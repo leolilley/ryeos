@@ -37,7 +37,10 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // authentication never guesses the owner from a later node configuration.
 // v21 retains the signed finite configuration-absence inventory.
 // Missing predecessor inventory is never interpreted as an empty policy.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 21;
+// v22 requires the same byte-bounded BundleExecutor member-source proof as
+// admitted launch capsules; signed init-v2 remains an independent wire contract.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 23;
+pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -642,6 +645,27 @@ impl PersistentSessionAuthority {
         self.wire.validate()?;
         self.artifact_identity.validate()?;
         self.execution_closure.validate()?;
+        if let (
+            AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                execution_plan_hash,
+                executable_identity,
+                ..
+            },
+            AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. },
+        ) = (&self.artifact_identity, &self.execution_closure)
+        {
+            let canonical_plan = lillux::canonical_json_bounded(
+                execution_plan,
+                MAX_PERSISTENT_SESSION_CAPSULE_BYTES,
+            )?;
+            if lillux::sha256_hex(&canonical_plan) != *execution_plan_hash {
+                anyhow::bail!("persistent-session execution plan contradicts artifact identity");
+            }
+            super::admitted_launch_capsule::validate_bundle_executor_plan_proof(
+                execution_plan,
+                executable_identity,
+            )?;
+        }
         if self.artifact_identity.launch_driver() != ExecutionLaunchDriver::DirectItemExecutor
             || self.execution_closure.launch_driver() != ExecutionLaunchDriver::DirectItemExecutor
         {
@@ -871,16 +895,19 @@ impl AdmittedPersistentSessionCapsule {
         if !self.exact_program.is_object() {
             anyhow::bail!("persistent-session exact program must be an object");
         }
-        let canonical = lillux::canonical_json(&self.exact_program)?;
+        let canonical = lillux::canonical_json_bounded(
+            &self.exact_program,
+            MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+        )?;
         if canonical.len() > MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES {
             anyhow::bail!("persistent-session exact program exceeds its retained byte bound");
         }
-        let observed = lillux::sha256_hex(canonical.as_bytes());
+        let observed = lillux::sha256_hex(&canonical);
         if observed != self.exact_program_hash {
             anyhow::bail!("persistent-session exact program hash mismatch");
         }
         let retained = self.retained_exact_program()?;
-        if lillux::canonical_json(&retained)?.len() > MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES {
+        if lillux::canonical_json_bounded(&retained, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES).is_err() {
             anyhow::bail!("persistent-session retained program exceeds its byte bound");
         }
         self.authority().validate()?;
@@ -1042,10 +1069,16 @@ impl AdmittedPersistentSessionCapsule {
                 );
             }
         }
+        lillux::canonical_json_bytes_bounded(self, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)
+            .context("persistent-session capsule exceeds bounded canonical byte ceiling")?;
         Ok(())
     }
 
     pub fn from_current_value(value: &Value) -> anyhow::Result<Self> {
+        let canonical = lillux::canonical_json_bounded(value, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)?;
+        if canonical.len() > MAX_PERSISTENT_SESSION_CAPSULE_BYTES {
+            anyhow::bail!("persistent-session capsule exceeds its raw canonical byte ceiling");
+        }
         let object = value
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("persistent-session capsule must be an object"))?;
@@ -1078,10 +1111,14 @@ impl AdmittedPersistentSessionCapsule {
         Ok(serde_json::to_value(self)?)
     }
 
+    pub fn to_canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        self.validate()?;
+        lillux::canonical_json_bytes_bounded(self, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)
+            .context("serialize persistent-session capsule under byte ceiling")
+    }
+
     pub fn content_hash(&self) -> anyhow::Result<String> {
-        Ok(lillux::sha256_hex(
-            lillux::canonical_json(&self.to_value()?)?.as_bytes(),
-        ))
+        Ok(lillux::sha256_hex(&self.to_canonical_bytes()?))
     }
 }
 

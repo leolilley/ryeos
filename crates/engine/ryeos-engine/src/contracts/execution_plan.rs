@@ -308,6 +308,18 @@ pub struct PlanTrustAuthority {
     pub raw_content_digest: String,
 }
 
+/// Authenticated singleton runtime-command owner retained with a successful
+/// binary resolution. The expanded command must equal the resolver request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRuntimeBinarySelection {
+    pub definition_owner: PlanTrustAuthority,
+    /// Exact zero-based position in the authenticated runtime executor chain.
+    pub definition_owner_chain_index: usize,
+    pub authored_command: String,
+    pub expanded_command: String,
+}
+
 /// Signed executor-manifest identity of the installed bundle that supplied a
 /// `bin:` command. This authorizes executable material only; it contributes no
 /// runtime or callback capabilities.
@@ -316,6 +328,8 @@ pub struct PlanTrustAuthority {
 pub struct PlanBundleExecutorIdentity {
     pub manifest_hash: String,
     pub signer_fingerprint: String,
+    pub runtime_selection: PlanRuntimeBinarySelection,
+    pub member_source_proof: ryeos_state::objects::BundleExecutorMemberSourceProofV1,
 }
 
 /// Exact command authority selected while compiling a subprocess plan.

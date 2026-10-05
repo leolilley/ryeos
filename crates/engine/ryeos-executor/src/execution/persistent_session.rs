@@ -2376,7 +2376,8 @@ fn admit_session_capsule(
         runtime_ref: session_authority.runtime_ref,
         executor_ref,
     };
-    let expected_hash = capsule.content_hash()?;
+    let canonical_capsule = capsule.to_canonical_bytes()?;
+    let expected_hash = lillux::sha256_hex(&canonical_capsule);
     let guard = publication.authority().acquire_shared_guard()?;
     publication.authority().ensure_guard(&guard)?;
     let _permit = state
@@ -2384,10 +2385,12 @@ fn admit_session_capsule(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow!("cannot acquire session-capsule write permit: {error}"))?;
     let cas = publication.authority().cas_store()?;
-    let stored =
-        publication
-            .staged_roots_mut()
-            .store_object_admitted(&guard, &cas, &capsule.to_value()?)?;
+    let stored = publication.staged_roots_mut().store_object_bytes_admitted(
+        &guard,
+        &cas,
+        &canonical_capsule,
+        ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES,
+    )?;
     if stored != expected_hash {
         bail!(
             "persistent-session capsule hash mismatch: expected {expected_hash}, stored {stored}"
@@ -4683,7 +4686,10 @@ fn load_capsule(state: &AppState, hash: &str) -> Result<AdmittedPersistentSessio
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
     let value = cas
-        .get_object(hash)?
+        .get_object_bounded(
+            hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow!("persistent-session capsule {hash} is unavailable"))?;
     authority.ensure_guard(&guard)?;
     let capsule = AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -4703,7 +4709,69 @@ fn validate_capsule_current_trust(
     engine: &ryeos_engine::engine::Engine,
     capsule: &AdmittedPersistentSessionCapsule,
 ) -> Result<()> {
-    ryeos_app::persistent_session_admission::validate_capsule_current_trust(engine, capsule)
+    ryeos_app::persistent_session_admission::validate_capsule_current_trust(engine, capsule)?;
+    validate_retained_bundle_member_source_trust(engine, capsule)
+}
+
+fn validate_retained_bundle_member_source_trust(
+    engine: &ryeos_engine::engine::Engine,
+    capsule: &AdmittedPersistentSessionCapsule,
+) -> Result<()> {
+    let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        executable_identity:
+            ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                content_hash,
+                executor_manifest_hash,
+                executor_manifest_signer_fingerprint,
+                member_source_proof,
+            },
+        ..
+    } = &capsule.artifact_identity
+    else {
+        return Ok(());
+    };
+
+    // Capsule parsing already joined this owner to its exact authenticated
+    // plan position. Reapply current trust here before reuse; the selected
+    // Bundle identity remains historical evidence rooted in that capsule,
+    // because the signed Bundle manifest bytes are not retained separately.
+    let owner = &member_source_proof.runtime_selection.definition_owner;
+    if !matches!(
+        owner.trust_class,
+        ryeos_state::objects::RetainedTrustClassV1::TrustedBundle
+            | ryeos_state::objects::RetainedTrustClassV1::TrustedProject
+            | ryeos_state::objects::RetainedTrustClassV1::TrustedNode
+    ) {
+        bail!("persistent-session Bundle runtime owner is not trusted");
+    }
+    let owner_signer = owner
+        .signer_fingerprint
+        .as_deref()
+        .ok_or_else(|| anyhow!("persistent-session Bundle runtime owner has no signer"))?;
+    for (label, fingerprint) in [
+        ("runtime owner", owner_signer),
+        (
+            "Bundle selection",
+            member_source_proof.selected_bundle.signer_fingerprint.as_str(),
+        ),
+        ("executor manifest", executor_manifest_signer_fingerprint.as_str()),
+    ] {
+        if !engine.node_trust_store.is_trusted(fingerprint) {
+            bail!("persistent-session retained {label} signer is no longer trusted");
+        }
+    }
+    let verifier = engine
+        .node_trust_store
+        .get(executor_manifest_signer_fingerprint)
+        .ok_or_else(|| anyhow!("persistent-session executor manifest signer was revoked"))?;
+    ryeos_engine::binary_resolver::verify_retained_bundle_executor_member_proof(
+        member_source_proof,
+        executor_manifest_hash,
+        executor_manifest_signer_fingerprint,
+        content_hash,
+        &verifier.verifying_key,
+    )?;
+    Ok(())
 }
 
 fn capsule_protocol_identity(capsule: &AdmittedPersistentSessionCapsule) -> Result<(&str, &str)> {

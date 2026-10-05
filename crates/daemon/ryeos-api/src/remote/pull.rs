@@ -158,12 +158,14 @@ async fn pull_results_staged(
                         remote_snapshot_hash
                     ))
                 })?;
-            store_remote_object(
+            let canonical_bytes = snapshot_objs.find_object_bytes(remote_snapshot_hash)
+                .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot("objects/get omitted canonical snapshot bytes".to_owned()))?;
+            store_remote_object_bytes(
                 authority,
                 staged_roots,
                 local_cas,
                 remote_snapshot_hash,
-                &value,
+                canonical_bytes,
             )?;
             fetched_count += 1;
             value
@@ -221,13 +223,14 @@ async fn pull_results_staged(
         if let Some(value) = local_cas.get_object(hash)? {
             return Ok(value);
         }
-        let value = roots_response
+        let response = roots_response
             .as_ref()
-            .and_then(|response| response.find_object(hash))
             .ok_or_else(|| {
                 PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} is absent"))
             })?;
-        store_remote_object(authority, staged_roots, local_cas, hash, &value)?;
+        let value = response.find_object(hash).ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} is absent")))?;
+        let bytes = response.find_object_bytes(hash).ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} has no raw canonical bytes")))?;
+        store_remote_object_bytes(authority, staged_roots, local_cas, hash, bytes)?;
         fetched_count += 1;
         Ok(value)
     };
@@ -257,7 +260,8 @@ async fn pull_results_staged(
                         "project file object {object_hash} is absent"
                     ))
                 })?;
-                store_remote_object(authority, staged_roots, local_cas, object_hash, &value)?;
+                let bytes = response.find_object_bytes(object_hash).ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(format!("project file object {object_hash} has no raw canonical bytes")))?;
+                store_remote_object_bytes(authority, staged_roots, local_cas, object_hash, bytes)?;
                 fetched_count += 1;
                 value
             }
@@ -308,18 +312,19 @@ async fn pull_results_staged(
     })
 }
 
-fn store_remote_object(
+fn store_remote_object_bytes(
     authority: &PinnedStateAuthority,
     staged_roots: &mut StagedCasRootLease,
     local_cas: &CasStore,
     expected_hash: &str,
-    value: &Value,
+    canonical_bytes: &[u8],
 ) -> Result<(), PullResultsError> {
     let guard = authority
         .acquire_shared_guard()
         .map_err(PullResultsError::Other)?;
+    let limit = ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES as usize;
     let stored = staged_roots
-        .store_object_admitted(&guard, local_cas, value)
+        .store_object_bytes_admitted(&guard, local_cas, canonical_bytes, limit)
         .map_err(PullResultsError::Other)?;
     if stored != expected_hash {
         return Err(PullResultsError::InvalidRemoteSnapshot(format!(

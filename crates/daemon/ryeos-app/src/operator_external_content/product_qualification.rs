@@ -552,10 +552,9 @@ fn prove_with_guard(
         .expect("authorized verifier terminal has a capsule");
     let cas = authority.cas_store()?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &cas,
             capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     let realization = capsule.verify_retained_execution_realization(
@@ -3464,10 +3463,9 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     evidence.validate()?;
     let cas = authority.cas_store()?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &cas,
             &evidence.verifier.admitted_launch_capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(

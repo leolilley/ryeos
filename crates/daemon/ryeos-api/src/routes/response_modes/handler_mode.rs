@@ -518,6 +518,13 @@ fn validate_request_config(
     config: &HandlerRequestConfig,
     raw: &RawRouteSpec,
 ) -> Result<(), RouteConfigError> {
+    if raw.request.body == RawRequestBody::ObjectsPutV1 {
+        return Err(RouteConfigError::InvalidSourceConfig {
+            id: raw.id.clone(),
+            src: "handler".into(),
+            reason: "objects_put_v1 is reserved for the exact objects/put JSON service route".into(),
+        });
+    }
     for header in &config.headers {
         HeaderName::from_bytes(header.as_bytes()).map_err(|err| {
             RouteConfigError::InvalidSourceConfig {
@@ -652,6 +659,9 @@ fn collect_allowed_headers(headers: &HeaderMap, allowlist: &[String]) -> BTreeMa
 fn body_envelope(mode: &RawRequestBody, raw: &[u8]) -> Result<BodyEnvelope, RouteDispatchError> {
     match mode {
         RawRequestBody::None => Ok(BodyEnvelope::None),
+        RawRequestBody::ObjectsPutV1 => Err(RouteDispatchError::BadRequest(
+            "objects_put_v1 body profile is only valid for the objects/put JSON service route".into(),
+        )),
         RawRequestBody::Json => {
             let json = serde_json::from_slice(raw).map_err(|err| {
                 RouteDispatchError::BadRequest(format!("invalid JSON body: {err}"))
@@ -825,8 +835,18 @@ fn validate_response_header(name: &HeaderName) -> Result<(), RouteDispatchError>
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
+    use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
     use std::fs;
+
+    #[test]
+    fn handler_request_config_rejects_objects_put_profile() {
+        let mut raw = raw_handler_route(Value::Null);
+        raw.request.body = RawRequestBody::ObjectsPutV1;
+        assert!(matches!(
+            validate_request_config(&HandlerRequestConfig::default(), &raw),
+            Err(RouteConfigError::InvalidSourceConfig { .. })
+        ));
+    }
 
     fn raw_handler_route(source_config: Value) -> RawRouteSpec {
         RawRouteSpec {

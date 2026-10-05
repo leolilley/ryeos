@@ -38,6 +38,12 @@ pub const REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
 pub const REMOTE_CLOSURE_MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT: usize = 100_000;
 
+/// Hard ceilings for repeated typed reads during publication/history replay.
+/// Remote publication admits at most 100,000 objects and 512 MiB of unique
+/// object bytes. Per-closure limits below cannot exceed these absolute caps.
+pub(crate) const MAX_BOUNDED_VALIDATION_READS: usize = 800_064;
+pub(crate) const MAX_BOUNDED_VALIDATION_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Transitive closure for one or more CAS object roots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectClosureReport {
@@ -52,6 +58,13 @@ pub struct ObjectClosureReport {
     /// verified by callers that hold that store; these are never opened as CAS
     /// blobs.
     pub large_object_hashes: BTreeSet<String>,
+    /// Unique addressed object bytes actually read during closure traversal.
+    pub object_bytes_read: u64,
+    /// Unique addressed blob bytes actually verified during closure traversal.
+    pub blob_bytes_verified: u64,
+    /// Typed object-edge count retained for traversal diagnostics; it does not
+    /// multiply the bounded authoritative-history reread budget.
+    pub object_reference_count: usize,
     /// Blob hashes referenced by reachable objects but absent from CAS.
     pub missing_blobs: Vec<MissingDependency>,
     /// Object hashes that were referenced but not present in CAS.
@@ -345,6 +358,113 @@ pub struct ObjectClosureLimits {
     pub max_links_per_object: usize,
 }
 
+/// Separate finite work budget for typed history verification after unique
+/// closure admission. Every read must name a member of that exact closure.
+/// The protocol permits at most 100,000 objects and 512 MiB of unique object
+/// bytes. An admitted object may be revisited by exact-head validation, legal
+/// transition checks, an optional source/target frontier check, and projection
+/// replay, so the allowance is eight reads per admitted hash and eight times
+/// the actual admitted byte total. Absolute limits cap this at 800,064 reads
+/// and 4 GiB even if a caller supplies a larger local policy. Typed history
+/// traversal follows chain/event/snapshot links; generic reference counts do
+/// not multiply this budget.
+#[derive(Debug)]
+pub(crate) struct BoundedCasObjectReadBudget {
+    admitted_hashes: BTreeSet<String>,
+    limits: ObjectClosureLimits,
+    validation_work_bytes: u64,
+    validation_reads: usize,
+    max_validation_work_bytes: u64,
+    max_validation_reads: usize,
+}
+
+impl BoundedCasObjectReadBudget {
+    pub(crate) fn new(
+        admitted_hashes: &BTreeSet<String>,
+        limits: ObjectClosureLimits,
+        initial_total_bytes: u64,
+    ) -> anyhow::Result<Self> {
+        if admitted_hashes.len() > limits.max_objects {
+            anyhow::bail!("admitted closure exceeds its object-count limit");
+        }
+        if initial_total_bytes > limits.max_total_object_bytes {
+            anyhow::bail!("admitted closure exceeds its aggregate object-byte limit");
+        }
+        let max_validation_reads = limits
+            .max_objects
+            .checked_mul(8)
+            .and_then(|count| count.checked_add(64))
+            .context("validation object-read ceiling overflow")?
+            .min(MAX_BOUNDED_VALIDATION_READS);
+        let max_validation_work_bytes = initial_total_bytes
+            .checked_mul(8)
+            .context("validation work-byte ceiling overflow")?
+            .min(MAX_BOUNDED_VALIDATION_BYTES);
+        Ok(Self {
+            admitted_hashes: admitted_hashes.clone(),
+            limits,
+            validation_work_bytes: 0,
+            validation_reads: 0,
+            max_validation_work_bytes,
+            max_validation_reads,
+        })
+    }
+
+    pub(crate) fn get_object(
+        &mut self,
+        cas: &lillux::CasStore,
+        hash: &str,
+        type_maximum_bytes: u64,
+    ) -> anyhow::Result<Option<Value>> {
+        if !self.admitted_hashes.contains(hash) {
+            anyhow::bail!("verification object {hash} is outside the admitted closure");
+        }
+        self.validation_reads = self
+            .validation_reads
+            .checked_add(1)
+            .context("validation object-read count overflow")?;
+        if self.validation_reads > self.max_validation_reads {
+            anyhow::bail!(
+                "authoritative validation exceeds its bounded object-read work budget: {} > {}",
+                self.validation_reads,
+                self.max_validation_reads
+            );
+        }
+        let remaining_work_bytes = self
+            .max_validation_work_bytes
+            .checked_sub(self.validation_work_bytes)
+            .context("validation work-byte accounting exceeded its admitted ceiling")?;
+        let maximum_bytes = self
+            .limits
+            .max_object_bytes
+            .min(type_maximum_bytes)
+            .min(remaining_work_bytes);
+        let Some(value) = cas.get_object_bounded(hash, maximum_bytes)? else {
+            return Ok(None);
+        };
+        let maximum = usize::try_from(maximum_bytes)
+            .context("admitted verification object limit exceeds this platform")?;
+        let canonical_len = u64::try_from(canonical_json_bounded(&value, maximum)?.len())
+            .context("verification object canonical size exceeds u64")?;
+        self.validation_work_bytes = self
+            .validation_work_bytes
+            .checked_add(canonical_len)
+            .context("validation object work-byte count overflow")?;
+        if self.validation_work_bytes > self.max_validation_work_bytes {
+            anyhow::bail!(
+                "authoritative validation exceeds its bounded object-byte work budget: {} > {}",
+                self.validation_work_bytes,
+                self.max_validation_work_bytes
+            );
+        }
+        Ok(Some(value))
+    }
+
+    pub(crate) fn admits_hash(&self, hash: &str) -> bool {
+        self.admitted_hashes.contains(hash)
+    }
+}
+
 /// Load one CAS JSON object by its exact requested identity.
 ///
 /// This is the shared authority boundary for consumers that act on a CAS
@@ -388,16 +508,33 @@ pub fn load_exact_cas_object_with_cas(
     if !is_canonical_hash(requested_hash) {
         anyhow::bail!("invalid requested CAS object hash {requested_hash}");
     }
-    let value = cas
-        .get_object_bounded(requested_hash, max_bytes)?
+    let raw = cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+        requested_hash,
+        max_bytes,
+        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+    )?
         .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
-    let canonical = lillux::canonical_json(&value)
-        .with_context(|| format!("failed to canonicalize CAS object {requested_hash}"))?;
-    let byte_len = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
-    if byte_len > max_bytes {
-        anyhow::bail!("CAS object {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
+    let cap = usize::try_from(max_bytes)
+        .context("admitted object byte limit exceeds this platform")?;
+    let value: Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("failed to parse CAS object {requested_hash}"))?;
+    if lillux::canonical_json_bounded(&value, cap)?.as_slice() != raw {
+        anyhow::bail!("CAS object {requested_hash} is not stored as canonical JSON bytes");
     }
     Ok(value)
+}
+
+/// Load a capsule with its protocol-wide raw-byte ceiling, independently of
+/// the larger caller-selected generic object policy.
+pub fn load_exact_capsule_object_with_cas(
+    cas: &lillux::CasStore,
+    requested_hash: &str,
+) -> anyhow::Result<Value> {
+    load_exact_cas_object_with_cas(
+        cas,
+        requested_hash,
+        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+    )
 }
 
 /// Load one CAS blob by its exact requested identity without following links.
@@ -432,12 +569,8 @@ pub fn load_exact_cas_blob_with_cas(
         anyhow::bail!("invalid requested CAS blob hash {requested_hash}");
     }
     let bytes = cas
-        .get_blob(requested_hash)?
+        .get_blob_bounded(requested_hash, max_bytes)?
         .ok_or_else(|| anyhow::anyhow!("CAS blob {requested_hash} is missing"))?;
-    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if byte_len > max_bytes {
-        anyhow::bail!("CAS blob {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
-    }
     Ok(bytes)
 }
 
@@ -570,6 +703,7 @@ pub(crate) fn collect_object_closure_with_cas_and_check(
         roots,
         ObjectClosureLimits::unbounded_for_local_maintenance(),
         check,
+        false,
     )
 }
 
@@ -620,7 +754,34 @@ pub fn collect_object_closure_with_cas_and_limits(
     limits: ObjectClosureLimits,
 ) -> anyhow::Result<ObjectClosureReport> {
     let mut check = || Ok(());
-    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check)
+    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check, false)
+}
+
+/// Collect a bounded closure from one pinned CAS authority while preserving
+/// the caller's cancellation or deadline check at each traversal step.
+pub(crate) fn collect_object_closure_with_cas_and_limits_and_check(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<ObjectClosureReport> {
+    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, check, false)
+}
+
+pub(crate) fn collect_object_closure_with_cas_and_limits_and_check_and_verify(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+    verify_typed_objects: bool,
+) -> anyhow::Result<ObjectClosureReport> {
+    collect_object_closure_from_source(
+        ClosureCas::Pinned(cas),
+        roots,
+        limits,
+        check,
+        verify_typed_objects,
+    )
 }
 
 /// Collect and validate a closure from untrusted in-memory transport bytes.
@@ -639,6 +800,7 @@ pub fn collect_object_closure_from_memory(
         roots,
         limits,
         &mut check,
+        false,
     )
 }
 
@@ -648,7 +810,7 @@ fn collect_object_closure_with_limits_and_check(
     limits: ObjectClosureLimits,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_from_source(ClosureCas::Path(cas_root), roots, limits, check)
+    collect_object_closure_from_source(ClosureCas::Path(cas_root), roots, limits, check, false)
 }
 
 #[derive(Clone, Copy)]
@@ -666,19 +828,11 @@ impl ClosureCas<'_> {
         match self {
             Self::Path(root) => read_cas_file_no_follow(root, "objects", hash, ".json", max_bytes),
             Self::Pinned(cas) => {
-                let Some((file, size)) = cas.open_object(hash)? else {
-                    return Ok(None);
-                };
-                if size > max_bytes {
-                    anyhow::bail!("CAS object {hash} exceeds byte limit {max_bytes}");
-                }
-                let mut bytes = Vec::with_capacity(usize::try_from(size)?);
-                file.take(max_bytes.saturating_add(1))
-                    .read_to_end(&mut bytes)?;
-                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
-                    anyhow::bail!("CAS object {hash} exceeded byte limit while reading");
-                }
-                Ok(Some(bytes))
+                cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+                    hash,
+                    max_bytes,
+                    crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+                )
             }
             Self::Memory { objects, .. } => {
                 let Some(bytes) = objects.get(hash) else {
@@ -752,7 +906,9 @@ impl ClosureCas<'_> {
             if read == 0 {
                 break;
             }
-            total = total.saturating_add(u64::try_from(read)?);
+            total = total
+                .checked_add(u64::try_from(read)?)
+                .context("CAS blob byte count overflow")?;
             if total > max_bytes {
                 anyhow::bail!("CAS blob {hash} exceeded byte limit while reading");
             }
@@ -770,10 +926,12 @@ fn collect_object_closure_from_source(
     roots: impl IntoIterator<Item = String>,
     limits: ObjectClosureLimits,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
+    verify_typed_objects: bool,
 ) -> anyhow::Result<ObjectClosureReport> {
     let mut report = ObjectClosureReport::default();
     let mut queue: VecDeque<(String, Option<String>, ExpectedObject)> = VecDeque::new();
     let mut loaded_identities = HashMap::<String, LoadedObjectIdentity>::new();
+    let mut inspected_blobs = HashMap::<String, (u64, String)>::new();
     let mut history_edges = BTreeMap::<HistoryGraph, BTreeMap<String, BTreeSet<String>>>::new();
     let mut total_object_bytes = 0_u64;
     let mut total_blob_bytes = 0_u64;
@@ -814,7 +972,12 @@ fn collect_object_closure_from_source(
             );
         }
 
-        let content = match cas.read_object(&hash, limits.max_object_bytes)? {
+        let remaining_object_bytes = limits
+            .max_total_object_bytes
+            .checked_sub(total_object_bytes)
+            .context("object closure object-byte accounting exceeded its admitted total")?;
+        let content_limit = limits.max_object_bytes.min(remaining_object_bytes);
+        let content = match cas.read_object(&hash, content_limit)? {
             Some(content) => content,
             None => {
                 report.missing_objects.push(MissingDependency {
@@ -824,7 +987,10 @@ fn collect_object_closure_from_source(
                 continue;
             }
         };
-        total_object_bytes = total_object_bytes.saturating_add(content.len() as u64);
+        total_object_bytes = total_object_bytes
+            .checked_add(u64::try_from(content.len()).context("object closure object size exceeds u64")?)
+            .context("object closure total object-byte count overflow")?;
+        report.object_bytes_read = total_object_bytes;
         if total_object_bytes > limits.max_total_object_bytes {
             anyhow::bail!(
                 "object closure exceeds max_total_object_bytes: {} > {}",
@@ -920,12 +1086,37 @@ fn collect_object_closure_from_source(
             continue;
         }
 
+        if verify_typed_objects {
+            match identity.kind.as_str() {
+                "chain_state" => {
+                    let state: crate::ChainState = serde_json::from_value(value.clone())
+                        .with_context(|| format!("decode chain_state {hash}"))?;
+                    state.validate()?;
+                }
+                "thread_snapshot" => {
+                    crate::objects::ThreadSnapshot::from_current_value(value.clone())
+                        .with_context(|| format!("decode current thread_snapshot {hash}"))?;
+                }
+                "thread_event" => {
+                    let event: crate::objects::ThreadEvent = serde_json::from_value(value.clone())
+                        .with_context(|| format!("decode thread_event {hash}"))?;
+                    event.validate()?;
+                }
+                _ => {}
+            }
+        }
+
         let object_edges = decoded.object_edges;
+        report.object_reference_count = report
+            .object_reference_count
+            .checked_add(object_edges.len())
+            .context("object closure reference count overflow")?;
 
         let link_count = object_edges
             .len()
-            .saturating_add(decoded.blob_hashes.len())
-            .saturating_add(decoded.large_object_hashes.len());
+            .checked_add(decoded.blob_hashes.len())
+            .and_then(|count| count.checked_add(decoded.large_object_hashes.len()))
+            .context("object closure link count overflow")?;
         if link_count > limits.max_links_per_object {
             anyhow::bail!(
                 "object {hash} exceeds max_links_per_object: {} > {}",
@@ -967,14 +1158,27 @@ fn collect_object_closure_from_source(
         for blob in decoded.blob_hashes {
             check()?;
             if is_canonical_hash(&blob) {
-                match cas
-                    .inspect_blob(&blob, limits.max_blob_bytes)
-                    .with_context(|| {
-                        format!(
-                            "enforce max_blob_bytes={} for referenced blob {blob}",
-                            limits.max_blob_bytes
-                        )
-                    })? {
+                let remaining_blob_bytes = limits
+                    .max_total_blob_bytes
+                    .checked_sub(total_blob_bytes)
+                    .context("object closure blob-byte accounting exceeded its admitted total")?;
+                let inspected = if let Some(observed) = inspected_blobs.get(&blob) {
+                    Some(observed.clone())
+                } else {
+                    let observed = cas
+                        .inspect_blob(&blob, limits.max_blob_bytes.min(remaining_blob_bytes))
+                        .with_context(|| {
+                            format!(
+                                "enforce max_blob_bytes={} for referenced blob {blob}",
+                                limits.max_blob_bytes
+                            )
+                        })?;
+                    if let Some(observed) = observed.as_ref() {
+                        inspected_blobs.insert(blob.clone(), observed.clone());
+                    }
+                    observed
+                };
+                match inspected {
                     Some((actual_size, actual_hash)) => {
                         if let Some(expected_size) = project_file_size
                             && actual_size != expected_size
@@ -995,7 +1199,10 @@ fn collect_object_closure_from_source(
                                     limits.max_blobs
                                 );
                             }
-                            total_blob_bytes = total_blob_bytes.saturating_add(actual_size);
+                            total_blob_bytes = total_blob_bytes
+                                .checked_add(actual_size)
+                                .context("object closure total blob-byte count overflow")?;
+                            report.blob_bytes_verified = total_blob_bytes;
                             if total_blob_bytes > limits.max_total_blob_bytes {
                                 anyhow::bail!(
                                     "object closure exceeds max_total_blob_bytes: {} > {}",
@@ -2370,5 +2577,117 @@ mod tests {
                 "missing current object contract: {kind}"
             );
         }
+    }
+
+    #[test]
+    fn bounded_verification_budget_shares_total_and_requires_closure_membership() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(directory.path().join("cas"));
+        let value = json!({"kind":"budget_fixture", "value":"bounded"});
+        let canonical = lillux::canonical_json(&value).unwrap();
+        let hash = cas.store_object(&value).unwrap();
+        let outside_hash = cas.store_object(&json!({"kind":"outside"})).unwrap();
+        let admitted = BTreeSet::from([hash.clone()]);
+        let object_bytes = u64::try_from(canonical.len()).unwrap();
+        let limits = ObjectClosureLimits {
+            max_objects: 1,
+            max_object_bytes: object_bytes,
+            max_total_object_bytes: u64::try_from(canonical.len()).unwrap(),
+            ..ObjectClosureLimits::default()
+        };
+        let mut budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            limits,
+            object_bytes,
+        ).unwrap();
+        for _ in 0..8 {
+            assert_eq!(
+                budget.get_object(&cas, &hash, limits.max_object_bytes).unwrap(),
+                Some(value.clone()),
+            );
+        }
+        assert_eq!(budget.validation_work_bytes, budget.max_validation_work_bytes);
+        assert!(budget.get_object(&cas, &hash, limits.max_object_bytes).is_err());
+        assert!(budget.get_object(&cas, &outside_hash, limits.max_object_bytes).is_err());
+
+        let mut read_budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_total_object_bytes: object_bytes * 2,
+                ..limits
+            },
+            object_bytes * 2,
+        ).unwrap();
+        read_budget.validation_reads = read_budget.max_validation_reads - 1;
+        assert!(read_budget.get_object(&cas, &hash, limits.max_object_bytes).is_ok());
+        assert_eq!(read_budget.validation_reads, read_budget.max_validation_reads);
+        assert!(read_budget.get_object(&cas, &hash, limits.max_object_bytes).is_err());
+    }
+
+    #[test]
+    fn bounded_verification_budget_checks_count_and_byte_overflow() {
+        let admitted = BTreeSet::new();
+        let count_overflow = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_objects: usize::MAX,
+                max_total_object_bytes: u64::MAX,
+                ..ObjectClosureLimits::default()
+            },
+            0,
+        )
+        .unwrap_err();
+        assert!(count_overflow.to_string().contains("read ceiling overflow"));
+
+        let byte_overflow = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_total_object_bytes: u64::MAX,
+                ..ObjectClosureLimits::default()
+            },
+            u64::MAX,
+        )
+        .unwrap_err();
+        assert!(byte_overflow.to_string().contains("work-byte ceiling overflow"));
+    }
+
+    #[test]
+    fn bounded_verification_budget_honors_absolute_caps_beyond_remote_policy() {
+        let admitted = BTreeSet::new();
+        let limits = ObjectClosureLimits {
+            max_objects: REMOTE_CLOSURE_MAX_OBJECTS,
+            max_total_object_bytes: REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES,
+            ..ObjectClosureLimits::default()
+        };
+        let budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            limits,
+            REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(budget.max_validation_reads, MAX_BOUNDED_VALIDATION_READS);
+        assert_eq!(budget.max_validation_work_bytes, MAX_BOUNDED_VALIDATION_BYTES);
+        assert_eq!(MAX_BOUNDED_VALIDATION_READS, 800_064);
+        assert_eq!(MAX_BOUNDED_VALIDATION_BYTES, 4 * 1024 * 1024 * 1024);
+
+        let generous_local_byte_limit = u64::MAX / 8;
+        let larger_local_budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_objects: REMOTE_CLOSURE_MAX_OBJECTS * 2,
+                max_total_object_bytes: generous_local_byte_limit,
+                ..ObjectClosureLimits::default()
+            },
+            generous_local_byte_limit,
+        )
+        .unwrap();
+        assert_eq!(
+            larger_local_budget.max_validation_reads,
+            MAX_BOUNDED_VALIDATION_READS
+        );
+        assert_eq!(
+            larger_local_budget.max_validation_work_bytes,
+            MAX_BOUNDED_VALIDATION_BYTES
+        );
     }
 }

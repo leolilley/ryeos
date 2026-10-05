@@ -126,6 +126,12 @@ impl ResponseMode for LaunchMode {
 
         match raw.request.body {
             RawRequestBody::Json | RawRequestBody::Text => {}
+            RawRequestBody::ObjectsPutV1 => {
+                return Err(RouteConfigError::InvalidResponseSpec {
+                    id: raw.id.clone(), mode: "launch".into(),
+                    reason: "launch mode does not accept the objects_put_v1 body profile".into(),
+                });
+            }
             RawRequestBody::None | RawRequestBody::Raw => {
                 return Err(RouteConfigError::InvalidResponseSpec {
                     id: raw.id.clone(),
@@ -215,6 +221,9 @@ impl CompiledResponseMode for CompiledLaunchMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         // Parse body per declared shape.
         let body_value: Value = match self.body {
+            RawRequestBody::ObjectsPutV1 => return Err(RouteDispatchError::Internal(
+                "launch mode reached handle() with objects_put_v1 body".into(),
+            )),
             RawRequestBody::Json => ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
                 .map_err(|e| {
                 RouteDispatchError::BadRequest(format!("invalid JSON body: {e}"))
@@ -358,6 +367,16 @@ mod tests {
     use ryeos_app::route_raw::{
         RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec,
     };
+
+    #[test]
+    fn launch_compile_rejects_objects_put_profile() {
+        let mut raw = make_raw("objects-put-profile");
+        raw.request.body = RawRequestBody::ObjectsPutV1;
+        assert!(matches!(
+            LaunchMode::default().compile(&raw),
+            Err(RouteConfigError::InvalidResponseSpec { .. })
+        ));
+    }
 
     fn make_raw(id: &str) -> RawRouteSpec {
         RawRouteSpec {

@@ -1308,11 +1308,15 @@ impl PreparedItemPlan {
         resolved: &ResolvedExecutionRequest,
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
-        let canonical_plan = lillux::canonical_json(&admitted_execution_plan_value_for_command(
+        let plan_value = admitted_execution_plan_value_for_command(
             &self.plan,
             self.realization_command.is_some(),
-        )?)?;
-        let execution_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+        )?;
+        let canonical_plan = lillux::canonical_json_bounded(
+            &plan_value,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+        )?;
+        let execution_plan_hash = lillux::sha256_hex(&canonical_plan);
         let plan_runtime = self
             .plan
             .runtime_identity
@@ -1359,6 +1363,7 @@ impl PreparedItemPlan {
                         executor_manifest_signer_fingerprint: executor_bundle
                             .signer_fingerprint
                             .clone(),
+                        member_source_proof: executor_bundle.member_source_proof.clone(),
                     },
                     Some(ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent {
                         code,
@@ -2491,8 +2496,11 @@ fn decode_retained_direct_plan(
     else {
         bail!("direct recovery found a non-direct admitted artifact identity");
     };
-    let canonical_plan = lillux::canonical_json(execution_plan)?;
-    let observed_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+    let canonical_plan = lillux::canonical_json_bounded(
+        execution_plan,
+        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+    )?;
+    let observed_plan_hash = lillux::sha256_hex(&canonical_plan);
     if &observed_plan_hash != execution_plan_hash {
         bail!(
             "admitted direct execution plan hash mismatch: expected {execution_plan_hash}, observed {observed_plan_hash}"
@@ -2564,6 +2572,7 @@ fn decode_retained_direct_plan(
                 content_hash,
                 executor_manifest_hash,
                 executor_manifest_signer_fingerprint,
+                member_source_proof,
             },
             ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
                 code,
@@ -2573,6 +2582,7 @@ fn decode_retained_direct_plan(
             &code.content_hash == content_hash
                 && &executor_bundle.manifest_hash == executor_manifest_hash
                 && &executor_bundle.signer_fingerprint == executor_manifest_signer_fingerprint
+                && &executor_bundle.member_source_proof == member_source_proof
         }
         (
             ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash },

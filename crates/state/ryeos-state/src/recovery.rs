@@ -1146,6 +1146,29 @@ impl StagedCasRootLease {
         Ok(stored)
     }
 
+    /// Stage exact bounded canonical object bytes. The exact bytes whose hash
+    /// is protected are the bytes persisted by CAS.
+    pub fn store_object_bytes_admitted(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        cas: &lillux::cas::CasStore,
+        canonical_bytes: &[u8],
+        maximum_bytes: usize,
+    ) -> Result<String> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        if canonical_bytes.len() > maximum_bytes {
+            anyhow::bail!("staged canonical CAS object exceeds {maximum_bytes} bytes");
+        }
+        let expected = lillux::sha256_hex(canonical_bytes);
+        self.protect_object_hash_admitted(cas_mutation_guard, &expected)?;
+        let stored = cas.store_canonical_object_bytes_bounded(canonical_bytes, maximum_bytes)?;
+        if stored != expected {
+            anyhow::bail!("staged CAS object hash mismatch: expected {expected}, got {stored}");
+        }
+        Ok(stored)
+    }
+
     pub fn store_blob_admitted(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,

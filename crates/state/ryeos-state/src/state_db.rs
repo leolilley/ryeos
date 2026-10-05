@@ -4471,6 +4471,7 @@ impl StateDb {
         target_hash: &str,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        limits: crate::object_closure::ObjectClosureLimits,
     ) -> anyhow::Result<()> {
         self.publish_external_chain_head(
             chain_root_id,
@@ -4478,6 +4479,7 @@ impl StateDb {
             signer,
             cas_mutation_guard,
             None,
+            limits,
         )
     }
 
@@ -4490,6 +4492,7 @@ impl StateDb {
         transition: &crate::sync::AdmittedChainWriterTransition,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        limits: crate::object_closure::ObjectClosureLimits,
     ) -> anyhow::Result<()> {
         transition.validate()?;
         self.publish_external_chain_head(
@@ -4498,6 +4501,7 @@ impl StateDb {
             signer,
             cas_mutation_guard,
             Some(transition),
+            limits,
         )
     }
 
@@ -5393,6 +5397,7 @@ impl StateDb {
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
         writer_transition: Option<&crate::sync::AdmittedChainWriterTransition>,
+        limits: crate::object_closure::ObjectClosureLimits,
     ) -> anyhow::Result<()> {
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         cas_mutation_guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
@@ -5405,8 +5410,38 @@ impl StateDb {
         )?;
         let current = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         let current_hash = current.as_ref().map(|head| head.target_hash.as_str());
+        let expected_anchor = writer_transition
+            .map(|transition| transition.evidence.source_chain_head_hash.as_str())
+            .or(current_hash);
+        let mut evidence_roots = Vec::new();
+        if let Some(transition) = writer_transition {
+            evidence_roots.push(transition.writer_grant_hash.clone());
+            evidence_roots.push(transition.evidence.placement_attestation_hash.clone());
+            evidence_roots.extend(
+                transition
+                    .evidence
+                    .source_accounting_transfer_hash
+                    .iter()
+                    .cloned(),
+            );
+        }
+        let (_, mut validation_budget) =
+            crate::rebuild::verify_repair_closure_anchored_with_cas_and_limits_and_budget(
+                &cas,
+                chain_root_id,
+                target_hash,
+                expected_anchor,
+                limits,
+                &evidence_roots,
+            )?;
         let required_anchor = if let Some(transition) = writer_transition {
-            verify_chain_writer_transition_adoption(&cas, transition, signer.fingerprint())?;
+            verify_chain_writer_transition_adoption(
+                &cas,
+                transition,
+                signer.fingerprint(),
+                limits,
+                &mut validation_budget,
+            )?;
             if chain_root_id != transition.evidence.chain_root_id
                 || target_hash != transition.target_chain_head_hash
             {
@@ -5424,12 +5459,13 @@ impl StateDb {
                     // local head is an ancestor of the newly granted source
                     // frontier; the scoped grant still authorizes only the
                     // immediate source->target successor.
-                    crate::rebuild::verify_repair_closure_anchored_with_cas(
+                    crate::rebuild::verify_repair_closure_anchored_with_existing_budget(
                         &cas,
                         chain_root_id,
                         &transition.evidence.source_chain_head_hash,
-                        true,
                         Some(&head.target_hash),
+                        limits,
+                        &mut validation_budget,
                     )?;
                 }
             }
@@ -5441,13 +5477,16 @@ impl StateDb {
         // target is idempotent; a different target must prove that current is
         // an ancestor, so import can advance but never fork or roll back a
         // locally published chain.
-        crate::rebuild::verify_repair_closure_anchored_with_cas(
-            &cas,
-            chain_root_id,
-            target_hash,
-            true,
-            required_anchor,
-        )?;
+        if required_anchor != expected_anchor {
+            crate::rebuild::verify_repair_closure_anchored_with_existing_budget(
+                &cas,
+                chain_root_id,
+                target_hash,
+                required_anchor,
+                limits,
+                &mut validation_budget,
+            )?;
+        }
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
             ProspectiveChainMutation::ReplaceHead(target_hash),
@@ -5460,12 +5499,14 @@ impl StateDb {
             &chain_lock,
         )?;
         if current_hash == Some(target_hash) {
-            if let Err(error) = crate::rebuild::repair_one_chain_verified_with_cas_and_observer(
+            if let Err(error) = crate::rebuild::repair_one_chain_verified_with_cas_and_limits_and_budget(
                 &self.projection,
                 &cas,
                 chain_root_id,
                 target_hash,
                 None,
+                limits,
+                &mut validation_budget,
             ) {
                 return Err(self.failed_write_after_cancelled_remove(
                     chain_root_id,
@@ -5547,12 +5588,14 @@ impl StateDb {
             );
             return Err(error);
         }
-        let projected = crate::rebuild::repair_one_chain_verified_with_cas_and_observer(
+        let projected = crate::rebuild::repair_one_chain_verified_with_cas_and_limits_and_budget(
             &self.projection,
             &cas,
             chain_root_id,
             target_hash,
             None,
+            limits,
+            &mut validation_budget,
         )
         .and_then(|_| self.acknowledge_projected_set_locked(chain_root_id, &chain_lock));
         match projected {
@@ -6160,6 +6203,8 @@ fn verify_chain_writer_transition_adoption(
     cas: &lillux::CasStore,
     transition: &crate::sync::AdmittedChainWriterTransition,
     publishing_signer: &str,
+    limits: crate::object_closure::ObjectClosureLimits,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
 ) -> anyhow::Result<()> {
     use crate::objects::{
         AdmittedLaunchCapsule, Attestation, ChainState, ChainWriterTransitionEvidence,
@@ -6172,9 +6217,9 @@ fn verify_chain_writer_transition_adoption(
     if publishing_signer != evidence.target_node_signer_fingerprint {
         anyhow::bail!("transferred chain head is not signed by its granted target writer");
     }
+    let mut get = |hash: &str, maximum: u64| budget.get_object(cas, hash, maximum);
 
-    let writer_value = cas
-        .get_object(&transition.writer_grant_hash)?
+    let writer_value = get(&transition.writer_grant_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("chain writer grant is absent"))?;
     let writer_attestation = Attestation::from_value(&writer_value)?;
     writer_attestation.verify_with_key(&transition.source_node_verifying_key)?;
@@ -6183,8 +6228,7 @@ fn verify_chain_writer_transition_adoption(
         anyhow::bail!("chain writer grant differs from admitted transition operands");
     }
 
-    let placement_value = cas
-        .get_object(&evidence.placement_attestation_hash)?
+    let placement_value = get(&evidence.placement_attestation_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("target placement attestation is absent"))?;
     let placement = Attestation::from_value(&placement_value)?;
     placement.verify_with_key(&transition.target_node_verifying_key)?;
@@ -6194,13 +6238,14 @@ fn verify_chain_writer_transition_adoption(
         anyhow::bail!("target placement attestation contradicts the writer grant");
     }
 
-    let capsule_value = cas
-        .get_object(&evidence.transition_subject_hash)?
+    let capsule_value = get(
+        &evidence.transition_subject_hash,
+        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+    )?
         .ok_or_else(|| anyhow::anyhow!("target launch capsule is absent"))?;
     AdmittedLaunchCapsule::from_current_value(capsule_value)?;
 
-    let source_value = cas
-        .get_object(&evidence.source_chain_head_hash)?
+    let source_value = get(&evidence.source_chain_head_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("writer transition source chain head is absent"))?;
     let source: ChainState = serde_json::from_value(source_value)?;
     source.validate()?;
@@ -6217,8 +6262,7 @@ fn verify_chain_writer_transition_adoption(
         anyhow::bail!("writer transition source event is not the source head frontier");
     }
 
-    let target_value = cas
-        .get_object(&transition.target_chain_head_hash)?
+    let target_value = get(&transition.target_chain_head_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("transferred target chain head is absent"))?;
     let target: ChainState = serde_json::from_value(target_value)?;
     target.validate()?;
@@ -6238,8 +6282,7 @@ fn verify_chain_writer_transition_adoption(
         .last_event_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("transferred source has no continuation event"))?;
-    let continuation_value = cas
-        .get_object(continuation_hash)?
+    let continuation_value = get(continuation_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("transferred continuation event is absent"))?;
     let continuation: ThreadEvent = serde_json::from_value(continuation_value)?;
     continuation.validate()?;
@@ -6274,8 +6317,7 @@ fn verify_chain_writer_transition_adoption(
         anyhow::bail!("remote continuation event differs from its writer grant");
     }
     if let Some(hash) = &remote.source_accounting_transfer_hash {
-        let value = cas
-            .get_object(hash)?
+        let value = get(hash, limits.max_object_bytes)?
             .ok_or_else(|| anyhow::anyhow!("accounting allowance transfer is absent"))?;
         let transfer: crate::objects::AccountingAllowanceTransfer = serde_json::from_value(value)?;
         if transfer.content_hash()? != *hash
@@ -6286,8 +6328,7 @@ fn verify_chain_writer_transition_adoption(
             anyhow::bail!("accounting allowance transfer contradicts its writer grant");
         }
     }
-    let runtime_seed_value = cas
-        .get_object(&remote.target_runtime_seed_hash)?
+    let runtime_seed_value = get(&remote.target_runtime_seed_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("remote continuation runtime seed is absent"))?;
     let runtime_seed = PlacementRuntimeSeed::from_current_value(runtime_seed_value)?;
     if runtime_seed.content_hash()? != remote.target_runtime_seed_hash
@@ -6301,8 +6342,7 @@ fn verify_chain_writer_transition_adoption(
     {
         anyhow::bail!("remote continuation runtime seed contradicts its writer grant");
     }
-    let checkpoint_value = cas
-        .get_object(&remote.checkpoint_manifest_hash)?
+    let checkpoint_value = get(&remote.checkpoint_manifest_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("remote continuation checkpoint is absent"))?;
     StateManifest::from_current_value(checkpoint_value)?;
 
@@ -6310,8 +6350,7 @@ fn verify_chain_writer_transition_adoption(
         .threads
         .get(&evidence.successor_placement_thread_id)
         .ok_or_else(|| anyhow::anyhow!("transferred successor placement is absent"))?;
-    let successor_value = cas
-        .get_object(&successor_entry.snapshot_hash)?
+    let successor_value = get(&successor_entry.snapshot_hash, limits.max_object_bytes)?
         .ok_or_else(|| anyhow::anyhow!("transferred successor snapshot is absent"))?;
     let successor = ThreadSnapshot::from_current_value(successor_value)?;
     if successor.chain_root_id != evidence.chain_root_id

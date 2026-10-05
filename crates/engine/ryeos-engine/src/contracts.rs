@@ -22,7 +22,7 @@ pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindi
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
     PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanExecutionProjectFileInput,
-    PlanNode, PlanNodeId, PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority,
+    PlanNode, PlanNodeId, PlanRuntimeBinarySelection, PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority,
     PlanVerifiedCommand, SubjectResolutionAuthority,
 };
 pub use execution_target::{

@@ -23,6 +23,34 @@ const REBUILD_TX_CHAIN_BATCH: usize = 200;
 #[cfg(test)]
 const REBUILD_TX_CHAIN_BATCH: usize = 2;
 
+trait ProjectionCasObjectReader {
+    fn get_object(&mut self, hash: &str) -> Result<Option<Value>>;
+}
+
+struct LocalProjectionCasReader<'a> {
+    cas: &'a lillux::CasStore,
+}
+
+impl ProjectionCasObjectReader for LocalProjectionCasReader<'_> {
+    fn get_object(&mut self, hash: &str) -> Result<Option<Value>> {
+        Ok(self.cas.get_object(hash)?)
+    }
+}
+
+struct BoundedProjectionCasReader<'a> {
+    cas: &'a lillux::CasStore,
+    limits: crate::object_closure::ObjectClosureLimits,
+    budget: &'a mut crate::object_closure::BoundedCasObjectReadBudget,
+}
+
+impl ProjectionCasObjectReader for BoundedProjectionCasReader<'_> {
+    fn get_object(&mut self, hash: &str) -> Result<Option<Value>> {
+        Ok(self
+            .budget
+            .get_object(self.cas, hash, self.limits.max_object_bytes)?)
+    }
+}
+
 /// Report from a full projection rebuild.
 #[derive(Debug, Clone, Default)]
 pub struct RebuildReport {
@@ -1023,6 +1051,39 @@ pub(crate) fn repair_one_chain_verified_with_cas_and_observer(
     }
     verify_repair_closure_with_cas_and_observer(cas, chain_root_id, head_hash, true, observer)?;
 
+    let mut reader = LocalProjectionCasReader { cas };
+    repair_one_chain_with_reader(projection, &mut reader, chain_root_id, head_hash, observer)
+}
+
+pub(crate) fn repair_one_chain_verified_with_cas_and_limits_and_budget(
+    projection: &ProjectionDb,
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+    limits: crate::object_closure::ObjectClosureLimits,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> Result<ChainRepairReport> {
+    ensure_not_cancelled(observer)?;
+    if !lillux::valid_hash(head_hash) || head_hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        anyhow::bail!("invalid chain head hash: {head_hash}");
+    }
+    let closure = collect_complete_publication_closure(cas, [head_hash.to_owned()], limits)?;
+    if closure.object_hashes.iter().any(|hash| !budget.admits_hash(hash)) {
+        anyhow::bail!("bounded projection repair escaped its admitted publication closure");
+    }
+    let mut reader = BoundedProjectionCasReader { cas, limits, budget };
+    repair_one_chain_with_reader(projection, &mut reader, chain_root_id, head_hash, observer)
+}
+
+fn repair_one_chain_with_reader<R: ProjectionCasObjectReader>(
+    projection: &ProjectionDb,
+    reader: &mut R,
+    chain_root_id: &str,
+    head_hash: &str,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+) -> Result<ChainRepairReport> {
+
     let current_meta = projection.get_projection_meta(chain_root_id)?;
     if current_meta
         .as_ref()
@@ -1041,18 +1102,18 @@ pub(crate) fn repair_one_chain_verified_with_cas_and_observer(
     };
     projection.immediate_transaction("repair one chain", || {
         let chain_report = if let Some(meta) = current_meta.as_ref() {
-            rebuild_chain_delta_with_observer(
+            rebuild_chain_delta_with_reader(
                 projection,
-                cas,
+                reader,
                 chain_root_id,
                 &meta.indexed_chain_state_hash,
                 head_hash,
                 observer,
             )?
         } else {
-            rebuild_chain_with_observer(projection, cas, chain_root_id, head_hash, observer)?
+            rebuild_chain_with_reader(projection, reader, chain_root_id, head_hash, observer)?
         };
-        let meta = head_projection_meta(cas, chain_root_id, head_hash)?;
+        let meta = head_projection_meta_with_reader(reader, chain_root_id, head_hash)?;
         projection.update_projection_meta(&meta)?;
         report.chains_updated = 1;
         report.threads_restored = chain_report.threads;
@@ -1101,6 +1162,141 @@ pub(crate) fn verify_repair_closure_anchored_with_cas(
     .map(|_| ())
 }
 
+pub(crate) fn verify_repair_closure_anchored_with_cas_and_limits(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    verify_all_hashes: bool,
+    expected_ancestor: Option<&str>,
+    limits: crate::object_closure::ObjectClosureLimits,
+) -> Result<()> {
+    verified_repair_closure_inner_with_limits(
+        cas,
+        chain_root_id,
+        head_hash,
+        verify_all_hashes,
+        expected_ancestor,
+        None,
+        limits,
+        true,
+    )
+    .map(|_| ())
+}
+
+/// Verify a bounded publication closure and return the finite read budget for
+/// the additional evidence, anchored-frontier, and projection reads performed
+/// while the caller retains its chain lock and CAS mutation guard.
+pub(crate) fn verify_repair_closure_anchored_with_cas_and_limits_and_budget(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    expected_ancestor: Option<&str>,
+    limits: crate::object_closure::ObjectClosureLimits,
+    additional_roots: &[String],
+) -> Result<(
+    crate::object_closure::ObjectClosureReport,
+    crate::object_closure::BoundedCasObjectReadBudget,
+)> {
+    let roots = std::iter::once(head_hash.to_owned())
+        .chain(additional_roots.iter().cloned())
+        .collect::<Vec<_>>();
+    let closure = collect_complete_publication_closure(cas, roots, limits)?;
+    let mut budget = crate::object_closure::BoundedCasObjectReadBudget::new(
+        &closure.object_hashes,
+        limits,
+        closure.object_bytes_read,
+    )?;
+    validate_publication_history(
+        cas,
+        chain_root_id,
+        head_hash,
+        expected_ancestor,
+        limits,
+        &mut budget,
+    )?;
+    Ok((closure, budget))
+}
+
+/// Recheck a second signed frontier inside the already admitted publication
+/// closure, charging exact-head and legal-history reads to the same work
+/// budget. The bounded closure walk keeps its own unique-transfer ceiling.
+pub(crate) fn verify_repair_closure_anchored_with_existing_budget(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    expected_ancestor: Option<&str>,
+    limits: crate::object_closure::ObjectClosureLimits,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> Result<crate::object_closure::ObjectClosureReport> {
+    let closure = collect_complete_publication_closure(
+        cas,
+        [head_hash.to_owned()],
+        limits,
+    )?;
+    if closure.object_hashes.iter().any(|hash| !budget.admits_hash(hash)) {
+        anyhow::bail!("anchored publication frontier escaped its initially admitted closure");
+    }
+    validate_publication_history(
+        cas,
+        chain_root_id,
+        head_hash,
+        expected_ancestor,
+        limits,
+        budget,
+    )?;
+    Ok(closure)
+}
+
+fn collect_complete_publication_closure(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    limits: crate::object_closure::ObjectClosureLimits,
+) -> Result<crate::object_closure::ObjectClosureReport> {
+    let mut cancellation_check = || Ok(());
+    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits_and_check_and_verify(
+        cas,
+        roots,
+        limits,
+        &mut cancellation_check,
+        true,
+    )?;
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "incomplete bounded publication closure: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
+            closure.missing_objects.len(),
+            closure.missing_blobs.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len(),
+        );
+    }
+    Ok(closure)
+}
+
+fn validate_publication_history(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    expected_ancestor: Option<&str>,
+    limits: crate::object_closure::ObjectClosureLimits,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> Result<()> {
+    let head_value = budget
+        .get_object(cas, head_hash, limits.max_object_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("bounded publication head {head_hash} is absent"))?;
+    let head: crate::ChainState = serde_json::from_value(head_value)
+        .with_context(|| format!("decode bounded publication head {head_hash}"))?;
+    head.validate()?;
+    ensure_repair_head_root(&head, chain_root_id)?;
+    crate::chain::validate_authoritative_history_with_cas_budget_and_check(
+        cas,
+        chain_root_id,
+        head_hash,
+        expected_ancestor,
+        &mut || Ok(()),
+        budget,
+    )
+}
+
 /// Verify one exact chain head from pinned CAS authority and return the
 /// complete closure that was checked. Import staging uses the returned hashes
 /// as durable temporary GC roots, including descendants omitted from an
@@ -1123,12 +1319,57 @@ fn verified_repair_closure_inner(
     expected_ancestor: Option<&str>,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<crate::object_closure::ObjectClosureReport> {
+    verified_repair_closure_inner_with_limits(
+        cas,
+        chain_root_id,
+        head_hash,
+        verify_all_hashes,
+        expected_ancestor,
+        observer,
+        crate::object_closure::ObjectClosureLimits::unbounded_for_local_maintenance(),
+        false,
+    )
+}
+
+/// Verify one exact chain head from pinned CAS authority under explicit
+/// transfer limits. Sync retains its mutation guard around this entire call.
+pub(crate) fn verified_repair_closure_with_cas_and_limits(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    verify_all_hashes: bool,
+    limits: crate::object_closure::ObjectClosureLimits,
+) -> Result<crate::object_closure::ObjectClosureReport> {
+    verified_repair_closure_inner_with_limits(
+        cas,
+        chain_root_id,
+        head_hash,
+        verify_all_hashes,
+        None,
+        None,
+        limits,
+        true,
+    )
+}
+
+fn verified_repair_closure_inner_with_limits(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    verify_all_hashes: bool,
+    expected_ancestor: Option<&str>,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+    limits: crate::object_closure::ObjectClosureLimits,
+    verify_typed_during_traversal: bool,
+) -> Result<crate::object_closure::ObjectClosureReport> {
     let mut cancellation_check = || ensure_not_cancelled(observer);
     cancellation_check()?;
-    let closure = crate::object_closure::collect_object_closure_with_cas_and_check(
+    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits_and_check_and_verify(
         cas,
         [head_hash.to_string()],
+        limits,
         &mut cancellation_check,
+        verify_all_hashes && verify_typed_during_traversal,
     )?;
     if !closure.is_complete() {
         let summary = format!(
@@ -1143,7 +1384,16 @@ fn verified_repair_closure_inner(
         }
         anyhow::bail!("{summary}");
     }
-    if verify_all_hashes {
+    let mut object_read_budget = if verify_typed_during_traversal {
+        Some(crate::object_closure::BoundedCasObjectReadBudget::new(
+            &closure.object_hashes,
+            limits,
+            closure.object_bytes_read,
+        )?)
+    } else {
+        None
+    };
+    if verify_all_hashes && !verify_typed_during_traversal {
         for hash in &closure.object_hashes {
             cancellation_check()?;
             let value = cas
@@ -1167,35 +1417,56 @@ fn verified_repair_closure_inner(
                 _ => {}
             }
         }
+        let mut verified_blob_bytes = closure.blob_bytes_verified;
         for hash in &closure.blob_hashes {
             cancellation_check()?;
-            cas.get_blob(hash)?
+            let remaining_bytes = limits
+                .max_total_blob_bytes
+                .checked_sub(verified_blob_bytes)
+                .context("verified blob-byte accounting exceeded its admitted total")?;
+            let maximum_bytes = limits.max_blob_bytes.min(remaining_bytes);
+            let bytes = cas.get_blob_bounded(hash, maximum_bytes)?
                 .ok_or_else(|| anyhow::anyhow!("verified CAS blob {hash} disappeared"))?;
+            verified_blob_bytes = verified_blob_bytes
+                .checked_add(u64::try_from(bytes.len())?)
+                .context("verified blob-byte count overflow")?;
         }
     }
     cancellation_check()?;
-    let state: crate::ChainState = serde_json::from_value(
-        cas.get_object(head_hash)?
-            .ok_or_else(|| anyhow::anyhow!("chain head object {head_hash} disappeared"))?,
-    )
+    let head_value = match object_read_budget.as_mut() {
+        Some(budget) => budget.get_object(cas, head_hash, limits.max_object_bytes)?,
+        None => cas.get_object(head_hash)?,
+    }
+        .ok_or_else(|| anyhow::anyhow!("chain head object {head_hash} disappeared"))?;
+    let state: crate::ChainState = serde_json::from_value(head_value)
     .with_context(|| format!("decode chain head object {head_hash}"))?;
     state.validate()?;
     ensure_repair_head_root(&state, chain_root_id)?;
     // A complete object closure may carry signed supporting evidence rooted in
     // another chain. Attestation subjects are ordinary closure edges, and
     // federated follow reservations intentionally bind a parent-chain head
-    // while travelling with the child. The loop above therefore performs
-    // structural validation only. Authority remains single-chain and strict:
+    // while travelling with the child. Structural checks run during bounded
+    // closure traversal. Authority remains single-chain and strict:
     // this head check plus validate_authoritative_history below prove that
     // every ChainState, snapshot, and event on the requested history belongs
     // to `chain_root_id` and advances through its exact legal transitions.
-    crate::chain::validate_authoritative_history_with_cas_and_check(
-        cas,
-        chain_root_id,
-        head_hash,
-        expected_ancestor,
-        &mut cancellation_check,
-    )
+    match object_read_budget.as_mut() {
+        Some(budget) => crate::chain::validate_authoritative_history_with_cas_budget_and_check(
+            cas,
+            chain_root_id,
+            head_hash,
+            expected_ancestor,
+            &mut cancellation_check,
+            budget,
+        ),
+        None => crate::chain::validate_authoritative_history_with_cas_and_check(
+            cas,
+            chain_root_id,
+            head_hash,
+            expected_ancestor,
+            &mut cancellation_check,
+        ),
+    }
     .with_context(|| {
         format!("invalid authoritative history for chain {chain_root_id}@{head_hash}")
     })?;
@@ -1251,7 +1522,16 @@ fn head_projection_meta(
     chain_root_id: &str,
     chain_state_hash: &str,
 ) -> Result<crate::projection::ProjectionMeta> {
-    let state = load_chain_state(cas, chain_state_hash, chain_root_id).with_context(|| {
+    let mut reader = LocalProjectionCasReader { cas };
+    head_projection_meta_with_reader(&mut reader, chain_root_id, chain_state_hash)
+}
+
+fn head_projection_meta_with_reader<R: ProjectionCasObjectReader>(
+    reader: &mut R,
+    chain_root_id: &str,
+    chain_state_hash: &str,
+) -> Result<crate::projection::ProjectionMeta> {
+    let state = load_chain_state_with_reader(reader, chain_state_hash, chain_root_id).with_context(|| {
         format!("derive projection cursor for {chain_root_id}@{chain_state_hash}")
     })?;
     Ok(crate::projection::ProjectionMeta {
@@ -1343,6 +1623,17 @@ fn rebuild_chain_with_observer(
     head_hash: &str,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<ChainReport> {
+    let mut reader = LocalProjectionCasReader { cas };
+    rebuild_chain_with_reader(projection, &mut reader, chain_root_id, head_hash, observer)
+}
+
+fn rebuild_chain_with_reader<R: ProjectionCasObjectReader>(
+    projection: &ProjectionDb,
+    reader: &mut R,
+    chain_root_id: &str,
+    head_hash: &str,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+) -> Result<ChainReport> {
     ensure_not_cancelled(observer)?;
     // A full repair is replacement, never an overlay. This also makes a
     // failed delta-ancestry fallback remove stale derived rows before replay.
@@ -1365,7 +1656,7 @@ fn rebuild_chain_with_observer(
         if !visited.insert(current_hash.clone()) {
             anyhow::bail!("cycle in ChainState history for {chain_root_id} at {current_hash}");
         }
-        let state = load_chain_state(cas, &current_hash, chain_root_id)
+        let state = load_chain_state_with_reader(reader, &current_hash, chain_root_id)
             .with_context(|| format!("load ChainState history link {current_hash}"))?;
         let previous = state.prev_chain_state_hash.clone();
         states.push((current_hash, state));
@@ -1383,7 +1674,7 @@ fn rebuild_chain_with_observer(
         ensure_not_cancelled(observer)?;
         for (thread_id, entry) in &state.threads {
             ensure_not_cancelled(observer)?;
-            let snapshot = load_thread_snapshot(cas, &entry.snapshot_hash).with_context(|| {
+            let snapshot = load_thread_snapshot_with_reader(reader, &entry.snapshot_hash).with_context(|| {
                 format!(
                     "load snapshot {} for thread {thread_id} from ChainState {state_hash}",
                     entry.snapshot_hash
@@ -1406,7 +1697,7 @@ fn rebuild_chain_with_observer(
     let (_, head_state) = states
         .last()
         .expect("a full ChainState traversal always contains its head");
-    report.events += walk_and_project_events_with_observer(projection, cas, head_state, observer)?;
+    report.events += walk_and_project_events_with_reader(projection, reader, head_state, observer)?;
 
     // Count unique threads
     let conn = projection.connection();
@@ -1443,6 +1734,25 @@ fn rebuild_chain_delta_with_observer(
     to_hash: &str,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<ChainReport> {
+    let mut reader = LocalProjectionCasReader { cas };
+    rebuild_chain_delta_with_reader(
+        projection,
+        &mut reader,
+        chain_root_id,
+        from_hash,
+        to_hash,
+        observer,
+    )
+}
+
+fn rebuild_chain_delta_with_reader<R: ProjectionCasObjectReader>(
+    projection: &ProjectionDb,
+    reader: &mut R,
+    chain_root_id: &str,
+    from_hash: &str,
+    to_hash: &str,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+) -> Result<ChainReport> {
     ensure_not_cancelled(observer)?;
     // Collect chain state hashes from `to_hash` toward earlier links until we reach `from_hash`
     let mut states = Vec::new();
@@ -1459,7 +1769,7 @@ fn rebuild_chain_delta_with_observer(
         if !visited.insert(current_hash.clone()) {
             anyhow::bail!("cycle in ChainState delta for {chain_root_id} at {current_hash}");
         }
-        let state = load_chain_state(cas, &current_hash, chain_root_id)
+        let state = load_chain_state_with_reader(reader, &current_hash, chain_root_id)
             .with_context(|| format!("load ChainState delta link {current_hash}"))?;
         let previous = state.prev_chain_state_hash.clone();
         states.push((current_hash, state));
@@ -1471,12 +1781,12 @@ fn rebuild_chain_delta_with_observer(
 
     if !found_from {
         // Couldn't find from_hash in chain — fall back to full rebuild
-        return rebuild_chain_with_observer(projection, cas, chain_root_id, to_hash, observer);
+        return rebuild_chain_with_reader(projection, reader, chain_root_id, to_hash, observer);
     }
 
     // Reaching a cursor hash is not enough: its object supplies the exclusive
     // event boundary and must remain readable, canonical, and root-bound.
-    let from_state = load_chain_state(cas, from_hash, chain_root_id)
+    let from_state = load_chain_state_with_reader(reader, from_hash, chain_root_id)
         .with_context(|| format!("load indexed ChainState cursor {from_hash}"))?;
 
     // Reverse to get chronological order of new states
@@ -1498,7 +1808,7 @@ fn rebuild_chain_delta_with_observer(
         ensure_not_cancelled(observer)?;
         for (thread_id, entry) in &state.threads {
             ensure_not_cancelled(observer)?;
-            let snapshot = load_thread_snapshot(cas, &entry.snapshot_hash).with_context(|| {
+            let snapshot = load_thread_snapshot_with_reader(reader, &entry.snapshot_hash).with_context(|| {
                 format!(
                     "load snapshot {} for thread {thread_id} from delta ChainState {state_hash}",
                     entry.snapshot_hash
@@ -1521,9 +1831,9 @@ fn rebuild_chain_delta_with_observer(
 
     // Project new events
     if let Some((_, head_state)) = states.last() {
-        report.events = match walk_and_project_events_from_with_observer(
+        report.events = match walk_and_project_events_from_with_reader(
             projection,
-            cas,
+            reader,
             head_state,
             Some(&from_state),
             observer,
@@ -1533,9 +1843,9 @@ fn rebuild_chain_delta_with_observer(
                 // The indexed event cursor is not an ancestor of
                 // the authoritative head. Replace the chain rather
                 // than layering a full replay over stale rows.
-                return rebuild_chain_with_observer(
+                return rebuild_chain_with_reader(
                     projection,
-                    cas,
+                    reader,
                     chain_root_id,
                     to_hash,
                     observer,
@@ -1545,9 +1855,9 @@ fn rebuild_chain_delta_with_observer(
                 // A row at the authoritative event identity is not
                 // the exact canonical event. Replace every row for
                 // the chain before replaying from CAS truth.
-                return rebuild_chain_with_observer(
+                return rebuild_chain_with_reader(
                     projection,
-                    cas,
+                    reader,
                     chain_root_id,
                     to_hash,
                     observer,
@@ -1566,8 +1876,17 @@ fn load_chain_state(
     hash: &str,
     expected_chain_root_id: &str,
 ) -> Result<ChainState> {
+    let mut reader = LocalProjectionCasReader { cas };
+    load_chain_state_with_reader(&mut reader, hash, expected_chain_root_id)
+}
+
+fn load_chain_state_with_reader<R: ProjectionCasObjectReader>(
+    reader: &mut R,
+    hash: &str,
+    expected_chain_root_id: &str,
+) -> Result<ChainState> {
     crate::objects::thread_snapshot::validate_canonical_hash("ChainState hash", hash)?;
-    let value = cas
+    let value = reader
         .get_object(hash)?
         .ok_or_else(|| anyhow::anyhow!("ChainState {hash} is absent"))?;
     let state: ChainState = serde_json::from_value(value)
@@ -1596,8 +1915,16 @@ fn load_chain_state(
 
 /// Load an exact, canonical thread snapshot from CAS.
 fn load_thread_snapshot(cas: &lillux::CasStore, hash: &str) -> Result<ThreadSnapshot> {
+    let mut reader = LocalProjectionCasReader { cas };
+    load_thread_snapshot_with_reader(&mut reader, hash)
+}
+
+fn load_thread_snapshot_with_reader<R: ProjectionCasObjectReader>(
+    reader: &mut R,
+    hash: &str,
+) -> Result<ThreadSnapshot> {
     crate::objects::thread_snapshot::validate_canonical_hash("thread snapshot hash", hash)?;
-    let value = cas
+    let value = reader
         .get_object(hash)?
         .ok_or_else(|| anyhow::anyhow!("thread_snapshot {hash} is absent"))?;
     let snapshot = ThreadSnapshot::from_current_value(value)
@@ -1634,7 +1961,17 @@ fn walk_and_project_events_with_observer(
     head_state: &ChainState,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<usize> {
-    walk_and_project_events_from_with_observer(projection, cas, head_state, None, observer)?
+    let mut reader = LocalProjectionCasReader { cas };
+    walk_and_project_events_with_reader(projection, &mut reader, head_state, observer)
+}
+
+fn walk_and_project_events_with_reader<R: ProjectionCasObjectReader>(
+    projection: &ProjectionDb,
+    reader: &mut R,
+    head_state: &ChainState,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+) -> Result<usize> {
+    walk_and_project_events_from_with_reader(projection, reader, head_state, None, observer)?
         .ok_or_else(|| anyhow::anyhow!("full event replay unexpectedly reported a missing cursor"))
 }
 
@@ -1658,6 +1995,17 @@ fn walk_and_project_events_from(
 fn walk_and_project_events_from_with_observer(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,
+    head_state: &ChainState,
+    stop_state: Option<&ChainState>,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+) -> Result<Option<usize>> {
+    let mut reader = LocalProjectionCasReader { cas };
+    walk_and_project_events_from_with_reader(projection, &mut reader, head_state, stop_state, observer)
+}
+
+fn walk_and_project_events_from_with_reader<R: ProjectionCasObjectReader>(
+    projection: &ProjectionDb,
+    reader: &mut R,
     head_state: &ChainState,
     stop_state: Option<&ChainState>,
     observer: Option<&dyn ProjectionRecoveryObserver>,
@@ -1708,7 +2056,7 @@ fn walk_and_project_events_from_with_observer(
                 );
             }
             if let Some(cursor_hash) = stop_hash {
-                let cursor_event = load_thread_event(cas, cursor_hash, &head_state.chain_root_id)
+                let cursor_event = load_thread_event_with_reader(reader, cursor_hash, &head_state.chain_root_id)
                     .context("load excluded event replay cursor")?;
                 if cursor_event.chain_seq != stop_sequence {
                     anyhow::bail!(
@@ -1743,7 +2091,7 @@ fn walk_and_project_events_from_with_observer(
             anyhow::bail!("cycle in event history at {event_hash}");
         }
 
-        let event = load_thread_event(cas, &event_hash, &head_state.chain_root_id)?;
+        let event = load_thread_event_with_reader(reader, &event_hash, &head_state.chain_root_id)?;
         if event.chain_seq != expected_chain_sequence {
             anyhow::bail!(
                 "event {event_hash} chain sequence mismatch: expected {expected_chain_sequence}, got {}",
@@ -1797,8 +2145,17 @@ fn load_thread_event(
     hash: &str,
     expected_chain_root_id: &str,
 ) -> Result<ThreadEvent> {
+    let mut reader = LocalProjectionCasReader { cas };
+    load_thread_event_with_reader(&mut reader, hash, expected_chain_root_id)
+}
+
+fn load_thread_event_with_reader<R: ProjectionCasObjectReader>(
+    reader: &mut R,
+    hash: &str,
+    expected_chain_root_id: &str,
+) -> Result<ThreadEvent> {
     crate::objects::thread_snapshot::validate_canonical_hash("thread event hash", hash)?;
-    let value = cas
+    let value = reader
         .get_object(hash)?
         .ok_or_else(|| anyhow::anyhow!("thread event {hash} is absent"))?;
     let event: ThreadEvent = serde_json::from_value(value)
@@ -2307,6 +2664,36 @@ mod tests {
         );
         let cs2_hash = write_object(&cas_root, &cs2);
         write_signed_head(&refs_root, "T-root", &cs2_hash);
+
+        let cas = lillux::CasStore::new(cas_root.clone());
+        let default_limits = crate::object_closure::ObjectClosureLimits::default();
+        let admitted = crate::object_closure::collect_object_closure_with_cas_and_limits(
+            &cas,
+            [cs2_hash.clone()],
+            default_limits,
+        )
+        .unwrap();
+        assert!(admitted.is_complete());
+        let mut exact_transfer_limits = default_limits;
+        exact_transfer_limits.max_total_object_bytes = admitted.object_bytes_read;
+        verified_repair_closure_with_cas_and_limits(
+            &cas,
+            "T-root",
+            &cs2_hash,
+            true,
+            exact_transfer_limits,
+        )
+        .expect("full two-state history validation accepts the exact unique-object transfer ceiling");
+        let mut over_transfer_limits = exact_transfer_limits;
+        over_transfer_limits.max_total_object_bytes = admitted.object_bytes_read - 1;
+        assert!(verified_repair_closure_with_cas_and_limits(
+            &cas,
+            "T-root",
+            &cs2_hash,
+            true,
+            over_transfer_limits,
+        )
+        .is_err());
 
         let proj_path = tmp.path().join("projection.db");
         let proj = ProjectionDb::open(&proj_path).unwrap();

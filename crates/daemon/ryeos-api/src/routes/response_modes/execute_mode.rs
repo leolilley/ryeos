@@ -902,6 +902,12 @@ impl ResponseMode for ExecuteMode {
 
         match raw.request.body {
             RawRequestBody::Json => {}
+            RawRequestBody::ObjectsPutV1 => {
+                return Err(RouteConfigError::InvalidResponseSpec {
+                    id: raw.id.clone(), mode: "execute".into(),
+                    reason: "execute mode does not accept the objects_put_v1 body profile".into(),
+                });
+            }
             _ => {
                 return Err(RouteConfigError::InvalidResponseSpec {
                     id: raw.id.clone(),
@@ -2761,6 +2767,14 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("request.body = json"), "got: {msg}");
+    }
+
+    #[test]
+    fn compile_rejects_objects_put_profile() {
+        assert!(matches!(
+            ExecuteMode.compile(&make_raw("ryeos_signed", RawRequestBody::ObjectsPutV1)),
+            Err(RouteConfigError::InvalidResponseSpec { .. })
+        ));
     }
 
     #[test]

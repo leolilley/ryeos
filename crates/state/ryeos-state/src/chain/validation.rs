@@ -42,6 +42,7 @@ fn validate_authoritative_closure(
     cas: &lillux::CasStore,
     state: &ChainState,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
 ) -> anyhow::Result<HashMap<String, EventPosition>> {
     check()?;
     state.validate()?;
@@ -54,7 +55,7 @@ fn validate_authoritative_closure(
 
     for (thread_id, entry) in &state.threads {
         check()?;
-        let snapshot = load_hashed_snapshot(cas, &entry.snapshot_hash)
+        let snapshot = load_hashed_snapshot_with_budget(cas, &entry.snapshot_hash, budget)
             .with_context(|| format!("load authoritative snapshot for thread {thread_id}"))?;
         validate_stored_snapshot(state, thread_id, entry, &snapshot)
             .with_context(|| format!("invalid authoritative snapshot for thread {thread_id}"))?;
@@ -97,7 +98,7 @@ fn validate_authoritative_closure(
             anyhow::bail!("cycle in chain event history at {event_hash}");
         }
 
-        let event = load_hashed_event(cas, event_hash)
+        let event = load_hashed_event_with_budget(cas, event_hash, budget)
             .with_context(|| format!("load authoritative chain event {event_hash}"))?;
         event.validate()?;
         if event.chain_root_id != state.chain_root_id {
@@ -272,15 +273,51 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
     expected_ancestor: Option<&str>,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    validate_authoritative_history_with_read_budget_and_check(
+        cas,
+        chain_root_id,
+        target_hash,
+        expected_ancestor,
+        check,
+        &mut None,
+    )
+}
+
+pub(crate) fn validate_authoritative_history_with_cas_limits_and_check(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    target_hash: &str,
+    expected_ancestor: Option<&str>,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<()> {
+    validate_authoritative_history_with_read_budget_and_check(
+        cas,
+        chain_root_id,
+        target_hash,
+        expected_ancestor,
+        check,
+        &mut Some(budget),
+    )
+}
+
+fn validate_authoritative_history_with_read_budget_and_check(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    target_hash: &str,
+    expected_ancestor: Option<&str>,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
+) -> anyhow::Result<()> {
     check()?;
-    let target = load_hashed_chain_state(cas, target_hash)?;
+    let target = load_hashed_chain_state_with_budget(cas, target_hash, budget)?;
     if target.chain_root_id != chain_root_id {
         anyhow::bail!(
             "target chain root mismatch: expected {chain_root_id}, got {}",
             target.chain_root_id
         );
     }
-    let event_positions = validate_authoritative_closure(cas, &target, check)?;
+    let event_positions = validate_authoritative_closure(cas, &target, check, budget)?;
 
     let mut newest_to_oldest = Vec::new();
     let mut visited = HashSet::new();
@@ -290,7 +327,7 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
         if !visited.insert(hash.clone()) {
             anyhow::bail!("cycle in ChainState history at {hash}");
         }
-        let state = load_hashed_chain_state(cas, &hash)
+        let state = load_hashed_chain_state_with_budget(cas, &hash, budget)
             .with_context(|| format!("load historical ChainState {hash}"))?;
         state.validate()?;
         validate_chain_positions(&state)?;
@@ -316,15 +353,15 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
     let genesis_hash = newest_to_oldest
         .first()
         .ok_or_else(|| anyhow::anyhow!("empty ChainState history for target {target_hash}"))?;
-    let mut previous = load_hashed_chain_state(cas, genesis_hash)?;
+    let mut previous = load_hashed_chain_state_with_budget(cas, genesis_hash, budget)?;
     check()?;
-    validate_genesis_state(cas, &previous, &event_positions)
+    validate_genesis_state(cas, &previous, &event_positions, budget)
         .with_context(|| format!("invalid genesis ChainState {genesis_hash}"))?;
     let mut previous_hash = genesis_hash.clone();
 
     for next_hash in newest_to_oldest.iter().skip(1) {
         check()?;
-        let next = load_hashed_chain_state(cas, next_hash)?;
+        let next = load_hashed_chain_state_with_budget(cas, next_hash, budget)?;
         validate_chain_state_transition(
             cas,
             &previous_hash,
@@ -333,6 +370,7 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
             &next,
             &event_positions,
             check,
+            budget,
         )
         .with_context(|| format!("invalid ChainState transition {previous_hash} -> {next_hash}"))?;
         previous = next;
@@ -346,6 +384,7 @@ fn validate_genesis_state(
     cas: &lillux::CasStore,
     state: &ChainState,
     events: &HashMap<String, EventPosition>,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
 ) -> anyhow::Result<()> {
     if state.prev_chain_state_hash.is_some() {
         anyhow::bail!("genesis ChainState has a predecessor");
@@ -357,7 +396,7 @@ fn validate_genesis_state(
         .threads
         .get(&state.chain_root_id)
         .expect("ChainState::validate requires its root entry");
-    let snapshot = load_hashed_snapshot(cas, &entry.snapshot_hash)?;
+    let snapshot = load_hashed_snapshot_with_budget(cas, &entry.snapshot_hash, budget)?;
     validate_published_snapshot(state, &state.chain_root_id, entry, &snapshot, events)?;
     validate_new_thread_snapshot(&snapshot, None)?;
 
@@ -406,6 +445,7 @@ fn validate_chain_state_transition(
     next: &ChainState,
     events: &HashMap<String, EventPosition>,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
 ) -> anyhow::Result<()> {
     if next.prev_chain_state_hash.as_deref() != Some(previous_hash) {
         anyhow::bail!(
@@ -463,7 +503,7 @@ fn validate_chain_state_transition(
                     next_entry.last_thread_seq,
                     check,
                 )?;
-                let snapshot = load_hashed_snapshot(cas, &next_entry.snapshot_hash)?;
+                let snapshot = load_hashed_snapshot_with_budget(cas, &next_entry.snapshot_hash, budget)?;
                 validate_published_snapshot(next, thread_id, next_entry, &snapshot, events)?;
                 let continuation_source = snapshot
                     .base_project_snapshot_hash
@@ -489,9 +529,16 @@ fn validate_chain_state_transition(
                         );
                     }
                 } else {
-                    let previous_snapshot =
-                        load_hashed_snapshot(cas, &previous_entry.snapshot_hash)?;
-                    let next_snapshot = load_hashed_snapshot(cas, &next_entry.snapshot_hash)?;
+                    let previous_snapshot = load_hashed_snapshot_with_budget(
+                        cas,
+                        &previous_entry.snapshot_hash,
+                        budget,
+                    )?;
+                    let next_snapshot = load_hashed_snapshot_with_budget(
+                        cas,
+                        &next_entry.snapshot_hash,
+                        budget,
+                    )?;
                     validate_published_snapshot(
                         next,
                         thread_id,
@@ -729,8 +776,18 @@ fn validate_event_advance(
 }
 
 fn load_hashed_chain_state(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<ChainState> {
-    let value = cas
-        .get_object(hash)
+    load_hashed_chain_state_with_budget(cas, hash, &mut None)
+}
+
+fn load_hashed_chain_state_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
+) -> anyhow::Result<ChainState> {
+    let value = match budget.as_deref_mut() {
+        Some(budget) => budget.get_object(cas, hash, u64::MAX)?,
+        None => cas.get_object(hash)?,
+    }
         .with_context(|| format!("read authoritative ChainState object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative ChainState object {hash} is absent"))?;
     let state: ChainState = serde_json::from_value(value)
@@ -760,13 +817,26 @@ fn validate_predecessor_link(
 }
 
 fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<ThreadSnapshot> {
-    let value = cas
-        .get_object(hash)
+    load_hashed_snapshot_with_budget(cas, hash, &mut None)
+}
+
+fn load_hashed_snapshot_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
+) -> anyhow::Result<ThreadSnapshot> {
+    let value = match budget.as_deref_mut() {
+        Some(budget) => budget.get_object(cas, hash, u64::MAX)?,
+        None => cas.get_object(hash)?,
+    }
         .with_context(|| format!("read authoritative snapshot object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
     let snapshot = ThreadSnapshot::from_current_value(value)
         .with_context(|| format!("decode authoritative snapshot object {hash}"))?;
-    snapshot.verify_result_workspace_output_capture(cas)?;
+    match budget.as_deref_mut() {
+        Some(budget) => snapshot.verify_result_workspace_output_capture_with_budget(cas, budget)?,
+        None => snapshot.verify_result_workspace_output_capture(cas)?,
+    }
     let canonical = lillux::canonical_json(&snapshot.to_value())
         .with_context(|| format!("canonicalize authoritative snapshot {hash}"))?;
     let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
@@ -779,8 +849,18 @@ fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Th
 }
 
 fn load_hashed_event(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<ThreadEvent> {
-    let value = cas
-        .get_object(hash)
+    load_hashed_event_with_budget(cas, hash, &mut None)
+}
+
+fn load_hashed_event_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
+) -> anyhow::Result<ThreadEvent> {
+    let value = match budget.as_deref_mut() {
+        Some(budget) => budget.get_object(cas, hash, u64::MAX)?,
+        None => cas.get_object(hash)?,
+    }
         .with_context(|| format!("read authoritative event object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative event object {hash} is absent"))?;
     let event: ThreadEvent = serde_json::from_value(value)

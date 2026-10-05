@@ -82,6 +82,10 @@ pub enum RawRequestBody {
     Raw,
     Text,
     Json,
+    /// JSON input admitted by the bounded `objects/put` raw-entry profile.
+    /// This variant must only be selected by its exact authenticated service
+    /// route and is never an alias for ordinary JSON parsing.
+    ObjectsPutV1,
 }
 
 impl Default for RawRequest {

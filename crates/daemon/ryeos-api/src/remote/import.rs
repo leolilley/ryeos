@@ -458,7 +458,13 @@ pub fn closure_response_to_export_payload(
                     .value
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("object closure entry missing value"))?;
-                let data = lillux::canonical_json(value)?.into_bytes();
+                let data = entry.value_bytes.clone().ok_or_else(|| {
+                    anyhow::anyhow!("object closure entry missing verified raw canonical bytes")
+                })?;
+                anyhow::ensure!(
+                    lillux::canonical_json_bounded(value, data.len())?.as_slice() == data.as_slice(),
+                    "object closure raw bytes differ from decoded value"
+                );
                 let hash = lillux::sha256_hex(&data);
                 if hash != entry.hash {
                     anyhow::bail!(
@@ -562,9 +568,24 @@ pub(crate) fn append_admitted_supplemental_entry(
             "blob",
         )
     } else {
+        if entry_bytes > limits.max_object_bytes {
+            anyhow::bail!("supplemental object exceeds admitted per-entry bytes");
+        }
+        let max_object_bytes = usize::try_from(limits.max_object_bytes)
+            .context("admitted per-object byte limit exceeds this platform")?;
+        let capsule = lillux::cas::json_object_is_capsule_kind(&entry.data)
+            .context("supplemental object kind is not valid or unambiguous JSON")?;
+        if capsule && entry.data.len() > ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES {
+            anyhow::bail!("supplemental capsule exceeds its raw byte ceiling");
+        }
         let value: Value =
             serde_json::from_slice(&entry.data).context("supplemental object is not JSON")?;
-        if lillux::canonical_json(&value)?.as_bytes() != entry.data.as_slice() {
+        let cap = if capsule {
+            max_object_bytes.min(ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)
+        } else {
+            max_object_bytes
+        };
+        if lillux::canonical_json_bounded(&value, cap)?.as_slice() != entry.data.as_slice() {
             anyhow::bail!("supplemental object is not canonical JSON");
         }
         let link_count = ryeos_state::object_closure::object_link_count(&value)
@@ -759,12 +780,14 @@ mod tests {
                     kind: "object".to_owned(),
                     data: None,
                     value: Some(value),
+                    value_bytes: Some(object_bytes.clone()),
                 },
                 crate::remote::client::CasEntry {
                     hash: blob_hash.clone(),
                     kind: "blob".to_owned(),
                     data: Some(base64::engine::general_purpose::STANDARD.encode(blob)),
                     value: None,
+                    value_bytes: None,
                 },
             ],
         )
@@ -785,9 +808,40 @@ mod tests {
                 kind: "blob".to_owned(),
                 data: Some(base64::engine::general_purpose::STANDARD.encode(b"wrong")),
                 value: None,
+                value_bytes: None,
             }],
         )
         .unwrap_err();
         assert!(error.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn supplemental_object_size_limit_precedes_json_materialization() {
+        let limits = ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits {
+            max_roots: 1,
+            max_objects: 2,
+            max_blobs: 2,
+            max_object_bytes: 64,
+            max_total_object_bytes: 128,
+            max_blob_bytes: 64,
+            max_total_blob_bytes: 128,
+            max_response_bytes: 256,
+            max_links_per_object: 8,
+        };
+        let data = vec![b'!'; 65];
+        let entry = SyncEntry {
+            hash: lillux::sha256_hex(&data),
+            is_blob: false,
+            data,
+        };
+        let mut payload = ExportPayload {
+            chain_root_id: "T-supplemental-size".to_owned(),
+            chain_head_hash: "11".repeat(32),
+            entries: Vec::new(),
+            total_bytes: 0,
+        };
+        let error = append_admitted_supplemental_entry(&mut payload, entry, &limits).unwrap_err();
+        assert!(error.to_string().contains("per-entry bytes"));
+        assert!(!error.to_string().contains("not valid JSON"));
     }
 }

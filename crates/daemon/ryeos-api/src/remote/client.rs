@@ -192,6 +192,106 @@ async fn read_json_checked_with_limit(
         .with_context(|| format!("{method} {url}: failed to parse response as JSON"))
 }
 
+/// Bounded response reader for endpoints that must inspect per-entry raw JSON
+/// bytes before materializing their values.
+async fn read_raw_json_checked_with_limit(
+    method: &'static str,
+    url: &str,
+    mut resp: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>> {
+    if maximum == 0 { bail!("{method} {url}: response byte limit must be greater than zero"); }
+    let status = resp.status();
+    if status.is_success() && resp.content_length().is_some_and(|n| n > maximum as u64) {
+        bail!("{method} {url}: response Content-Length exceeds {maximum} byte limit");
+    }
+    let cap = if status.is_success() { maximum } else { ERROR_BODY_EXCERPT_MAX };
+    let mut body = Vec::with_capacity(resp.content_length().and_then(|n| usize::try_from(n).ok()).unwrap_or(0).min(cap));
+    let mut truncated = false;
+    while let Some(chunk) = resp.chunk().await.with_context(|| format!("{method} {url}: failed to read response body"))? {
+        let remaining = cap.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            if status.is_success() { bail!("{method} {url}: response body exceeds {maximum} byte limit"); }
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&body);
+        return Err(RemoteHttpError { method, url: url.to_owned(), status, body: if truncated { format!("{text}… [truncated after {ERROR_BODY_EXCERPT_MAX} bytes]") } else { truncate_error_body(&text) } }.into());
+    }
+    Ok(body)
+}
+
+fn decode_raw_object_value(hash: &str, raw: &serde_json::value::RawValue) -> Result<(Value, Vec<u8>)> {
+    let bytes = raw.get().as_bytes();
+    if bytes.len() > 32 * 1024 * 1024 { bail!("remote CAS object {hash} exceeds the 32 MiB raw object limit"); }
+    let capsule = lillux::cas::json_object_is_capsule_kind(bytes)
+        .context("object value must be a JSON object with unambiguous kind")?;
+    if capsule && bytes.len() > 16 * 1024 * 1024
+    {
+        bail!("remote capsule object {hash} exceeds the 16 MiB raw capsule limit");
+    }
+    if lillux::sha256_hex(bytes) != hash { bail!("remote CAS object {hash} does not match its raw content address"); }
+    let value: Value = serde_json::from_slice(bytes)?;
+    if lillux::canonical_json_bounded(&value, bytes.len())?.as_slice() != bytes {
+        bail!("remote CAS object {hash} is not canonical JSON");
+    }
+    Ok((value, bytes.to_vec()))
+}
+
+fn base64_json_string_max_len(max_decoded_bytes: u64) -> Result<usize> {
+    let encoded = max_decoded_bytes
+        .checked_add(2)
+        .context("base64 byte ceiling overflow")?
+        .checked_div(3)
+        .context("base64 byte ceiling overflow")?
+        .checked_mul(4)
+        .context("base64 encoded ceiling overflow")?;
+    usize::try_from(encoded)
+        .context("base64 encoded ceiling exceeds this platform")?
+        .checked_add(2)
+        .context("base64 JSON string ceiling overflow")
+}
+
+fn decode_bounded_base64_json_string(
+    raw: &serde_json::value::RawValue,
+    max_decoded_bytes: u64,
+) -> Result<String> {
+    let encoded_max = base64_json_string_max_len(max_decoded_bytes)?;
+    let raw_text = raw.get();
+    if raw_text.len() > encoded_max {
+        bail!("remote base64 blob exceeds its admitted encoded byte ceiling");
+    }
+    let data: String = serde_json::from_str(raw_text)
+        .context("remote blob data is not a JSON string")?;
+    if data.len() > encoded_max.saturating_sub(2)
+        || raw_text.len() != data.len().saturating_add(2)
+    {
+        bail!("remote blob data exceeds its admitted encoded byte ceiling");
+    }
+    Ok(data)
+}
+
+fn base64_json_entries_max_len(max_decoded_bytes: u64, max_entries: usize) -> Result<usize> {
+    let entries = u64::try_from(max_entries).context("blob count exceeds u64")?;
+    let rounded_input = max_decoded_bytes
+        .checked_add(entries.checked_mul(2).context("blob count ceiling overflow")?)
+        .context("aggregate blob byte ceiling overflow")?;
+    let encoded = rounded_input
+        .checked_add(2)
+        .context("aggregate base64 ceiling overflow")?
+        .checked_div(3)
+        .context("aggregate base64 ceiling overflow")?
+        .checked_mul(4)
+        .context("aggregate base64 ceiling overflow")?;
+    let quotes = entries.checked_mul(2).context("aggregate quote ceiling overflow")?;
+    usize::try_from(encoded.checked_add(quotes).context("aggregate base64 ceiling overflow")?)
+        .context("aggregate base64 ceiling exceeds this platform")
+}
+
 /// Cap on establishing a TCP/TLS connection to a remote. Applies to
 /// every request; without it a dead or filtered remote hangs callers
 /// for the OS connect timeout (minutes).
@@ -528,6 +628,65 @@ impl RemoteClient {
         })
     }
 
+    /// POST `/objects/put` while preserving already-validated canonical object
+    /// JSON bytes inside the signed request body.
+    pub async fn objects_put_raw(
+        &self,
+        staging_id: Option<&str>,
+        project_path: &str,
+        blobs: &[BlobUpload],
+        objects: &[RawObjectUpload],
+    ) -> Result<ObjectsPutResponse> {
+        #[derive(serde::Serialize)]
+        struct RawEntry<'a> {
+            value: &'a serde_json::value::RawValue,
+        }
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            staging_id: Option<&'a str>,
+            project_path: &'a str,
+            blobs: &'a [BlobUpload],
+            blob_chunks: &'static [BlobChunkUpload],
+            objects: Vec<RawEntry<'a>>,
+        }
+        let request = Request {
+            staging_id,
+            project_path,
+            blobs,
+            blob_chunks: &[],
+            objects: objects
+                .iter()
+                .map(|entry| RawEntry { value: &entry.value })
+                .collect(),
+        };
+        let resp = self
+            .signed_post_serializable_with_response_limit(
+                "/objects/put",
+                &request,
+                DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        Ok(ObjectsPutResponse {
+            staging_id: resp["staging_id"]
+                .as_str()
+                .context("objects/put response missing staging_id")?
+                .to_string(),
+            expected_previous_hash: match resp.get("expected_previous_hash") {
+                Some(Value::String(hash)) => Some(hash.clone()),
+                Some(Value::Null) => None,
+                _ => anyhow::bail!("objects/put response missing nullable expected_previous_hash"),
+            },
+            blob_hashes: resp["blob_hashes"]
+                .as_array()
+                .map(|values| values.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default(),
+            object_hashes: resp["object_hashes"]
+                .as_array()
+                .map(|values| values.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default(),
+        })
+    }
+
     pub async fn objects_put_blob_chunk(
         &self,
         staging_id: &str,
@@ -800,41 +959,33 @@ impl RemoteClient {
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
-        let resp = match total_timeout {
-            Some(timeout) => {
-                self.signed_post_with_response_limit_and_timeout(
-                    "/objects/get",
-                    &body,
-                    max_response_bytes,
-                    timeout,
-                )
-                .await?
+        let request = async {
+            let path = "/objects/get";
+            let url = format!("{}{}", self.base_url, path);
+            let body_bytes = serde_json::to_vec(&body)?;
+            let headers = self.sign_request("POST", path, &body_bytes)?;
+            let mut request = self.http.post(&url)
+                .header("content-type", "application/json")
+                .header("x-ryeos-key-id", &headers.key_id)
+                .header("x-ryeos-timestamp", &headers.timestamp)
+                .header("x-ryeos-nonce", &headers.nonce)
+                .header("x-ryeos-signature", &headers.signature)
+                .body(body_bytes);
+            if let Some(forwarding) = headers.forwarding.as_ref() {
+                request = request
+                    .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
+                    .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
+                    .header("x-ryeos-forwarding-signature", &forwarding.signature);
             }
-            None => {
-                self.signed_post_with_response_limit("/objects/get", &body, max_response_bytes)
-                    .await?
-            }
+            let response = request.send().await.with_context(|| format!("POST {url} failed"))?;
+            read_raw_json_checked_with_limit("POST", &url, response, max_response_bytes).await
         };
-        let entries = resp
-            .get("entries")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| {
-                let hash = entry.get("hash")?.as_str()?.to_string();
-                let kind = entry.get("kind")?.as_str()?.to_string();
-                Some(CasEntry {
-                    hash,
-                    kind,
-                    data: entry.get("data").and_then(|v| v.as_str()).map(String::from),
-                    value: entry.get("value").cloned(),
-                })
-            })
-            .collect();
-        let response = ObjectsGetResponse { entries };
-        response.validate_against_request(object_hashes, blob_hashes)?;
-        Ok(response)
+        let raw_body = match total_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, request).await
+                .map_err(|_| anyhow::anyhow!("POST {}/objects/get exceeded total timeout of {} seconds", self.base_url, timeout.as_secs()))??,
+            None => request.await?,
+        };
+        parse_raw_objects_get_response(&raw_body, object_hashes, blob_hashes)
     }
 
     /// POST /objects/closure/describe (authenticated).
@@ -864,11 +1015,8 @@ impl RemoteClient {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
         let body = closure_request_body(roots, &options);
-        let resp = self
-            .signed_post_with_response_limit("/objects/closure/get", &body, response_limit)
-            .await?;
-        let response: ObjectsClosureGetResponse =
-            serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
+        let raw = self.signed_post_raw_with_response_limit("/objects/closure/get", &body, response_limit).await?;
+        let response = parse_raw_objects_closure_get(&raw, roots, &options)?;
         response.validate_against_request(roots, &options)?;
         Ok(response)
     }
@@ -884,16 +1032,15 @@ impl RemoteClient {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
         let body = closure_request_body(roots, &options);
-        let resp = self
-            .signed_post_with_response_limit_and_timeout(
+        let raw = self
+            .signed_post_raw_with_response_limit_and_timeout(
                 "/objects/closure/get",
                 &body,
                 response_limit,
                 total_timeout,
             )
             .await?;
-        let response: ObjectsClosureGetResponse =
-            serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
+        let response = parse_raw_objects_closure_get(&raw, roots, &options)?;
         response.validate_against_request(roots, &options)?;
         Ok(response)
     }
@@ -1462,6 +1609,16 @@ impl RemoteClient {
         body: &Value,
         max_response_bytes: usize,
     ) -> Result<Value> {
+        self.signed_post_serializable_with_response_limit(path, body, max_response_bytes)
+            .await
+    }
+
+    async fn signed_post_serializable_with_response_limit<T: serde::Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &T,
+        max_response_bytes: usize,
+    ) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign_request("POST", path, &body_bytes)?;
@@ -1487,6 +1644,44 @@ impl RemoteClient {
             .with_context(|| format!("POST {} failed", url))?;
 
         read_json_checked_with_limit("POST", &url, resp, max_response_bytes).await
+    }
+
+    async fn signed_post_raw_with_response_limit(
+        &self,
+        path: &str,
+        body: &Value,
+        maximum: usize,
+    ) -> Result<Vec<u8>> {
+        let url = format!("{}{}", self.base_url, path);
+        let body_bytes = serde_json::to_vec(body)?;
+        let headers = self.sign_request("POST", path, &body_bytes)?;
+        let mut request = self.http.post(&url)
+            .header("content-type", "application/json")
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature)
+            .body(body_bytes);
+        if let Some(forwarding) = headers.forwarding.as_ref() {
+            request = request
+                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
+                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
+                .header("x-ryeos-forwarding-signature", &forwarding.signature);
+        }
+        let response = request.send().await.with_context(|| format!("POST {url} failed"))?;
+        read_raw_json_checked_with_limit("POST", &url, response, maximum).await
+    }
+
+    async fn signed_post_raw_with_response_limit_and_timeout(
+        &self,
+        path: &str,
+        body: &Value,
+        maximum: usize,
+        timeout: lillux::time::Duration,
+    ) -> Result<Vec<u8>> {
+        tokio::time::timeout(timeout, self.signed_post_raw_with_response_limit(path, body, maximum))
+            .await
+            .map_err(|_| anyhow::anyhow!("POST {}{} exceeded total timeout of {} seconds", self.base_url, path, timeout.as_secs()))?
     }
 
     /// Apply a total timeout around request signing, connect/send, and the
@@ -1992,6 +2187,10 @@ pub struct CasEntry {
     pub data: Option<String>,
     /// JSON value (present when kind == "object").
     pub value: Option<Value>,
+    /// Exact canonical JSON bytes as received, retained for byte-preserving
+    /// transfer import and persistence.
+    #[serde(skip)]
+    pub value_bytes: Option<Vec<u8>>,
 }
 
 /// Response from `objects/get`.
@@ -2172,6 +2371,14 @@ impl ObjectsGetResponse {
             .and_then(|e| e.value.clone())
     }
 
+    /// Borrow the exact canonical bytes received for an object entry.
+    pub fn find_object_bytes(&self, hash: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.hash == hash && entry.kind == "object")
+            .and_then(|entry| entry.value_bytes.as_deref())
+    }
+
     /// Find a blob entry by hash, returning decoded bytes.
     pub fn find_blob(&self, hash: &str) -> Option<Vec<u8>> {
         use base64::Engine;
@@ -2201,6 +2408,221 @@ pub struct ObjectsClosureGetResponse {
     pub object_bytes: u64,
     pub blob_bytes: u64,
     pub entries: Vec<CasEntry>,
+}
+
+fn parse_raw_objects_get_response(
+    bytes: &[u8],
+    object_hashes: &[String],
+    blob_hashes: &[String],
+) -> Result<ObjectsGetResponse> {
+    #[derive(serde::Deserialize)]
+    struct RawEntry {
+        hash: String,
+        kind: String,
+        data: Option<Box<serde_json::value::RawValue>>,
+        value: Option<Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawResponse {
+        #[serde(default)]
+        entries: Vec<RawEntry>,
+    }
+    let raw: RawResponse = serde_json::from_slice(bytes)
+        .context("failed to parse objects/get response envelope")?;
+    let requested_objects = unique_hashes(object_hashes, "objects/get requested objects")?;
+    let requested_blobs = unique_hashes(blob_hashes, "objects/get requested blobs")?;
+    let maximum_entries = object_hashes
+        .len()
+        .checked_add(blob_hashes.len())
+        .context("objects/get requested entry count overflow")?;
+    if raw.entries.len() > maximum_entries {
+        bail!("objects/get returned more entries than requested");
+    }
+    let mut raw_object_bytes = 0usize;
+    let mut seen_objects = BTreeSet::new();
+    let mut seen_blobs = BTreeSet::new();
+    for entry in &raw.entries {
+        if !is_canonical_hash(&entry.hash) {
+            bail!("objects/get returned an invalid hash");
+        }
+        match entry.kind.as_str() {
+            "object" | "missing_object" => {
+                if !requested_objects.contains(entry.hash.as_str())
+                    || !seen_objects.insert(entry.hash.as_str())
+                {
+                    bail!("objects/get returned an unexpected or duplicate object entry");
+                }
+                if (entry.kind == "object") != entry.value.is_some() || entry.data.is_some() {
+                    bail!("objects/get returned an invalid object entry shape");
+                }
+            }
+            "blob" | "missing_blob" => {
+                if !requested_blobs.contains(entry.hash.as_str())
+                    || !seen_blobs.insert(entry.hash.as_str())
+                {
+                    bail!("objects/get returned an unexpected or duplicate blob entry");
+                }
+                if (entry.kind == "blob") != entry.data.is_some() || entry.value.is_some() {
+                    bail!("objects/get returned an invalid blob entry shape");
+                }
+                if let Some(data) = &entry.data {
+                    if data.get().len()
+                        > base64_json_string_max_len(
+                            crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES,
+                        )?
+                    {
+                        bail!("remote inline blob exceeds the endpoint byte ceiling");
+                    }
+                }
+            }
+            _ => bail!("objects/get returned an unsupported entry kind"),
+        }
+        if let Some(value) = &entry.value {
+            let size = value.get().len();
+            if size > 32 * 1024 * 1024 {
+                bail!("remote CAS object {} exceeds the 32 MiB raw object limit", entry.hash);
+            }
+            raw_object_bytes = raw_object_bytes
+                .checked_add(size)
+                .context("remote raw object aggregate size overflow")?;
+            if raw_object_bytes > 512 * 1024 * 1024 {
+                bail!("remote CAS response exceeds the 512 MiB raw object aggregate limit");
+            }
+        }
+    }
+    let entries = raw.entries.into_iter().map(|entry| -> Result<CasEntry> {
+        let data = entry
+            .data
+            .map(|raw_data| {
+                decode_bounded_base64_json_string(
+                    &raw_data,
+                    crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES,
+                )
+            })
+            .transpose()?;
+        let (value, value_bytes) = if let Some(raw_value) = entry.value {
+            let (value, bytes) = decode_raw_object_value(&entry.hash, &raw_value)?;
+            (Some(value), Some(bytes))
+        } else {
+            (None, None)
+        };
+        Ok(CasEntry { hash: entry.hash, kind: entry.kind, data, value, value_bytes })
+    }).collect::<Result<Vec<_>>>()?;
+    let response = ObjectsGetResponse { entries };
+    response.validate_against_request(object_hashes, blob_hashes)?;
+    Ok(response)
+}
+
+fn parse_raw_objects_closure_get(
+    bytes: &[u8],
+    requested_roots: &[String],
+    options: &NodeAdmittedObjectsClosureRequestOptions,
+) -> Result<ObjectsClosureGetResponse> {
+    #[derive(serde::Deserialize)]
+    struct RawEntry {
+        hash: String,
+        kind: String,
+        data: Option<Box<serde_json::value::RawValue>>,
+        value: Option<Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawResponse {
+        closure: ObjectsClosureSummary,
+        object_bytes: u64,
+        blob_bytes: u64,
+        entries: Vec<RawEntry>,
+    }
+    let raw: RawResponse = serde_json::from_slice(bytes).context("failed to parse object closure envelope")?;
+    validate_closure_summary_against_request(&raw.closure, requested_roots)?;
+    let limits = options.limits();
+    if raw.closure.object_hashes.len() > limits.max_objects {
+        bail!("remote object closure exceeds admitted object count");
+    }
+    if raw.closure.blob_hashes.len() > limits.max_blobs {
+        bail!("remote object closure exceeds admitted blob count");
+    }
+    let object_hashes = unique_hashes(&raw.closure.object_hashes, "object closure")?;
+    let blob_hashes = unique_hashes(&raw.closure.blob_hashes, "blob closure")?;
+    let maximum_entries = raw.closure.object_hashes.len()
+        .checked_add(raw.closure.blob_hashes.len())
+        .context("remote closure entry count overflow")?;
+    if raw.entries.len() > maximum_entries {
+        bail!("remote closure returned more entries than advertised");
+    }
+    let mut aggregate_objects = 0usize;
+    let mut aggregate_blob_json_bytes = 0usize;
+    let mut returned_objects = BTreeSet::new();
+    let mut returned_blobs = BTreeSet::new();
+    for entry in &raw.entries {
+        if !is_canonical_hash(&entry.hash) {
+            bail!("remote closure returned an invalid entry hash");
+        }
+        match entry.kind.as_str() {
+            "object" => {
+                if !object_hashes.contains(entry.hash.as_str())
+                    || !returned_objects.insert(entry.hash.as_str())
+                    || entry.value.is_none()
+                    || entry.data.is_some()
+                {
+                    bail!("remote closure returned an unexpected, duplicate, or malformed object entry");
+                }
+                let size = entry.value.as_ref().expect("checked above").get().len();
+                if u64::try_from(size).context("closure object size exceeds u64")? > limits.max_object_bytes {
+                    bail!("closure object exceeds admitted per-object byte limit");
+                }
+                aggregate_objects = aggregate_objects.checked_add(size)
+                    .context("closure raw object aggregate overflow")?;
+                if u64::try_from(aggregate_objects).context("closure object aggregate exceeds u64")? > limits.max_total_object_bytes {
+                    bail!("closure objects exceed admitted aggregate byte limit");
+                }
+            }
+            "blob" => {
+                if !blob_hashes.contains(entry.hash.as_str())
+                    || !returned_blobs.insert(entry.hash.as_str())
+                    || entry.data.is_none()
+                    || entry.value.is_some()
+                {
+                    bail!("remote closure returned an unexpected, duplicate, or malformed blob entry");
+                }
+                let data = entry.data.as_ref().expect("checked above");
+                if data.get().len() > base64_json_string_max_len(limits.max_blob_bytes)? {
+                    bail!("closure blob exceeds admitted per-blob byte limit");
+                }
+                aggregate_blob_json_bytes = aggregate_blob_json_bytes.checked_add(data.get().len())
+                    .context("closure raw blob aggregate size overflow")?;
+                let aggregate_limit = base64_json_entries_max_len(
+                    limits.max_total_blob_bytes,
+                    limits.max_blobs,
+                )?;
+                if aggregate_blob_json_bytes > aggregate_limit {
+                    bail!("closure blobs exceed admitted aggregate byte limit");
+                }
+            }
+            "missing" if entry.value.is_none() && entry.data.is_none() => {
+                bail!("complete remote closure returned a missing entry");
+            }
+            _ => bail!("remote closure returned an invalid entry kind or shape"),
+        }
+    }
+    let entries = raw.entries.into_iter().map(|entry| -> Result<CasEntry> {
+        let data = entry.data.map(|raw_data| {
+            decode_bounded_base64_json_string(&raw_data, limits.max_blob_bytes)
+        }).transpose()?;
+        let (value, value_bytes) = match entry.value {
+            Some(raw_value) => {
+                let (value, bytes) = decode_raw_object_value(&entry.hash, &raw_value)?;
+                (Some(value), Some(bytes))
+            }
+            None => (None, None),
+        };
+        Ok(CasEntry { hash: entry.hash, kind: entry.kind, data, value, value_bytes })
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(ObjectsClosureGetResponse {
+        closure: raw.closure,
+        object_bytes: raw.object_bytes,
+        blob_bytes: raw.blob_bytes,
+        entries,
+    })
 }
 
 impl ObjectsClosureGetResponse {
@@ -3457,6 +3879,21 @@ pub struct BlobChunkUpload {
     pub data: String,
 }
 
+#[derive(Debug)]
+pub struct RawObjectUpload {
+    pub hash: String,
+    pub value: Box<serde_json::value::RawValue>,
+}
+
+impl RawObjectUpload {
+    pub fn from_canonical_bytes(hash: String, bytes: Vec<u8>) -> Result<Self> {
+        let json = String::from_utf8(bytes).context("canonical CAS object is not UTF-8")?;
+        let value = serde_json::value::RawValue::from_string(json)
+            .context("canonical CAS object is not one JSON value")?;
+        Ok(Self { hash, value })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4526,6 +4963,7 @@ mod tests {
             kind: "object".to_string(),
             data: None,
             value: Some(value),
+            value_bytes: Some(canonical.into_bytes()),
         };
         let response = ObjectsClosureGetResponse {
             closure: ObjectsClosureSummary {
@@ -4543,6 +4981,154 @@ mod tests {
                 .validate_against_request(&[hash], &options)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn raw_object_decode_rejects_duplicate_kind_before_capsule_materialization() {
+        let raw = serde_json::value::RawValue::from_string(
+            r#"{"kind":"example","kind":"admitted_launch_capsule"}"#.to_owned(),
+        )
+        .unwrap();
+        let error = decode_raw_object_value(&"00".repeat(32), &raw).unwrap_err();
+        assert!(error.to_string().contains("unambiguous kind"));
+    }
+
+    #[test]
+    fn objects_get_raw_envelope_rejects_duplicate_before_object_decode() {
+        let hash = "11".repeat(32);
+        let body = serde_json::json!({
+            "entries": [
+                {"hash": hash, "kind": "object", "value": {"kind":"not-addressed"}},
+                {"hash": hash, "kind": "object", "value": {"kind":"not-addressed"}}
+            ]
+        });
+        let requested = vec![hash.clone(), "22".repeat(32)];
+        let error = parse_raw_objects_get_response(
+            &serde_json::to_vec(&body).unwrap(),
+            &requested,
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unexpected or duplicate object"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn objects_get_raw_envelope_rejects_unrequested_value_before_decode() {
+        let requested = "11".repeat(32);
+        let returned = "22".repeat(32);
+        let body = serde_json::json!({
+            "entries": [{
+                "hash": returned,
+                "kind": "object",
+                "value": {"kind":"not-addressed", "padding":"x".repeat(4096)}
+            }]
+        });
+        let error = parse_raw_objects_get_response(
+            &serde_json::to_vec(&body).unwrap(),
+            &[requested],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unexpected or duplicate object"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn objects_get_raw_envelope_rejects_excess_count_before_object_decode() {
+        let first = "11".repeat(32);
+        let second = "22".repeat(32);
+        let body = serde_json::json!({
+            "entries": [
+                {"hash": first, "kind":"object", "value":{"kind":"wrong-hash"}},
+                {"hash": second, "kind":"object", "value":{"kind":"wrong-hash"}}
+            ]
+        });
+        let error = parse_raw_objects_get_response(
+            &serde_json::to_vec(&body).unwrap(),
+            &["33".repeat(32)],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("more entries than requested"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn closure_raw_envelope_rejects_duplicate_before_object_decode() {
+        let hash = "33".repeat(32);
+        let options = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &test_object_closure_policy(),
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "closure": {
+                "roots": [hash],
+                "complete": true,
+                "object_hashes": [hash, "44".repeat(32)],
+                "blob_hashes": [],
+                "large_object_hashes": [],
+                "missing_objects": [],
+                "missing_blobs": [],
+                "malformed_objects": [],
+                "unsupported_objects": []
+            },
+            "object_bytes": 0,
+            "blob_bytes": 0,
+            "entries": [
+                {"hash": hash, "kind":"object", "value":{"kind":"wrong-hash"}},
+                {"hash": hash, "kind":"object", "value":{"kind":"wrong-hash"}}
+            ]
+        });
+        let requested_roots = vec![hash];
+        let error = parse_raw_objects_closure_get(
+            &serde_json::to_vec(&body).unwrap(),
+            &requested_roots,
+            &options,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn closure_raw_envelope_rejects_oversized_blob_before_string_decode() {
+        let root = "55".repeat(32);
+        let mut policy = test_object_closure_policy();
+        policy.max_blobs = 1;
+        policy.max_blob_bytes = 3;
+        policy.max_total_blob_bytes = 3;
+        let options = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &policy,
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "closure": {
+                "roots": [root],
+                "complete": true,
+                "object_hashes": [],
+                "blob_hashes": [root],
+                "large_object_hashes": [],
+                "missing_objects": [],
+                "missing_blobs": [],
+                "malformed_objects": [],
+                "unsupported_objects": []
+            },
+            "object_bytes": 0,
+            "blob_bytes": 4,
+            "entries": [{"hash":root, "kind":"blob", "data":"YWJjZA=="}]
+        });
+        let requested_roots = vec![root];
+        let error = parse_raw_objects_closure_get(
+            &serde_json::to_vec(&body).unwrap(),
+            &requested_roots,
+            &options,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("per-blob byte limit"));
+        assert!(!error.to_string().contains("invalid base64"));
     }
 
     #[test]
@@ -4590,6 +5176,7 @@ mod tests {
                 kind: "object".to_string(),
                 data: None,
                 value: Some(value),
+                value_bytes: Some(canonical.clone().into_bytes()),
             }],
         };
         assert!(

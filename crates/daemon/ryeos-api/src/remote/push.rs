@@ -16,7 +16,7 @@ use ryeos_state::objects::{ProjectSnapshot, ProjectTree};
 use ryeos_state::project_sync::ProjectSyncScope;
 use ryeos_state::{PinnedStateAuthority, StagedCasRootLease};
 
-use crate::remote::client::{BlobChunkUpload, BlobUpload, ObjectsPutResponse, RemoteClient};
+use crate::remote::client::{BlobChunkUpload, BlobUpload, ObjectsPutResponse, RawObjectUpload, RemoteClient};
 use ryeos_app::state::AppState;
 
 const OBJECTS_PUT_BODY_BUDGET_BYTES: usize = 900 * 1024;
@@ -593,31 +593,15 @@ pub(crate) async fn upload_missing(
     let missing_blobs = has_resp.missing_blob_hashes;
     let uploaded = missing_objects.len() + missing_blobs.len();
 
-    let mut objects = Vec::new();
-    let mut publication_root_staged = false;
     let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
-    for hash in &missing_objects {
-        let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
-            local_cas,
-            hash,
-            limits.max_object_bytes,
-        )?;
-        publication_root_staged |= hash == publication_root_hash;
-        objects.push((hash.clone(), value));
-    }
-
     // The final publication root must itself be bound to the server-issued
     // capability even when the remote already had a deduplicated copy.
-    if !publication_root_staged {
-        let root = ryeos_state::object_closure::load_exact_cas_object_with_cas(
-            local_cas,
-            publication_root_hash,
-            limits.max_object_bytes,
-        )?;
-        objects.push((publication_root_hash.to_string(), root));
+    let mut object_hashes = missing_objects;
+    if !object_hashes.iter().any(|hash| hash == publication_root_hash) {
+        object_hashes.push(publication_root_hash.to_owned());
     }
-    objects.sort_by(|left, right| left.0.cmp(&right.0));
-    objects.dedup_by(|left, right| left.0 == right.0);
+    object_hashes.sort();
+    object_hashes.dedup();
 
     let staging_id = upload_session.staging_id;
     let expected_previous_hash = upload_session.expected_previous_hash;
@@ -627,8 +611,9 @@ pub(crate) async fn upload_missing(
     // Pack adjacent small immutable blobs into bounded requests. Sending every
     // source file through an individual signed request makes ordinary project
     // pushes scale with network round trips rather than bytes. Large blobs
-    // remain bounded, sequential and retry-idempotent chunks. Peak memory is
-    // independent of generation size, and the remote still verifies every
+    // remain bounded, sequential and retry-idempotent chunks. Blob payload
+    // buffers stay within their request/chunk limits; the admitted closure
+    // separately caps total transfer work, and the remote verifies every
     // complete digest before admitting it to this publication capability.
     const INLINE_BLOB_BATCH_MAX_ENTRIES: usize = 128;
 
@@ -728,21 +713,58 @@ pub(crate) async fn upload_missing(
         }
         blob_index += 1;
     }
-    for batch in chunk_object_uploads(&objects)? {
-        let expected = batch
-            .iter()
-            .map(|(hash, _)| hash.clone())
-            .collect::<Vec<_>>();
-        let values = batch
-            .iter()
-            .map(|(_, value)| value.clone())
-            .collect::<Vec<_>>();
-        let response = client
-            .objects_put(Some(&staging_id), project_path_for_ref, &[], &values)
+    // Keep only one bounded request of raw object bodies resident at a time.
+    // The empty request serialization accounts for the exact staging/path and
+    // array envelope, including JSON escaping in caller-controlled paths.
+    let envelope_bytes = object_put_envelope_bytes(&staging_id, project_path_for_ref)?;
+    if envelope_bytes.saturating_add(10) > OBJECTS_PUT_BODY_BUDGET_BYTES {
+        anyhow::bail!("objects/put request envelope exceeds its body budget");
+    }
+    let single_object_limit = u64::try_from(
+        OBJECTS_PUT_BODY_BUDGET_BYTES.saturating_sub(envelope_bytes.saturating_add(10)),
+    )?;
+    let object_byte_limit = limits.max_object_bytes.min(single_object_limit);
+    let mut object_batch = Vec::<RawObjectUpload>::new();
+    let mut request_bytes = envelope_bytes;
+    for hash in &object_hashes {
+        let object = load_canonical_object_for_upload(local_cas, hash, object_byte_limit)?;
+        let entry_bytes = raw_object_entry_bytes(&object);
+        let comma_bytes = if object_batch.is_empty() { 0 } else { 1 };
+        if !object_batch.is_empty()
+            && request_bytes
+                .saturating_add(comma_bytes)
+                .saturating_add(entry_bytes)
+                > OBJECTS_PUT_BODY_BUDGET_BYTES
+        {
+            send_raw_object_batch(
+                client,
+                &staging_id,
+                project_path_for_ref,
+                &object_batch,
+                expected_previous_hash.as_deref(),
+            )
             .await?;
-        validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
-        validate_upload_response(&response.blob_hashes, &[], "blob")?;
-        validate_upload_response(&response.object_hashes, &expected, "object")?;
+            object_batch.clear();
+            request_bytes = envelope_bytes;
+        }
+        let next_request_bytes = request_bytes
+            .saturating_add(if object_batch.is_empty() { 0 } else { 1 })
+            .saturating_add(entry_bytes);
+        if next_request_bytes > OBJECTS_PUT_BODY_BUDGET_BYTES {
+            anyhow::bail!("canonical object {hash} exceeds the bounded objects/put request body");
+        }
+        request_bytes = next_request_bytes;
+        object_batch.push(object);
+    }
+    if !object_batch.is_empty() {
+        send_raw_object_batch(
+            client,
+            &staging_id,
+            project_path_for_ref,
+            &object_batch,
+            expected_previous_hash.as_deref(),
+        )
+        .await?;
     }
 
     Ok(StagedUploadResult {
@@ -763,24 +785,60 @@ fn inline_blob_request_size(blob_size: u64) -> Result<usize> {
         .saturating_add(64))
 }
 
-fn chunk_object_uploads(
-    entries: &[(String, serde_json::Value)],
-) -> Result<Vec<&[(String, serde_json::Value)]>> {
-    let mut encoded_sizes = Vec::with_capacity(entries.len());
-    for (_, value) in entries {
-        encoded_sizes.push(
-            lillux::canonical_json(value)
-                .context("failed to canonicalize object upload entry")?
-                .len()
-                .saturating_add(64),
-        );
+fn load_canonical_object_for_upload(
+    cas: &CasStore,
+    hash: &str,
+    maximum_bytes: u64,
+) -> Result<RawObjectUpload> {
+    let bytes = cas
+        .get_object_raw_bytes_bounded_with_capsule_ceiling(
+            hash,
+            maximum_bytes,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("local CAS object {hash} disappeared before upload"))?;
+    let maximum = usize::try_from(maximum_bytes)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .context("local CAS upload object is not JSON")?;
+    if lillux::canonical_json_bounded(&value, maximum)?.as_slice() != bytes.as_slice() {
+        anyhow::bail!("local CAS upload object {hash} is not canonical JSON");
     }
-    let mut index = 0;
-    Ok(chunk_upload_entries(entries, |_| {
-        let size = encoded_sizes[index];
-        index += 1;
-        size
-    }))
+    Ok(RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)?)
+}
+
+fn object_put_envelope_bytes(
+    staging_id: &str,
+    project_path: &str,
+) -> Result<usize> {
+    Ok(serde_json::to_vec(&serde_json::json!({
+        "staging_id": staging_id,
+        "project_path": project_path,
+        "blobs": [],
+        "blob_chunks": [],
+        "objects": [],
+    }))?.len())
+}
+
+fn raw_object_entry_bytes(entry: &RawObjectUpload) -> usize {
+    // objects_put_raw wraps each untouched value in {"value": ...}.
+    entry.value.get().len().saturating_add(10)
+}
+
+async fn send_raw_object_batch(
+    client: &RemoteClient,
+    staging_id: &str,
+    project_path: &str,
+    batch: &[RawObjectUpload],
+    expected_previous_hash: Option<&str>,
+) -> Result<()> {
+    let expected = batch.iter().map(|entry| entry.hash.clone()).collect::<Vec<_>>();
+    let response = client
+        .objects_put_raw(Some(staging_id), project_path, &[], batch)
+        .await?;
+    validate_upload_session(&response, staging_id, expected_previous_hash)?;
+    validate_upload_response(&response.blob_hashes, &[], "blob")?;
+    validate_upload_response(&response.object_hashes, &expected, "object")?;
+    Ok(())
 }
 
 fn chunk_upload_entries<T, F>(entries: &[T], mut encoded_size: F) -> Vec<&[T]>
@@ -1012,7 +1070,9 @@ mod refuse_walking_root_tests {
 #[cfg(test)]
 mod upload_batch_tests {
     use super::{
-        OBJECTS_PUT_BODY_BUDGET_BYTES, inline_blob_request_size, validate_blob_chunk_response,
+        OBJECTS_PUT_BODY_BUDGET_BYTES, RawObjectUpload, object_put_envelope_bytes,
+        raw_object_entry_bytes,
+        inline_blob_request_size, validate_blob_chunk_response,
     };
 
     #[test]
@@ -1038,6 +1098,29 @@ mod upload_batch_tests {
             inline_blob_request_size((largest_raw + 1) as u64).unwrap()
                 > OBJECTS_PUT_BODY_BUDGET_BYTES
         );
+    }
+
+    #[test]
+    fn raw_object_entry_and_envelope_sizes_match_request_shape() {
+        let value = RawObjectUpload::from_canonical_bytes(
+            "a".repeat(64),
+            br#"{"kind":"example"}"#.to_vec(),
+        )
+        .unwrap();
+        let envelope = object_put_envelope_bytes("stage", "/project").unwrap();
+        let actual = serde_json::to_vec(&serde_json::json!({
+            "staging_id": "stage",
+            "project_path": "/project",
+            "blobs": [],
+            "blob_chunks": [],
+            "objects": [{"value": serde_json::from_str::<serde_json::Value>(value.value.get()).unwrap()}],
+        }))
+        .unwrap();
+        assert_eq!(actual.len(), envelope + raw_object_entry_bytes(&value));
+        assert!(actual.len() < OBJECTS_PUT_BODY_BUDGET_BYTES);
+        let largest_value = OBJECTS_PUT_BODY_BUDGET_BYTES - envelope - 10;
+        assert!(envelope + largest_value + 10 <= OBJECTS_PUT_BODY_BUDGET_BYTES);
+        assert!(envelope + largest_value + 1 + 10 > OBJECTS_PUT_BODY_BUDGET_BYTES);
     }
 
     #[test]

@@ -316,10 +316,9 @@ pub(super) fn verified_root_producer(
             .as_deref()
             .context("product producer placement has no admitted capsule")?;
         let capsule = AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
                 &cas,
                 hash,
-                limits.max_object_bytes,
             )?,
         )?;
         capsule.verify_retained_execution_realization(

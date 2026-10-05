@@ -121,6 +121,24 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
     )
 }
 
+pub(crate) fn validate_authoritative_history_with_cas_budget_and_check(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    target_hash: &str,
+    expected_ancestor: Option<&str>,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<()> {
+    validation::validate_authoritative_history_with_cas_limits_and_check(
+        cas,
+        chain_root_id,
+        target_hash,
+        expected_ancestor,
+        check,
+        budget,
+    )
+}
+
 pub(crate) fn normalize_prospective_event_timestamps(
     events: &mut [ThreadEvent],
     floor: &str,

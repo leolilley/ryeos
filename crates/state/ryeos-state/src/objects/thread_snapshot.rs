@@ -1033,15 +1033,37 @@ impl ThreadSnapshot {
         &self,
         cas: &lillux::CasStore,
     ) -> anyhow::Result<()> {
+        self.verify_result_workspace_output_capture_inner(cas, None)
+    }
+
+    pub(crate) fn verify_result_workspace_output_capture_with_budget(
+        &self,
+        cas: &lillux::CasStore,
+        budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+    ) -> anyhow::Result<()> {
+        self.verify_result_workspace_output_capture_inner(cas, Some(budget))
+    }
+
+    fn verify_result_workspace_output_capture_inner(
+        &self,
+        cas: &lillux::CasStore,
+        mut budget: Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
+    ) -> anyhow::Result<()> {
         self.validate_result_workspace_output_shape()?;
         let Some(hash) = self.result_workspace_output_capture_hash.as_deref() else {
             return Ok(());
         };
-        let value = crate::object_closure::load_exact_cas_object_with_cas(
-            cas,
-            hash,
-            super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64,
-        )?;
+        let capture_maximum = super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64;
+        let value = match budget.as_deref_mut() {
+            Some(budget) => budget
+                .get_object(cas, hash, capture_maximum)?
+                .ok_or_else(|| anyhow::anyhow!("workspace output capture {hash} is missing"))?,
+            None => crate::object_closure::load_exact_cas_object_with_cas(
+                cas,
+                hash,
+                capture_maximum,
+            )?,
+        };
         let capture = super::WorkspaceOutputCapture::from_value(&value)?;
         let admitted = self
             .project_authority
@@ -1061,20 +1083,41 @@ impl ThreadSnapshot {
                 "terminal workspace output capture contradicts its exact admitted producer or generation"
             );
         }
-        let base = crate::project_materialization::load_project_snapshot_bounded(
-            cas,
-            &capture.base_project_snapshot_hash,
-        )?
+        let base = match budget.as_deref_mut() {
+            Some(budget) => crate::project_materialization::load_project_snapshot_bounded_with_budget(
+                cas,
+                &capture.base_project_snapshot_hash,
+                budget,
+            )?,
+            None => crate::project_materialization::load_project_snapshot_bounded(
+                cas,
+                &capture.base_project_snapshot_hash,
+            )?,
+        }
         .context("terminal workspace output base snapshot is missing")?;
-        let result = crate::project_materialization::load_project_snapshot_bounded(
-            cas,
-            &capture.result_project_snapshot_hash,
-        )?
+        let result = match budget.as_deref_mut() {
+            Some(budget) => crate::project_materialization::load_project_snapshot_bounded_with_budget(
+                cas,
+                &capture.result_project_snapshot_hash,
+                budget,
+            )?,
+            None => crate::project_materialization::load_project_snapshot_bounded(
+                cas,
+                &capture.result_project_snapshot_hash,
+            )?,
+        }
         .context("terminal workspace output result snapshot is missing")?;
-        let policy = crate::project_materialization::load_project_policy_bounded(
-            cas,
-            &capture.partition.project_snapshot_policy_hash,
-        )?
+        let policy = match budget.as_deref_mut() {
+            Some(budget) => crate::project_materialization::load_project_policy_bounded_with_budget(
+                cas,
+                &capture.partition.project_snapshot_policy_hash,
+                budget,
+            )?,
+            None => crate::project_materialization::load_project_policy_bounded(
+                cas,
+                &capture.partition.project_snapshot_policy_hash,
+            )?,
+        }
         .context("terminal workspace output policy is missing")?;
         capture
             .partition

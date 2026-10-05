@@ -343,10 +343,9 @@ fn authenticate_consumer_root_for_owner(
     }
     let cas = authority.cas_store()?;
     let capsule = AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &cas,
             &coordinate.accepted_capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     require_terminal_invocation(&root, &capsule)?;
@@ -1192,10 +1191,9 @@ fn verify_retained_remote_consumer(
         .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let capsule = AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &authority.cas_store()?,
             &evidence.verifier.admitted_launch_capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
@@ -1350,10 +1348,9 @@ fn prove_participant(
         .as_deref()
         .context("qualification participant has no capsule")?;
     let capsule = AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &authority.cas_store()?,
             capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     let realization = capsule.verify_retained_execution_realization(
@@ -1593,10 +1590,9 @@ pub(in crate::operator_external_content) fn verify_current(
             .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let capsule = AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
                 &authority.cas_store()?,
                 &evidence.verifier.admitted_launch_capsule_hash,
-                limits.max_object_bytes,
             )?,
         )?;
         let sealed =
@@ -1679,10 +1675,9 @@ pub(in crate::operator_external_content) fn verify_current(
             .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let child_capsule = AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
                 &authority.cas_store()?,
                 &retained.verifier.admitted_launch_capsule_hash,
-                limits.max_object_bytes,
             )?,
         )?;
         let child_sealed =

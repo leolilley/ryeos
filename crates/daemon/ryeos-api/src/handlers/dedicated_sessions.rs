@@ -640,7 +640,10 @@ fn candidate_result_launch_capsule(
     let cas_read = state.acquire_cas_read().map_err(internal)?;
     let value = cas_read
         .cas()
-        .get_object(&session.admitted_capsule_hash)
+        .get_object_bounded(
+            &session.admitted_capsule_hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )
         .map_err(internal)?
         .ok_or_else(|| internal("hosted candidate session capsule disappeared"))?;
     let capsule =
@@ -1890,7 +1893,10 @@ fn load_persistent_session_capsule(
     authority.ensure_guard(&guard)?;
     let value = authority
         .cas_store()?
-        .get_object(capsule_hash)?
+        .get_object_bounded(
+            capsule_hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow::anyhow!("persistent-session capsule is absent from CAS"))?;
     let capsule =
         ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;

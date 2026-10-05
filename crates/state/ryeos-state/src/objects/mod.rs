@@ -67,10 +67,13 @@ pub mod workspace_output_capture;
 
 pub use admitted_launch_capsule::{
     ADMITTED_DIRECT_COMMAND_ROOT, ADMITTED_DIRECT_PROJECT_ROOT,
-    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope, AdmittedDirectCommandClosure,
+    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES, AdmittedAccountingScope, AdmittedDirectCommandClosure,
     AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchAuthority,
     AdmittedLaunchCapsule, DirectExecutableIdentity, DirectRootSourceIdentity,
-    DirectRuntimeIdentity, DirectRuntimeSourceSpace, admitted_direct_command_execution_path,
+    DirectRuntimeIdentity, DirectRuntimeSourceSpace, BundleExecutorMemberSourceProofV1,
+    BundleExecutorRequestOriginV1, RetainedItemSpaceV1, RetainedRuntimeBinarySelectionV1,
+    RetainedRuntimeDefinitionOwnerV1, RetainedTrustClassV1, SelectedBundleIdentityV1,
+    admitted_direct_command_execution_path,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{
@@ -159,7 +162,7 @@ pub use persistent_session_capsule::{
     MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES, MAX_SESSION_AUXILIARY_CONFIGS,
     MAX_SESSION_CONFIGURATION_FILE_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES,
     MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES, MAX_STRUCTURED_SESSION_PROFILE_BYTES,
-    PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
+    MAX_PERSISTENT_SESSION_CAPSULE_BYTES, PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
     PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
     PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
     PreparedSessionProcessEnvironment, RetainedExternalRuntimeContentQualification,

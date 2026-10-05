@@ -4669,7 +4669,10 @@ fn load_source_launch_capsule(
     expected_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
     let value = cas
-        .get_object(expected_hash)?
+        .get_object_bounded(
+            expected_hash,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .context("source admitted launch capsule is absent")?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
     if capsule.content_hash()? != expected_hash {
@@ -4687,10 +4690,14 @@ fn source_project_path_from_payload(
         .iter()
         .find(|entry| !entry.is_blob && entry.hash == manifest.source_launch_capsule_hash)
         .context("transfer payload omits source launch capsule")?;
+    if entry.data.len() > ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES {
+        bail!("transferred launch capsule exceeds its raw byte ceiling");
+    }
+    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash {
+        bail!("transfer launch capsule content address changed");
+    }
     let value: Value = serde_json::from_slice(&entry.data)?;
-    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash
-        || lillux::canonical_json(&value)?.as_bytes() != entry.data
-    {
+    if lillux::canonical_json_bounded(&value, ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)?.as_slice() != entry.data {
         bail!("transfer launch capsule content identity changed");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
@@ -4726,7 +4733,10 @@ fn credential_contract_from_capsule(
         .values()
     {
         let value = cas
-            .get_object(capsule_hash)?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
             .context("source persistent-session capsule is absent")?;
         let capsule =
             ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -4755,7 +4765,10 @@ fn persistent_programs(
         .iter()
         .map(|(name, hash)| {
             let value = cas
-                .get_object(hash)?
+                .get_object_bounded(
+                    hash,
+                    ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+                )?
                 .with_context(|| format!("target persistent session {name:?} is absent"))?;
             let capsule =
                 ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;

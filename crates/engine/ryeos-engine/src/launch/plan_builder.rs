@@ -1388,6 +1388,9 @@ fn build_plan_with_execution_root(
     // the complete meaning-blind implementation set those policies may name.
     let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
+    let mut authenticated_chain_authorities =
+        vec![root_plan_trust_authority(item, &canonical_ref)];
+    authenticated_chain_authorities.extend(terminal.verified_chain.iter().cloned());
     // A pinned snapshot has a materialized execution root even though source
     // lookup remains under its separate admitted project authority. Give the
     // runtime compiler the same root already exposed in RYEOS_PROJECT_ROOT so
@@ -1421,6 +1424,7 @@ fn build_plan_with_execution_root(
         project_authority,
         sealed_content,
         runtime_execution_root,
+        Some(&authenticated_chain_authorities),
     )?;
 
     // Step 5: Build plan node
@@ -1540,6 +1544,29 @@ fn widen_root_trust_class(
         (ContractTrustClass::Trusted, ItemSpace::Node) => TrustClass::TrustedNode,
         (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
         (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
+    }
+}
+
+fn root_plan_trust_authority(
+    item: &VerifiedItem,
+    canonical_ref: &str,
+) -> crate::contracts::PlanTrustAuthority {
+    let resolved = &item.resolved;
+    let trust_class = match (item.trust_class, resolved.source_space) {
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => crate::resolution::TrustClass::TrustedBundle,
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => crate::resolution::TrustClass::TrustedProject,
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Node) => crate::resolution::TrustClass::TrustedNode,
+        (ContractTrustClass::Untrusted, _) => crate::resolution::TrustClass::UntrustedProject,
+        (ContractTrustClass::Unsigned, _) => crate::resolution::TrustClass::Unsigned,
+    };
+    crate::contracts::PlanTrustAuthority {
+        requested_id: canonical_ref.to_owned(),
+        canonical_ref: canonical_ref.to_owned(),
+        source_space: resolved.source_space,
+        trust_class,
+        signer_fingerprint: resolved.signature_header.as_ref().map(|header| header.signer_fingerprint.clone()),
+        content_hash: resolved.content_hash.clone(),
+        raw_content_digest: resolved.raw_content_digest.clone(),
     }
 }
 

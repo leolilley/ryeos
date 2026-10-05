@@ -2267,10 +2267,14 @@ fn attach_admitted_launch_capsule(
             state_authority.trust_store(),
         )
         .context("verify admitted execution realization before thread birth")?;
-    let expected_hash = capsule.content_hash()?;
+    let canonical_capsule = capsule.to_canonical_bytes()?;
+    let expected_hash = lillux::sha256_hex(&canonical_capsule);
     let stored_hash = state_authority
         .cas_store()?
-        .store_object(&capsule.to_value())
+        .store_canonical_object_bytes_bounded(
+            &canonical_capsule,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+        )
         .context("store admitted launch capsule before thread birth")?;
     if stored_hash != expected_hash {
         bail!(
@@ -2297,7 +2301,10 @@ fn load_admitted_launch_capsule_with_realization(
 )> {
     let value = state_authority
         .cas_store()?
-        .get_object(capsule_hash)?
+        .get_object_bounded(
+            capsule_hash,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)
         .context("decode supported admitted launch capsule")?;
@@ -2311,7 +2318,61 @@ fn load_admitted_launch_capsule_with_realization(
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
+    verify_rooted_bundle_member_source_proof(&capsule, state_authority.trust_store())
+        .context("revalidate rooted retained Bundle member-source signatures")?;
     Ok((capsule, realization))
+}
+
+fn verify_rooted_bundle_member_source_proof(
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    trust_store: &ryeos_state::refs::TrustStore,
+) -> Result<()> {
+    let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        executable_identity:
+            ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                content_hash,
+                executor_manifest_hash,
+                executor_manifest_signer_fingerprint,
+                member_source_proof,
+            },
+        ..
+    } = &capsule.artifact_identity
+    else {
+        return Ok(());
+    };
+    // The selected Bundle identity is historical evidence in the exact
+    // authenticated capsule/plan root; this durable proof does not retain the
+    // signed Bundle manifest bytes needed to authenticate that identity alone.
+    // Revalidate the retained executor-manifest ref and ItemSource sidecar,
+    // while requiring the runtime-owner, Bundle-selection and executor-
+    // manifest signer identities to remain in current trust.
+    let owner = &member_source_proof.runtime_selection.definition_owner;
+    if !matches!(
+        owner.trust_class,
+        ryeos_state::objects::RetainedTrustClassV1::TrustedBundle
+            | ryeos_state::objects::RetainedTrustClassV1::TrustedProject
+            | ryeos_state::objects::RetainedTrustClassV1::TrustedNode
+    ) || owner
+        .signer_fingerprint
+        .as_ref()
+        .map_or(true, |fingerprint| !trust_store.contains_key(fingerprint))
+    {
+        bail!("retained Bundle runtime owner is no longer trusted");
+    }
+    if !trust_store.contains_key(&member_source_proof.selected_bundle.signer_fingerprint) {
+        bail!("retained Bundle selection signer is no longer trusted");
+    }
+    let verifier = trust_store
+        .get(executor_manifest_signer_fingerprint)
+        .ok_or_else(|| anyhow!("retained executor manifest signer was revoked"))?;
+    ryeos_engine::binary_resolver::verify_retained_bundle_executor_member_proof(
+        member_source_proof,
+        executor_manifest_hash,
+        executor_manifest_signer_fingerprint,
+        content_hash,
+        verifier,
+    )?;
+    Ok(())
 }
 
 struct ContinuationCapsuleTransition<'a> {
@@ -5315,7 +5376,10 @@ impl StateStore {
         authority.ensure_guard(&guard)?;
         let value = authority
             .cas_store()?
-            .get_object(capsule_hash)?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
             .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
         authority.ensure_guard(&guard)?;
         if ryeos_state::objects::canonical_value_digest(&value)? != capsule_hash {
@@ -8846,7 +8910,11 @@ impl StateStore {
             validate_target_preparation_job_transition(&job, transfer_manifest_hash, progress)?;
         self.state_authority.ensure_guard(permit.cas_guard())?;
         let cas = self.state_authority.cas_store()?;
-        if cas.put_object(&target_capsule.to_value())?.hash != capsule_hash {
+        let target_capsule_bytes = target_capsule.to_canonical_bytes()?;
+        if cas.store_canonical_object_bytes_bounded(
+            &target_capsule_bytes,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+        )? != capsule_hash {
             bail!("stored target placement capsule digest changed");
         }
         if cas.put_blob(&prepared_seed.launch_metadata_bytes)?.hash
@@ -11670,7 +11738,10 @@ impl StateStore {
                 let cas = self.state_authority.cas_store()?;
                 let target_capsule_hash = &authority.placement.target_launch_capsule_hash;
                 let target_capsule_value = cas
-                    .get_object(target_capsule_hash)?
+                    .get_object_bounded(
+                        target_capsule_hash,
+                        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+                    )?
                     .ok_or_else(|| anyhow!("remote adoption target launch capsule is absent"))?;
                 let target_capsule =
                     ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
@@ -11679,6 +11750,11 @@ impl StateStore {
                 if target_capsule.content_hash()? != *target_capsule_hash {
                     bail!("remote adoption target launch capsule changed content hash");
                 }
+                verify_rooted_bundle_member_source_proof(
+                    &target_capsule,
+                    self.state_authority.trust_store(),
+                )
+                .context("revalidate transferred rooted Bundle member-source signatures")?;
                 target_capsule
                     .verify_retained_execution_realization_with_key(
                         &cas,
@@ -21154,11 +21230,15 @@ impl StateStore {
             )
             .context("verify root action admitted execution realization")?;
         self.state_authority.ensure_guard(permit.cas_guard())?;
-        let expected_capsule_hash = capsule.content_hash()?;
+        let canonical_capsule = capsule.to_canonical_bytes()?;
+        let expected_capsule_hash = lillux::sha256_hex(&canonical_capsule);
         let admitted_launch_capsule_hash = self
             .state_authority
             .cas_store()?
-            .store_object(&capsule.to_value())
+            .store_canonical_object_bytes_bounded(
+                &canonical_capsule,
+                ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+            )
             .context("store detached admitted launch capsule")?;
         if admitted_launch_capsule_hash != expected_capsule_hash {
             bail!(
@@ -22805,6 +22885,203 @@ mod tests {
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use std::io::Write as _;
     use tempfile::tempdir;
+
+    fn rooted_bundle_proof_fixture(
+        key: &lillux::crypto::SigningKey,
+        fingerprint: &str,
+    ) -> ryeos_state::objects::AdmittedLaunchCapsule {
+        use ryeos_state::objects::{
+            AdmittedDirectCommandClosure as Command, AdmittedExecutionClosure as Closure,
+            AdmittedLaunchArtifactIdentity as Artifact, DirectExecutableIdentity as Executable,
+            DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
+            ExecutionLifecycleAuthority, ExecutionOwnershipAuthority, ExecutionRecoveryAuthority,
+            ExecutionProjectAuthority, ExecutionLaunchDriver, RetainedItemSpaceV1 as Space,
+            RetainedTrustClassV1 as Trust,
+        };
+
+        let triple = "x86_64-unknown-linux-gnu";
+        let item_ref = format!("bin/{triple}/runner");
+        let item_source = json!({
+            "kind": "item_source",
+            "item_ref": item_ref,
+            "content_blob_hash": "f".repeat(64),
+            "integrity": format!("sha256:{}", "f".repeat(64)),
+            "signature_info": null,
+            "mode": 0o755,
+        });
+        let item_source_bytes = lillux::canonical_json(&item_source).unwrap();
+        let item_source_hash = lillux::sha256_hex(item_source_bytes.as_bytes());
+        let manifest = json!({
+            "kind": "source_manifest",
+            "item_source_hashes": { item_ref.clone(): item_source_hash.clone() },
+        });
+        let manifest_hash = lillux::sha256_hex(lillux::canonical_json(&manifest).unwrap().as_bytes());
+        let manifest_ref_body = format!("ryeos:bundle-executor-manifest\n{manifest_hash}\n");
+        let signed_manifest_ref = lillux::signature::sign_content(
+            &manifest_ref_body,
+            key,
+            "#",
+            None,
+        );
+        let signed_sidecar = lillux::signature::sign_content(
+            &item_source_bytes,
+            key,
+            "#",
+            None,
+        );
+        let proof = ryeos_state::objects::BundleExecutorMemberSourceProofV1 {
+            requested_binary_ref: "bin:runner".to_owned(),
+            request_origin: ryeos_state::objects::BundleExecutorRequestOriginV1::WrapperBundle {
+                wrapper_bundle_name: "fixture".to_owned(),
+            },
+            selected_bundle: ryeos_state::objects::SelectedBundleIdentityV1 {
+                name: "fixture".to_owned(),
+                body_digest: "a".repeat(64),
+                signer_fingerprint: fingerprint.to_owned(),
+            },
+            runtime_selection: ryeos_state::objects::RetainedRuntimeBinarySelectionV1 {
+                definition_owner: ryeos_state::objects::RetainedRuntimeDefinitionOwnerV1 {
+                    requested_id: "runtime:fixture".to_owned(),
+                    canonical_ref: "runtime:fixture".to_owned(),
+                    source_space: Space::Bundle,
+                    trust_class: Trust::TrustedBundle,
+                    signer_fingerprint: Some(fingerprint.to_owned()),
+                    content_hash: "b".repeat(64),
+                    raw_content_digest: "c".repeat(64),
+                },
+                definition_owner_chain_index: 1,
+                authored_command: "bin:runner".to_owned(),
+                expanded_command: "bin:runner".to_owned(),
+            },
+            selected_item_ref: item_ref,
+            target_triple: triple.to_owned(),
+            item_source_hash,
+            expected_mode: 0o755,
+            signed_executor_manifest_ref: signed_manifest_ref.into_bytes(),
+            executor_manifest_object: manifest,
+            item_source_object: item_source,
+            signed_item_source_sidecar: signed_sidecar.into_bytes(),
+        };
+        let exact_program = json!({});
+        let exact_program_hash =
+            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
+        let sealed_invocation = json!({});
+        let plan = json!({});
+        let execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(&plan).unwrap().as_bytes());
+        let protocol_document = String::new();
+        let protocol_hash = lillux::sha256_hex(protocol_document.as_bytes());
+        let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
+            schema: ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            kind: "admitted_launch_capsule".to_owned(),
+            exact_program,
+            exact_program_hash,
+            sealed_invocation,
+            project_authority: ExecutionProjectAuthority::PROJECTLESS,
+            lifecycle_authority: ExecutionLifecycleAuthority {
+                ownership: ExecutionOwnershipAuthority::DaemonOwned,
+                recovery: ExecutionRecoveryAuthority::RestartRecoverable,
+            },
+            launch_driver: ExecutionLaunchDriver::DirectItemExecutor,
+            artifact_identity: Artifact::DirectItemExecutor {
+                executor_ref: "tool:test/executor".to_owned(),
+                root_subject_source_content_digest: "d".repeat(64),
+                root_subject_signer_fingerprint: Some(fingerprint.to_owned()),
+                root_subject_source_identity: DirectRootSourceIdentity::Project,
+                protocol_ref: "protocol:test".to_owned(),
+                protocol_content_hash: protocol_hash,
+                protocol_signer_fingerprint: fingerprint.to_owned(),
+                execution_plan_hash,
+                executable_identity: Executable::BundleExecutor {
+                    content_hash: "f".repeat(64),
+                    executor_manifest_hash: manifest_hash,
+                    executor_manifest_signer_fingerprint: fingerprint.to_owned(),
+                    member_source_proof: proof,
+                },
+                runtime_identity: DirectRuntimeIdentity {
+                    runtime_ref: "runtime:fixture".to_owned(),
+                    runtime_source_space: DirectRuntimeSourceSpace::Bundle,
+                    runtime_content_hash: "e".repeat(64),
+                    runtime_signer_fingerprint: fingerprint.to_owned(),
+                    runtime_bundle_manifest_hash: Some("1".repeat(64)),
+                    runtime_bundle_signer_fingerprint: Some(fingerprint.to_owned()),
+                },
+            },
+            execution_closure: Closure::DirectItemExecutor {
+                execution_plan: plan,
+                protocol_descriptor_document: protocol_document,
+                command: Command::NodePolicy,
+                admitted_project_root: None,
+            },
+            execution_realization_hash: "2".repeat(64),
+            source_binding_hash: None,
+            accounting_scope: None,
+            effective_caps: Vec::new(),
+            parent_delegation_caps: None,
+            runtime_ref: "runtime:fixture".to_owned(),
+            executor_ref: "tool:test/executor".to_owned(),
+        };
+        capsule
+    }
+
+    #[test]
+    fn rooted_bundle_member_proof_rechecks_current_owner_and_signatures() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let fingerprint = lillux::crypto::fingerprint(&key.verifying_key());
+        let trust = ryeos_state::refs::TrustStore::from([(
+            fingerprint.clone(),
+            key.verifying_key(),
+        )]);
+        let capsule = rooted_bundle_proof_fixture(&key, &fingerprint);
+        verify_rooted_bundle_member_source_proof(&capsule, &trust)
+            .expect("rooted proof verifies with current owner and source signer");
+
+        let mut bad_signature = capsule.clone();
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executable_identity:
+                ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                    member_source_proof,
+                    ..
+                },
+            ..
+        } = &mut bad_signature.artifact_identity else {
+            unreachable!("fixture uses BundleExecutor identity");
+        };
+        let mut sidecar =
+            String::from_utf8(member_source_proof.signed_item_source_sidecar.clone()).unwrap();
+        let header_end = sidecar.find('\n').unwrap();
+        let signer_separator = sidecar[..header_end].rfind(':').unwrap();
+        let signature_separator = sidecar[..signer_separator].rfind(':').unwrap();
+        let signature_start = signature_separator + 1;
+        let replacement = if sidecar.as_bytes()[signature_start] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        sidecar.replace_range(
+            signature_start..signature_start + 1,
+            &(replacement as char).to_string(),
+        );
+        member_source_proof.signed_item_source_sidecar = sidecar.into_bytes();
+        assert!(verify_rooted_bundle_member_source_proof(&bad_signature, &trust).is_err());
+
+        let mut revoked_owner = capsule;
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executable_identity:
+                ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                    member_source_proof,
+                    ..
+                },
+            ..
+        } = &mut revoked_owner.artifact_identity else {
+            unreachable!("fixture uses BundleExecutor identity");
+        };
+        member_source_proof
+            .runtime_selection
+            .definition_owner
+            .signer_fingerprint = Some("0".repeat(64));
+        assert!(verify_rooted_bundle_member_source_proof(&revoked_owner, &trust).is_err());
+    }
 
     #[test]
     fn abandoned_runtime_snapshot_stage_is_removed_under_pinned_state_authority() {

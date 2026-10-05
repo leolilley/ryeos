@@ -633,6 +633,17 @@ pub fn load_project_snapshot_bounded(
         .transpose()
 }
 
+pub(crate) fn load_project_snapshot_bounded_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<Option<ProjectSnapshot>> {
+    budget
+        .get_object(cas, hash, MAX_PROJECT_SNAPSHOT_OBJECT_BYTES)?
+        .map(|value| ProjectSnapshot::from_value(&value))
+        .transpose()
+}
+
 pub fn load_project_tree_bounded(
     cas: &lillux::CasStore,
     hash: &str,
@@ -655,6 +666,17 @@ pub fn load_project_policy_bounded(
 ) -> anyhow::Result<Option<ProjectSnapshotPolicy>> {
     read_bounded_cas_object(cas, hash, MAX_PROJECT_POLICY_OBJECT_BYTES)?
         .map(|(value, _)| ProjectSnapshotPolicy::from_value(&value))
+        .transpose()
+}
+
+pub(crate) fn load_project_policy_bounded_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<Option<ProjectSnapshotPolicy>> {
+    budget
+        .get_object(cas, hash, MAX_PROJECT_POLICY_OBJECT_BYTES)?
+        .map(|value| ProjectSnapshotPolicy::from_value(&value))
         .transpose()
 }
 

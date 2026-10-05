@@ -3992,7 +3992,10 @@ fn load_persistent_capsule(
     hash: &str,
 ) -> anyhow::Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
     let value = cas
-        .get_object(hash)?
+        .get_object_bounded(
+            hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow::anyhow!("persistent-session capsule is absent: {hash}"))?;
     let capsule =
         ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;

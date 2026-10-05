@@ -368,6 +368,12 @@ fn json_type_name(value: &Value) -> &'static str {
 #[derive(Debug, Default, Clone)]
 pub struct SpecOverrides {
     pub command: Option<String>,
+    /// Authenticated chain element that owned the singleton runtime command.
+    /// This is present only on the authority-bearing production compiler path.
+    pub runtime_command_owner: Option<RuntimeCommandOwner>,
+    /// Exact verified authority aligned with each chain element. The legacy
+    /// non-authoritative wrapper leaves this absent and must refuse `bin:`.
+    pub authenticated_chain_authorities: Option<Vec<crate::contracts::PlanTrustAuthority>>,
     pub args: Option<Vec<RuntimeArgument>>,
     pub stdin_data: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -376,6 +382,13 @@ pub struct SpecOverrides {
     /// handler claims one field on `ExecutionDecorations` (e.g.
     /// `native_async`) and sets it. Default = empty.
     pub execution: ExecutionDecorations,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCommandOwner {
+    pub definition_owner: crate::contracts::PlanTrustAuthority,
+    pub definition_owner_chain_index: usize,
+    pub authored_command: String,
 }
 
 /// Mutable compilation state passed to every handler.
@@ -619,6 +632,7 @@ pub fn compile_with_handlers(
         project_authority,
         sealed_content,
         project_root,
+        None,
     )
 }
 
@@ -648,7 +662,15 @@ pub(crate) fn compile_with_handlers_and_execution_root(
     )>,
     sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     execution_root: Option<&Path>,
+    authenticated_chain_authorities: Option<&[crate::contracts::PlanTrustAuthority]>,
 ) -> Result<PlanSubprocessSpec, EngineError> {
+    if let Some(authorities) = authenticated_chain_authorities
+        && authorities.len() != chain.len()
+    {
+        return Err(EngineError::Internal(
+            "verified chain authority count differs from runtime chain".to_owned(),
+        ));
+    }
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
         env: plan_env.clone(),
@@ -672,6 +694,8 @@ pub(crate) fn compile_with_handlers_and_execution_root(
         root_trust_class,
         host_env,
     };
+    ctx.spec_overrides.authenticated_chain_authorities =
+        authenticated_chain_authorities.map(|authorities| authorities.to_vec());
     ctx.template_ctx.project_path = execution_root.map(|p| p.to_path_buf());
 
     ctx.template_ctx.params = params.clone();
@@ -882,7 +906,19 @@ pub(crate) fn compile_with_handlers_and_execution_root(
     // not solve this by adding a deferred child environment to a parent launch
     // preparer: an ordinary child owns this admission itself.
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
-        let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
+        let owner = ctx.spec_overrides.runtime_command_owner.as_ref().ok_or_else(|| {
+            EngineError::InvalidRuntimeConfig {
+                path: "config.command".to_owned(),
+                reason: "binary command has no authenticated singleton runtime owner".to_owned(),
+            }
+        })?;
+        let runtime_selection = crate::contracts::PlanRuntimeBinarySelection {
+            definition_owner: owner.definition_owner.clone(),
+            definition_owner_chain_index: owner.definition_owner_chain_index,
+            authored_command: owner.authored_command.clone(),
+            expanded_command: cmd_expanded.clone(),
+        };
+        let (resolved, member_source_proof) = crate::binary_resolver::resolve_runtime_binary_command_ref_with_selection(
             &cmd_expanded,
             &chain
                 .first()
@@ -895,6 +931,7 @@ pub(crate) fn compile_with_handlers_and_execution_root(
             roots,
             node_trust_ref,
             ctx.root_trust_class,
+            &runtime_selection,
         )?;
         (
             resolved.absolute_path.to_string_lossy().into_owned(),
@@ -906,6 +943,8 @@ pub(crate) fn compile_with_handlers_and_execution_root(
                 provider: crate::contracts::PlanBundleExecutorIdentity {
                     manifest_hash: resolved.manifest_hash,
                     signer_fingerprint: resolved.signer_fingerprint,
+                    runtime_selection,
+                    member_source_proof,
                 },
             }),
         )
@@ -1030,6 +1069,7 @@ mod tests {
             None,
             None,
             Some(root),
+            None,
         )
         .unwrap();
         assert_eq!(spec.args[0].literal_value(), root.to_str());

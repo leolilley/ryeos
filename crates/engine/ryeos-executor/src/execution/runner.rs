@@ -2421,7 +2421,10 @@ fn verify_dispatch_effect_record(
     let evidence_hash = &record.admission_evidence_hash;
     let evidence = match authority
         .cas_store()
-        .and_then(|cas| cas.get_object(evidence_hash))
+        .and_then(|cas| cas.get_object_bounded(
+            evidence_hash,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        ))
     {
         Ok(Some(value)) => value,
         Ok(None) => {
@@ -2686,7 +2689,10 @@ fn load_verified_dispatch_effect_record(
         let historical_capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
             authority
                 .cas_store()?
-                .get_object(&record.admission_evidence_hash)?
+                .get_object_bounded(
+                    &record.admission_evidence_hash,
+                    ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+                )?
                 .context("retained effect admission evidence disappeared")?,
         )?;
         if let Some(current) = expected_current_capsule {
@@ -4752,6 +4758,77 @@ fn recovered_direct_protocol(
     crate::dispatch::validate_admitted_direct_protocol(&protocol, item_kind)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok(protocol)
+}
+
+fn validate_retained_bundle_member_source_trust(
+    engine: &ryeos_engine::engine::Engine,
+    primary: &ryeos_engine::resolution::ResolutionOutput,
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+) -> Result<()> {
+    let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        executable_identity:
+            ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                content_hash,
+                executor_manifest_hash,
+                executor_manifest_signer_fingerprint,
+                member_source_proof,
+            },
+        ..
+    } = &capsule.artifact_identity
+    else {
+        return Ok(());
+    };
+
+    let selection = &member_source_proof.runtime_selection;
+    let index = selection.definition_owner_chain_index;
+    if plan.executor_chain.get(index).map(String::as_str)
+        != Some(selection.definition_owner.requested_id.as_str())
+    {
+        anyhow::bail!("retained Bundle runtime owner is not at its exact executor-chain position");
+    }
+    let expected_owner = if index == 0 {
+        if plan.root_ref != primary.root.resolved_ref {
+            anyhow::bail!("retained Bundle root owner has no matching authenticated root");
+        }
+        serde_json::json!({
+            "requested_id": plan.root_ref,
+            "canonical_ref": plan.root_ref,
+            "source_space": primary.root.source_space,
+            "trust_class": primary.root.trust_class,
+            "signer_fingerprint": primary.root.signer_fingerprint,
+            "content_hash": primary.root.source_content_digest,
+            "raw_content_digest": primary.root.raw_content_digest,
+        })
+    } else {
+        let authority = plan
+            .executor_authorities
+            .get(index - 1)
+            .ok_or_else(|| anyhow::anyhow!("retained Bundle runtime owner position has no plan authority"))?;
+        serde_json::to_value(authority)?
+    };
+    if serde_json::to_value(&selection.definition_owner)? != expected_owner {
+        anyhow::bail!("retained Bundle runtime owner differs from its exact authenticated chain authority");
+    }
+
+    if !engine
+        .node_trust_store
+        .is_trusted(&member_source_proof.selected_bundle.signer_fingerprint)
+    {
+        anyhow::bail!("retained Bundle selection signer is no longer trusted");
+    }
+    let verifier = engine
+        .node_trust_store
+        .get(executor_manifest_signer_fingerprint)
+        .ok_or_else(|| anyhow::anyhow!("retained executor manifest signer was revoked"))?;
+    ryeos_engine::binary_resolver::verify_retained_bundle_executor_member_proof(
+        member_source_proof,
+        executor_manifest_hash,
+        executor_manifest_signer_fingerprint,
+        content_hash,
+        &verifier.verifying_key,
+    )?;
+    Ok(())
 }
 
 fn validate_recovered_direct_request_authority(
@@ -9039,6 +9116,15 @@ async fn run_existing_recovered_thread(
     )
     .map_err(|error| {
         guard.fail_before_spawn(error.context("admitted_program_authority_revoked"))
+    })?;
+    validate_retained_bundle_member_source_trust(
+        &engine,
+        primary_resolution,
+        prepared_plan.execution_plan(),
+        &admitted_capsule,
+    )
+    .map_err(|error| {
+        guard.fail_before_spawn(error.context("admitted_bundle_member_source_invalid"))
     })?;
 
     // Read credentials only after the exact plan, protocol, executor, and

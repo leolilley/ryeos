@@ -445,10 +445,9 @@ fn load_capture_source(
         bail!("producer terminal result generation changed during product capture");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &cas,
             &capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     capsule.verify_retained_execution_realization(

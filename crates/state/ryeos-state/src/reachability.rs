@@ -208,8 +208,33 @@ pub(crate) fn collect_chain_reachable_from_head_with_cas(
     Ok(set)
 }
 
+/// Walk one exact chain head from the pinned CAS authority under transfer
+/// ceilings. Sync callers use this instead of the local-maintenance traversal
+/// so object and blob limits apply while the closure is being discovered.
+pub(crate) fn collect_chain_reachable_from_head_with_cas_and_limits(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    chain_head_hash: &str,
+    limits: crate::object_closure::ObjectClosureLimits,
+) -> Result<ReachableSet> {
+    let mut set = ReachableSet {
+        authoritative_root_count: 1,
+        ..ReachableSet::default()
+    };
+    set.chain_root_ids.push(chain_root_id.to_string());
+    merge_object_closure_with_cas_and_limits(cas, [chain_head_hash.to_string()], &mut set, limits)?;
+    Ok(set)
+}
+
 fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut ReachableSet) -> Result<()> {
     let closure = collect_object_closure(cas_root, roots)?;
+    merge_complete_object_closure(closure, set)
+}
+
+fn merge_complete_object_closure(
+    closure: crate::object_closure::ObjectClosureReport,
+    set: &mut ReachableSet,
+) -> Result<()> {
     if !closure.is_complete() {
         if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
             return Err(anyhow::anyhow!(incompatible.clone())).context(
@@ -236,24 +261,17 @@ fn merge_object_closure_with_cas(
     set: &mut ReachableSet,
 ) -> Result<()> {
     let closure = crate::object_closure::collect_object_closure_with_cas(cas, roots)?;
-    if !closure.is_complete() {
-        if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
-            return Err(anyhow::anyhow!(incompatible.clone())).context(
-                "authoritative reachable closure contains an incompatible object contract",
-            );
-        }
-        anyhow::bail!(
-            "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
-            closure.missing_objects.len(),
-            closure.missing_blobs.len(),
-            closure.malformed_objects.len(),
-            closure.unsupported_objects.len()
-        );
-    }
-    set.object_hashes.extend(closure.object_hashes);
-    set.blob_hashes.extend(closure.blob_hashes);
-    set.large_object_hashes.extend(closure.large_object_hashes);
-    Ok(())
+    merge_complete_object_closure(closure, set)
+}
+
+fn merge_object_closure_with_cas_and_limits(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    set: &mut ReachableSet,
+    limits: crate::object_closure::ObjectClosureLimits,
+) -> Result<()> {
+    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits(cas, roots, limits)?;
+    merge_complete_object_closure(closure, set)
 }
 
 #[cfg(test)]

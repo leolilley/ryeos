@@ -173,6 +173,17 @@ impl RuntimeHandler for RuntimeConfigHandler {
                 reason: format!("{e}"),
             }
         })?;
+        let runtime_command_owner = ctx
+            .spec_overrides
+            .authenticated_chain_authorities
+            .as_ref()
+            .and_then(|authorities| authorities.get(ctx.current_index))
+            .cloned()
+            .map(|definition_owner| crate::runtime::RuntimeCommandOwner {
+                definition_owner,
+                definition_owner_chain_index: ctx.current_index,
+                authored_command: config.command.clone(),
+            });
         for argument in &config.args {
             if let RuntimeArgument::ExecutionProjectFile(input) = argument {
                 if ctx.current_index != 0 {
@@ -201,6 +212,7 @@ impl RuntimeHandler for RuntimeConfigHandler {
         );
 
         ctx.spec_overrides.command = Some(config.command);
+        ctx.spec_overrides.runtime_command_owner = runtime_command_owner;
         ctx.spec_overrides.args = Some(config.args);
         ctx.spec_overrides.stdin_data = config.input_data;
         ctx.spec_overrides.timeout_secs = Some(timeout_secs);
