@@ -896,12 +896,17 @@ struct OriginalManifestPrecontactGuard<'a> {
 
 impl OriginalManifestPrecontactGuard<'_> {
     fn require_exclusive(&self) -> Result<()> {
-        let retained = self.original.lock_original_contact_retention(Some(self.cancelled))?;
+        let retained = self
+            .original
+            .lock_original_contact_retention(Some(self.cancelled))?;
         let exclusive = !self.original.retained.is_poisoned()
             && retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight
             && retained.original_manifest_restored.is_none()
             && retained.trusted_inputs.is_none()
-            && retained.original_scratch.as_ref().is_some_and(|v| Arc::ptr_eq(v, &self.scratch))
+            && retained
+                .original_scratch
+                .as_ref()
+                .is_some_and(|v| Arc::ptr_eq(v, &self.scratch))
             && !retained.admission_refused
             && retained.phase == PooledStartPhase::Preparing
             && retained.original_funding.is_none()
@@ -920,28 +925,60 @@ impl OriginalManifestPrecontactGuard<'_> {
             && retained.quarantined_startup_channels.is_empty()
             && self.original.is_in_flight();
         drop(retained);
-        anyhow::ensure!(exclusive, "original manifest checkout lost exclusive unfunded owners");
-        anyhow::ensure!(!(self.cancelled)() && !self.deadline.has_elapsed(),
-            "original manifest preparation cancelled or expired after ownership check");
+        anyhow::ensure!(
+            exclusive,
+            "original manifest checkout lost exclusive unfunded owners"
+        );
+        anyhow::ensure!(
+            !(self.cancelled)() && !self.deadline.has_elapsed(),
+            "original manifest preparation cancelled or expired after ownership check"
+        );
         Ok(())
     }
 
     fn retain_original_manifest_documents(&mut self, state: &crate::state::AppState) -> Result<()> {
         self.require_exclusive()?;
-        let budget = self.original.original_callback_budget.get()
+        let budget = self
+            .original
+            .original_callback_budget
+            .get()
             .context("original manifest preparation lacks SAME callback budget")?;
-        self.inputs.as_mut().context("original manifest inputs checked out")?
+        self.inputs
+            .as_mut()
+            .context("original manifest inputs checked out")?
             .bind_original_isolation_expectation(state, budget)?;
         self.require_exclusive()?;
         // Cooperative whole-call boundaries ONLY; internal IO is not preempted.
-        self.inputs.as_mut().context("original manifest inputs checked out")?
+        self.inputs
+            .as_mut()
+            .context("original manifest inputs checked out")?
             .retain_original_manifest_documents(state)?;
         self.require_exclusive()?;
-        let _ = self.inputs.as_mut().context("original manifest inputs checked out")?
+        let _ = self
+            .inputs
+            .as_mut()
+            .context("original manifest inputs checked out")?
             .original_manifest_documents(state)?;
         self.require_exclusive()?;
-        self.inputs.as_ref().context("original manifest inputs checked out")?
+        self.inputs
+            .as_ref()
+            .context("original manifest inputs checked out")?
             .require_original_isolation_expectation(state)?;
+        self.require_exclusive()
+    }
+
+    fn retain_gpu_loader_closure_inventory(
+        &mut self,
+        state: &crate::state::AppState,
+        roots: ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots<'_>,
+    ) -> Result<()> {
+        self.require_exclusive()?;
+        let result = self
+            .inputs
+            .as_mut()
+            .context("original GPU loader inventory inputs checked out")?
+            .retain_gpu_loader_closure_inventory(state, roots);
+        result?;
         self.require_exclusive()
     }
 
@@ -949,12 +986,23 @@ impl OriginalManifestPrecontactGuard<'_> {
         self.require_exclusive()?;
         // Completion validates the actual prepared pair itself; mere checkout
         // cannot call this private operation into a fabricated Prepared phase.
-        let _ = self.inputs.as_mut().context("original prepared inputs checked out")?
+        let _ = self
+            .inputs
+            .as_mut()
+            .context("original prepared inputs checked out")?
             .original_manifest_documents(state)?;
-        self.inputs.as_ref().context("original prepared inputs checked out")?
+        self.inputs
+            .as_ref()
+            .context("original prepared inputs checked out")?
             .require_original_isolation_expectation(state)?;
+        self.inputs
+            .as_mut()
+            .context("original prepared inputs checked out")?
+            .validate_gpu_loader_inventory_for_restore(state)?;
         self.require_exclusive()?;
-        let mut retained = self.original.lock_original_contact_retention(Some(self.cancelled))?;
+        let mut retained = self
+            .original
+            .lock_original_contact_retention(Some(self.cancelled))?;
         let eligible = !self.original.retained.is_poisoned()
             && !self.deadline.has_elapsed()
             && retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight
@@ -962,16 +1010,24 @@ impl OriginalManifestPrecontactGuard<'_> {
             && !retained.admission_refused
             && retained.trusted_inputs.is_none()
             && retained.original_manifest_restored.is_none()
-            && retained.original_scratch.as_ref().is_some_and(|v| Arc::ptr_eq(v, &self.scratch))
+            && retained
+                .original_scratch
+                .as_ref()
+                .is_some_and(|v| Arc::ptr_eq(v, &self.scratch))
             && retained.original_funding.is_none()
             && !retained.original_contact_attempted
             && retained.original_spawn_permit.is_none()
             && !retained.original_held_attached
             && retained.retained_running.is_empty()
-            && !retained.native_check_attempted && !retained.native_check_in_flight && !retained.native_check_refused
-            && !retained.startup_check_attempted && !retained.startup_check_in_flight && !retained.startup_check_refused
+            && !retained.native_check_attempted
+            && !retained.native_check_in_flight
+            && !retained.native_check_refused
+            && !retained.startup_check_attempted
+            && !retained.startup_check_in_flight
+            && !retained.startup_check_refused
             && retained.original_startup_restored.is_none()
-            && retained.quarantined_inputs.is_empty() && retained.quarantined_startup_channels.is_empty()
+            && retained.quarantined_inputs.is_empty()
+            && retained.quarantined_startup_channels.is_empty()
             && self.original.is_in_flight();
         if !eligible {
             drop(retained);
@@ -991,10 +1047,16 @@ impl OriginalManifestPrecontactGuard<'_> {
 
 impl Drop for OriginalManifestPrecontactGuard<'_> {
     fn drop(&mut self) {
-        if self.inputs.is_none() { return; }
+        if self.inputs.is_none() {
+            return;
+        }
         // Mandatory custody completion may block beyond original deadline.
         // Only this unique checkout writes the reserved restoration slot.
-        let mut retained = self.original.retained.lock().unwrap_or_else(|p| p.into_inner());
+        let mut retained = self
+            .original
+            .retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         retained.original_manifest_restored = self.inputs.take();
         retained.manifest_preparation = OriginalManifestPreparationPhase::Refused;
         retained.admission_refused = true;
@@ -1018,7 +1080,9 @@ impl OriginalStartupCheckGuard<'_> {
     fn require_exclusive(&self) -> Result<()> {
         // Ownership checks only. Never hold this mutex during source/CAS/live
         // or FD4 operations. Poison retains originals but cannot admit a join.
-        let retained = self.original.lock_original_contact_retention(Some(self.cancelled))?;
+        let retained = self
+            .original
+            .lock_original_contact_retention(Some(self.cancelled))?;
         let exclusive = !self.original.retained.is_poisoned()
             && retained.startup_check_attempted
             && retained.startup_check_in_flight
@@ -1051,9 +1115,15 @@ impl OriginalStartupCheckGuard<'_> {
             exclusive,
             "original startup checkout lost exclusive actual owners"
         );
-        anyhow::ensure!(!(self.cancelled)()
-            && self.original.original_callback_budget.get().is_some_and(|budget| !budget.contact_expiry().has_elapsed()),
-            "original startup validation cancelled or expired");
+        anyhow::ensure!(
+            !(self.cancelled)()
+                && self
+                    .original
+                    .original_callback_budget
+                    .get()
+                    .is_some_and(|budget| !budget.contact_expiry().has_elapsed()),
+            "original startup validation cancelled or expired"
+        );
         Ok(())
     }
 
@@ -1261,14 +1331,20 @@ impl PersistentSessionPooledStart {
     ) -> Result<OriginalManifestPrecontactGuard<'a>> {
         let mut retained = match self.lock_original_contact_retention(Some(cancelled)) {
             Ok(retained) => retained,
-            Err(error) => { self.refuse_manifest_precontact(); return Err(error); }
+            Err(error) => {
+                self.refuse_manifest_precontact();
+                return Err(error);
+            }
         };
         let eligible = !self.retained.is_poisoned()
             && !Self::native_check_blocks_mutation(&retained)
             && !retained.admission_refused
             && retained.phase == PooledStartPhase::Preparing
             && retained.original_funding.is_none()
-            && retained.trusted_inputs.as_ref().is_some_and(|v| v.has_selected_startup_contract())
+            && retained
+                .trusted_inputs
+                .as_ref()
+                .is_some_and(|v| v.has_selected_startup_contract())
             && retained.original_scratch.is_some()
             && !retained.original_contact_attempted
             && retained.original_spawn_permit.is_none()
@@ -1282,15 +1358,26 @@ impl PersistentSessionPooledStart {
             retained.admission_refused = true;
             retained.phase = PooledStartPhase::Unsettled;
             drop(retained);
-            bail!("original manifest checkout requires exclusive unfunded signed inputs and scratch");
+            bail!(
+                "original manifest checkout requires exclusive unfunded signed inputs and scratch"
+            );
         }
         retained.manifest_preparation = OriginalManifestPreparationPhase::UnfundedInFlight;
         let guard = OriginalManifestPrecontactGuard {
             inputs: retained.trusted_inputs.take(),
             original: self,
             cancelled,
-            deadline: self.original_callback_budget.get().expect("budget checked acquiring retention").contact_expiry(),
-            scratch: Arc::clone(retained.original_scratch.as_ref().expect("actual scratch checked before checkout")),
+            deadline: self
+                .original_callback_budget
+                .get()
+                .expect("budget checked acquiring retention")
+                .contact_expiry(),
+            scratch: Arc::clone(
+                retained
+                    .original_scratch
+                    .as_ref()
+                    .expect("actual scratch checked before checkout"),
+            ),
         };
         drop(retained);
         guard.require_exclusive()?;
@@ -1355,10 +1442,15 @@ impl PersistentSessionPooledStart {
         stage_pooled_obligation_owners(&mut retained, &resource, &retirement);
         let eligible = !self.retained.is_poisoned()
             && retained.manifest_preparation == OriginalManifestPreparationPhase::Prepared
-            && !retained.native_check_attempted && !retained.native_check_in_flight && !retained.native_check_refused
-            && !retained.startup_check_attempted && !retained.startup_check_in_flight && !retained.startup_check_refused
+            && !retained.native_check_attempted
+            && !retained.native_check_in_flight
+            && !retained.native_check_refused
+            && !retained.startup_check_attempted
+            && !retained.startup_check_in_flight
+            && !retained.startup_check_refused
             && retained.original_manifest_restored.is_none()
-            && retained.quarantined_inputs.is_empty() && retained.quarantined_startup_channels.is_empty()
+            && retained.quarantined_inputs.is_empty()
+            && retained.quarantined_startup_channels.is_empty()
             && !retained.admission_refused
             && retained.phase == PooledStartPhase::Preparing
             && retained.retained_running.len() == 1
@@ -1510,11 +1602,57 @@ impl PersistentSessionPooledStart {
         scratch: Arc<crate::temp_dir_guard::TempDirGuard>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<bool> {
+        self.prepare_trusted_original_funding_inner(
+            state,
+            inputs,
+            allocation_scope,
+            original,
+            scratch,
+            cancelled,
+            None,
+        )
+    }
+
+    /// GPU-only data preparation over the exact already-retained realization
+    /// roots. This stays in the same unique unfunded precontact guard.
+    pub fn prepare_trusted_gpu_original_funding(
+        &self,
+        state: &crate::state::AppState,
+        inputs: crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs,
+        allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
+        original: &crate::runtime_db::ProcessResourceReservationRecord,
+        scratch: Arc<crate::temp_dir_guard::TempDirGuard>,
+        cancelled: &dyn Fn() -> bool,
+        roots: ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots<'_>,
+    ) -> Result<bool> {
+        self.prepare_trusted_original_funding_inner(
+            state,
+            inputs,
+            allocation_scope,
+            original,
+            scratch,
+            cancelled,
+            Some(roots),
+        )
+    }
+
+    fn prepare_trusted_original_funding_inner(
+        &self,
+        state: &crate::state::AppState,
+        inputs: crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs,
+        allocation_scope: &ryeos_state::objects::AdmittedAccountingScope,
+        original: &crate::runtime_db::ProcessResourceReservationRecord,
+        scratch: Arc<crate::temp_dir_guard::TempDirGuard>,
+        cancelled: &dyn Fn() -> bool,
+        gpu_roots: Option<ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots<'_>>,
+    ) -> Result<bool> {
         // Mandatory custody deposit BEFORE selector/budget/cancellation checks.
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
         let first_scratch = Self::retain_original_scratch(&mut retained, &scratch);
-        if !first_scratch || Self::native_check_blocks_mutation(&retained)
-            || retained.trusted_inputs.is_some() || retained.original_funding.is_some()
+        if !first_scratch
+            || Self::native_check_blocks_mutation(&retained)
+            || retained.trusted_inputs.is_some()
+            || retained.original_funding.is_some()
         {
             retained.quarantined_inputs.push(inputs);
             retained.manifest_preparation = OriginalManifestPreparationPhase::Refused;
@@ -1524,38 +1662,70 @@ impl PersistentSessionPooledStart {
             bail!("original trusted funding attempt cannot replace verified input owner");
         }
         retained.trusted_inputs = Some(inputs);
-        let selected = retained.trusted_inputs.as_ref().expect("actual input deposited")
+        let selected = retained
+            .trusted_inputs
+            .as_ref()
+            .expect("actual input deposited")
             .has_selected_startup_contract();
         drop(retained);
         let result = (|| {
-            let budget = self.original_callback_budget.get()
+            let budget = self
+                .original_callback_budget
+                .get()
                 .context("original trusted funding lacks retained callback budget")?;
-            anyhow::ensure!(budget.precontact_binding().scope == allocation_scope,
-                "original document funding differs from retained callback scope");
-            anyhow::ensure!(!cancelled() && !budget.contact_expiry().has_elapsed(),
-                "original trusted funding cancelled or expired before preparation");
+            anyhow::ensure!(
+                budget.precontact_binding().scope == allocation_scope,
+                "original document funding differs from retained callback scope"
+            );
+            anyhow::ensure!(
+                !cancelled() && !budget.contact_expiry().has_elapsed(),
+                "original trusted funding cancelled or expired before preparation"
+            );
+            let gpu_roots_supplied = gpu_roots.is_some();
             if selected {
                 let mut guard = self.checkout_original_manifest_precontact(cancelled)?;
                 guard.retain_original_manifest_documents(state)?;
+                if let Some(roots) = gpu_roots {
+                    guard.retain_gpu_loader_closure_inventory(state, roots)?;
+                }
                 guard.commit_prepared(state)?;
+            } else {
+                anyhow::ensure!(
+                    !gpu_roots_supplied,
+                    "GPU loader roots were supplied without selected startup inputs"
+                );
             }
             // SAME predicate before reacquisition; no callback under retention.
             let mut retained = self.lock_original_contact_retention(Some(cancelled))?;
             let document_phase = if selected {
                 retained.manifest_preparation == OriginalManifestPreparationPhase::Prepared
-                    && !retained.native_check_attempted && !retained.native_check_in_flight && !retained.native_check_refused
-                    && !retained.startup_check_attempted && !retained.startup_check_in_flight && !retained.startup_check_refused
-                    && retained.original_manifest_restored.is_none() && retained.original_startup_restored.is_none()
-                    && retained.quarantined_inputs.is_empty() && retained.quarantined_startup_channels.is_empty()
+                    && !retained.native_check_attempted
+                    && !retained.native_check_in_flight
+                    && !retained.native_check_refused
+                    && !retained.startup_check_attempted
+                    && !retained.startup_check_in_flight
+                    && !retained.startup_check_refused
+                    && retained.original_manifest_restored.is_none()
+                    && retained.original_startup_restored.is_none()
+                    && retained.quarantined_inputs.is_empty()
+                    && retained.quarantined_startup_channels.is_empty()
             } else {
                 !Self::native_check_blocks_mutation(&retained)
             };
-            let eligible = document_phase && !self.retained.is_poisoned()
-                && !retained.admission_refused && retained.phase == PooledStartPhase::Preparing
-                && retained.trusted_inputs.is_some() && retained.original_funding.is_none()
-                && retained.original_scratch.as_ref().is_some_and(|v| Arc::ptr_eq(v, &scratch))
-                && !retained.original_contact_attempted && retained.original_spawn_permit.is_none()
-                && !retained.original_held_attached && retained.retained_running.is_empty()
+            let eligible = document_phase
+                && !self.retained.is_poisoned()
+                && !retained.admission_refused
+                && retained.phase == PooledStartPhase::Preparing
+                && retained.trusted_inputs.is_some()
+                && retained.original_funding.is_none()
+                && retained
+                    .original_scratch
+                    .as_ref()
+                    .is_some_and(|v| Arc::ptr_eq(v, &scratch))
+                && !retained.original_contact_attempted
+                && retained.original_spawn_permit.is_none()
+                && !retained.original_held_attached
+                && retained.retained_running.is_empty()
                 && self.is_in_flight();
             if !eligible {
                 drop(retained);
@@ -1564,20 +1734,38 @@ impl PersistentSessionPooledStart {
             if !selected {
                 // Historical unselected funding route unchanged. Selected bind,
                 // CAS producer and validated borrow already ran outside this lock.
-                retained.trusted_inputs.as_mut().expect("original input retained")
+                retained
+                    .trusted_inputs
+                    .as_mut()
+                    .expect("original input retained")
                     .bind_original_isolation_expectation(state, budget)?;
             }
             let callback = budget.precontact_binding();
             let funding = crate::accounting_db::precontact::OriginalFundingOwner::prepare(
-                state, retained.trusted_inputs.as_ref().expect("same restored input retained"),
-                budget, allocation_scope, original, callback.callback_thread_id, callback.callback_launch_owner,
+                state,
+                retained
+                    .trusted_inputs
+                    .as_ref()
+                    .expect("same restored input retained"),
+                budget,
+                allocation_scope,
+                original,
+                callback.callback_thread_id,
+                callback.callback_launch_owner,
             )?;
             // Root SAME attempt BEFORE first RuntimeDb/ledger write; no reset.
             retained.original_funding = Some(funding);
-            state.state_store.reserve_process_resource_launch_with_scratch_until(
-                original, &scratch, budget.contact_expiry(),
-            )?;
-            retained.original_funding.as_mut().expect("funding retained before RuntimeDb")
+            state
+                .state_store
+                .reserve_process_resource_launch_with_scratch_until(
+                    original,
+                    &scratch,
+                    budget.contact_expiry(),
+                )?;
+            retained
+                .original_funding
+                .as_mut()
+                .expect("funding retained before RuntimeDb")
                 .reserve()
         })();
         if !matches!(&result, Ok(true)) {
@@ -5661,14 +5849,19 @@ mod tests {
                 let original_ref = &original;
                 let operation = threads.spawn(move || {
                     entered.send(()).unwrap();
-                    original_ref.checkout_original_manifest_precontact(&|| cancelled).is_err()
+                    original_ref
+                        .checkout_original_manifest_precontact(&|| cancelled)
+                        .is_err()
                 });
                 entry.recv().unwrap();
                 release.wait();
                 assert!(operation.join().unwrap());
             });
             let retained = original.retained.lock().unwrap();
-            assert_eq!(retained.manifest_preparation, super::OriginalManifestPreparationPhase::Refused);
+            assert_eq!(
+                retained.manifest_preparation,
+                super::OriginalManifestPreparationPhase::Refused
+            );
             assert!(retained.admission_refused);
             assert!(retained.trusted_inputs.is_none() && retained.original_funding.is_none());
         }
@@ -5678,11 +5871,15 @@ mod tests {
     fn manifest_initial_acquisition_obeys_actual_original_budget_under_contention() {
         let root = tempfile::tempdir().unwrap();
         let fixture = crate::handler_context::budget_test_support::build(
-            root.path(), lillux::time::Duration::from_secs(1),
-        ).unwrap();
+            root.path(),
+            lillux::time::Duration::from_secs(1),
+        )
+        .unwrap();
         let budget = fixture.context.original_execution_budget().unwrap();
         let original = super::PersistentSessionPooledStart::new();
-        original.retain_original_callback_budget(budget, budget.precontact_binding().scope).unwrap();
+        original
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
         let held = std::sync::Barrier::new(2);
         std::thread::scope(|threads| {
             threads.spawn(|| {
@@ -5695,26 +5892,41 @@ mod tests {
                 }
             });
             held.wait();
-            assert!(original.checkout_original_manifest_precontact(&|| false).is_err());
+            assert!(
+                original
+                    .checkout_original_manifest_precontact(&|| false)
+                    .is_err()
+            );
         });
         assert!(budget.contact_expiry().has_elapsed());
         assert_eq!(original.original_callback_budget.get().unwrap(), budget);
         let retained = original.retained.lock().unwrap();
-        assert_eq!(retained.manifest_preparation, super::OriginalManifestPreparationPhase::Refused);
+        assert_eq!(
+            retained.manifest_preparation,
+            super::OriginalManifestPreparationPhase::Refused
+        );
         assert!(retained.trusted_inputs.is_none() && retained.original_funding.is_none());
         drop(retained);
-        assert!(original.checkout_original_manifest_precontact(&|| false).is_err());
+        assert!(
+            original
+                .checkout_original_manifest_precontact(&|| false)
+                .is_err()
+        );
     }
 
     #[test]
     fn manifest_initial_contention_rechecks_same_actual_cancellation_predicate() {
         let root = tempfile::tempdir().unwrap();
         let fixture = crate::handler_context::budget_test_support::build(
-            root.path(), lillux::time::Duration::from_secs(5),
-        ).unwrap();
+            root.path(),
+            lillux::time::Duration::from_secs(5),
+        )
+        .unwrap();
         let budget = fixture.context.original_execution_budget().unwrap();
         let original = super::PersistentSessionPooledStart::new();
-        original.retain_original_callback_budget(budget, budget.precontact_binding().scope).unwrap();
+        original
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
         let held = std::sync::Barrier::new(2);
         let (cancelled_signal, cancellation) = std::sync::mpsc::channel();
         let observations = std::cell::Cell::new(0);
@@ -5729,15 +5941,24 @@ mod tests {
             held.wait();
             let cancelled = || {
                 observations.set(observations.get() + 1);
-                if observations.get() == 3 { cancelled_signal.send(()).unwrap(); }
+                if observations.get() == 3 {
+                    cancelled_signal.send(()).unwrap();
+                }
                 observations.get() >= 3
             };
-            assert!(original.checkout_original_manifest_precontact(&cancelled).is_err());
+            assert!(
+                original
+                    .checkout_original_manifest_precontact(&cancelled)
+                    .is_err()
+            );
         });
         assert!(observations.get() >= 3);
         assert_eq!(original.original_callback_budget.get().unwrap(), budget);
         let retained = original.retained.lock().unwrap();
-        assert_eq!(retained.manifest_preparation, super::OriginalManifestPreparationPhase::Refused);
+        assert_eq!(
+            retained.manifest_preparation,
+            super::OriginalManifestPreparationPhase::Refused
+        );
         assert!(retained.trusted_inputs.is_none() && retained.original_funding.is_none());
     }
     #[test]
@@ -5753,7 +5974,10 @@ mod tests {
                 .is_err()
         );
         let retained = original.retained.lock().unwrap();
-        assert_eq!(retained.manifest_preparation, OriginalManifestPreparationPhase::Refused);
+        assert_eq!(
+            retained.manifest_preparation,
+            OriginalManifestPreparationPhase::Refused
+        );
         assert!(retained.trusted_inputs.is_none() && retained.original_manifest_restored.is_none());
         assert!(retained.phase == super::PooledStartPhase::Unsettled);
         assert!(super::PersistentSessionPooledStart::native_check_blocks_mutation(&retained));
@@ -5794,7 +6018,10 @@ mod tests {
                 .is_err()
         );
         let retained = original.retained.lock().unwrap_or_else(|p| p.into_inner());
-        assert_eq!(retained.manifest_preparation, OriginalManifestPreparationPhase::Refused);
+        assert_eq!(
+            retained.manifest_preparation,
+            OriginalManifestPreparationPhase::Refused
+        );
         assert!(retained.admission_refused);
         assert!(retained.original_manifest_restored.is_none());
         assert!(retained.phase == super::PooledStartPhase::Unsettled);
@@ -5814,38 +6041,55 @@ mod tests {
         use crate::runtime_db::process_resource_custody::*;
         let root = tempfile::tempdir().unwrap();
         let mut fixture = crate::handler_context::budget_test_support::build(
-            root.path(), Duration::from_secs(60),
-        ).unwrap();
-        let selected = ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
-            source_root: "source".into(), member: "startup.json".into(),
-            sha256: lillux::sha256_hex(b"static selected member, no original product qualification"),
-        };
+            root.path(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let selected =
+            ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
+                source_root: "source".into(),
+                member: "startup.json".into(),
+                sha256: lillux::sha256_hex(
+                    b"static selected member, no original product qualification",
+                ),
+            };
         // Populate existing signed factory into SAME budget State, not a second
         // independently built State/proof. Obtain inputs through production verify.
         let hash = crate::persistent_session_admission::factory_controls::populate_fixture(
-            &mut fixture.state, Some(selected),
+            &mut fixture.state,
+            Some(selected),
         );
-        let inputs = crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
-            &fixture.state, &hash,
-        ).unwrap();
+        let inputs =
+            crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
+                &fixture.state,
+                &hash,
+            )
+            .unwrap();
         let pinned = fixture.state.state_store.pinned_state_authority().unwrap();
         let runtime = pinned.runtime_directory();
         let (path, scratch) = crate::temp_dir_guard::create_projectless_workspace(
-            &runtime.path().join("cache"), "manifest-negative-original",
-        ).unwrap();
+            &runtime.path().join("cache"),
+            "manifest-negative-original",
+        )
+        .unwrap();
         std::fs::write(path.join("sentinel"), b"same original scratch").unwrap();
         let (parent, name) = scratch.owned_scratch_parent().unwrap();
         // Intent DATA from actual owners; never reserved during fixture setup.
         let intent = crate::runtime_db::ProcessResourceReservationRecord {
-            owner_kind: "pooled_session".into(), owner_coordinate: name.to_str().unwrap().into(),
+            owner_kind: "pooled_session".into(),
+            owner_coordinate: name.to_str().unwrap().into(),
             daemon_generation_id: crate::runtime_db::daemon_generation_id().into(),
             selections: inputs.selected().selections().to_vec(),
-            allocation_limit: inputs.selected().max_concurrent_exclusive_allocations().unwrap(),
-            launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
-                cleanup_contract_digest: inputs.cleanup_contract_digest().into(),
-                host_lifetime: lillux::ProcessHostLifetime::capture_current().unwrap(),
-                phase: crate::runtime_db::TrustedResourceLaunchPhase::Reserved,
-            },
+            allocation_limit: inputs
+                .selected()
+                .max_concurrent_exclusive_allocations()
+                .unwrap(),
+            launch_authority:
+                crate::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                    cleanup_contract_digest: inputs.cleanup_contract_digest().into(),
+                    host_lifetime: lillux::ProcessHostLifetime::capture_current().unwrap(),
+                    phase: crate::runtime_db::TrustedResourceLaunchPhase::Reserved,
+                },
             runtime_custody: Some(ProcessResourceRuntimeCustody {
                 version: ProcessResourceRuntimeCustody::VERSION,
                 session_capsule_hash: hash.clone(),
@@ -5873,8 +6117,10 @@ mod tests {
         // proves no COMMITTED effect only, not absence of rolled-back attempts.
         let db = state.accounting.as_ref().unwrap();
         let conn = rusqlite::Connection::open_with_flags(
-            db.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
+            db.path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
         let original_id = intent.reservation_id().unwrap();
         let gates = conn.query_row(
             "SELECT COUNT(*) FROM resource_owner_accounting_gate WHERE original_reservation_id=?1",
@@ -5891,67 +6137,140 @@ mod tests {
     #[test]
     fn genuine_manifest_binder_refusal_restores_same_input_before_committed_financial_effect() {
         let (_root, fixture, hash, scratch, intent) = manifest_negative_fixture();
-        let inputs = crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
-            &fixture.state, &hash,
-        ).unwrap();
+        let inputs =
+            crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
+                &fixture.state,
+                &hash,
+            )
+            .unwrap();
         let devices = Arc::clone(inputs.selected().devices().unwrap());
         let budget = fixture.context.original_execution_budget().unwrap();
         let start = PersistentSessionPooledStart::new();
-        start.retain_original_callback_budget(budget, budget.precontact_binding().scope).unwrap();
-        let runtime_before = fixture.state.state_store.process_resource_reservations().unwrap();
+        start
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
+        let runtime_before = fixture
+            .state
+            .state_store
+            .process_resource_reservations()
+            .unwrap();
         let ledger_before = manifest_negative_ledger_effects(&fixture.state, &intent);
-        let cancelled = || { assert!(start.retained.try_lock().is_ok()); false };
-        let error = start.prepare_trusted_original_funding(
-            &fixture.state, inputs, budget.precontact_binding().scope, &intent,
-            Arc::clone(&scratch), &cancelled,
-        ).unwrap_err();
+        let cancelled = || {
+            assert!(start.retained.try_lock().is_ok());
+            false
+        };
+        let error = start
+            .prepare_trusted_original_funding(
+                &fixture.state,
+                inputs,
+                budget.precontact_binding().scope,
+                &intent,
+                Arc::clone(&scratch),
+                &cancelled,
+            )
+            .unwrap_err();
         // First refusal: SAME State uses disabled_for_authoring isolation.
         // Registered-backend and qualified-product checks are not reached.
         assert!(format!("{error:#}").contains("original"));
         let retained = start.retained.lock().unwrap();
-        assert_eq!(retained.manifest_preparation, OriginalManifestPreparationPhase::Refused);
+        assert_eq!(
+            retained.manifest_preparation,
+            OriginalManifestPreparationPhase::Refused
+        );
         let original = retained.original_manifest_restored.as_ref().unwrap();
         original.require_same_state(&fixture.state).unwrap();
         assert_eq!(original.capsule().content_hash().unwrap(), hash);
-        assert!(Arc::ptr_eq(original.selected().devices().unwrap(), &devices));
+        assert!(Arc::ptr_eq(
+            original.selected().devices().unwrap(),
+            &devices
+        ));
         assert!(retained.trusted_inputs.is_none() && retained.original_funding.is_none());
-        assert!(Arc::ptr_eq(retained.original_scratch.as_ref().unwrap(), &scratch));
-        assert!(PersistentSessionPooledStart::native_check_blocks_mutation(&retained));
+        assert!(Arc::ptr_eq(
+            retained.original_scratch.as_ref().unwrap(),
+            &scratch
+        ));
+        assert!(PersistentSessionPooledStart::native_check_blocks_mutation(
+            &retained
+        ));
         drop(retained);
-        assert_eq!(fixture.state.state_store.process_resource_reservations().unwrap(), runtime_before);
-        assert_eq!(manifest_negative_ledger_effects(&fixture.state, &intent), ledger_before);
+        assert_eq!(
+            fixture
+                .state
+                .state_store
+                .process_resource_reservations()
+                .unwrap(),
+            runtime_before
+        );
+        assert_eq!(
+            manifest_negative_ledger_effects(&fixture.state, &intent),
+            ledger_before
+        );
         assert_eq!(ledger_before, (0, 0));
-        assert_eq!(std::fs::read(scratch.path().unwrap().join("sentinel")).unwrap(), b"same original scratch");
+        assert_eq!(
+            std::fs::read(scratch.path().unwrap().join("sentinel")).unwrap(),
+            b"same original scratch"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn genuine_manifest_cancel_after_checkout_restores_original_devices_and_scratch() {
         let (_root, fixture, hash, scratch, intent) = manifest_negative_fixture();
-        let inputs = crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
-            &fixture.state, &hash,
-        ).unwrap();
+        let inputs =
+            crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
+                &fixture.state,
+                &hash,
+            )
+            .unwrap();
         let devices = Arc::clone(inputs.selected().devices().unwrap());
         let budget = fixture.context.original_execution_budget().unwrap();
         let start = PersistentSessionPooledStart::new();
-        start.retain_original_callback_budget(budget, budget.precontact_binding().scope).unwrap();
+        start
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
         let observed = std::cell::Cell::new(false);
         let cancelled = || {
             let retained = start.retained.lock().unwrap();
-            let in_flight = retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight;
+            let in_flight =
+                retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight;
             drop(retained);
-            if in_flight { observed.set(true); }
+            if in_flight {
+                observed.set(true);
+            }
             in_flight
         };
-        assert!(start.prepare_trusted_original_funding(
-            &fixture.state, inputs, budget.precontact_binding().scope, &intent,
-            Arc::clone(&scratch), &cancelled,
-        ).is_err());
+        assert!(
+            start
+                .prepare_trusted_original_funding(
+                    &fixture.state,
+                    inputs,
+                    budget.precontact_binding().scope,
+                    &intent,
+                    Arc::clone(&scratch),
+                    &cancelled,
+                )
+                .is_err()
+        );
         assert!(observed.get());
         let retained = start.retained.lock().unwrap();
-        assert_eq!(retained.manifest_preparation, OriginalManifestPreparationPhase::Refused);
-        assert!(Arc::ptr_eq(retained.original_manifest_restored.as_ref().unwrap().selected().devices().unwrap(), &devices));
-        assert!(Arc::ptr_eq(retained.original_scratch.as_ref().unwrap(), &scratch));
+        assert_eq!(
+            retained.manifest_preparation,
+            OriginalManifestPreparationPhase::Refused
+        );
+        assert!(Arc::ptr_eq(
+            retained
+                .original_manifest_restored
+                .as_ref()
+                .unwrap()
+                .selected()
+                .devices()
+                .unwrap(),
+            &devices
+        ));
+        assert!(Arc::ptr_eq(
+            retained.original_scratch.as_ref().unwrap(),
+            &scratch
+        ));
         assert!(retained.original_funding.is_none() && retained.trusted_inputs.is_none());
     }
 
@@ -5960,35 +6279,63 @@ mod tests {
     fn genuine_manifest_unwind_and_poison_conserve_checked_out_owner_without_prepared_setter() {
         for poison in [false, true] {
             let (_root, fixture, hash, scratch, intent) = manifest_negative_fixture();
-            let inputs = crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
-                &fixture.state, &hash,
-            ).unwrap();
+            let inputs =
+                crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
+                    &fixture.state,
+                    &hash,
+                )
+                .unwrap();
             let devices = Arc::clone(inputs.selected().devices().unwrap());
             let budget = fixture.context.original_execution_budget().unwrap();
             let start = PersistentSessionPooledStart::new();
-            start.retain_original_callback_budget(budget, budget.precontact_binding().scope).unwrap();
+            start
+                .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+                .unwrap();
             let cancelled = || {
                 let retained = start.retained.lock().unwrap();
-                if retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight {
-                    if !poison { drop(retained); }
+                if retained.manifest_preparation
+                    == OriginalManifestPreparationPhase::UnfundedInFlight
+                {
+                    if !poison {
+                        drop(retained);
+                    }
                     panic!("genuine operation unwind after unique checkout");
                 }
                 false
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 start.prepare_trusted_original_funding(
-                    &fixture.state, inputs, budget.precontact_binding().scope, &intent,
-                    Arc::clone(&scratch), &cancelled,
+                    &fixture.state,
+                    inputs,
+                    budget.precontact_binding().scope,
+                    &intent,
+                    Arc::clone(&scratch),
+                    &cancelled,
                 )
             }));
             assert!(outcome.is_err());
             assert_eq!(start.retained.is_poisoned(), poison);
             let retained = start.retained.lock().unwrap_or_else(|p| p.into_inner());
-            assert_eq!(retained.manifest_preparation, OriginalManifestPreparationPhase::Refused);
+            assert_eq!(
+                retained.manifest_preparation,
+                OriginalManifestPreparationPhase::Refused
+            );
             assert!(retained.admission_refused && retained.phase == PooledStartPhase::Unsettled);
-            assert!(Arc::ptr_eq(retained.original_manifest_restored.as_ref().unwrap().selected().devices().unwrap(), &devices));
+            assert!(Arc::ptr_eq(
+                retained
+                    .original_manifest_restored
+                    .as_ref()
+                    .unwrap()
+                    .selected()
+                    .devices()
+                    .unwrap(),
+                &devices
+            ));
             assert!(retained.original_funding.is_none() && retained.trusted_inputs.is_none());
-            assert!(Arc::ptr_eq(retained.original_scratch.as_ref().unwrap(), &scratch));
+            assert!(Arc::ptr_eq(
+                retained.original_scratch.as_ref().unwrap(),
+                &scratch
+            ));
         }
     }
 
@@ -5996,50 +6343,95 @@ mod tests {
     #[test]
     fn genuine_competing_manifest_deposit_quarantines_actual_owner_and_preserves_original_slot() {
         let (_root, fixture, hash, scratch, intent) = manifest_negative_fixture();
-        let inputs = crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
-            &fixture.state, &hash,
-        ).unwrap();
-        let competing = crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
-            &fixture.state, &hash,
-        ).unwrap();
+        let inputs =
+            crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
+                &fixture.state,
+                &hash,
+            )
+            .unwrap();
+        let competing =
+            crate::persistent_session_admission::VerifiedTrustedPooledSessionInputs::verify(
+                &fixture.state,
+                &hash,
+            )
+            .unwrap();
         let devices = Arc::clone(inputs.selected().devices().unwrap());
         let other_devices = Arc::clone(competing.selected().devices().unwrap());
         let pinned = fixture.state.state_store.pinned_state_authority().unwrap();
         let (_, competing_scratch) = crate::temp_dir_guard::create_projectless_workspace(
-            &pinned.runtime_directory().path().join("cache"), "manifest-negative-competitor",
-        ).unwrap();
+            &pinned.runtime_directory().path().join("cache"),
+            "manifest-negative-competitor",
+        )
+        .unwrap();
         let competitor = std::cell::RefCell::new(Some(competing));
         let cancellation = AtomicBool::new(false);
         let operation_cancelled = || cancellation.load(Ordering::Acquire);
         let budget = fixture.context.original_execution_budget().unwrap();
         let start = PersistentSessionPooledStart::new();
-        start.retain_original_callback_budget(budget, budget.precontact_binding().scope).unwrap();
+        start
+            .retain_original_callback_budget(budget, budget.precontact_binding().scope)
+            .unwrap();
         let cancelled = || {
             let retained = start.retained.lock().unwrap();
-            let in_flight = retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight;
+            let in_flight =
+                retained.manifest_preparation == OriginalManifestPreparationPhase::UnfundedInFlight;
             drop(retained);
             if in_flight {
                 if let Some(competing) = competitor.borrow_mut().take() {
                     // A genuinely supplied second owner, not replacement proof.
-                    assert!(start.prepare_trusted_original_funding(
-                        &fixture.state, competing, budget.precontact_binding().scope, &intent,
-                        Arc::clone(&competing_scratch), &operation_cancelled,
-                    ).is_err());
+                    assert!(
+                        start
+                            .prepare_trusted_original_funding(
+                                &fixture.state,
+                                competing,
+                                budget.precontact_binding().scope,
+                                &intent,
+                                Arc::clone(&competing_scratch),
+                                &operation_cancelled,
+                            )
+                            .is_err()
+                    );
                 }
             }
             operation_cancelled()
         };
-        assert!(start.prepare_trusted_original_funding(
-            &fixture.state, inputs, budget.precontact_binding().scope, &intent,
-            Arc::clone(&scratch), &cancelled,
-        ).is_err());
+        assert!(
+            start
+                .prepare_trusted_original_funding(
+                    &fixture.state,
+                    inputs,
+                    budget.precontact_binding().scope,
+                    &intent,
+                    Arc::clone(&scratch),
+                    &cancelled,
+                )
+                .is_err()
+        );
         assert!(competitor.borrow().is_none());
         let retained = start.retained.lock().unwrap();
-        assert_eq!(retained.manifest_preparation, OriginalManifestPreparationPhase::Refused);
-        assert!(Arc::ptr_eq(retained.original_manifest_restored.as_ref().unwrap().selected().devices().unwrap(), &devices));
+        assert_eq!(
+            retained.manifest_preparation,
+            OriginalManifestPreparationPhase::Refused
+        );
+        assert!(Arc::ptr_eq(
+            retained
+                .original_manifest_restored
+                .as_ref()
+                .unwrap()
+                .selected()
+                .devices()
+                .unwrap(),
+            &devices
+        ));
         assert_eq!(retained.quarantined_inputs.len(), 1);
-        assert!(Arc::ptr_eq(retained.quarantined_inputs[0].selected().devices().unwrap(), &other_devices));
-        assert!(Arc::ptr_eq(retained.original_scratch.as_ref().unwrap(), &scratch));
+        assert!(Arc::ptr_eq(
+            retained.quarantined_inputs[0].selected().devices().unwrap(),
+            &other_devices
+        ));
+        assert!(Arc::ptr_eq(
+            retained.original_scratch.as_ref().unwrap(),
+            &scratch
+        ));
         assert!(retained.lifelines.len() >= 2);
         assert!(retained.original_funding.is_none() && retained.trusted_inputs.is_none());
     }

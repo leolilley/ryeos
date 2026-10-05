@@ -35,6 +35,7 @@ ryeos-external-execution-contract = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-graph-definition = { workspace = true }
 ryeos-effect-contract = { workspace = true }
+ryeos-gpu-loader-owner-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }

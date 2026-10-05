@@ -262,14 +262,57 @@ impl PreparedTrustedSessionCustody {
                 )));
             }
         };
-        if !original_start.prepare_trusted_original_funding(
-            state,
-            self.verified_inputs,
-            allocation_scope,
-            &original,
-            self.workspace,
-            cancelled,
-        )? {
+        let gpu_project_path = self.workspace.path();
+        let gpu_roots: anyhow::Result<
+            Option<ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots<'_>>,
+        > = (|| {
+            if self.verified_inputs.has_selected_startup_contract() {
+                let selected = self.verified_inputs.selected_gpu_loader_realizations()?;
+                let external = self.external.as_ref().context(
+                    "selected GPU loader roots lack their same retained realization owner",
+                )?;
+                Ok(Some(BoundExternalRealizations::project_gpu_loader_roots(
+                    external,
+                    selected,
+                    gpu_project_path
+                        .as_deref()
+                        .context("selected GPU loader roots lack project coordinate")?,
+                )?))
+            } else {
+                Ok(None)
+            }
+        })();
+        let gpu_roots = match gpu_roots {
+            Ok(roots) => roots,
+            Err(error) => {
+                let retention = original_start
+                    .retain_before_contact(vec![Box::new(self)])
+                    .err();
+                return Err(error.context(format!(
+                    "same original custody retained on GPU root projection refusal: {retention:?}"
+                )));
+            }
+        };
+        let prepared = match gpu_roots {
+            Some(roots) => original_start.prepare_trusted_gpu_original_funding(
+                state,
+                self.verified_inputs,
+                allocation_scope,
+                &original,
+                self.workspace,
+                cancelled,
+                roots,
+            )?,
+            None => original_start.prepare_trusted_original_funding(
+                state,
+                self.verified_inputs,
+                allocation_scope,
+                &original,
+                self.workspace,
+                cancelled,
+            )?,
+        };
+        if !prepared {
             bail!("original trusted pooled funding was denied; same custody remains retained");
         }
         Ok(())

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::prepared_evidence_attachment::PreparedEvidenceAttachment;
 
 pub(crate) mod cleanup_channel;
+pub(crate) mod loader_closure;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,6 +207,9 @@ pub struct VerifiedTrustedPooledSessionInputs {
     startup_contract_selection:
         Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
     original_manifest_custody: Option<OriginalManifestPairCustody>,
+    gpu_loader_inventory:
+        Option<crate::persistent_session_admission::loader_closure::SealedGpuLoaderInventory>,
+    gpu_loader_inventory_refused: bool,
 }
 
 // Exact canonical CAS bytes and sealed copies stay in the SAME actual input
@@ -232,9 +236,13 @@ impl OriginalManifestDocument {
         expected: &serde_json::Value,
         maximum: u64,
     ) -> Result<()> {
-        let bytes = self.bytes.as_ref().context("borrowed manifest bytes are missing")?;
+        let bytes = self
+            .bytes
+            .as_ref()
+            .context("borrowed manifest bytes are missing")?;
         anyhow::ensure!(
-            !bytes.is_empty() && bytes.len() as u64 <= maximum
+            !bytes.is_empty()
+                && bytes.len() as u64 <= maximum
                 && maximum <= ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64,
             "borrowed manifest exceeds unchanged document cap"
         );
@@ -244,11 +252,17 @@ impl OriginalManifestDocument {
         );
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
         anyhow::ensure!(
-            lillux::canonical_json(&value).map_err(anyhow::Error::msg)?.as_bytes() == bytes
+            lillux::canonical_json(&value)
+                .map_err(anyhow::Error::msg)?
+                .as_bytes()
+                == bytes
                 && &value == expected,
             "borrowed manifest differs from canonical selected product value"
         );
-        let sealed = self.sealed.as_ref().context("borrowed manifest sealed owner is missing")?;
+        let sealed = self
+            .sealed
+            .as_ref()
+            .context("borrowed manifest sealed owner is missing")?;
         sealed.require_write_sealed_regular()?;
         let (copy, _) = sealed.read_regular_file_stable_bounded(maximum)?;
         anyhow::ensure!(
@@ -389,6 +403,22 @@ struct OriginalStartupContract {
     realizations: Option<ryeos_engine::external_realization::RealizedExternalContentSet>,
     contract: Option<DecodedStartupContract>,
     verified: bool,
+}
+
+fn ensure_gpu_loader_realization_ids(ids: &[&str]) -> Result<()> {
+    const EXPECTED: [&str; 6] = [
+        "driver",
+        "model",
+        "python-gnu",
+        "runtime",
+        "tinygrad",
+        "toolchain",
+    ];
+    anyhow::ensure!(
+        ids == EXPECTED,
+        "selected GPU loader realization IDs differ from fixed complete role set"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -718,35 +748,55 @@ impl VerifiedTrustedPooledSessionInputs {
     ) -> Result<OriginalManifestDocuments<'_>> {
         let validation: Result<()> = (|| {
             self.require_original_isolation_expectation(state)?;
-            let original = self.original_isolation.as_ref()
+            let original = self
+                .original_isolation
+                .as_ref()
                 .context("borrowed manifests lack actual original expectation")?;
             require_original_isolation_unexpired(original)?;
-            let pair = self.original_manifest_custody.as_ref()
+            let pair = self
+                .original_manifest_custody
+                .as_ref()
                 .context("original manifest pair is not prepared")?;
             anyhow::ensure!(
                 !pair.refused && pair.verified,
                 "original manifest pair is unverified or remains refused"
             );
-            let limits = state.node_policy
+            let limits = state
+                .node_policy
                 .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
                 .closure_limits()?;
-            let maximum = limits.max_object_bytes
+            let maximum = limits
+                .max_object_bytes
                 .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64);
             anyhow::ensure!(maximum > 0, "borrowed manifest object cap is zero");
-            let gnu_bytes = pair.gnu.bytes.as_ref().context("borrowed GNU bytes are missing")?;
-            let driver_bytes = pair.driver.bytes.as_ref().context("borrowed driver bytes are missing")?;
+            let gnu_bytes = pair
+                .gnu
+                .bytes
+                .as_ref()
+                .context("borrowed GNU bytes are missing")?;
+            let driver_bytes = pair
+                .driver
+                .bytes
+                .as_ref()
+                .context("borrowed driver bytes are missing")?;
             anyhow::ensure!(
-                !gnu_bytes.is_empty() && gnu_bytes.len() as u64 <= maximum
-                    && !driver_bytes.is_empty() && driver_bytes.len() as u64 <= maximum,
+                !gnu_bytes.is_empty()
+                    && gnu_bytes.len() as u64 <= maximum
+                    && !driver_bytes.is_empty()
+                    && driver_bytes.len() as u64 <= maximum,
                 "borrowed manifest pair exceeds unchanged document caps"
             );
-            let total = gnu_bytes.len().checked_add(driver_bytes.len())
+            let total = gnu_bytes
+                .len()
+                .checked_add(driver_bytes.len())
                 .context("borrowed manifest pair size overflow")?;
             anyhow::ensure!(
                 total <= 2 * ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES,
                 "borrowed manifest pair exceeds sixteen MiB"
             );
-            let products = self.original_product_inputs.as_ref()
+            let products = self
+                .original_product_inputs
+                .as_ref()
                 .context("borrowed manifests lack actual selected product owners")?;
             require_original_isolation_unexpired(original)?;
             pair.gnu.validate_borrowed_data(
@@ -773,9 +823,13 @@ impl VerifiedTrustedPooledSessionInputs {
             }
             return Err(error);
         }
-        let pair = self.original_manifest_custody.as_ref()
+        let pair = self
+            .original_manifest_custody
+            .as_ref()
             .expect("complete pair validated in same exclusive borrow");
-        let products = self.original_product_inputs.as_ref()
+        let products = self
+            .original_product_inputs
+            .as_ref()
             .expect("actual selected product owners validated");
         Ok(OriginalManifestDocuments {
             _owner: self,
@@ -787,9 +841,18 @@ impl VerifiedTrustedPooledSessionInputs {
             },
             driver: OriginalManifestDocumentObservation {
                 role: ryeos_engine::isolation::OriginalProductManifestRole::Driver,
-                descriptor: pair.driver.sealed.as_ref().expect("actual driver seal validated"),
+                descriptor: pair
+                    .driver
+                    .sealed
+                    .as_ref()
+                    .expect("actual driver seal validated"),
                 selected_raw_sha256: &products.driver.selection.manifest_hash,
-                bytes: pair.driver.bytes.as_ref().expect("driver bytes validated").len() as u64,
+                bytes: pair
+                    .driver
+                    .bytes
+                    .as_ref()
+                    .expect("driver bytes validated")
+                    .len() as u64,
             },
         })
     }
@@ -900,9 +963,40 @@ impl VerifiedTrustedPooledSessionInputs {
         pair.verified = result.is_ok();
         result
     }
-    pub(crate) fn has_selected_startup_contract(&self) -> bool {
+    pub fn has_selected_startup_contract(&self) -> bool {
         self.startup_contract_selection.is_some()
     }
+
+    /// Borrow the exact selected complete set needed by the GPU loader
+    /// inventory. This returns no materialization or descriptor authority.
+    pub fn selected_gpu_loader_realizations(
+        &self,
+    ) -> Result<&ryeos_engine::external_realization::RealizedExternalContentSet> {
+        let startup = self
+            .original_startup_contract
+            .as_ref()
+            .context("GPU loader inventory lacks original startup contract")?;
+        anyhow::ensure!(
+            self.startup_contract_selection.is_some() && startup.verified,
+            "GPU loader inventory requires verified original startup contract"
+        );
+        anyhow::ensure!(
+            self.original_product_inputs.is_some(),
+            "GPU loader inventory lacks selected GNU and driver product owners"
+        );
+        let realizations = startup
+            .realizations
+            .as_ref()
+            .context("GPU loader inventory lacks exact selected complete realization set")?;
+        realizations.validate()?;
+        let ids = realizations
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        ensure_gpu_loader_realization_ids(&ids)?;
+        Ok(realizations)
+    }
+
     pub(crate) fn original_startup_request_inputs(
         &self,
         state: &crate::state::AppState,
@@ -972,13 +1066,27 @@ impl VerifiedTrustedPooledSessionInputs {
         // Independently derive expected request even if its plan carrier was
         // removed. Current DATA never upgrades this owner to physical authority.
         let resolution = exact.resolution_output.restore();
-        let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. }
-            = &capsule.execution_closure else { bail!("trusted pooled inputs lack direct plan"); };
-        let plan: ryeos_engine::contracts::ExecutionPlan = serde_json::from_value(execution_plan.clone())?;
-        if resolution.composed.derived.contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
-            || plan.current_target_request.is_some() {
-            let source = crate::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)?
-                .context("current target DATA lacks retained signed Worker source")?;
+        let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan,
+            ..
+        } = &capsule.execution_closure
+        else {
+            bail!("trusted pooled inputs lack direct plan");
+        };
+        let plan: ryeos_engine::contracts::ExecutionPlan =
+            serde_json::from_value(execution_plan.clone())?;
+        if resolution
+            .composed
+            .derived
+            .contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+            || plan.current_target_request.is_some()
+        {
+            let source = crate::source_closure_admission::recover_source_closure(
+                state,
+                &state.engine,
+                &resolution,
+            )?
+            .context("current target DATA lacks retained signed Worker source")?;
             source.verify_retained_worker_target_data(&state.engine, &resolution, &plan)?;
         }
         // All current execution is held, including this original owner. A
@@ -1018,6 +1126,8 @@ impl VerifiedTrustedPooledSessionInputs {
             original_startup_contract: None,
             startup_contract_selection: session.startup_contract.clone(),
             original_manifest_custody: None,
+            gpu_loader_inventory: None,
+            gpu_loader_inventory_refused: false,
         };
         inputs.require_same_state(state)?;
         Ok(inputs)
@@ -2291,9 +2401,16 @@ mod tests {
         OriginalManifestDocument,
     ) {
         let (root, state, value, hash) = manifest_data_fixture();
-        let cas = state.state_store.pinned_state_authority().unwrap().cas_store().unwrap();
+        let cas = state
+            .state_store
+            .pinned_state_authority()
+            .unwrap()
+            .cas_store()
+            .unwrap();
         let mut document = OriginalManifestDocument {
-            object_hash: hash.clone(), bytes: None, sealed: None,
+            object_hash: hash.clone(),
+            bytes: None,
+            sealed: None,
         };
         document.retain_cas_bytes(&cas, 1024).unwrap();
         document.verify_and_seal(&value, 1024).unwrap();
@@ -2306,27 +2423,59 @@ mod tests {
         let (_root, _state, value, hash, document) = borrowed_manifest_data_fixture();
         let size = document.bytes.as_ref().unwrap().len() as u64;
         let original = document.sealed.as_ref().unwrap().clone();
-        document.validate_borrowed_data(&hash, &value, size).unwrap();
-        assert!(document.sealed.as_ref().unwrap().same_file_identity(&original).unwrap());
+        document
+            .validate_borrowed_data(&hash, &value, size)
+            .unwrap();
+        assert!(
+            document
+                .sealed
+                .as_ref()
+                .unwrap()
+                .same_file_identity(&original)
+                .unwrap()
+        );
         original.require_write_sealed_regular().unwrap();
-        for maximum in [0, size - 1, ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64 + 1] {
-            let error = document.validate_borrowed_data(&hash, &value, maximum).unwrap_err();
-            assert!(error.to_string().contains("unchanged document cap"), "{error}");
+        for maximum in [
+            0,
+            size - 1,
+            ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64 + 1,
+        ] {
+            let error = document
+                .validate_borrowed_data(&hash, &value, maximum)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("unchanged document cap"),
+                "{error}"
+            );
         }
-        document.validate_borrowed_data(&hash, &value, size).unwrap();
+        document
+            .validate_borrowed_data(&hash, &value, size)
+            .unwrap();
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_independent_hash_and_typed_value_mismatch_refuse() {
         let (_root, _state, value, hash, document) = borrowed_manifest_data_fixture();
-        let error = document.validate_borrowed_data(&lillux::sha256_hex(b"foreign identity"), &value, 1024)
+        let error = document
+            .validate_borrowed_data(&lillux::sha256_hex(b"foreign identity"), &value, 1024)
             .unwrap_err();
-        assert!(error.to_string().contains("independently selected raw identity"));
-        let error = document.validate_borrowed_data(&hash, &serde_json::json!({"foreign":"value"}), 1024)
+        assert!(
+            error
+                .to_string()
+                .contains("independently selected raw identity")
+        );
+        let error = document
+            .validate_borrowed_data(&hash, &serde_json::json!({"foreign":"value"}), 1024)
             .unwrap_err();
-        assert!(error.to_string().contains("canonical selected product value"));
-        document.validate_borrowed_data(&hash, &value, 1024).unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("canonical selected product value")
+        );
+        document
+            .validate_borrowed_data(&hash, &value, 1024)
+            .unwrap();
     }
 
     #[test]
@@ -2342,11 +2491,15 @@ mod tests {
                 document.sealed = None;
                 "sealed owner is missing"
             };
-            let error = document.validate_borrowed_data(&hash, &value, 1024).unwrap_err();
+            let error = document
+                .validate_borrowed_data(&hash, &value, 1024)
+                .unwrap_err();
             assert!(error.to_string().contains(diagnostic), "{error}");
             original.require_write_sealed_regular().unwrap();
-            assert_eq!(original.read_regular_file_stable_bounded(1024).unwrap().0,
-                lillux::canonical_json(&value).unwrap().as_bytes());
+            assert_eq!(
+                original.read_regular_file_stable_bounded(1024).unwrap().0,
+                lillux::canonical_json(&value).unwrap().as_bytes()
+            );
         }
     }
 
@@ -2355,17 +2508,31 @@ mod tests {
     fn borrowed_manifest_mutable_descriptor_refuses_even_with_same_raw_bytes() {
         let (root, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
         let original = document.sealed.as_ref().unwrap().clone();
-        std::fs::write(root.path().join("mutable-manifest.json"), document.bytes.as_ref().unwrap()).unwrap();
+        std::fs::write(
+            root.path().join("mutable-manifest.json"),
+            document.bytes.as_ref().unwrap(),
+        )
+        .unwrap();
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
-        let mutable = directory.open_pinned_regular_descendant(
-            std::path::Path::new("mutable-manifest.json"), false,
-        ).unwrap().unwrap();
+        let mutable = directory
+            .open_pinned_regular_descendant(std::path::Path::new("mutable-manifest.json"), false)
+            .unwrap()
+            .unwrap();
         document.sealed = Some(mutable.inherited_descriptor_authority().unwrap());
-        let error = document.validate_borrowed_data(&hash, &value, 1024).unwrap_err();
-        assert!(error.to_string().contains("not sealed against content mutation"), "{error}");
+        let error = document
+            .validate_borrowed_data(&hash, &value, 1024)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not sealed against content mutation"),
+            "{error}"
+        );
         original.require_write_sealed_regular().unwrap();
-        assert_eq!(original.read_regular_file_stable_bounded(1024).unwrap().0,
-            document.bytes.as_ref().unwrap().as_slice());
+        assert_eq!(
+            original.read_regular_file_stable_bounded(1024).unwrap().0,
+            document.bytes.as_ref().unwrap().as_slice()
+        );
     }
 
     #[test]
@@ -2376,11 +2543,23 @@ mod tests {
         let bytes = document.bytes.as_ref().unwrap().clone();
         document.sealed = Some(lillux::sealed_memfd(c"substituted-data-control", b"{}").unwrap());
         let substituted = document.sealed.as_ref().unwrap().clone();
-        let error = document.validate_borrowed_data(&hash, &value, 1024).unwrap_err();
+        let error = document
+            .validate_borrowed_data(&hash, &value, 1024)
+            .unwrap_err();
         assert!(error.to_string().contains("sealed copy differs"), "{error}");
-        assert!(document.sealed.as_ref().unwrap().same_file_identity(&substituted).unwrap());
+        assert!(
+            document
+                .sealed
+                .as_ref()
+                .unwrap()
+                .same_file_identity(&substituted)
+                .unwrap()
+        );
         assert_eq!(document.bytes.as_ref().unwrap(), &bytes);
-        assert_eq!(original.read_regular_file_stable_bounded(1024).unwrap().0, bytes);
+        assert_eq!(
+            original.read_regular_file_stable_bounded(1024).unwrap().0,
+            bytes
+        );
         // This leaf preserves data only; sticky ORIGINAL pair/current-State/
         // generation/device/expiry/restoration needs genuine factory controls.
     }

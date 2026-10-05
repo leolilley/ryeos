@@ -25,6 +25,7 @@ members = [
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
     "crates/tools/handler-bins",
+    "crates/tools/gpu-loader-owner-contract",
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",
     "crates/engine/ryeos-provider-contract",
@@ -108,6 +109,7 @@ ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
 ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }
+ryeos-gpu-loader-owner-contract = { path = "crates/tools/gpu-loader-owner-contract" }
 ryeos-structured-session = { path = "crates/tools/structured-session" }
 ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter" }
 ryeos-lillux-oci-hook = { path = "crates/host-adapters/lillux-oci-hook" }
