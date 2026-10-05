@@ -159,15 +159,40 @@ def run_product(
         gnu_bounds=retained_gnu_bounds, driver_bounds=retained_driver_bounds
     )
     import importlib
-    from cuda_lifecycle import install
+    from cuda_lifecycle import install, _fence_installation_owners, _InstallationFailureEvidence
     if bindings is None:
         bindings = importlib.import_module("tinygrad.runtime.autogen.cuda")
     verify_origins((gnu / "python", worker, tinygrad))
-    lifecycle = install(
-        selected_device=0, observe=observe, bindings=bindings,
-        expected_uuid_v2_hex=retained_uuid_v2_hex,
-        require_single_visible_device=True,
-    )
+    published_owners = []
+    failure_evidence = _InstallationFailureEvidence()
+    lifecycle = None
+
+    def publish_owner(owner):
+        # Retain every supplied owner before refusing duplicate publication.
+        # Neither publication nor object identity supplies admission authority.
+        published_owners.append(owner)
+        failure_evidence.owners.append(owner)
+        if owner is None or len(published_owners) != 1:
+            raise RuntimeError("lifecycle installation owner publication is missing or duplicated")
+
+    try:
+        lifecycle = install(
+            selected_device=0, observe=observe, bindings=bindings,
+            expected_uuid_v2_hex=retained_uuid_v2_hex,
+            require_single_visible_device=True,
+            publish_owner=publish_owner,
+        )
+        failure_evidence.owners.append(lifecycle)
+        if len(published_owners) != 1 or lifecycle is not published_owners[0]:
+            raise RuntimeError("lifecycle installation returned a different or unpublished owner")
+    except BaseException as error:
+        # Also fence a substituted returned owner. Attempt all distinct owners,
+        # retain the first, and preserve this error even if fencing fails.
+        try:
+            failure_evidence = _fence_installation_owners(error, failure_evidence)
+        except BaseException as evidence_error:
+            failure_evidence.evidence_failures.append(evidence_error)
+        raise
 
     def load_session():
         # Keep this selected-product gate before compiler/session/model imports

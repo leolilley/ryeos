@@ -110,8 +110,23 @@ class Lifecycle:
             if not callable(self._native_uuid) or ctypes.sizeof(self._uuid_type) != 16:
                 raise LifecycleError("selected driver UUID-v2 ABI differs")
         self._result: ShutdownResult | None = None
+        self._installation_failure: BaseException | None = None
         self._policy = lambda: None
         self._terminalize = lambda: None
+
+    def abort_installation(self, error: BaseException) -> None:
+        """Fence partial installation without native close or retirement evidence.
+
+        Keep hooks, inventory and the first failure with this same owner. D's
+        independent process/resource owner must settle the remaining uncertainty.
+        """
+        with self._lock:
+            if self._installation_failure is not None:
+                return
+            self._installation_failure = error
+            self._state = "failed"
+            self._poison = self._poison or "lifecycle installation failed"
+            self._result = ShutdownResult("failed", error="lifecycle installation failed")
 
     @contextmanager
     def submission(self):
@@ -343,9 +358,49 @@ class Lifecycle:
             return self._result
 
 
+class _InstallationFailureEvidence:
+    """Local custody independent of exception metadata and formatting hooks.
+
+    Catch-site locals retain this holder through the initiating traceback even
+    when the exception refuses evidence attributes or notes.
+    """
+    __slots__ = ("owners", "fence_failures", "evidence_failures")
+
+    def __init__(self):
+        self.owners = []
+        self.fence_failures = []
+        self.evidence_failures = []
+
+
+def _fence_installation_owners(error: BaseException, evidence: _InstallationFailureEvidence):
+    """Fence all retained owners before best-effort exception annotation."""
+    attempted = []
+    for owner in evidence.owners:
+        if owner is None or any(owner is prior for prior in attempted):
+            continue
+        attempted.append(owner)
+        try:
+            owner.abort_installation(error)
+        except BaseException as failure:
+            evidence.fence_failures.append(failure)
+    # No reads from error metadata precede fencing. Attribute and annotation
+    # failures are secondary evidence, never prerequisites for retaining owners.
+    try:
+        error._installation_failure_evidence = evidence
+    except BaseException as failure:
+        evidence.evidence_failures.append(failure)
+    for failure in evidence.fence_failures:
+        try:
+            BaseException.add_note(error, "installation owner fence failed")
+        except BaseException as annotation_failure:
+            evidence.evidence_failures.append(annotation_failure)
+    return evidence
+
+
 def install(*, bindings=None, selected_device: int = 0, observe: Callable | None = None,
             expected_uuid_v2_hex: str | None = None,
-            require_single_visible_device: bool = False) -> Lifecycle:
+            require_single_visible_device: bool = False,
+            publish_owner: Callable | None = None) -> Lifecycle:
     """Install once after the exact DLL resolver, before any CUDA consumer.
 
     observe is optional for offline/source preparation ONLY. Production runtime
@@ -353,7 +408,12 @@ def install(*, bindings=None, selected_device: int = 0, observe: Callable | None
     expected_uuid_v2_hex is comparison data only. None preserves the unqualified
     source-preparation path; a trusted launch must obtain the expected value
     from D's independently admitted original device owner before native use.
+    publish_owner retains the same lifecycle before consumer mutations. It is
+    optional for direct source callers, required by run_product, and grants no
+    admission authority. Failure fences the owner without claiming retirement.
     """
+    if publish_owner is not None and not callable(publish_owner):
+        raise LifecycleError("invalid installation owner publication callback")
     if isinstance(selected_device, bool) or selected_device != 0:
         raise LifecycleError("first product selects only device ordinal zero")
     if observe is not None and not callable(observe): raise LifecycleError("invalid observer")
@@ -381,6 +441,21 @@ def install(*, bindings=None, selected_device: int = 0, observe: Callable | None
         raise LifecycleError("selected driver lacks visible-device count binding")
     lifecycle = Lifecycle(bindings, selected_device, observe, expected_uuid_v2_hex,
                           require_single_visible_device)
+    failure_evidence = _InstallationFailureEvidence()
+    failure_evidence.owners.append(lifecycle)
+    try:
+        if publish_owner is not None:
+            publish_owner(lifecycle)
+        return _install_consumers(lifecycle, bindings, helpers, Buffer, Device)
+    except BaseException as error:
+        try:
+            failure_evidence = _fence_installation_owners(error, failure_evidence)
+        except BaseException as evidence_error:
+            failure_evidence.evidence_failures.append(evidence_error)
+        raise
+
+
+def _install_consumers(lifecycle, bindings, helpers, Buffer, Device):
     def policy():
         if (repr(helpers.DEV) != "CUDA:PTX" or helpers.JIT.value != 0 or helpers.PROFILE.value != 0
                 or helpers.DEBUG.value != 0 or helpers.BEAM.value != 0 or helpers.VALIDATE_WITH_CPU.value != 0):
