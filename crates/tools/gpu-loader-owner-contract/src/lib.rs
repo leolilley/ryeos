@@ -4,6 +4,8 @@
 //! and descriptor authorities. It cannot export descriptors, authorize a
 //! launch, or replace the App's independent comparison with retained inputs.
 
+pub mod startup_v3;
+
 use std::collections::BTreeSet;
 
 use anyhow::ensure;
