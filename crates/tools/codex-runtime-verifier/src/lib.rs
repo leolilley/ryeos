@@ -4,6 +4,7 @@
 //! still needs to own the native guest and real app-server observations.
 
 pub mod app_server;
+mod consumer_checker_projection;
 pub mod consumer_controller;
 pub mod consumer_observer;
 pub mod consumer_outer_owner;
