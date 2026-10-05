@@ -123,7 +123,7 @@ pub struct ExecutionParams {
 /// temp-dir lifeline, then durably stops, exact-kills, and settles the owned
 /// wait-owned execution tree. A closed shutdown gate transfers that work to the
 /// shutdown coordinator; detached handoff explicitly disarms this guard.
-struct ExecutionGuard {
+pub(super) struct ExecutionGuard {
     state: AppState,
     thread_id: Option<String>,
     /// Owned project workspace used for journal/foldback authority.
@@ -140,7 +140,7 @@ struct ExecutionGuard {
 
 /// Inert precontact owner shape. No constructor exposes it to native launch;
 /// activation requires the separately reviewed composition root and bounds.
-struct SelectedQualificationInvocation<
+pub(super) struct SelectedQualificationInvocation<
     G = ExecutionGuard,
     C = ThreadLaunchClaim,
     P = ryeos_app::callback_token::PairedRemoteConsumerCustody,
@@ -162,6 +162,9 @@ impl<G, C, P> SelectedQualificationInvocation<G, C, P> {
 }
 
 impl SelectedQualificationInvocation {
+    pub(super) fn claim_identity(&self) -> (&str, &str, &str) {
+        self.claim.selected_claim_identity()
+    }
     /// Only the complete precontact owners may be moved here. This constructor
     /// grants no selected spawn; no postcontact caller uses this inert shape.
     fn from_precontact(

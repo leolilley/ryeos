@@ -6,14 +6,18 @@ const CAPACITY: usize = 32;
 #[derive(Debug)]
 struct StoreIdentity;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SelectedGeneration {
     store: Arc<StoreIdentity>,
     generation: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SelectedTicket {
+#[derive(Clone)]
+/// Opaque exact invocation identity; no production pending issuer exists.
+/// ```compile_fail
+/// let ticket = ryeos_app::SelectedTicket::default();
+/// ```
+pub struct SelectedTicket {
     registration: SelectedGeneration,
     slot: usize,
     nonce: u64,
@@ -22,15 +26,63 @@ pub(crate) struct SelectedTicket {
     owner: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SelectedBorrowTicket {
-    ticket: SelectedTicket,
+#[derive(Clone)]
+/// Exact borrower metadata, not native loan or settlement authority.
+/// ```compile_fail
+/// let borrower = ryeos_app::SelectedBorrowTicket::default();
+/// ```
+pub struct SelectedBorrowTicket {
+    // Cloning the exact return ticket after App mutation is an Arc increment,
+    // not a new fallible allocation of strings or a new borrower identity.
+    ticket: Arc<SelectedTicket>,
     borrower: u64,
 }
 
+impl std::fmt::Debug for SelectedGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SelectedGeneration { .. }")
+    }
+}
+impl std::fmt::Debug for SelectedTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SelectedTicket { .. }")
+    }
+}
+impl std::fmt::Debug for SelectedBorrowTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SelectedBorrowTicket { .. }")
+    }
+}
+
 impl SelectedBorrowTicket {
+    pub fn invocation(&self) -> &SelectedTicket { &self.ticket }
     pub(crate) fn claim_identity(&self) -> (&str, &str, &str) {
         (&self.ticket.thread, &self.ticket.claim, &self.ticket.owner)
+    }
+}
+
+impl PartialEq for SelectedTicket {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.registration.store, &other.registration.store)
+            && self.registration.generation == other.registration.generation
+            && self.slot == other.slot && self.nonce == other.nonce
+            && self.thread == other.thread && self.claim == other.claim && self.owner == other.owner
+    }
+}
+impl Eq for SelectedTicket {}
+impl PartialEq for SelectedBorrowTicket {
+    fn eq(&self, other: &Self) -> bool {
+        self.ticket == other.ticket && self.borrower == other.borrower
+    }
+}
+impl Eq for SelectedBorrowTicket {}
+
+impl SelectedTicket {
+    pub fn matches_claim(&self, thread: &str, claim: &str, owner: &str) -> bool {
+        self.thread == thread && self.claim == claim && self.owner == owner
+    }
+    pub(crate) fn claim_identity(&self) -> (&str, &str, &str) {
+        (&self.thread, &self.claim, &self.owner)
     }
 }
 
@@ -62,7 +114,7 @@ pub(crate) enum SelectedBookkeepingError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SelectedBorrowReturn {
+pub enum SelectedBorrowReturn {
     Returned,
     AlreadyReturned,
 }
@@ -149,7 +201,7 @@ impl SelectedInvocationBookkeeping {
         Ok(record)
     }
 
-    fn install(&mut self, ticket: &SelectedTicket) -> Result<(), SelectedBookkeepingError> {
+    pub(crate) fn install(&mut self, ticket: &SelectedTicket) -> Result<(), SelectedBookkeepingError> {
         if self.closed { return Err(SelectedBookkeepingError::Closed); }
         let r = self.record(ticket)?;
         if r.refused { return Err(SelectedBookkeepingError::Refused); }
@@ -158,22 +210,25 @@ impl SelectedInvocationBookkeeping {
         Ok(())
     }
 
-    fn borrow(&mut self, ticket: &SelectedTicket) -> Result<SelectedBorrowTicket, SelectedBookkeepingError> {
+    pub(crate) fn borrow(&mut self, ticket: &SelectedTicket) -> Result<SelectedBorrowTicket, SelectedBookkeepingError> {
         if self.closed { return Err(SelectedBookkeepingError::Closed); }
         let borrower = self.next_borrower;
         let next = borrower.checked_add(1).ok_or(SelectedBookkeepingError::Exhausted)?;
         let r = self.record(ticket)?;
         if r.refused { return Err(SelectedBookkeepingError::Refused); }
         if r.phase != Phase::Occupied { return Err(SelectedBookkeepingError::WrongState); }
-        let loan = SelectedBorrowTicket { ticket: ticket.clone(), borrower };
+        let loan = SelectedBorrowTicket { ticket: Arc::new(ticket.clone()), borrower };
         r.phase = Phase::Borrowed(borrower);
         r.last_returned = None;
         self.next_borrower = next;
         Ok(loan)
     }
 
-    fn restored(&mut self, loan: &SelectedBorrowTicket) -> Result<(), SelectedBookkeepingError> {
+    pub(crate) fn restored(&mut self, loan: &SelectedBorrowTicket) -> Result<(), SelectedBookkeepingError> {
         let r = self.record(&loan.ticket)?;
+        if r.phase == Phase::RestoredAwaitingBorrowAck(loan.borrower)
+            || (r.phase == Phase::Occupied && r.last_returned == Some(loan.borrower))
+        { return Ok(()); }
         if r.phase != Phase::Borrowed(loan.borrower) { return Err(SelectedBookkeepingError::WrongState); }
         r.phase = Phase::RestoredAwaitingBorrowAck(loan.borrower);
         Ok(())
@@ -209,7 +264,7 @@ impl SelectedInvocationBookkeeping {
 
     fn close_admission(&mut self) { self.closed = true; }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn fixture_restored_borrow(
         &mut self, generation: &SelectedGeneration, thread: &str, claim: &str, owner: &str,
     ) -> SelectedBorrowTicket {
@@ -237,6 +292,15 @@ mod tests {
         let t = b.pending(&g, "thread", "claim", "owner").unwrap();
         b.install(&t).unwrap();
         (b, t)
+    }
+
+    #[test]
+    fn public_identity_debug_is_redacted() {
+        let (mut b, ticket) = occupied();
+        let borrower = b.borrow(&ticket).unwrap();
+        assert_eq!(format!("{:?}", ticket.registration), "SelectedGeneration { .. }");
+        assert_eq!(format!("{ticket:?}"), "SelectedTicket { .. }");
+        assert_eq!(format!("{borrower:?}"), "SelectedBorrowTicket { .. }");
     }
 
     #[test]

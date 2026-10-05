@@ -99,7 +99,9 @@ pub mod scoped_producer_process;
 pub mod scoped_producer_start;
 pub mod scoped_producer_stop;
 mod selected_invocation_bookkeeping;
-pub use selected_invocation_bookkeeping::SelectedGeneration;
+pub use selected_invocation_bookkeeping::{
+    SelectedBorrowReturn, SelectedBorrowTicket, SelectedGeneration, SelectedTicket,
+};
 pub mod service_registry;
 pub mod source_closure_admission;
 pub mod standalone_audit;

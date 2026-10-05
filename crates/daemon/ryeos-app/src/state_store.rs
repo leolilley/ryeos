@@ -1739,6 +1739,8 @@ fn cooperate_while_blocking<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
+enum SelectedMetadataAccess { Start, Return }
+
 pub struct StateStore {
     state_authority: ryeos_state::PinnedStateAuthority,
     thread_runtime_authority: Option<ThreadRuntimeAuthority>,
@@ -19726,26 +19728,87 @@ impl StateStore {
 
     /// Metadata return acknowledgment only. No production borrower issuer is
     /// exposed in this cut, and this is not native/financial settlement evidence.
-    pub(crate) fn ack_selected_borrow_return(
+    pub fn ack_selected_borrow_return(
         &self,
-        borrower: &crate::selected_invocation_bookkeeping::SelectedBorrowTicket,
-    ) -> Result<crate::selected_invocation_bookkeeping::SelectedBorrowReturn> {
+        borrower: &crate::SelectedBorrowTicket,
+    ) -> Result<crate::SelectedBorrowReturn> {
+        self.with_selected_metadata_claim(borrower.invocation(), SelectedMetadataAccess::Return, |selected| {
+            selected.ack_selected_borrow_return(borrower)
+        })
+    }
+
+    /// Metadata only; no production pending-ticket issuer exists yet.
+    pub fn confirm_selected_metadata_install(&self, ticket: &crate::SelectedTicket) -> Result<()> {
+        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| selected.install(ticket))
+    }
+
+    /// Names a metadata borrower, not a native loan or contact permission.
+    pub fn begin_selected_metadata_borrow(
+        &self, ticket: &crate::SelectedTicket,
+    ) -> Result<crate::SelectedBorrowTicket> {
+        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| selected.borrow(ticket))
+    }
+
+    pub fn mark_selected_metadata_restored(&self, borrower: &crate::SelectedBorrowTicket) -> Result<()> {
+        self.with_selected_metadata_claim(borrower.invocation(), SelectedMetadataAccess::Return, |selected| selected.restored(borrower))
+    }
+
+    /// Row-only dependency fixture. No capsule/native/root/loan issuer, and
+    /// absent from production builds. Uses the actual current active claim.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fixture_selected_restored_metadata(
+        &self, thread_id: &str,
+    ) -> Result<crate::SelectedBorrowTicket> {
+        let generation = self.register_selected_bookkeeping_generation()?;
         let store = self.lock()?;
         let active = self.active_launch_owners.lock()
             .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
         let mut selected = self.selected_invocations.lock()
             .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
-        let (thread_id, claim_id, owner) = borrower.claim_identity();
+        let claim = store.runtime_db.get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("metadata fixture requires a genuine current claim"))?;
+        if !active.contains(&claim.claimed_by)
+            || claim.owner.daemon_generation_id != runtime_db::daemon_generation_id()
+        {
+            bail!("metadata fixture claim is not active in this generation");
+        }
+        Ok(selected.fixture_restored_borrow(
+            &generation, thread_id, &claim.claim_id, &claim.claimed_by,
+        ))
+    }
+
+    // Private pure-metadata operation: no public callback or native cleanup
+    // bridge. All callers above invoke only the finite registry transitions.
+    fn with_selected_metadata_claim<T>(
+        &self,
+        ticket: &crate::SelectedTicket,
+        access: SelectedMetadataAccess,
+        operation: impl FnOnce(&mut crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping)
+            -> std::result::Result<T, crate::selected_invocation_bookkeeping::SelectedBookkeepingError>,
+    ) -> Result<T> {
+        let store = self.lock()?;
+        let active = self.active_launch_owners.lock()
+            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let mut selected = self.selected_invocations.lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
+        if matches!(access, SelectedMetadataAccess::Start)
+            && (self.read_only || !self.process_attachment_admission_open.load(Ordering::Acquire))
+        {
+            bail!("selected metadata admission is closed");
+        }
+        let (thread_id, claim_id, owner) = ticket.claim_identity();
         let claim = store.runtime_db.get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("selected borrower durable claim is absent"))?;
         if claim.thread_id != thread_id || claim.claim_id != claim_id
             || claim.claimed_by != owner || !active.contains(owner)
+            || claim.owner.thread_id != thread_id
+            || claim.owner.daemon_generation_id != runtime_db::daemon_generation_id()
         {
             bail!("selected borrower claim/active association changed");
         }
         // All fallible durable checks precede the exact metadata mutation.
-        selected.ack_selected_borrow_return(borrower)
-            .map_err(|error| anyhow!("selected borrow-return acknowledgment refused: {error:?}"))
+        operation(&mut selected)
+            .map_err(|error| anyhow!("selected metadata transition refused: {error:?}"))
     }
 
     /// Release a launch claim the caller owns (matched by `claim_id`).
@@ -23060,6 +23123,30 @@ mod tests {
         let other = test_store();
         other.register_selected_bookkeeping_generation().unwrap();
         assert!(other.ack_selected_borrow_return(&borrower).is_err());
+    }
+
+    #[test]
+    fn selected_return_retries_after_close_but_new_metadata_borrow_refuses() {
+        let store = test_store();
+        let generation = store.register_selected_bookkeeping_generation().unwrap();
+        let thread = "T-selected-return-close";
+        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
+        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap().unwrap();
+        let first = store.selected_invocations.lock().unwrap()
+            .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
+        let ticket = first.invocation().clone();
+        store.mark_selected_metadata_restored(&first).unwrap();
+        store.ack_selected_borrow_return(&first).unwrap();
+        let second = store.begin_selected_metadata_borrow(&ticket).unwrap();
+        assert!(store.mark_selected_metadata_restored(&first).is_err());
+        store.close_process_attachment_admission().unwrap();
+        store.mark_selected_metadata_restored(&second).unwrap();
+        store.mark_selected_metadata_restored(&second).unwrap();
+        assert_eq!(store.ack_selected_borrow_return(&second).unwrap(), crate::SelectedBorrowReturn::Returned);
+        assert_eq!(store.ack_selected_borrow_return(&second).unwrap(), crate::SelectedBorrowReturn::AlreadyReturned);
+        assert!(store.begin_selected_metadata_borrow(&ticket).is_err());
+        assert!(store.ack_selected_borrow_return(&first).is_err());
     }
 
     #[test]
