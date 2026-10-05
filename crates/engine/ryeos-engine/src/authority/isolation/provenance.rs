@@ -250,6 +250,8 @@ pub struct AppliedIsolationLaunchAwaitingAttachment {
     /// Exact destination/kind/access expectation compiled independently of
     /// adapter translation, before the held target or provider can run.
     pub expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
+    /// Private compiler custody; callers cannot construct or replace it.
+    pub(crate) original_command_binding: Option<super::CompiledOriginalCommandBinding>,
 }
 
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {

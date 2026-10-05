@@ -592,6 +592,7 @@ struct SelectedOriginalLaunchContext {
     provenance: crate::isolation::IsolationLaunchProvenance,
     original_deadline: lillux::time::MonotonicDeadline,
     backend_capture: std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    command_binding: crate::isolation::CompiledOriginalCommandBinding,
 }
 
 /// A spawned execution whose exact target exists but cannot execute user code
@@ -1352,6 +1353,14 @@ fn isolation_plan_request_awaiting_attachment(
         let expected_mount_preparation = applied.expected_mount_preparation.ok_or_else(|| {
             EngineError::Internal("selected compiler omitted mount commitments".into())
         })?;
+        let command_binding = applied.original_command_binding.take().ok_or_else(|| {
+            EngineError::Internal("selected compiler omitted actual command custody".into())
+        })?;
+        command_binding.require_same_compilation(
+            &expected_applied_launch,
+            &expected_mount_preparation,
+            &backend_capture,
+        )?;
         if original_deadline.has_elapsed() {
             return Err(EngineError::Internal(
                 "selected original launch context expired during compilation".into(),
@@ -1363,6 +1372,7 @@ fn isolation_plan_request_awaiting_attachment(
             provenance: applied.provenance,
             original_deadline,
             backend_capture,
+            command_binding,
         };
         return Ok((applied.request, Some(selected_launch_context)));
     }

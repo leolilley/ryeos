@@ -90,6 +90,119 @@ struct CompiledIsolationLaunch {
     expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
     expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
     loopback_transfer: Option<CompiledLoopbackTransfer>,
+    original_command_binding: Option<CompiledOriginalCommandBinding>,
+}
+
+/// Custody produced only by the actual original held target compiler.
+/// No selected GPU role, funding, applied observation or release authority.
+pub(crate) struct CompiledOriginalCommandBinding {
+    command: IsolationAdmittedCommand,
+    realization_tree: Option<lillux::InheritedDescriptorAuthority>,
+    target: lillux::LinuxSandboxAppliedLaunchCommitments,
+    mounts: lillux::LinuxSandboxMountPreparationCommitments,
+    backend: Arc<VerifiedIsolationBackendCapture>,
+    original_deadline: lillux::time::MonotonicDeadline,
+}
+
+impl CompiledOriginalCommandBinding {
+    pub(crate) fn require_same_compilation(
+        &self,
+        target: &lillux::LinuxSandboxAppliedLaunchCommitments,
+        mounts: &lillux::LinuxSandboxMountPreparationCommitments,
+        backend: &Arc<VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if self.target != *target || self.mounts != *mounts || !Arc::ptr_eq(&self.backend, backend) {
+            return Err(refused(
+                "original command custody differs from its compiler return".into(),
+            ));
+        }
+        if self.original_deadline.has_elapsed() {
+            return Err(refused(
+                "original command custody expired before process contact".into(),
+            ));
+        }
+        let command = match &self.command {
+            IsolationAdmittedCommand::DescriptorBound(command) => {
+                if self.realization_tree.is_some() {
+                    return Err(refused("standalone command custody carries a foreign tree".into()));
+                }
+                command
+            }
+            IsolationAdmittedCommand::RealizationMember(command) => {
+                let tree = self.realization_tree.as_ref().ok_or_else(|| {
+                    refused("original member command custody lost its actual tree".into())
+                })?;
+                if tree.directory_identity().map_err(|error| {
+                    refused(format!("identify retained original command tree: {error}"))
+                })? != command.realization_root() {
+                    return Err(refused("original member command custody changed tree".into()));
+                }
+                command.command()
+            }
+        };
+        validate_descriptor_bound_command(command)
+    }
+}
+
+// Called downstream of target preparation with the exact selected mount
+// handle. A source identity or public descriptor-bound DTO alone is insufficient.
+fn retain_original_prepared_command(
+    authority: Option<IsolationCommandAuthorityRef<'_>>,
+    prepared_target: &lillux::InheritedDescriptorAuthority,
+) -> Result<IsolationAdmittedCommand, EngineError> {
+    let (retained, command) = match authority {
+        Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
+            (
+                IsolationAdmittedCommand::DescriptorBound(command.clone()),
+                command,
+            )
+        }
+        Some(IsolationCommandAuthorityRef::RealizationMember(member)) => {
+            (
+                IsolationAdmittedCommand::RealizationMember(member.clone()),
+                member.command(),
+            )
+        }
+        _ => {
+            return Err(refused(
+                "original held compiler requires an admitted descriptor-backed command".into(),
+            ));
+        }
+    };
+    validate_descriptor_bound_command(command)?;
+    if !command
+        .executable()
+        .same_file_identity(prepared_target)
+        .map_err(|error| refused(format!("compare original prepared executable: {error}")))?
+        || descriptor_file_identity(prepared_target)? != command.file_identity()
+    {
+        return Err(refused(
+            "original command descriptor differs from prepared target".into(),
+        ));
+    }
+    Ok(retained)
+}
+
+fn retain_original_prepared_tree(
+    command: &IsolationAdmittedCommand,
+    mounts: &[IsolationReadOnlyMountAuthority],
+) -> Result<Option<lillux::InheritedDescriptorAuthority>, EngineError> {
+    let IsolationAdmittedCommand::RealizationMember(member) = command else {
+        return Ok(None);
+    };
+    let mount = mounts.iter().find(|mount| {
+        matches!(
+            mount.scope(),
+            IsolationReadOnlyMountScope::ProjectRealization
+                | IsolationReadOnlyMountScope::ExecutionRuntimeRealization
+        ) && mount.destination() == member.realization_destination()
+    }).ok_or_else(|| refused("original command custody lost its prepared tree mount".into()))?;
+    if mount.source().directory_identity().map_err(|error| {
+        refused(format!("identify original prepared command tree: {error}"))
+    })? != member.realization_root() {
+        return Err(refused("original prepared command tree binding changed".into()));
+    }
+    Ok(Some(mount.source().clone()))
 }
 
 struct CompiledLoopbackTransfer {
@@ -2411,6 +2524,7 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: None,
         })
     }
 
@@ -2452,6 +2566,7 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: None,
         })
     }
 
@@ -2502,6 +2617,18 @@ impl IsolationRuntime {
                 "original backend capture deadline expired during compilation".into(),
             ));
         }
+        let binding = applied.original_command_binding.as_ref().ok_or_else(|| {
+            refused("original compiler omitted prepared command custody".into())
+        })?;
+        binding.require_same_compilation(
+            applied.expected_applied_launch.as_ref().ok_or_else(|| {
+                refused("original compiler omitted target commitments".into())
+            })?,
+            applied.expected_mount_preparation.as_ref().ok_or_else(|| {
+                refused("original compiler omitted mount commitments".into())
+            })?,
+            capture,
+        )?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
             request: IsolationRequestAwaitingAttachment::new_with_original_backend_capture(
                 applied.request,
@@ -2510,6 +2637,7 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: applied.original_command_binding,
         })
     }
 
@@ -2612,6 +2740,17 @@ impl IsolationRuntime {
         let verified_command_authority = context
             .verified_command
             .map(|authority| authority.authority());
+        if original_occupancy.is_some()
+            && !matches!(
+                verified_command_authority,
+                Some(IsolationCommandAuthorityRef::DescriptorBound(_))
+                    | Some(IsolationCommandAuthorityRef::RealizationMember(_))
+            )
+        {
+            return Err(refused(
+                "original held compiler cannot use a data-only command fallback".into(),
+            ));
+        }
         if request.argv0.is_some() {
             return Err(refused(
                 "caller-supplied subprocess argv[0] is not admitted by isolation policy"
@@ -2973,6 +3112,7 @@ impl IsolationRuntime {
                 expected_applied_launch: None,
                 expected_mount_preparation: None,
                 loopback_transfer: None,
+                original_command_binding: None,
             });
         }
         if !request.inherited_fds.is_empty() {
@@ -4881,6 +5021,50 @@ impl IsolationRuntime {
         launch_request
             .validate()
             .map_err(|error| refused(format!("invalid isolation launch request: {error}")))?;
+        // Only now have descriptor/member preparation, target mount selection,
+        // exact commitments and the complete request validation succeeded.
+        let original_command_binding = if let Some(original_deadline) = original_occupancy_deadline {
+            let target_role = launch_request
+                .authorities
+                .iter()
+                .find(|authority| authority.id == launch_request.plan.target.executable)
+                .ok_or_else(|| refused("original compiled target authority missing".into()))?;
+            if target_role.purpose != IsolationAuthorityPurpose::Executable {
+                return Err(refused(
+                    "original compiled target is not executable authority".into(),
+                ));
+            }
+            let prepared_target = authority_handles
+                .iter()
+                .find(|handle| handle.inherited_descriptor().ok() == Some(target_role.inherited_fd))
+                .ok_or_else(|| {
+                    refused("original compiled target descriptor owner missing".into())
+                })?;
+            let command =
+                retain_original_prepared_command(verified_command_authority, prepared_target)?;
+            let realization_tree =
+                retain_original_prepared_tree(&command, context.external_read_only_mounts)?;
+            let backend_capture = self
+                .verified_backend_capture
+                .as_ref()
+                .ok_or_else(|| refused("original compiled command lacks captured backend".into()))?;
+            let binding = CompiledOriginalCommandBinding {
+                command,
+                realization_tree,
+                target: expected_applied_launch.clone(),
+                mounts: expected_mount_preparation.clone(),
+                backend: Arc::clone(backend_capture),
+                original_deadline,
+            };
+            binding.require_same_compilation(
+                &expected_applied_launch,
+                &expected_mount_preparation,
+                backend_capture,
+            )?;
+            Some(binding)
+        } else {
+            None
+        };
         let request_bytes = serde_json::to_vec(&launch_request)
             .map_err(|error| refused(format!("serialize isolation request: {error}")))?;
         if request_bytes.len() > ryeos_isolation_protocol::MAX_REQUEST_BYTES {
@@ -4977,6 +5161,7 @@ impl IsolationRuntime {
                 receiver,
                 request: launch_request,
             }),
+            original_command_binding,
         })
     }
 
@@ -7538,6 +7723,133 @@ mod tests {
             .capture_verified_command(&command, Some(&project), Some(&live_access))
             .unwrap_err();
         assert!(error.to_string().contains("path binding changed"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_refuses_missing_and_data_only_owners() {
+        let target = lillux::sealed_memfd(c"unselected-target", b"data").unwrap();
+        let identity = IsolationVerifiedCode {
+            source_path: "/admitted/owner".into(),
+            content_hash: lillux::sha256_hex(b"data"),
+        };
+        assert!(retain_original_prepared_command(None, &target).is_err());
+        assert!(retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::Revalidate(&identity)),
+            &target,
+        ).is_err());
+        assert!(target.file_identity().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn original_retention_control_command() -> IsolationDescriptorBoundCommand {
+        let bytes = b"original command retention component control";
+        let executable = lillux::sealed_executable_memfd(c"original-command-control", bytes).unwrap();
+        let file_identity = descriptor_file_identity(&executable).unwrap();
+        IsolationDescriptorBoundCommand::new(
+            IsolationVerifiedCode {
+                source_path: "/admitted/owner".into(),
+                content_hash: lillux::sha256_hex(bytes),
+            },
+            executable,
+            file_identity,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_refuses_different_inode_with_identical_bytes() {
+        let command = original_retention_control_command();
+        let replacement = original_retention_control_command();
+        assert_eq!(command.identity(), replacement.identity());
+        assert!(retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+            replacement.executable(),
+        ).is_err());
+        assert!(command.executable().file_identity().is_ok());
+        assert!(replacement.executable().file_identity().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_retains_exact_owner_after_source_drop() {
+        let command = original_retention_control_command();
+        let retained = retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+            command.executable(),
+        ).unwrap();
+        assert!(retained.same_binding_as(&command.clone().into()).unwrap());
+        let before = command.file_identity();
+        drop(command);
+        let IsolationAdmittedCommand::DescriptorBound(command) = retained else {
+            panic!("retention changed command variant");
+        };
+        assert_eq!(descriptor_file_identity(command.executable()).unwrap(), before);
+        validate_descriptor_bound_command(&command).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_member_retains_root_and_destination_distinctions() {
+        let command = original_retention_control_command();
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let root_a = lillux::PinnedDirectory::open(root_a.path()).unwrap().unwrap();
+        let root_b = lillux::PinnedDirectory::open(root_b.path()).unwrap().unwrap();
+        let member = IsolationRealizationMemberCommand::new(
+            command.clone(), root_a.identity().unwrap(), "/runtime/selected".into(),
+        );
+        let retained = retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::RealizationMember(&member)),
+            command.executable(),
+        ).unwrap();
+        assert!(retained.same_binding_as(&member.clone().into()).unwrap());
+        let other_root = IsolationRealizationMemberCommand::new(
+            command.clone(), root_b.identity().unwrap(), "/runtime/selected".into(),
+        );
+        let other_destination = IsolationRealizationMemberCommand::new(
+            command, root_a.identity().unwrap(), "/runtime/substituted".into(),
+        );
+        assert!(!retained.same_binding_as(&other_root.into()).unwrap());
+        assert!(!retained.same_binding_as(&other_destination.into()).unwrap());
+        drop(member);
+        let IsolationAdmittedCommand::RealizationMember(member) = retained else {
+            panic!("retention discarded member tree placement");
+        };
+        validate_descriptor_bound_command(member.command()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_tree_refuses_substitution_and_retains_live_root() {
+        let source = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(source.path()).unwrap().unwrap();
+        let other = lillux::PinnedDirectory::open(foreign.path()).unwrap().unwrap();
+        let member: IsolationAdmittedCommand = IsolationRealizationMemberCommand::new(
+            original_retention_control_command(),
+            root.identity().unwrap(),
+            "/runtime/selected".into(),
+        ).into();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.path().into(), "/runtime/selected".into(),
+            root.inherited_descriptor_authority().unwrap(),
+        );
+        let replacement = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            foreign.path().into(), "/runtime/selected".into(),
+            other.inherited_descriptor_authority().unwrap(),
+        );
+        let wrong_destination = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.path().into(), "/runtime/other".into(),
+            root.inherited_descriptor_authority().unwrap(),
+        );
+        assert!(retain_original_prepared_tree(&member, &[]).is_err());
+        assert!(retain_original_prepared_tree(&member, &[replacement]).is_err());
+        assert!(retain_original_prepared_tree(&member, &[wrong_destination]).is_err());
+        let identity = root.identity().unwrap();
+        let retained = retain_original_prepared_tree(&member, &[mount]).unwrap().unwrap();
+        drop(root);
+        assert_eq!(retained.directory_identity().unwrap(), identity);
     }
 
     #[cfg(target_os = "linux")]
