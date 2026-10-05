@@ -1575,6 +1575,60 @@ fn valid_boot_id(value: &str) -> bool {
 }
 
 impl ProcessScope {
+    /// Component preflight only. This does not authenticate an upper admission.
+    pub(crate) fn require_selected_launch_right(&self) -> Result<(), String> {
+        if self.launch_available {
+            Ok(())
+        } else {
+            Err("selected scope launch right already consumed".into())
+        }
+    }
+
+    pub(crate) fn consume_selected_launch_right(&mut self) -> Result<(), String> {
+        self.require_selected_launch_right()?;
+        self.launch_available = false;
+        Ok(())
+    }
+
+    fn selected_control_bound(
+        &self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<crate::time::MonotonicDeadline, String> {
+        if original.has_elapsed() || self.recovery.control_timeout.is_zero() {
+            return Err("selected scope control bound unavailable".into());
+        }
+        Ok(original.min(crate::time::MonotonicDeadline::after(
+            self.recovery.control_timeout,
+        )))
+    }
+
+    pub(crate) fn require_held_member_until(
+        &self,
+        pid: u32,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let bound = self.selected_control_bound(original)?;
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => scope.require_member_until(pid, bound),
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("selected scope membership unavailable".into()),
+        }
+    }
+
+    pub(crate) fn request_selected_termination_until(
+        &self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let bound = self.selected_control_bound(original)?;
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => scope.request_termination_until(bound),
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("selected scope termination unavailable".into()),
+        }
+    }
+
     /// Install and read back scope-wide limits while this exact reservation is
     /// still empty. A failure grants no weaker launch path; the owner must
     /// retire the unlaunched reservation through its durable journal.
@@ -1908,6 +1962,101 @@ mod tests {
         serde_json::json!({"version": SCOPE_CONFIGURATION_VERSION, "backend": {
             "implementation": "linux_cgroup_v2", "parent": "/explicit/delegation"
         }})
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires separately authorized explicit disposable cgroup delegation; component control only"]
+    fn selected_no_child_retains_consumed_actual_scope_until_local_empty() {
+        let root =
+            std::env::var_os("LILLUX_TEST_CGROUP_PARENT").expect("explicit disposable delegation");
+        let config: ProcessScopeConfiguration = serde_json::from_value(serde_json::json!({
+            "version": SCOPE_CONFIGURATION_VERSION,
+            "backend": {"implementation": "linux_cgroup_v2", "parent": root}
+        }))
+        .unwrap();
+        let provider = ProcessScopeProvider::open(&config).unwrap();
+        let scope = provider
+            .reserve(
+                &format!("selected-nochild-{:032x}", rand::random::<u128>()),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let recovery = scope.recovery().clone();
+        let mut status = crate::exec::supervised_launcher_attachment_status_pipe().unwrap();
+        status
+            .reader
+            .require_applied_launch_receipt("test.selected-scoped/v1")
+            .unwrap();
+        status.reader.require_mount_preparation_receipt().unwrap();
+        let mut request = Some(crate::SubprocessRequest {
+            cmd: "/missing-selected-scoped-component-command".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: vec![status.writer],
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: Some(status.reader),
+        });
+        let mut source_scope = Some(scope);
+        // Synthetic compiler commitments select no admitted caller and yield
+        // no positive native evidence; creation intentionally fails before exec.
+        let mut target = Some(crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [0; 32],
+            argv_sha256: [0; 32],
+            environment_sha256: [0; 32],
+            cwd_sha256: [0; 32],
+        });
+        let mut mounts = Some(crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        });
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut storage = crate::exec::SelectedScopedStorage::for_component_test();
+        let mut ledger = storage.borrow_for_component_test();
+        ledger
+            .prepare_from_compiled_slots(
+                &mut request,
+                &mut source_scope,
+                &mut target,
+                &mut mounts,
+                original,
+                original,
+            )
+            .unwrap();
+        assert!(
+            request.is_none() && source_scope.is_none() && target.is_none() && mounts.is_none()
+        );
+        assert_eq!(
+            ledger.create(),
+            crate::exec::SelectedScopedObservation::RefusedWithoutChild
+        );
+        assert!(
+            ledger
+                .require_recorded_local_scope_settlement(&recovery)
+                .is_err()
+        );
+        assert_eq!(
+            ledger.observe_cleanup(),
+            crate::exec::SelectedScopedObservation::LocallySettled
+        );
+        ledger
+            .require_recorded_local_scope_settlement(&recovery)
+            .unwrap();
+        assert_eq!(
+            ledger.create(),
+            crate::exec::SelectedScopedObservation::Refused
+        );
+        // Fixture directory retirement only after actual local proof; not App
+        // reservation clearing, refunded funding or enclosing root qualification.
+        drop(ledger);
+        drop(storage);
+        provider.retire(&recovery, Duration::from_secs(5)).unwrap();
     }
 
     #[test]

@@ -885,7 +885,7 @@ pub struct SubprocessResult {
     pub stderr_truncated: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum InitialLauncherStatus {
     Target(u32, Option<crate::LinuxSandboxMountPreparationReceipt>),
     Refused(String),
@@ -4714,6 +4714,10 @@ impl std::os::fd::AsRawFd for ForkChildCloseFile {
 #[cfg(unix)]
 impl Drop for ForkChildCloseFile {
     fn drop(&mut self) {
+        if self.file.is_none() {
+            // Selected bounded close already removed the exact registration.
+            return;
+        }
         let barrier = direct_attachment_fork_barrier();
         barrier
             .waiting_descriptor_closers
@@ -4755,6 +4759,61 @@ impl Drop for ForkChildCloseFile {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn selected_close_inherited_copies(
+    copies: &mut Vec<InheritedDescriptorAuthority>,
+    original: crate::time::MonotonicDeadline,
+) -> Result<bool, String> {
+    // Remove only duplicate Arcs for which another SAME vector owner remains.
+    let mut index = 0;
+    while index < copies.len() {
+        if copies[..index]
+            .iter()
+            .any(|prior| Arc::ptr_eq(&prior.handle, &copies[index].handle))
+        {
+            copies.swap_remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    if copies.is_empty() {
+        return Ok(true);
+    }
+    if original.has_elapsed() {
+        return Ok(false);
+    }
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = match barrier.state.try_lock() {
+        Ok(state) => state,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err("selected descriptor barrier poisoned".into());
+        }
+    };
+    if state.fork_quiesced || original.has_elapsed() {
+        return Ok(false);
+    }
+    for copy in copies.iter_mut() {
+        if let Some(handle) = Arc::get_mut(&mut copy.handle) {
+            if handle.file.is_some() {
+                if original.has_elapsed() {
+                    return Ok(false);
+                }
+                if !state.fork_child_close_fds.remove(&handle.fd) {
+                    return Err("selected inherited descriptor registration missing".into());
+                }
+                // Drop ONLY the uniquely owned plain File, under same barrier.
+                handle.file.take();
+            }
+        }
+    }
+    let closed = copies.iter().all(|copy| copy.handle.file.is_none());
+    // Uniquely closed owners have inert Drop; shared owners remain in ledger.
+    copies.retain(|copy| copy.handle.file.is_some());
+    barrier.changed.notify_all();
+    Ok(closed)
+}
+
 /// Register an already-open descriptor while its caller retains a
 /// fork-sensitive lease acquired before opening it.
 #[cfg(unix)]
@@ -4782,6 +4841,8 @@ pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCl
 struct PendingForkControlDescriptor {
     fd: i32,
     writer: Option<std::fs::File>,
+    #[cfg(target_os = "linux")]
+    selected_scoped_borrowed: bool,
 }
 
 impl PendingForkControlDescriptor {
@@ -4815,6 +4876,9 @@ impl PendingForkControlDescriptor {
             let locked = barrier.state.try_lock();
             let mut state = match locked {
                 Ok(state) => state,
+                Err(std::sync::TryLockError::Poisoned(_)) if self.selected_scoped_borrowed => {
+                    return Err("selected scoped release barrier poisoned".into());
+                }
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     mode.pause(deadline);
@@ -4825,6 +4889,12 @@ impl PendingForkControlDescriptor {
                 drop(state);
                 mode.pause(deadline);
                 continue;
+            }
+            if self.selected_scoped_borrowed {
+                mode.check(deadline)?;
+                if request_expiry.is_some_and(|expiry| Instant::now() >= expiry) {
+                    return Err("selected scoped release closure completed late".into());
+                }
             }
             if !state.pending_fork_control_fds.remove(&self.fd) {
                 return Err("selected release descriptor registration lost".into());
@@ -4847,6 +4917,12 @@ impl Drop for PendingForkControlDescriptor {
     fn drop(&mut self) {
         // Selected bounded closure already unregistered and closed under the
         // same barrier. Ordinary descriptors keep their existing Drop path.
+        #[cfg(target_os = "linux")]
+        if self.selected_scoped_borrowed && self.writer.is_some() {
+            // Unresolved final destruction is unsupported: upper must retain
+            // this descriptor. Never enter the unbounded ordinary closer.
+            return;
+        }
         if self.writer.is_none() {
             return;
         }
@@ -4900,6 +4976,8 @@ fn register_pending_fork_control_file(file: std::fs::File) -> PendingForkControl
     PendingForkControlDescriptor {
         fd,
         writer: Some(file),
+        #[cfg(target_os = "linux")]
+        selected_scoped_borrowed: false,
     }
 }
 
@@ -5019,6 +5097,74 @@ struct AttachmentWorkerGate {
     prepared_mappings: Option<PreparedInheritedMappings>,
 }
 
+#[cfg(target_os = "linux")]
+struct SelectedScopedPipe<T>(Arc<Mutex<T>>);
+#[cfg(target_os = "linux")]
+impl<T: Read> Read for SelectedScopedPipe<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("selected pipe poisoned"))?
+            .read(bytes)
+    }
+}
+#[cfg(target_os = "linux")]
+impl<T: Write> Write for SelectedScopedPipe<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("selected pipe poisoned"))?
+            .write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("selected pipe poisoned"))?
+            .flush()
+    }
+}
+
+enum SpawnPipe<T> {
+    Owned(T),
+    #[cfg(target_os = "linux")]
+    Selected(SelectedScopedPipe<T>),
+}
+impl<T: Read> Read for SpawnPipe<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Owned(pipe) => pipe.read(bytes),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.read(bytes),
+        }
+    }
+}
+impl<T: Write> Write for SpawnPipe<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Owned(pipe) => pipe.write(bytes),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.write(bytes),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Owned(pipe) => pipe.flush(),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.flush(),
+        }
+    }
+}
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> std::os::fd::AsRawFd for SpawnPipe<T> {
+    fn as_raw_fd(&self) -> i32 {
+        match self {
+            Self::Owned(pipe) => pipe.as_raw_fd(),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.0.lock().unwrap_or_else(|p| p.into_inner()).as_raw_fd(),
+        }
+    }
+}
+
 /// A running subprocess that can be waited on later.
 pub struct RunningProcess {
     // Platform ownership stays here. Applications retain the opaque recovery
@@ -5058,6 +5204,14 @@ pub struct RunningProcess {
     /// proving every local obligation. Raw native/output custody stays here.
     #[cfg(target_os = "linux")]
     selected_cleanup_complete: bool,
+    #[cfg(target_os = "linux")]
+    selected_scoped_borrowed: bool,
+    #[cfg(target_os = "linux")]
+    selected_scoped_stdin: Option<Arc<Mutex<process::ChildStdin>>>,
+    #[cfg(target_os = "linux")]
+    selected_scoped_stdout: Option<Arc<Mutex<process::ChildStdout>>>,
+    #[cfg(target_os = "linux")]
+    selected_scoped_stderr: Option<Arc<Mutex<process::ChildStderr>>>,
     /// Fixed diagnostic facts in stdin/stdout/stderr/status order. A panicked
     /// join ends that worker lifetime; it is not process or native testimony.
     #[cfg(target_os = "linux")]
@@ -5071,6 +5225,7 @@ pub struct RunningProcess {
     /// original channel wait or retries a consumed observation.
     applied_receipt_failure: Option<String>,
     applied_receipt_returned: bool,
+    selected_initial_status: Option<Result<InitialLauncherStatus, String>>,
     stdout_capture: SharedCapture,
     stderr_capture: SharedCapture,
     stdout_reader_taken: bool,
@@ -5153,6 +5308,1317 @@ enum AttachmentPendingOwner {
     Supervised {
         running: Box<RunningProcess>,
     },
+}
+
+#[cfg(target_os = "linux")]
+fn selected_scoped_pin_exited(pin: &OwnedFd) -> Result<bool, String> {
+    match native_terminal_pin_has_exited(pin) {
+        NativeTerminalPinObservation::Exited => Ok(true),
+        NativeTerminalPinObservation::NotExited | NativeTerminalPinObservation::Interrupted => {
+            Ok(false)
+        }
+        NativeTerminalPinObservation::Error(detail) => Err(detail),
+        NativeTerminalPinObservation::NotAttempted => Err("selected pin not observed".into()),
+    }
+}
+
+/// Private actual lower owners. Only the lexical surface is externally nameable.
+/// A separately reviewed composition must retain storage until ALL duties settle.
+#[cfg(target_os = "linux")]
+struct SelectedScopedCustody {
+    request: Option<SubprocessRequest>,
+    scope: Option<crate::ProcessScope>,
+    target: Option<crate::LinuxSandboxAppliedLaunchCommitments>,
+    mounts: Option<crate::LinuxSandboxMountPreparationCommitments>,
+    bounds: Option<SelectedSupervisedBounds>,
+    request_expiry: Option<Instant>,
+    create_started: bool,
+    create_attempted: bool,
+    refused: bool,
+    release_attempted: bool,
+    released: bool,
+    termination_attempted: bool,
+    scope_empty: bool,
+    locally_settled: bool,
+    running: Option<RunningProcess>,
+    setup_child: Option<process::Child>,
+    setup_status: Option<SupervisedProcessStatus>,
+    setup_fds: Vec<InheritedDescriptorAuthority>,
+    setup_mappings: Vec<InheritedDescriptorMapping>,
+    setup_mapping_lifelines: Vec<InheritedDescriptorAuthority>,
+    setup_reaped: bool,
+    terminal: Option<process::ExitStatus>,
+    result: Option<SubprocessResult>,
+    failure: Option<SubprocessResult>,
+    watchdog: Option<SelectedScopedWatchdog>,
+}
+
+/// Opaque whole lower storage, eventually retained inside the composition Box.
+/// No production constructor, borrow issuer or owner extraction exists in L1.
+/// Merely declaring this type does not implement safe unresolved final Drop.
+///
+/// ```compile_fail
+/// let storage = lillux::exec::SelectedScopedStorage::empty();
+/// ```
+/// ```compile_fail
+/// let storage: lillux::exec::SelectedScopedStorage = Default::default();
+/// ```
+#[cfg(target_os = "linux")]
+pub struct SelectedScopedStorage {
+    custody: SelectedScopedCustody,
+}
+
+/// Exclusive lexical mechanics over the SAME private storage. Original bounds
+/// transport mechanics only; App/Executor admission remains a separate issuer.
+/// There is no production mint, owned return, DerefMut or lifetime widening.
+///
+/// ```compile_fail
+/// use lillux::exec::SelectedScopedBorrow;
+/// fn shorten<'long: 'short, 'short>(
+///     loan: SelectedScopedBorrow<'long>,
+/// ) -> SelectedScopedBorrow<'short> { loan }
+/// ```
+/// ```compile_fail
+/// use lillux::exec::{SelectedScopedBorrow, SelectedScopedStorage};
+/// fn extract(loan: SelectedScopedBorrow<'_>) -> SelectedScopedStorage {
+///     loan.into_inner()
+/// }
+/// ```
+/// ```compile_fail
+/// use lillux::exec::{SelectedScopedBorrow, SelectedScopedHeldView};
+/// fn escape(loan: &SelectedScopedBorrow<'_>) -> Option<SelectedScopedHeldView<'static>> {
+///     loan.held()
+/// }
+/// ```
+#[cfg(target_os = "linux")]
+pub struct SelectedScopedBorrow<'loan> {
+    custody: &'loan mut SelectedScopedCustody,
+    invariant: std::marker::PhantomData<fn(&'loan ()) -> &'loan ()>,
+}
+
+// Lillux unit fixtures only. Dependency builds (including Engine tests) do not
+// receive a mint. Native production issuance/restoration remains unimplemented.
+#[cfg(all(test, target_os = "linux"))]
+impl SelectedScopedStorage {
+    pub(crate) fn for_component_test() -> Self {
+        Self {
+            custody: SelectedScopedCustody::empty(),
+        }
+    }
+
+    pub(crate) fn borrow_for_component_test(&mut self) -> SelectedScopedBorrow<'_> {
+        SelectedScopedBorrow {
+            custody: &mut self.custody,
+            invariant: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopedBorrow<'_> {
+    pub fn prepare_from_compiled_slots(
+        &mut self,
+        request: &mut Option<SubprocessRequest>,
+        scope: &mut Option<crate::ProcessScope>,
+        target: &mut Option<crate::LinuxSandboxAppliedLaunchCommitments>,
+        mounts: &mut Option<crate::LinuxSandboxMountPreparationCommitments>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        self.custody.prepare_from_compiled_slots(
+            request,
+            scope,
+            target,
+            mounts,
+            original_service,
+            original_cleanup,
+        )
+    }
+
+    pub fn create(&mut self) -> SelectedScopedObservation {
+        self.custody.create()
+    }
+
+    pub fn held(&self) -> Option<SelectedScopedHeldView<'_>> {
+        self.custody.held()
+    }
+
+    pub fn release_after_attachment(&mut self) -> SelectedScopedObservation {
+        self.custody.release_after_attachment()
+    }
+
+    pub fn retained_applied(&self) -> Option<&crate::LinuxSandboxAppliedLaunchReceipt> {
+        self.custody.retained_applied()
+    }
+
+    pub fn retained_result(&self) -> Option<&SubprocessResult> {
+        self.custody.retained_result()
+    }
+
+    pub fn observe_applied(&mut self) -> SelectedScopedObservation {
+        self.custody.observe_applied()
+    }
+
+    pub fn observe_runtime(
+        &mut self,
+        cancelled: impl FnMut() -> bool,
+    ) -> SelectedScopedObservation {
+        self.custody.observe_runtime(cancelled)
+    }
+
+    pub fn observe_cleanup(&mut self) -> SelectedScopedObservation {
+        self.custody.observe_cleanup()
+    }
+
+    pub fn require_recorded_local_scope_settlement(
+        &self,
+        expected: &crate::ProcessScopeRecovery,
+    ) -> Result<(), String> {
+        self.custody.require_recorded_local_scope_settlement(expected)
+    }
+}
+
+/// Same helper PID and cancellation descriptor transferred by plain moves.
+/// No ordinary detached reaper policy on selected ownership.
+#[cfg(target_os = "linux")]
+struct SelectedScopedWatchdog {
+    pid: libc::pid_t,
+    _cancel: Option<std::fs::File>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelectedScopedObservation {
+    Pending,
+    Held,
+    Running,
+    Observed,
+    Collected,
+    LocallySettled,
+    Refused,
+    RefusedWithoutChild,
+}
+
+/// Immutable view of the SAME ledger-held pin, never an escaping process owner.
+#[cfg(target_os = "linux")]
+pub struct SelectedScopedHeldView<'a> {
+    running: &'a RunningProcess,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopedHeldView<'_> {
+    pub fn pid(&self) -> u32 {
+        self.running.pid
+    }
+    pub fn pgid(&self) -> i64 {
+        self.running.pgid
+    }
+    pub fn check_exact_process_alive(&self) -> Result<(), String> {
+        let pin = self
+            .running
+            .attachment_target_lifetime
+            .as_ref()
+            .ok_or("selected held pin absent")?;
+        if selected_scoped_pin_exited(pin)? {
+            Err("selected held target exited".into())
+        } else {
+            validate_supervised_attachment_target(
+                self.running.pid,
+                self.running.pgid,
+                pin.as_raw_fd(),
+            )
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopedCustody {
+    fn empty() -> Self {
+        Self {
+            request: None,
+            scope: None,
+            target: None,
+            mounts: None,
+            bounds: None,
+            request_expiry: None,
+            create_started: false,
+            create_attempted: false,
+            refused: false,
+            release_attempted: false,
+            released: false,
+            termination_attempted: false,
+            scope_empty: false,
+            locally_settled: false,
+            running: None,
+            setup_child: None,
+            setup_status: None,
+            setup_fds: Vec::new(),
+            setup_mappings: Vec::new(),
+            setup_mapping_lifelines: Vec::new(),
+            setup_reaped: false,
+            terminal: None,
+            result: None,
+            failure: None,
+            watchdog: None,
+        }
+    }
+
+    /// Borrow all source slots for validation, then install by infallible moves.
+    /// Only an actual compiler owner may provide meaningful commitments; this
+    /// component API alone is not an authority issuer or a production caller.
+    fn prepare_from_compiled_slots(
+        &mut self,
+        request: &mut Option<SubprocessRequest>,
+        scope: &mut Option<crate::ProcessScope>,
+        target: &mut Option<crate::LinuxSandboxAppliedLaunchCommitments>,
+        mounts: &mut Option<crate::LinuxSandboxMountPreparationCommitments>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if self.bounds.is_some() || self.scope.is_some() || self.create_started {
+            return Err("selected destination already prepared".into());
+        }
+        if original_cleanup.is_before(&original_service) || original_service.has_elapsed() {
+            return Err("selected original bounds inverted or expired".into());
+        }
+        let req = request.as_ref().ok_or("compiled request already spent")?;
+        let actual_scope = scope.as_ref().ok_or("selected actual scope absent")?;
+        actual_scope.require_selected_launch_right()?;
+        if target.is_none()
+            || mounts.is_none()
+            || !req.supervised_status.as_ref().is_some_and(|s| {
+                matches!(
+                    s.state,
+                    SupervisedProcessStatusState::AwaitingAttachment { .. }
+                ) && s.applied_receipt_schema.is_some()
+                    && s.mount_preparation_required
+            })
+        {
+            return Err("selected compiled held/applied/mount commitments absent".into());
+        }
+        // Cache request expiry BEFORE extraction. It only narrows original.
+        let anchor = Instant::now();
+        let service_expiry = anchor
+            .checked_add(original_service.remaining())
+            .ok_or("selected request expiry overflow")?;
+        let relative =
+            request_timeout_duration(req.timeout).and_then(|duration| anchor.checked_add(duration));
+        let expiry = relative.map_or(service_expiry, |bound| bound.min(service_expiry));
+        if original_service.has_elapsed() || Instant::now() >= expiry {
+            return Err("selected preparation completed late".into());
+        }
+        // No validation, allocation, callback or destructor below these takes.
+        self.request = request.take();
+        self.scope = scope.take();
+        self.target = target.take();
+        self.mounts = mounts.take();
+        self.bounds = Some(SelectedSupervisedBounds {
+            service: original_service,
+            cleanup: original_cleanup,
+        });
+        self.request_expiry = Some(expiry);
+        Ok(())
+    }
+
+    fn retain_same_watchdog(&mut self) {
+        if self.watchdog.is_none() {
+            if let Some(watchdog) = self
+                .running
+                .as_mut()
+                .and_then(|r| r.occupancy_watchdog.as_mut())
+            {
+                let retained = SelectedScopedWatchdog {
+                    pid: watchdog.pid,
+                    _cancel: watchdog.cancel.take(),
+                };
+                watchdog.pid = -1;
+                self.watchdog = Some(retained);
+            }
+            if let Some(running) = self.running.as_mut() {
+                running.occupancy_watchdog.take();
+            }
+        }
+    }
+
+    fn service_live(&self) -> Result<(), String> {
+        let bounds = self.bounds.ok_or("selected bounds absent")?;
+        if bounds.service.has_elapsed() || self.request_expiry.is_some_and(|d| Instant::now() >= d)
+        {
+            Err("selected original service/request expired".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record_failure(&mut self, result: SubprocessResult) {
+        self.refused = true;
+        if self.failure.is_none() {
+            self.failure = Some(result);
+        }
+    }
+
+    fn refuse(&mut self, detail: impl Into<String>) -> SelectedScopedObservation {
+        self.record_failure(spawn_failure(Instant::now(), detail));
+        SelectedScopedObservation::Refused
+    }
+
+    fn create(&mut self) -> SelectedScopedObservation {
+        if self.create_started || self.refused {
+            return SelectedScopedObservation::Refused;
+        }
+        if let Err(detail) = self.service_live() {
+            return self.refuse(detail);
+        }
+        if self.request.is_none() || self.scope.is_none() {
+            return self.refuse("selected preparation absent");
+        }
+        // Clone SAME backend control before extraction; it has no launch right.
+        let control = self
+            .scope
+            .as_ref()
+            .expect("checked actual scope")
+            .control_authority();
+        self.create_started = true;
+        let original = self.bounds.expect("prepared bounds").service;
+        let request = self.request.take().expect("checked actual request");
+        let outcome = lib_spawn_with_stdio_custody_into(
+            request,
+            false,
+            None,
+            Some(control),
+            None,
+            Some(original),
+            false,
+            SpawnFailureCustodyMode::Ordinary,
+            Some(self),
+        );
+        match outcome {
+            Ok(running) => {
+                self.running = Some(running);
+                self.retain_same_watchdog();
+            }
+            Err(SpawnWithStdioError::ScopedRetained) => return SelectedScopedObservation::Refused,
+            Err(SpawnWithStdioError::WithoutRunningOwner {
+                result,
+                create_attempted,
+            }) => {
+                self.create_attempted |= create_attempted;
+                self.record_failure(result);
+                return SelectedScopedObservation::RefusedWithoutChild;
+            }
+            Err(SpawnWithStdioError::Selected(_)) => unreachable!("scoped ordinary producer"),
+        }
+        let validation = self.validate_held();
+        match validation {
+            Ok(()) => SelectedScopedObservation::Held,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn validate_held(&mut self) -> Result<(), String> {
+        self.service_live()?;
+        let bounds = self.bounds.ok_or("selected bounds absent")?;
+        let scope = self.scope.as_ref().ok_or("selected scope absent")?;
+        let running = self
+            .running
+            .as_mut()
+            .ok_or("selected actual wrapper absent")?;
+        if running.attachment_release.is_none() {
+            return Err("selected held release absent".into());
+        }
+        // Install actual pin BEFORE subsequent validation can fail.
+        let birth = read_linux_process_birth(running.pid)?;
+        running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid)?));
+        let pin = running
+            .attachment_target_lifetime
+            .as_ref()
+            .ok_or("selected pin absent")?;
+        validate_pinned_process_birth(running.pid, running.pgid, None, &birth, pin.as_raw_fd())?;
+        validate_supervised_attachment_target(running.pid, running.pgid, pin.as_raw_fd())?;
+        scope.require_held_member_until(running.pid, bounds.service)?;
+        let preparation = running
+            .mount_preparation
+            .as_ref()
+            .ok_or("selected mount receipt absent")?;
+        if !preparation.matches_commitments(self.mounts.as_ref().ok_or("compiled mounts absent")?) {
+            return Err("selected held mount commitment mismatch".into());
+        }
+        if let Some(channel) = running.native_settlement.as_mut() {
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native identity expired".into());
+            }
+            let group = u32::try_from(running.pgid).map_err(|_| "selected group out of range")?;
+            let identity = crate::process_control::capture_exact_process_identity_from_pidfd(
+                running.pid,
+                Some(group),
+                pin.as_fd(),
+            )?;
+            channel.held_target_identity = Some(identity);
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native identity late".into());
+            }
+        }
+        self.service_live()
+    }
+
+    fn held(&self) -> Option<SelectedScopedHeldView<'_>> {
+        if self.refused || self.released {
+            return None;
+        }
+        self.running
+            .as_ref()
+            .filter(|r| r.attachment_target_lifetime.is_some())
+            .map(|running| SelectedScopedHeldView { running })
+    }
+
+    fn release_after_attachment(&mut self) -> SelectedScopedObservation {
+        if self.refused || self.release_attempted {
+            return SelectedScopedObservation::Refused;
+        }
+        let operation = (|| -> Result<(), String> {
+            self.service_live()?;
+            self.held()
+                .ok_or("selected held owner absent")?
+                .check_exact_process_alive()?;
+            let bounds = self.bounds.ok_or("selected bounds absent")?;
+            let expiry = self.request_expiry;
+            let running = self
+                .running
+                .as_mut()
+                .ok_or("selected actual wrapper absent")?;
+            for capture in [&running.stdout_capture, &running.stderr_capture] {
+                if capture
+                    .state
+                    .try_lock()
+                    .map_err(|_| "selected capture unavailable")?
+                    .truncated
+                {
+                    return Err("selected output truncated".into());
+                }
+            }
+            if running.output_overflow_rx.try_recv().is_ok() {
+                return Err("selected output overflow".into());
+            }
+            if !matches!(poll_wrapper(&mut running.child), Ok(WrapperPoll::Running)) {
+                return Err("selected wrapper not releasable".into());
+            }
+            self.release_attempted = true;
+            let boundary = running
+                .attachment_release
+                .as_mut()
+                .ok_or("selected boundary absent")?;
+            let writer = boundary.writer.as_mut().ok_or("selected writer absent")?;
+            let flags = unsafe { libc::fcntl(writer.fd, libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(writer.fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err("selected release nonblocking setup failed".into());
+            }
+            let live =
+                || !bounds.service.has_elapsed() && !expiry.is_some_and(|d| Instant::now() >= d);
+            if !live() {
+                return Err("selected prewrite expired".into());
+            }
+            match writer
+                .writer
+                .as_mut()
+                .ok_or("selected file absent")?
+                .write(&[ATTACHMENT_RELEASE_TOKEN])
+            {
+                Ok(1) => {}
+                _ => return Err("selected release write uncertain; no retry".into()),
+            }
+            if !live() {
+                return Err("selected postwrite expired".into());
+            }
+            writer.close_selected_with_request_until(
+                bounds.service,
+                SelectedCleanupMode::BoundedOriginal,
+                expiry,
+            )?;
+            boundary.writer.take();
+            running.attachment_release.take();
+            if !live() {
+                return Err("selected release handoff late".into());
+            }
+            self.released = true;
+            Ok(())
+        })();
+        match operation {
+            Ok(()) => SelectedScopedObservation::Running,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn retained_applied(&self) -> Option<&crate::LinuxSandboxAppliedLaunchReceipt> {
+        self.running
+            .as_ref()?
+            .applied_receipt_observation
+            .as_ref()?
+            .as_ref()
+            .ok()
+    }
+    fn retained_result(&self) -> Option<&SubprocessResult> {
+        self.result.as_ref().or(self.failure.as_ref())
+    }
+
+    fn observe_applied(&mut self) -> SelectedScopedObservation {
+        if self.refused || !self.released {
+            return SelectedScopedObservation::Refused;
+        }
+        let operation = (|| -> Result<bool, String> {
+            self.service_live()?;
+            let running = self.running.as_mut().ok_or("selected wrapper absent")?;
+            if running.applied_receipt_observation.is_none() {
+                let rx = running
+                    .applied_receipt_rx
+                    .as_ref()
+                    .ok_or("selected receiver absent")?;
+                match rx.try_recv() {
+                    Ok(raw) => {
+                        running.applied_receipt_observation = Some(raw);
+                        running.applied_receipt_rx.take();
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(false),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        running.applied_receipt_observation =
+                            Some(Err("selected applied EOF".into()));
+                        running.applied_receipt_rx.take();
+                    }
+                }
+            }
+            let receipt = running
+                .applied_receipt_observation
+                .as_ref()
+                .ok_or("selected raw cache absent")?
+                .as_ref()
+                .map_err(Clone::clone)?;
+            if receipt.owned_child_pid != running.pid
+                || !receipt
+                    .matches_commitments(self.target.as_ref().ok_or("compiled target absent")?)
+                || !receipt.matches_post_release_mounts(
+                    self.mounts.as_ref().ok_or("compiled mounts absent")?,
+                )
+            {
+                return Err("selected applied commitment mismatch".into());
+            }
+            self.service_live()?;
+            Ok(true)
+        })();
+        match operation {
+            Ok(true) => SelectedScopedObservation::Observed,
+            Ok(false) => SelectedScopedObservation::Pending,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn observe_runtime(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> SelectedScopedObservation {
+        if self.refused {
+            return SelectedScopedObservation::Refused;
+        }
+        // Cancellation callback only observes; on unwind all fields remain here.
+        if cancelled() {
+            return self.refuse("selected observation cancelled");
+        }
+        match self.observe_applied() {
+            SelectedScopedObservation::Observed => {}
+            other => return other,
+        }
+        match self.advance_local_observation(false) {
+            Ok(true) => {
+                if let Err(detail) = self.service_live() {
+                    return self.refuse(detail);
+                }
+                SelectedScopedObservation::Collected
+            }
+            Ok(false) => SelectedScopedObservation::Pending,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn revoke_release(&mut self, cleanup: crate::time::MonotonicDeadline) -> Result<(), String> {
+        let boundary = if let Some(running) = self.running.as_mut() {
+            running.attachment_release.as_mut()
+        } else {
+            self.setup_status
+                .as_mut()
+                .and_then(|status| match &mut status.state {
+                    SupervisedProcessStatusState::AwaitingAttachment {
+                        attachment_release, ..
+                    } => Some(attachment_release),
+                    _ => None,
+                })
+        };
+        if let Some(boundary) = boundary {
+            if let Some(writer) = boundary.writer.as_mut() {
+                writer.close_selected_until(cleanup, SelectedCleanupMode::BoundedOriginal)?;
+            }
+            boundary.writer.take();
+        }
+        Ok(())
+    }
+
+    fn observe_cleanup(&mut self) -> SelectedScopedObservation {
+        if self.locally_settled {
+            return SelectedScopedObservation::LocallySettled;
+        }
+        let operation = (|| -> Result<bool, String> {
+            let cleanup = self.bounds.ok_or("selected cleanup bound absent")?.cleanup;
+            // Revocation/control are attempted only while the ORIGINAL is live.
+            if !cleanup.has_elapsed() {
+                self.revoke_release(cleanup)?;
+                if !self.scope_empty
+                    && !self
+                        .scope
+                        .as_ref()
+                        .ok_or("selected actual scope absent")?
+                        .is_empty()?
+                {
+                    if !self.termination_attempted {
+                        self.termination_attempted = true; // poison before write, including uncertainty
+                        self.scope
+                            .as_ref()
+                            .expect("same scope")
+                            .request_selected_termination_until(cleanup)?;
+                    }
+                }
+            }
+            self.advance_local_observation(true)
+        })();
+        match operation {
+            Ok(true) => SelectedScopedObservation::LocallySettled,
+            Ok(false) => SelectedScopedObservation::Pending,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn advance_local_observation(&mut self, cleanup: bool) -> Result<bool, String> {
+        // No relative wait, force, recovery reopen or numeric signal here.
+        let original_cleanup = self.bounds.ok_or("selected cleanup bounds absent")?.cleanup;
+        if !self.setup_mappings.is_empty() || !self.setup_mapping_lifelines.is_empty() {
+            self.setup_fds
+                .reserve(self.setup_mappings.len() + self.setup_mapping_lifelines.len());
+            while let Some(mapping) = self.setup_mappings.pop() {
+                self.setup_fds.push(mapping.source);
+            }
+            while let Some(source) = self.setup_mapping_lifelines.pop() {
+                self.setup_fds.push(source);
+            }
+        }
+        if !selected_close_inherited_copies(&mut self.setup_fds, original_cleanup)? {
+            return Ok(false);
+        }
+        if !self.scope_empty {
+            self.scope_empty = self
+                .scope
+                .as_ref()
+                .ok_or("selected actual scope absent")?
+                .is_empty()?;
+            if !self.scope_empty {
+                return Ok(false);
+            }
+        }
+        if let Some(child) = self.setup_child.as_mut() {
+            if !self.setup_reaped {
+                if !matches!(
+                    poll_wrapper(child).map_err(|e| e.to_string())?,
+                    WrapperPoll::ExitedUnreaped
+                ) {
+                    return Ok(false);
+                }
+                let Some(status) = child.try_wait().map_err(|e| e.to_string())? else {
+                    return Ok(false);
+                };
+                self.terminal = Some(status);
+                self.setup_reaped = true;
+            }
+        }
+        let Some(running) = self.running.as_mut() else {
+            // No Child is never no-contact. Actual retained scope emptiness is
+            // the local fact; unresolved release registration still holds duty.
+            if self.setup_status.as_ref().is_some_and(|s| {
+                matches!(&s.state,
+                SupervisedProcessStatusState::AwaitingAttachment { attachment_release, .. }
+                if attachment_release.writer.as_ref().is_some_and(|w| w.writer.is_some()))
+            }) {
+                return Ok(false);
+            }
+            self.locally_settled = true;
+            return Ok(true);
+        };
+        if !running.wrapper_reaped {
+            if !matches!(
+                poll_wrapper(&mut running.child).map_err(|e| e.to_string())?,
+                WrapperPoll::ExitedUnreaped
+            ) {
+                return Ok(false);
+            }
+            let Some(status) = running.child.try_wait().map_err(|e| e.to_string())? else {
+                return Ok(false);
+            };
+            // Cache immediately after consuming wait; no post-reap repoll.
+            self.terminal = Some(status);
+            running.wrapper_reaped = true;
+        }
+        if let Some(pin) = running.attachment_target_lifetime.as_ref() {
+            if !selected_scoped_pin_exited(pin)? {
+                return Ok(false);
+            }
+        }
+        if let Some(watchdog) = self.watchdog.as_mut() {
+            if watchdog.pid > 0 {
+                let mut status = 0;
+                let observed = unsafe { libc::waitpid(watchdog.pid, &mut status, libc::WNOHANG) };
+                if observed == 0 {
+                    return Ok(false);
+                }
+                if observed != watchdog.pid
+                    || !(libc::WIFEXITED(status) || libc::WIFSIGNALED(status))
+                {
+                    return Err("selected watchdog exclusive natural reap uncertain".into());
+                }
+                watchdog.pid = -1;
+            }
+        }
+        // Keep workers until terminal scope/wrapper/pin/helper facts. Natural
+        // collection does not truncate drains; cleanup may stop them only live.
+        if cleanup
+            && !self
+                .bounds
+                .ok_or("selected bounds absent")?
+                .cleanup
+                .has_elapsed()
+        {
+            running.drain_stop.store(true, Ordering::Release);
+            running.selected_scoped_stdin.take();
+            running.selected_scoped_stdout.take();
+            running.selected_scoped_stderr.take();
+        }
+        if running.selected_scoped_stdin.is_some()
+            || running.selected_scoped_stdout.is_some()
+            || running.selected_scoped_stderr.is_some()
+        {
+            return Ok(false);
+        }
+        for (index, slot) in [
+            &mut running.stdin_thread,
+            &mut running.stdout_thread,
+            &mut running.stderr_thread,
+            &mut running.status_thread,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if slot.as_ref().is_some_and(|handle| !handle.is_finished()) {
+                return Ok(false);
+            }
+            if let Some(handle) = slot.take() {
+                if handle.join().is_err() {
+                    running.selected_worker_panics[index] = true;
+                }
+            }
+        }
+        if running.attachment_release.as_ref().is_some_and(|boundary| {
+            boundary
+                .writer
+                .as_ref()
+                .is_some_and(|writer| writer.writer.is_some())
+        }) {
+            return Ok(false);
+        }
+        if !Self::poll_raw_native(running)? {
+            return Ok(false);
+        }
+        let native_observed = running.poll_native_terminal_testimony();
+        let native_ok = matches!(native_observed, Ok(true));
+        if self.result.is_none() {
+            let out = running
+                .stdout_capture
+                .state
+                .try_lock()
+                .map_err(|_| "selected stdout unavailable")?;
+            let err = running
+                .stderr_capture
+                .state
+                .try_lock()
+                .map_err(|_| "selected stderr unavailable")?;
+            if let Some(channel) = running.native_settlement.as_mut() {
+                if channel.retained_drains.is_none() {
+                    channel.retained_drains = Some((out.clone(), err.clone()));
+                }
+            }
+            let code = self
+                .terminal
+                .as_ref()
+                .and_then(process::ExitStatus::code)
+                .unwrap_or(-1);
+            let late = self
+                .bounds
+                .ok_or("selected bounds absent")?
+                .service
+                .has_elapsed()
+                || self.request_expiry.is_some_and(|d| Instant::now() >= d);
+            let panicked = running.selected_worker_panics.iter().any(|fact| *fact);
+            self.result = Some(SubprocessResult {
+                success: code == 0
+                    && native_ok
+                    && !self.refused
+                    && !late
+                    && !panicked
+                    && !out.truncated
+                    && !err.truncated,
+                stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
+                stderr: if panicked {
+                    append_diagnostic(
+                        &String::from_utf8_lossy(&err.bytes),
+                        "selected worker panicked",
+                    )
+                } else {
+                    String::from_utf8_lossy(&err.bytes).into_owned()
+                },
+                exit_code: code,
+                duration_ms: running.start.elapsed().as_secs_f64() * 1000.0,
+                pid: running.pid,
+                timed_out: late,
+                launcher_refusal: None,
+                aborted_before_attachment: None,
+                output_limit_exceeded: output_limit_exceeded(&out, &err),
+                stdout_truncated: out.truncated,
+                stderr_truncated: err.truncated,
+            });
+        }
+        // Cache raw native testimony; semantic native acceptance stays separate.
+        running.selected_cleanup_complete = true;
+        self.locally_settled = true;
+        Ok(true)
+    }
+
+    fn poll_raw_native(running: &mut RunningProcess) -> Result<bool, String> {
+        let Some(channel) = running.native_settlement.as_mut() else {
+            return Ok(true);
+        };
+        if channel.exact_eof {
+            return Ok(true);
+        }
+        use crate::sandbox::native_terminal_wire::{
+            MAX_NATIVE_TERMINAL_FRAME_BYTES, decode_testimony,
+        };
+        let mut bytes = [0u8; MAX_NATIVE_TERMINAL_FRAME_BYTES + 1];
+        let count = unsafe {
+            libc::read(
+                channel.reader.file().as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                return Ok(false);
+            }
+            return Err(error.to_string());
+        }
+        if count == 0 {
+            channel.exact_eof = true; // cache consumed EOF before decoding
+            match decode_testimony(&channel.frame) {
+                Ok(raw) => channel.testimony = Some(raw),
+                Err(detail) => {
+                    if channel.failure.is_none() {
+                        channel.failure = Some(detail);
+                    }
+                }
+            }
+            return Ok(true);
+        }
+        let count = count as usize;
+        let remaining = (MAX_NATIVE_TERMINAL_FRAME_BYTES + 1).saturating_sub(channel.frame.len());
+        channel
+            .frame
+            .extend_from_slice(&bytes[..count.min(remaining)]);
+        if channel.frame.len() > MAX_NATIVE_TERMINAL_FRAME_BYTES || count > remaining {
+            if channel.failure.is_none() {
+                channel.failure = Some("selected native frame exceeded cap".into());
+            }
+        }
+        Ok(false)
+    }
+
+    /// Pure same-owner local check; NEVER reopen expected recovery authority.
+    fn require_recorded_local_scope_settlement(
+        &self,
+        expected: &crate::ProcessScopeRecovery,
+    ) -> Result<(), String> {
+        if !self.locally_settled
+            || !self.scope_empty
+            || self.scope.as_ref().map(|s| s.recovery()) != Some(expected)
+        {
+            return Err("selected same-scope local settlement absent or mismatched".into());
+        }
+        Ok(())
+    }
+}
+
+/// Selected supervised custody, never a selector issuer or financial proof.
+#[cfg(all(test, target_os = "linux"))]
+mod selected_scoped_component_tests {
+    use super::*;
+
+    fn request(cmd: &str, args: &[&str]) -> SubprocessRequest {
+        SubprocessRequest {
+            cmd: cmd.into(),
+            argv0: None,
+            args: args.iter().map(|s| (*s).into()).collect(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 60.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        }
+    }
+    fn pipe_cloexec() -> (std::fs::File, InheritedDescriptorAuthority) {
+        let lease = retain_fork_sensitive_descriptors();
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        (
+            reader,
+            InheritedDescriptorAuthority::from_owned_file(writer, &lease).unwrap(),
+        )
+    }
+
+    #[test]
+    fn lexical_refusal_keeps_actual_request_and_commitment_slots() {
+        let mut source = Some(request("/never-contact", &[]));
+        let request_address = source.as_ref().unwrap() as *const SubprocessRequest;
+        let mut scope = None;
+        let mut target = Some(crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        });
+        let mut mounts = Some(crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [5; 32],
+        });
+        let mut storage = SelectedScopedStorage::for_component_test();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(60));
+        {
+            let mut loan = storage.borrow_for_component_test();
+            assert!(
+                loan.prepare_from_compiled_slots(
+                    &mut source,
+                    &mut scope,
+                    &mut target,
+                    &mut mounts,
+                    original,
+                    original,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            source.as_ref().unwrap() as *const SubprocessRequest,
+            request_address
+        );
+        assert!(target.is_some() && mounts.is_some());
+        assert!(storage.custody.request.is_none() && !storage.custody.create_attempted);
+    }
+
+    #[test]
+    fn lexical_expired_refusal_keeps_same_storage_owner_across_reborrow() {
+        let mut storage = SelectedScopedStorage::for_component_test();
+        storage.custody.request = Some(request("/never-contact", &[]));
+        let endpoint = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        storage.custody.bounds = Some(SelectedSupervisedBounds {
+            service: endpoint,
+            cleanup: endpoint,
+        });
+        let owner = &storage.custody as *const SelectedScopedCustody;
+        assert_eq!(
+            storage.borrow_for_component_test().create(),
+            SelectedScopedObservation::Refused
+        );
+        assert_eq!(
+            storage.borrow_for_component_test().create(),
+            SelectedScopedObservation::Refused
+        );
+        assert_eq!(&storage.custody as *const SelectedScopedCustody, owner);
+        assert!(storage.custody.request.is_some() && !storage.custody.create_attempted);
+    }
+
+    #[test]
+    fn lexical_observer_unwind_ends_borrow_without_dropping_actual_request() {
+        let mut storage = SelectedScopedStorage::for_component_test();
+        storage.custody.request = Some(request("/never-contact", &[]));
+        let owner = &storage.custody as *const SelectedScopedCustody;
+        let request_address = storage.custody.request.as_ref().unwrap() as *const SubprocessRequest;
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut loan = storage.borrow_for_component_test();
+            loan.observe_runtime(|| panic!("injected observation-only unwind"));
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(&storage.custody as *const SelectedScopedCustody, owner);
+        assert_eq!(
+            storage.custody.request.as_ref().unwrap() as *const SubprocessRequest,
+            request_address
+        );
+        let mut loan = storage.borrow_for_component_test();
+        assert_eq!(loan.create(), SelectedScopedObservation::Refused);
+        assert!(storage.custody.request.is_some() && !storage.custody.create_attempted);
+    }
+
+    #[test]
+    fn inverted_bounds_leave_actual_source_slots_unspent() {
+        let mut request = Some(request("/missing-component-test-command", &[]));
+        let mut scope = None;
+        let mut target = Some(crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        });
+        let mut mounts = Some(crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [5; 32],
+        });
+        let service = crate::time::MonotonicDeadline::after(Duration::from_secs(60));
+        let cleanup = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut ledger = SelectedScopedCustody::empty();
+        assert!(
+            ledger
+                .prepare_from_compiled_slots(
+                    &mut request,
+                    &mut scope,
+                    &mut target,
+                    &mut mounts,
+                    service,
+                    cleanup
+                )
+                .is_err()
+        );
+        assert!(request.is_some() && target.is_some() && mounts.is_some());
+        assert!(ledger.bounds.is_none() && !ledger.create_attempted);
+    }
+
+    #[test]
+    fn expired_service_refusal_is_sticky_and_does_not_take_request() {
+        let mut ledger = SelectedScopedCustody::empty();
+        let endpoint = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        ledger.bounds = Some(SelectedSupervisedBounds {
+            service: endpoint,
+            cleanup: endpoint,
+        });
+        ledger.request = Some(request("/never-contact", &[]));
+        assert_eq!(ledger.create(), SelectedScopedObservation::Refused);
+        assert_eq!(ledger.create(), SelectedScopedObservation::Refused);
+        assert!(ledger.request.is_some() && !ledger.create_attempted);
+    }
+
+    #[test]
+    fn expired_parent_close_preserves_same_registered_descriptor() {
+        let (reader, authority) = pipe_cloexec();
+        let fd = authority.file().as_raw_fd();
+        let mut copies = vec![authority];
+        assert!(
+            !selected_close_inherited_copies(
+                &mut copies,
+                crate::time::MonotonicDeadline::after(Duration::ZERO)
+            )
+            .unwrap()
+        );
+        assert_eq!(copies[0].file().as_raw_fd(), fd);
+        assert!(
+            direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap()
+                .fork_child_close_fds
+                .contains(&fd)
+        );
+        assert!(
+            selected_close_inherited_copies(
+                &mut copies,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(1))
+            )
+            .unwrap()
+        );
+        assert!(copies.is_empty());
+        drop(reader);
+    }
+
+    #[test]
+    fn duplicate_parent_aliases_close_once_under_same_barrier() {
+        let (reader, authority) = pipe_cloexec();
+        let fd = authority.file().as_raw_fd();
+        let mut copies = vec![authority.clone(), authority];
+        assert!(
+            selected_close_inherited_copies(
+                &mut copies,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(1))
+            )
+            .unwrap()
+        );
+        assert!(copies.is_empty());
+        assert!(
+            !direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap()
+                .fork_child_close_fds
+                .contains(&fd)
+        );
+        drop(reader);
+    }
+
+    #[test]
+    fn shared_external_alias_remains_an_actual_ledger_obligation() {
+        let (reader, authority) = pipe_cloexec();
+        let mut copies = vec![authority.clone()];
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(1));
+        assert!(!selected_close_inherited_copies(&mut copies, bound).unwrap());
+        assert!(Arc::ptr_eq(&copies[0].handle, &authority.handle));
+        drop(authority);
+        assert!(selected_close_inherited_copies(&mut copies, bound).unwrap());
+        drop(reader);
+    }
+
+    #[test]
+    fn child_only_unwind_restores_actual_child_without_legacy_signal() {
+        // Real local fixture, NOT scoped/admitted/native positive coverage.
+        let child = process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let pin = open_pidfd(pid).unwrap();
+        let mut ledger = SelectedScopedCustody::empty();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SelectedSupervisedSetupGuard {
+                child: Some(child),
+                supervised_status: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                mapping_lifelines: Vec::new(),
+                mode: SpawnFailureCustodyMode::Ordinary,
+                scoped: Some(&mut ledger),
+            };
+            panic!("injected first-Child producer unwind");
+        }));
+        assert!(unwind.is_err() && ledger.refused);
+        assert_eq!(ledger.setup_child.as_ref().unwrap().id(), pid);
+        assert!(!selected_scoped_pin_exited(&pin).unwrap());
+        // Explicit fixture owner disposal; not selected cleanup evidence.
+        let child = ledger.setup_child.as_mut().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn running_setup_unwind_restores_same_workers_and_wrapper() {
+        // Guard transfer control only; no authenticated scope/issuer supplied.
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.selected_scoped_borrowed = true;
+        let pid = running.child.id();
+        let mut ledger = SelectedScopedCustody::empty();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SpawnRunningGuard {
+                running: Some(running),
+                mode: SpawnFailureCustodyMode::Ordinary,
+                scoped: Some(&mut ledger),
+            };
+            panic!("injected actual post-worker unwind");
+        }));
+        assert!(unwind.is_err() && ledger.refused);
+        let retained = ledger.running.as_mut().unwrap();
+        assert_eq!(retained.child.id(), pid);
+        assert!(retained.stdout_thread.is_some() && retained.stderr_thread.is_some());
+        assert!(matches!(
+            poll_wrapper(&mut retained.child),
+            Ok(WrapperPoll::Running)
+        ));
+        // Restore ordinary fixture disposal only AFTER custody assertions.
+        retained.selected_scoped_borrowed = false;
+    }
+
+    #[test]
+    fn raw_applied_reader_failure_is_cached_before_sticky_refusal() {
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.selected_scoped_borrowed = true;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        running.applied_receipt_rx = Some(receiver);
+        sender
+            .send(Err("actual component reader refusal".into()))
+            .unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut ledger = SelectedScopedCustody::empty();
+        ledger.running = Some(running);
+        ledger.bounds = Some(SelectedSupervisedBounds {
+            service: original,
+            cleanup: original,
+        });
+        ledger.released = true;
+        assert_eq!(ledger.observe_applied(), SelectedScopedObservation::Refused);
+        let retained = ledger.running.as_ref().unwrap();
+        assert!(
+            matches!(retained.applied_receipt_observation.as_ref(), Some(Err(detail)) if detail == "actual component reader refusal")
+        );
+        assert!(retained.applied_receipt_rx.is_none());
+        assert_eq!(ledger.observe_applied(), SelectedScopedObservation::Refused);
+        assert!(
+            ledger
+                .running
+                .as_ref()
+                .unwrap()
+                .applied_receipt_observation
+                .is_some()
+        );
+        // Ordinary fixture disposal, independently from selected component.
+        ledger.running.as_mut().unwrap().selected_scoped_borrowed = false;
+    }
+
+    #[test]
+    fn consumed_initial_status_survives_same_running_setup_refusal() {
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.selected_scoped_borrowed = true;
+        let pid = running.child.id();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(Err("actual initial-status reader refusal".to_owned()))
+            .unwrap();
+        let raw = receiver.recv_timeout(Duration::from_secs(1));
+        retain_initial_launcher_status(&mut running, &raw);
+        let mut ledger = SelectedScopedCustody::empty();
+        let guard = SpawnRunningGuard {
+            running: Some(running),
+            mode: SpawnFailureCustodyMode::Ordinary,
+            scoped: Some(&mut ledger),
+        };
+        assert!(matches!(
+            guard.into_spawn_failure(spawn_failure(Instant::now(), "later setup failure")),
+            SpawnWithStdioError::ScopedRetained
+        ));
+        let retained = ledger.running.as_mut().unwrap();
+        assert_eq!(retained.child.id(), pid);
+        assert!(
+            matches!(retained.selected_initial_status.as_ref(), Some(Err(detail)) if detail == "actual initial-status reader refusal")
+        );
+        assert!(retained.stdout_thread.is_some() && retained.stderr_thread.is_some());
+        // Independent ordinary fixture disposal; no selected scope claim.
+        retained.selected_scoped_borrowed = false;
+    }
 }
 
 /// Selected supervised custody, never a selector issuer or financial proof.
@@ -7966,13 +9432,23 @@ impl RunningProcess {
 impl Drop for RunningProcess {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
-        if self.selected_cleanup_complete {
+        if self.selected_cleanup_complete || self.selected_scoped_borrowed {
             // Already-settled selected custody must never re-poll/signall a
             // numeric wrapper identity after its exact Child fence was reaped.
             return;
         }
         let _ = self.abort_and_reap_inner();
     }
+}
+
+fn retain_initial_launcher_status(
+    running: &mut RunningProcess,
+    raw: &Result<Result<InitialLauncherStatus, String>, std::sync::mpsc::RecvTimeoutError>,
+) {
+    running.selected_initial_status = Some(match raw {
+        Ok(observation) => observation.clone(),
+        Err(detail) => Err(detail.to_string()),
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -8211,6 +9687,7 @@ pub fn lib_spawn_selected_supervised_awaiting_attachment_until(
         SpawnFailureCustodyMode::Selected(bounds),
     ) {
         Ok(running) => running,
+        Err(SpawnWithStdioError::ScopedRetained) => unreachable!("unscoped producer"),
         Err(SpawnWithStdioError::Selected(outcome)) => {
             return SelectedSupervisedSpawnOutcome::Refused(outcome);
         }
@@ -8943,6 +10420,8 @@ enum SpawnWithStdioError {
     },
     #[cfg(target_os = "linux")]
     Selected(SelectedSupervisedFailureOutcome),
+    #[cfg(target_os = "linux")]
+    ScopedRetained,
 }
 
 impl From<SubprocessResult> for SpawnWithStdioError {
@@ -8961,24 +10440,35 @@ enum SpawnFailureCustodyMode {
     Selected(SelectedSupervisedBounds),
 }
 
-struct SpawnRunningGuard {
+struct SpawnRunningGuard<'a> {
     running: Option<RunningProcess>,
     mode: SpawnFailureCustodyMode,
+    #[cfg(target_os = "linux")]
+    scoped: Option<&'a mut SelectedScopedCustody>,
+    #[cfg(not(target_os = "linux"))]
+    lifetime: std::marker::PhantomData<&'a ()>,
 }
 
-impl std::ops::Deref for SpawnRunningGuard {
+impl std::ops::Deref for SpawnRunningGuard<'_> {
     type Target = RunningProcess;
     fn deref(&self) -> &RunningProcess {
         self.running.as_ref().expect("spawn guard owns running")
     }
 }
-impl std::ops::DerefMut for SpawnRunningGuard {
+impl std::ops::DerefMut for SpawnRunningGuard<'_> {
     fn deref_mut(&mut self) -> &mut RunningProcess {
         self.running.as_mut().expect("spawn guard owns running")
     }
 }
-impl SpawnRunningGuard {
+impl SpawnRunningGuard<'_> {
     fn into_spawn_failure(mut self, result: SubprocessResult) -> SpawnWithStdioError {
+        #[cfg(target_os = "linux")]
+        if let Some(destination) = self.scoped.as_deref_mut() {
+            destination.running = self.running.take();
+            destination.retain_same_watchdog();
+            destination.record_failure(result);
+            return SpawnWithStdioError::ScopedRetained;
+        }
         let running = self.running.take().expect("spawn guard owns running");
         match self.mode {
             SpawnFailureCustodyMode::Ordinary => {
@@ -8992,8 +10482,17 @@ impl SpawnRunningGuard {
         }
     }
 }
-impl Drop for SpawnRunningGuard {
+impl Drop for SpawnRunningGuard<'_> {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(destination) = self.scoped.as_deref_mut() {
+            if self.running.is_some() {
+                destination.running = self.running.take();
+                destination.retain_same_watchdog();
+                destination.refused = true;
+            }
+            return;
+        }
         #[cfg(target_os = "linux")]
         if let SpawnFailureCustodyMode::Selected(bounds) = self.mode {
             if let Some(running) = self.running.take() {
@@ -9005,17 +10504,18 @@ impl Drop for SpawnRunningGuard {
 }
 
 #[cfg(target_os = "linux")]
-struct SelectedSupervisedSetupGuard {
+struct SelectedSupervisedSetupGuard<'a> {
     child: Option<process::Child>,
     supervised_status: Option<SupervisedProcessStatus>,
     inherited_fds: Vec<InheritedDescriptorAuthority>,
     inherited_fd_mappings: Vec<InheritedDescriptorMapping>,
     mapping_lifelines: Vec<InheritedDescriptorAuthority>,
     mode: SpawnFailureCustodyMode,
+    scoped: Option<&'a mut SelectedScopedCustody>,
 }
 
 #[cfg(target_os = "linux")]
-impl SelectedSupervisedSetupGuard {
+impl SelectedSupervisedSetupGuard<'_> {
     fn revoke_held_boundary(
         &mut self,
         deadline: crate::time::MonotonicDeadline,
@@ -9037,8 +10537,20 @@ impl SelectedSupervisedSetupGuard {
 }
 
 #[cfg(target_os = "linux")]
-impl Drop for SelectedSupervisedSetupGuard {
+impl Drop for SelectedSupervisedSetupGuard<'_> {
     fn drop(&mut self) {
+        if let Some(destination) = self.scoped.as_deref_mut() {
+            // Actual first Child/status/lifelines are restored by plain moves.
+            destination.setup_child = self.child.take();
+            destination.setup_status = self.supervised_status.take();
+            if !self.inherited_fds.is_empty() {
+                destination.setup_fds = std::mem::take(&mut self.inherited_fds);
+            }
+            destination.setup_mappings = std::mem::take(&mut self.inherited_fd_mappings);
+            destination.setup_mapping_lifelines = std::mem::take(&mut self.mapping_lifelines);
+            destination.refused = true;
+            return;
+        }
         let bounds = match self.mode {
             SpawnFailureCustodyMode::Selected(bounds) => bounds,
             SpawnFailureCustodyMode::Ordinary => return,
@@ -9096,6 +10608,8 @@ fn lib_spawn_with_stdio(
         Ok(running) => Ok(running),
         Err(SpawnWithStdioError::WithoutRunningOwner { result, .. }) => Err(result),
         #[cfg(target_os = "linux")]
+        Err(SpawnWithStdioError::ScopedRetained) => unreachable!("ordinary producer"),
+        #[cfg(target_os = "linux")]
         Err(SpawnWithStdioError::Selected(_)) => {
             unreachable!("ordinary mode never constructs selected custody")
         }
@@ -9113,6 +10627,35 @@ fn lib_spawn_with_stdio_custody(
     exact_inheritance: bool,
     failure_mode: SpawnFailureCustodyMode,
 ) -> Result<RunningProcess, SpawnWithStdioError> {
+    lib_spawn_with_stdio_custody_into(
+        request,
+        inherit_stdio,
+        #[cfg(target_os = "linux")]
+        attachment_gate,
+        #[cfg(not(target_os = "linux"))]
+        _attachment_gate,
+        process_scope,
+        account,
+        absolute_deadline,
+        exact_inheritance,
+        failure_mode,
+        #[cfg(target_os = "linux")]
+        None,
+    )
+}
+
+fn lib_spawn_with_stdio_custody_into(
+    request: SubprocessRequest,
+    inherit_stdio: bool,
+    #[cfg(target_os = "linux")] mut attachment_gate: Option<AttachmentWorkerGate>,
+    #[cfg(not(target_os = "linux"))] _attachment_gate: Option<()>,
+    process_scope: Option<crate::ProcessScope>,
+    account: Option<&crate::ControllerAccount>,
+    absolute_deadline: Option<crate::time::MonotonicDeadline>,
+    exact_inheritance: bool,
+    failure_mode: SpawnFailureCustodyMode,
+    #[cfg(target_os = "linux")] scoped: Option<&mut SelectedScopedCustody>,
+) -> Result<RunningProcess, SpawnWithStdioError> {
     let start = Instant::now();
     #[cfg(not(target_os = "linux"))]
     let _ = exact_inheritance;
@@ -9129,6 +10672,35 @@ fn lib_spawn_with_stdio_custody(
         inherited_fd_mappings,
         supervised_status,
     } = request;
+    #[cfg(target_os = "linux")]
+    let mut setup = SelectedSupervisedSetupGuard {
+        child: None,
+        supervised_status,
+        inherited_fds,
+        inherited_fd_mappings,
+        mapping_lifelines: Vec::new(),
+        mode: failure_mode,
+        scoped,
+    };
+    #[cfg(target_os = "linux")]
+    if setup.scoped.is_some() {
+        if let Some(status) = setup.supervised_status.as_mut() {
+            if let SupervisedProcessStatusState::AwaitingAttachment {
+                attachment_release, ..
+            } = &mut status.state
+            {
+                if let Some(writer) = attachment_release.writer.as_mut() {
+                    writer.selected_scoped_borrowed = true;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let inherited_fds = &setup.inherited_fds;
+    #[cfg(target_os = "linux")]
+    let inherited_fd_mappings = &setup.inherited_fd_mappings;
+    #[cfg(target_os = "linux")]
+    let supervised_status = &setup.supervised_status;
     if stdin_data.is_some()
         && inherited_fd_mappings
             .iter()
@@ -9223,7 +10795,7 @@ fn lib_spawn_with_stdio_custody(
             .iter()
             .map(|(source, _)| *source)
             .collect();
-        for mapping in &inherited_fd_mappings {
+        for mapping in inherited_fd_mappings.iter() {
             copies.insert(mapping.source.file().as_raw_fd());
         }
         copies.retain(|fd| !targets.contains(fd) && !raw_inherited_fds.contains(fd));
@@ -9470,14 +11042,23 @@ fn lib_spawn_with_stdio_custody(
     let drain_stop = Arc::new(AtomicBool::new(false));
     let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
     #[cfg(target_os = "linux")]
-    let mut setup = SelectedSupervisedSetupGuard {
-        child: None,
-        supervised_status,
-        inherited_fds,
-        inherited_fd_mappings,
-        mapping_lifelines: inherited_fd_mapping_lifelines,
-        mode: failure_mode,
-    };
+    {
+        setup.mapping_lifelines = inherited_fd_mapping_lifelines;
+        if setup.scoped.is_some() {
+            setup
+                .inherited_fds
+                .reserve(setup.inherited_fd_mappings.len() + setup.mapping_lifelines.len());
+        }
+        if let Some(destination) = setup.scoped.as_deref_mut() {
+            destination.create_attempted = true;
+            destination
+                .scope
+                .as_mut()
+                .expect("prepared actual scope")
+                .consume_selected_launch_right()
+                .map_err(|detail| spawn_failure(start, detail))?;
+        }
+    }
     let child = match command.spawn() {
         Ok(c) => c,
         Err(_) if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) => {
@@ -9507,9 +11088,27 @@ fn lib_spawn_with_stdio_custody(
     // failed setup to wait for the full supervision timeout.
     #[cfg(target_os = "linux")]
     {
-        setup.mapping_lifelines.clear();
-        setup.inherited_fds.clear();
-        setup.inherited_fd_mappings.clear();
+        if setup.scoped.is_some() {
+            // Capacity reserved before Child; each source move is infallible.
+            while let Some(mapping) = setup.inherited_fd_mappings.pop() {
+                setup.inherited_fds.push(mapping.source);
+            }
+            while let Some(source) = setup.mapping_lifelines.pop() {
+                setup.inherited_fds.push(source);
+            }
+            let bound = absolute_deadline.expect("scoped original service bound");
+            selected_close_inherited_copies(&mut setup.inherited_fds, bound)
+                .map_err(|detail| spawn_failure(start, detail))?;
+            // Shared actual descriptors stay rooted in destination until their
+            // external borrowers release them. No ordinary Drop for closers.
+            if let Some(destination) = setup.scoped.as_deref_mut() {
+                destination.setup_fds = std::mem::take(&mut setup.inherited_fds);
+            }
+        } else {
+            setup.mapping_lifelines.clear();
+            setup.inherited_fds.clear();
+            setup.inherited_fd_mappings.clear();
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -9597,11 +11196,20 @@ fn lib_spawn_with_stdio_custody(
         #[cfg(target_os = "linux")]
         selected_cleanup_complete: false,
         #[cfg(target_os = "linux")]
+        selected_scoped_borrowed: false,
+        #[cfg(target_os = "linux")]
+        selected_scoped_stdin: None,
+        #[cfg(target_os = "linux")]
+        selected_scoped_stdout: None,
+        #[cfg(target_os = "linux")]
+        selected_scoped_stderr: None,
+        #[cfg(target_os = "linux")]
         selected_worker_panics: [false; 4],
         applied_receipt_rx: None,
         applied_receipt_observation: None,
         applied_receipt_failure: None,
         applied_receipt_returned: false,
+        selected_initial_status: None,
         stdout_capture,
         stderr_capture,
         stdout_reader_taken: false,
@@ -9619,10 +11227,18 @@ fn lib_spawn_with_stdio_custody(
     let mut running = SpawnRunningGuard {
         running: Some(running),
         mode: failure_mode,
+        #[cfg(target_os = "linux")]
+        scoped: setup.scoped.take(),
+        #[cfg(not(target_os = "linux"))]
+        lifetime: std::marker::PhantomData,
     };
+    #[cfg(target_os = "linux")]
+    if running.scoped.is_some() {
+        running.selected_scoped_borrowed = true;
+    }
     let mut status_reader = status_reader;
     #[cfg(target_os = "linux")]
-    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) {
+    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) || running.scoped.is_some() {
         running.selected_setup_status = status_reader.take();
     }
     if inherit_stdio {
@@ -9659,6 +11275,27 @@ fn lib_spawn_with_stdio_custody(
             .stderr
             .take()
             .expect("configured stderr retained");
+        #[cfg(target_os = "linux")]
+        let (stdout_handle, stderr_handle) = if running.scoped.is_some() {
+            let stdout = Arc::new(Mutex::new(stdout_handle));
+            running.selected_scoped_stdout = Some(Arc::clone(&stdout));
+            let stderr = Arc::new(Mutex::new(stderr_handle));
+            running.selected_scoped_stderr = Some(Arc::clone(&stderr));
+            (
+                SpawnPipe::Selected(SelectedScopedPipe(stdout)),
+                SpawnPipe::Selected(SelectedScopedPipe(stderr)),
+            )
+        } else {
+            (
+                SpawnPipe::Owned(stdout_handle),
+                SpawnPipe::Owned(stderr_handle),
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (stdout_handle, stderr_handle) = (
+            SpawnPipe::Owned(stdout_handle),
+            SpawnPipe::Owned(stderr_handle),
+        );
         running.stdout_thread = Some(spawn_bounded_drain(
             stdout_handle,
             Some(
@@ -9693,22 +11330,44 @@ fn lib_spawn_with_stdio_custody(
     // wait on WouldBlock, but it observes the same cleanup flag as the bounded
     // drainers. The request deadline can therefore terminate and join every
     // pipe worker even when the child never consumes the remaining input.
-    running.stdin_thread = match spawn_stdin_writer(
-        running.child.stdin.take(),
-        stdin_data,
-        Arc::clone(&running.drain_stop),
-    ) {
-        Ok(thread) => thread,
-        Err(error) => {
-            return Err(running.into_spawn_failure(spawn_failure(
-                start,
-                format!("Failed to spawn: configure nonblocking stdin: {error}"),
-            )));
+    #[cfg(target_os = "linux")]
+    {
+        running.selected_scoped_stdout.take();
+        running.selected_scoped_stderr.take();
+    }
+    // Retain stdin through configuration and worker-creation failure/unwind.
+    #[cfg(target_os = "linux")]
+    if running.scoped.is_some() {
+        if let Some(stdin) = running.child.stdin.as_ref() {
+            if let Err(error) = configure_nonblocking_fd(stdin) {
+                return Err(running.into_spawn_failure(spawn_failure(start, error.to_string())));
+            }
         }
-    };
+    }
+    let stdin_handle = running.child.stdin.take().map(|stdin| {
+        #[cfg(target_os = "linux")]
+        if running.scoped.is_some() {
+            let retained = Arc::new(Mutex::new(stdin));
+            running.selected_scoped_stdin = Some(Arc::clone(&retained));
+            return SpawnPipe::Selected(SelectedScopedPipe(retained));
+        }
+        SpawnPipe::Owned(stdin)
+    });
+    running.stdin_thread =
+        match spawn_stdin_writer(stdin_handle, stdin_data, Arc::clone(&running.drain_stop)) {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(running.into_spawn_failure(spawn_failure(
+                    start,
+                    format!("Failed to spawn: configure nonblocking stdin: {error}"),
+                )));
+            }
+        };
 
     #[cfg(target_os = "linux")]
-    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) {
+    running.selected_scoped_stdin.take();
+    #[cfg(target_os = "linux")]
+    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) || running.scoped.is_some() {
         // SAME registered descriptor Arc, not a new FD or inherited peer.
         status_reader = running.selected_setup_status.clone();
     }
@@ -9749,7 +11408,11 @@ fn lib_spawn_with_stdio_custody(
                 .map_or(Instant::now(), |expiry| relative_setup.min(expiry))
         });
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
-        let reported_pid = match status_rx.recv_timeout(setup_wait) {
+        let initial_observation = status_rx.recv_timeout(setup_wait);
+        // Cache consumed raw status BEFORE mount/PID/expiry checks; actual
+        // Child/scope/channels remain guarded. Raw data grants no authority.
+        retain_initial_launcher_status(&mut running, &initial_observation);
+        let reported_pid = match initial_observation {
             Ok(Ok(InitialLauncherStatus::Target(pid, preparation))) => {
                 if mount_preparation_required && preparation.is_none() {
                     return Err(running.into_spawn_failure(spawn_failure(
@@ -9809,7 +11472,7 @@ fn lib_spawn_with_stdio_custody(
 }
 
 fn spawn_stdin_writer(
-    stdin: Option<process::ChildStdin>,
+    stdin: Option<SpawnPipe<process::ChildStdin>>,
     data: Option<String>,
     stop: Arc<AtomicBool>,
 ) -> Result<Option<thread::JoinHandle<()>>, String> {
@@ -12037,6 +13700,7 @@ mod selected_supervised_custody_tests {
                     service: expired,
                     cleanup: expired,
                 }),
+                scoped: None,
             };
             panic!("injected actual post-child setup unwind");
         }));
@@ -12321,6 +13985,7 @@ mod selected_supervised_custody_tests {
                 service: bound,
                 cleanup: bound,
             }),
+            scoped: None,
         };
         guard.child = Some(command.spawn().unwrap());
         let pin = open_pidfd(guard.child.as_ref().unwrap().id()).unwrap();
@@ -13348,7 +15013,7 @@ fn do_stream(
     };
     let stream_stop = Arc::new(AtomicBool::new(false));
     let mut stdin_thread = match spawn_stdin_writer(
-        child.stdin.take(),
+        child.stdin.take().map(SpawnPipe::Owned),
         stdin_data.map(str::to_owned),
         Arc::clone(&stream_stop),
     ) {

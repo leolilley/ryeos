@@ -1412,6 +1412,40 @@ impl ProcessCgroup {
         }
     }
 
+    pub(crate) fn require_member_until(
+        &self,
+        pid: u32,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if membership_contains_with_expiry(
+            |buffer, offset| self.members.read_at(buffer, offset),
+            pid,
+            || original.has_elapsed(),
+        )? {
+            Ok(())
+        } else {
+            Err("held target outside retained selected scope".into())
+        }
+    }
+
+    /// One pinned control write; interrupted/uncertain writes are not retried.
+    pub(crate) fn request_termination_until(
+        &self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if original.has_elapsed() {
+            return Err("selected termination bound expired".into());
+        }
+        let size = unsafe { libc::write(self.kill.as_raw_fd(), b"1".as_ptr().cast(), 1) };
+        if size != 1 {
+            return Err("selected pinned termination write uncertain".into());
+        }
+        if original.has_elapsed() {
+            return Err("selected pinned termination completed late".into());
+        }
+        Ok(())
+    }
+
     /// Place only the forked command itself, before exec or any workload code.
     /// Writing zero lets the kernel select the exact current task; no numeric
     /// PID race or post-launch move is involved. The descriptor is CLOEXEC.
@@ -1745,16 +1779,24 @@ fn require_controller_excluded(
 }
 
 fn membership_contains(
-    mut read_at: impl FnMut(&mut [u8], u64) -> io::Result<usize>,
+    read_at: impl FnMut(&mut [u8], u64) -> io::Result<usize>,
     expected: u32,
     deadline: Instant,
+) -> Result<bool, String> {
+    membership_contains_with_expiry(read_at, expected, || Instant::now() >= deadline)
+}
+
+fn membership_contains_with_expiry(
+    mut read_at: impl FnMut(&mut [u8], u64) -> io::Result<usize>,
+    expected: u32,
+    expired: impl Fn() -> bool,
 ) -> Result<bool, String> {
     let mut buffer = [0; MAX_CONTROL_RECORD_BYTES];
     let mut offset = 0u64;
     let mut pid = 0u32;
     let mut digits = 0u32;
     loop {
-        if Instant::now() >= deadline {
+        if expired() {
             return Err("process scope membership check exceeded its control deadline".to_owned());
         }
         let size = match read_at(&mut buffer, offset) {
@@ -1762,6 +1804,9 @@ fn membership_contains(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(format!("read execution scope membership: {error}")),
         };
+        if expired() {
+            return Err("process scope membership completed after its original bound".into());
+        }
         if size == 0 {
             return if digits == 0 {
                 Ok(false)
@@ -1891,6 +1936,44 @@ fn display(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn selected_membership_expiry_after_read_refuses_even_matching_record() {
+        let expired = std::cell::Cell::new(false);
+        let outcome = membership_contains_with_expiry(
+            |bytes, _| {
+                bytes[..3].copy_from_slice(b"42\n");
+                expired.set(true);
+                Ok(3)
+            },
+            42,
+            || expired.get(),
+        );
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn selected_membership_uses_same_expiry_across_fragmented_records() {
+        let source = b"123\n42\n";
+        let reads = std::cell::Cell::new(0);
+        assert!(
+            membership_contains_with_expiry(
+                |bytes, offset| {
+                    reads.set(reads.get() + 1);
+                    let offset = offset as usize;
+                    if offset == source.len() {
+                        return Ok(0);
+                    }
+                    bytes[0] = source[offset];
+                    Ok(1)
+                },
+                42,
+                || false,
+            )
+            .unwrap()
+        );
+        assert_eq!(reads.get(), source.len());
+    }
 
     #[test]
     #[ignore = "requires an explicit disposable cgroup-v2 parent with memory and pids controllers delegated"]
