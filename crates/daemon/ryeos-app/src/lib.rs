@@ -98,6 +98,7 @@ pub mod scoped_producer_observe;
 pub mod scoped_producer_process;
 pub mod scoped_producer_start;
 pub mod scoped_producer_stop;
+mod selected_invocation_bookkeeping;
 pub mod service_registry;
 pub mod source_closure_admission;
 pub mod standalone_audit;

@@ -1764,6 +1764,8 @@ pub struct StateStore {
     /// Persisted claims prove fencing identity; this registry separately proves
     /// that a current task still owns the post-exit settlement window.
     active_launch_owners: Mutex<HashSet<String>>,
+    /// Shared across all AppState clones; metadata owns no native resources.
+    selected_invocations: Mutex<crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping>,
     /// Process-local cancellation signals for durable, still-unbound launch
     /// admissions. Persisted planning state remains the authority; this map
     /// only stops work promptly after that state commits cancelled.
@@ -4629,6 +4631,7 @@ impl StateStore {
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(BTreeSet::new()),
             active_launch_owners: Mutex::new(HashSet::new()),
+            selected_invocations: Mutex::new(crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
@@ -4673,6 +4676,7 @@ impl StateStore {
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(attached_thread_ids),
             active_launch_owners: Mutex::new(HashSet::new()),
+            selected_invocations: Mutex::new(crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
@@ -4791,6 +4795,7 @@ impl StateStore {
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(attached_thread_ids),
             active_launch_owners: Mutex::new(HashSet::new()),
+            selected_invocations: Mutex::new(crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
@@ -19699,6 +19704,50 @@ impl StateStore {
         }
     }
 
+    /// Register the actual process generation in the shared metadata domain.
+    /// This does not admit a selected invocation or install any native owner.
+    pub(crate) fn register_selected_bookkeeping_generation(
+        &self,
+    ) -> Result<crate::selected_invocation_bookkeeping::SelectedGeneration> {
+        if self.read_only {
+            bail!("selected bookkeeping is unavailable on a read-only store");
+        }
+        let _store = self.lock()?;
+        let _active = self.active_launch_owners.lock()
+            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let mut selected = self.selected_invocations.lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
+        if !self.process_attachment_admission_open.load(Ordering::Acquire) {
+            bail!("selected bookkeeping admission is closed");
+        }
+        selected.register_generation(runtime_db::daemon_generation_id())
+            .map_err(|error| anyhow!("selected generation registration refused: {error:?}"))
+    }
+
+    /// Metadata return acknowledgment only. No production borrower issuer is
+    /// exposed in this cut, and this is not native/financial settlement evidence.
+    pub(crate) fn ack_selected_borrow_return(
+        &self,
+        borrower: &crate::selected_invocation_bookkeeping::SelectedBorrowTicket,
+    ) -> Result<crate::selected_invocation_bookkeeping::SelectedBorrowReturn> {
+        let store = self.lock()?;
+        let active = self.active_launch_owners.lock()
+            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let mut selected = self.selected_invocations.lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
+        let (thread_id, claim_id, owner) = borrower.claim_identity();
+        let claim = store.runtime_db.get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("selected borrower durable claim is absent"))?;
+        if claim.thread_id != thread_id || claim.claim_id != claim_id
+            || claim.claimed_by != owner || !active.contains(owner)
+        {
+            bail!("selected borrower claim/active association changed");
+        }
+        // All fallible durable checks precede the exact metadata mutation.
+        selected.ack_selected_borrow_return(borrower)
+            .map_err(|error| anyhow!("selected borrow-return acknowledgment refused: {error:?}"))
+    }
+
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
@@ -22988,6 +23037,44 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn selected_metadata_is_shared_and_ack_requires_actual_claim_and_active_owner() {
+        use crate::selected_invocation_bookkeeping::SelectedBorrowReturn;
+        let store = Arc::new(test_store());
+        let same_store = Arc::clone(&store);
+        let generation = store.register_selected_bookkeeping_generation().unwrap();
+        let thread = "T-selected-ack";
+        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
+        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap().unwrap();
+        let borrower = same_store.selected_invocations.lock().unwrap()
+            .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
+        store.active_launch_owners.lock().unwrap().remove(&claim.claimed_by);
+        assert!(same_store.ack_selected_borrow_return(&borrower).is_err());
+        assert!(store.selected_invocations.lock().unwrap().fixture_awaiting_ack(&borrower));
+        store.active_launch_owners.lock().unwrap().insert(claim.claimed_by.clone());
+        assert_eq!(same_store.ack_selected_borrow_return(&borrower).unwrap(), SelectedBorrowReturn::Returned);
+        assert_eq!(store.ack_selected_borrow_return(&borrower).unwrap(), SelectedBorrowReturn::AlreadyReturned);
+        let other = test_store();
+        other.register_selected_bookkeeping_generation().unwrap();
+        assert!(other.ack_selected_borrow_return(&borrower).is_err());
+    }
+
+    #[test]
+    fn selected_missing_durable_claim_keeps_restored_metadata_pending() {
+        let store = test_store();
+        let generation = store.register_selected_bookkeeping_generation().unwrap();
+        let thread = "T-selected-missing-claim";
+        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
+        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap().unwrap();
+        let borrower = store.selected_invocations.lock().unwrap()
+            .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
+        store.release_thread_launch_claim(thread, &claim.claim_id).unwrap();
+        assert!(store.ack_selected_borrow_return(&borrower).is_err());
+        assert!(store.selected_invocations.lock().unwrap().fixture_awaiting_ack(&borrower));
     }
 
     #[test]
