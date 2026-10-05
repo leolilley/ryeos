@@ -236,6 +236,7 @@ impl CompiledResponseMode for CompiledJsonMode {
             workspace_lifeline: None,
             launch_timings: None,
             state: ctx.state,
+            publication: ctx.publication,
             webhook_dedupe: ctx.webhook_dedupe,
         };
 

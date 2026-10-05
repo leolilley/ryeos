@@ -581,6 +581,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.launch_mode = req.launch_mode;
         options.target_site_id = req.target_site_id;
         options.validate_only = req.validate_only;
+        options = options.with_application_publication(ctx.publication.clone());
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;

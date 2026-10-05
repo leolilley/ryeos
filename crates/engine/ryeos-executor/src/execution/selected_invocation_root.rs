@@ -1,5 +1,7 @@
-//! Empty composition groundwork. This module cannot install or launch an owner.
+//! Daemon-owned selected invocation storage and immutable publication.
+//! Publication does not authorize native contact or certify settlement.
 use std::sync::{Arc, Weak};
+use crate::{SelectedApplicationPublication, SelectedRootClose};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const CAPACITY: usize = 32;
@@ -181,11 +183,32 @@ struct SelectedRetainedSlot {
     slot: std::sync::Mutex<SlotCore<SelectedWholeOwner, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>,
 }
 
+/// Invariant lexical loan of the SAME concrete root owner. Private fields and
+/// constructor prevent caller data from minting a loan or extracting owners.
+/// ```compile_fail
+/// fn shorten<'long: 'short, 'short>(
+///     loan: ryeos_executor::SelectedDedicatedInvocationLoan<'long>,
+/// ) -> ryeos_executor::SelectedDedicatedInvocationLoan<'short> { loan }
+/// ```
+/// ```compile_fail
+/// let loan = ryeos_executor::SelectedDedicatedInvocationLoan::default();
+/// ```
+#[cfg(target_os = "linux")]
+pub struct SelectedDedicatedInvocationLoan<'root> {
+    inner: RootLoan<'root, SelectedWholeOwner, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>,
+}
+
+// No selected native implementation on other hosts; the type stays uninhabited.
+#[cfg(not(target_os = "linux"))]
+pub struct SelectedDedicatedInvocationLoan<'root> {
+    unavailable: std::convert::Infallible,
+    invariant: std::marker::PhantomData<fn(&'root ()) -> &'root ()>,
+}
+
 #[cfg(target_os = "linux")]
 struct SelectedRetainedRoot {
-    // The node stays in its fixed slot even while its WHOLE Box is borrowed.
-    // No constructor/removal/close for this nonempty storage is exposed.
-    slots: [Option<SelectedRetainedSlot>; CAPACITY],
+    // A slot stays counted while its whole owner is borrowed or refused.
+    slots: [Option<Arc<SelectedRetainedSlot>>; CAPACITY],
 }
 
 #[cfg(target_os = "linux")]
@@ -222,6 +245,24 @@ impl SelectedRetainedSlot {
         };
         SlotCore::finish_reserved_loan(&self.slot, ticket, reservation, borrower)
             .map_err(|error| anyhow::anyhow!("selected root/App loan join retained: {error:?}"))
+    }
+
+    fn begin_dedicated_loan(
+        &self, store: &ryeos_app::state_store::StateStore, ticket: &ryeos_app::SelectedTicket,
+    ) -> anyhow::Result<SelectedDedicatedInvocationLoan<'_>> {
+        {
+            let slot = self.slot.lock()
+                .map_err(|_| anyhow::anyhow!("dedicated root slot poisoned; owner retained"))?;
+            let owner = slot.owner.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("dedicated root whole owner is already borrowed"))?;
+            let admission = owner.invocation.dedicated_admission()
+                .ok_or_else(|| anyhow::anyhow!("remote consumer proof cannot mint dedicated root loan"))?;
+            anyhow::ensure!(admission.invocation() == ticket,
+                "dedicated root loan differs from exact installed admission");
+        }
+        // Existing two-phase reservation preserves Box on App error and Drop
+        // restores it before ACK. This wrapper has no native owner extraction.
+        Ok(SelectedDedicatedInvocationLoan { inner: self.begin_loan(store, ticket)? })
     }
 
     fn acknowledge_pending_return(
@@ -285,17 +326,33 @@ fn acknowledge_pending_return<O>(
     Ok(returned)
 }
 
-// Uninhabited until a separately reviewed owner implementation replaces this
-// empty storage cut. This is not a fake native owner or settlement witness.
-enum UnavailableOwner {}
-
-struct EmptyRoot {
-    slots: [Option<UnavailableOwner>; CAPACITY],
+struct SelectedRoot {
+    generation: std::sync::Mutex<Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>>,
+    #[cfg(target_os = "linux")]
+    retained: std::sync::Mutex<SelectedRetainedRoot>,
     closed: AtomicBool,
 }
 
+impl SelectedRoot {
+    fn has_unresolved_owners(&self) -> bool {
+        // Shutdown must not wait for an in-flight registration or slot writer.
+        // Contention is unresolved custody, never a positive empty receipt.
+        if self.generation.try_lock().is_err() { return true; }
+        #[cfg(target_os = "linux")]
+        {
+            match self.retained.try_lock() {
+                Ok(retained) => retained.slots.iter().any(Option::is_some),
+                // Poison never certifies empty or authorizes lifecycle release.
+                Err(_) => true,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        { false }
+    }
+}
+
 pub struct SelectedInvocationCompositionBarrier {
-    root: Arc<EmptyRoot>,
+    root: Arc<SelectedRoot>,
     registered_generation: Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>,
 }
 
@@ -320,7 +377,7 @@ pub struct SelectedInvocationCompositionBarrier {
 ///     -> Option<lillux::exec::SelectedScopedHeldView<'static>> { loan.held() }
 /// ```
 pub struct SelectedInvocationAttachment {
-    root: Weak<EmptyRoot>,
+    root: Weak<SelectedRoot>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -332,8 +389,12 @@ pub enum SelectedInstallationRefusal {
 
 impl SelectedInvocationCompositionBarrier {
     pub fn bootstrap() -> (Self, SelectedInvocationAttachment) {
-        let root = Arc::new(EmptyRoot {
-            slots: std::array::from_fn(|_| None),
+        let root = Arc::new(SelectedRoot {
+            generation: std::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            retained: std::sync::Mutex::new(SelectedRetainedRoot {
+                slots: std::array::from_fn(|_| None),
+            }),
             closed: AtomicBool::new(false),
         });
         let attachment = SelectedInvocationAttachment { root: Arc::downgrade(&root) };
@@ -353,26 +414,81 @@ impl SelectedInvocationCompositionBarrier {
             anyhow::bail!("selected composition generation is already registered");
         }
         let generation = store.register_selected_bookkeeping_generation()?;
+        // Store work is complete before acquiring root publication storage.
+        let mut registered = self.root.generation.lock()
+            .map_err(|_| anyhow::anyhow!("selected root generation storage poisoned"))?;
+        anyhow::ensure!(!self.root.closed.load(Ordering::Acquire), "selected root closed during registration");
+        anyhow::ensure!(registered.is_none(), "selected root generation already registered");
+        *registered = Some((Arc::clone(store), generation.clone()));
         self.registered_generation = Some((Arc::clone(store), generation));
         Ok(())
     }
 
-    /// Closes only the structurally empty bootstrap. No native settlement claim.
-    pub fn close_empty_bootstrap(&self) {
-        // The sole constructor fills every slot with None; no owner issuer,
-        // storage mutation, extraction or loan exists in this implementation.
-        for slot in &self.root.slots {
-            if let Some(owner) = slot { match *owner {} }
-        }
-        self.root.closed.store(true, Ordering::Release);
+    /// Capture the actual armed App/Executor generation in one immutable object.
+    /// This publication is a carrier, not a product or contact admission.
+    pub fn publication(
+        &self, app: Arc<ryeos_app::state::AppState>,
+    ) -> anyhow::Result<Arc<SelectedApplicationPublication>> {
+        let (store, _) = self.registered_generation.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("selected publication generation is unarmed"))?;
+        anyhow::ensure!(Arc::ptr_eq(store, &app.state_store),
+            "selected publication App belongs to another Store generation");
+        anyhow::ensure!(!self.root.closed.load(Ordering::Acquire),
+            "selected publication root is closed");
+        Ok(Arc::new(SelectedApplicationPublication {
+            app,
+            attachment: SelectedInvocationAttachment { root: Arc::downgrade(&self.root) },
+        }))
     }
+
+    pub fn has_unresolved_owners(&self) -> bool {
+        self.root.has_unresolved_owners()
+    }
+
+    /// Close admission before observing retained custody. An occupied slot,
+    /// including Pending, BorrowReserved and refusal, requires reconciliation.
+    /// This never extracts an owner or treats a stopped waiter as settlement.
+    pub fn close(&self) -> SelectedRootClose {
+        self.root.closed.store(true, Ordering::Release);
+        if self.root.has_unresolved_owners() {
+            SelectedRootClose::Unresolved
+        } else {
+            SelectedRootClose::Closed
+        }
+    }
+
 }
 
 impl Drop for SelectedInvocationCompositionBarrier {
-    fn drop(&mut self) { self.close_empty_bootstrap(); }
+    fn drop(&mut self) {
+        if self.close() == SelectedRootClose::Unresolved {
+            // Drop cannot run a bounded native/financial reconciliation. Keep
+            // the exact root and Store alive even if a caller misses the normal
+            // daemon unresolved hold. Arc clone increments only; no new owner,
+            // mutex re-entry, ledger write or synthetic positive receipt.
+            let _ = Arc::into_raw(Arc::clone(&self.root));
+            if let Some(registration) = self.registered_generation.take() {
+                std::mem::forget(registration);
+            }
+        }
+    }
 }
 
 impl SelectedInvocationAttachment {
+    pub(crate) fn validate_for_store(
+        &self, store: &Arc<ryeos_app::state_store::StateStore>,
+    ) -> anyhow::Result<()> {
+        let root = self.root.upgrade()
+            .ok_or_else(|| anyhow::anyhow!("selected invocation root detached"))?;
+        anyhow::ensure!(!root.closed.load(Ordering::Acquire), "selected invocation root closed");
+        let generation = root.generation.lock()
+            .map_err(|_| anyhow::anyhow!("selected root generation poisoned"))?;
+        let (registered, _) = generation.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("selected invocation root unarmed"))?;
+        anyhow::ensure!(Arc::ptr_eq(registered, store), "selected invocation Store generation mismatch");
+        Ok(())
+    }
+
     pub fn installation_refusal(&self) -> SelectedInstallationRefusal {
         match self.root.upgrade() {
             None => SelectedInstallationRefusal::Detached,
@@ -650,8 +766,10 @@ mod tests {
         let other_store = actual_store(other_root.path());
         assert!(barrier.register_from_store(&other_store).is_err());
         assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, &store));
+        assert!(attachment.validate_for_store(&store).is_ok());
+        assert!(attachment.validate_for_store(&other_store).is_err());
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
-        barrier.close_empty_bootstrap();
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
     }
 
@@ -664,7 +782,7 @@ mod tests {
         assert!(barrier.register_from_store(&store).is_err());
         assert!(barrier.registered_generation.is_none());
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
-        barrier.close_empty_bootstrap();
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert!(barrier.register_from_store(&store).is_err());
         assert!(barrier.registered_generation.is_none());
     }
@@ -672,11 +790,16 @@ mod tests {
     #[test]
     fn bootstrap_refuses_and_empty_close_is_idempotent() {
         let (barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
-        assert_eq!(barrier.root.slots.len(), CAPACITY);
-        assert!(barrier.root.slots.iter().all(Option::is_none));
+        #[cfg(target_os = "linux")]
+        {
+            let retained = barrier.root.retained.lock().unwrap();
+            assert_eq!(retained.slots.len(), CAPACITY);
+            assert!(retained.slots.iter().all(Option::is_none));
+        }
+        assert!(!barrier.has_unresolved_owners());
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
-        barrier.close_empty_bootstrap();
-        barrier.close_empty_bootstrap();
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
         drop(barrier);
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
@@ -692,5 +815,47 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(observer.installation_refusal(), SelectedInstallationRefusal::Detached);
+    }
+}
+
+#[cfg(test)]
+mod selected_close_controls {
+    use super::*;
+
+    #[test]
+    fn empty_close_is_positive_and_prevents_publication() {
+        let (barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_does_not_wait_for_retained_storage_and_stays_closed() {
+        let (barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
+        let retained = barrier.root.retained.lock().unwrap();
+        assert_eq!(barrier.close(), SelectedRootClose::Unresolved);
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        drop(retained);
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn poisoned_storage_never_certifies_empty() {
+        let (barrier, _) = SelectedInvocationCompositionBarrier::bootstrap();
+        let root = Arc::clone(&barrier.root);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _retained = root.retained.lock().unwrap();
+            panic!("storage uncertainty");
+        }));
+        assert!(barrier.has_unresolved_owners());
+        assert_eq!(barrier.close(), SelectedRootClose::Unresolved);
+        let observer = Arc::downgrade(&root);
+        drop(root);
+        drop(barrier);
+        // Defensive Drop retains the SAME root; it does not invent closure.
+        assert!(observer.upgrade().is_some());
     }
 }

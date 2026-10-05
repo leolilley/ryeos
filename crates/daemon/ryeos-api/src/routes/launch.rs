@@ -230,6 +230,9 @@ pub(crate) struct DispatchLaunchOptions {
     /// released only after dispatch has either committed the captured snapshot
     /// into authoritative history or failed without exposing a root.
     captured_generation: Option<ryeos_executor::execution::CapturedProjectGeneration>,
+    /// Immutable App/Executor availability captured by HTTP ingress. This does
+    /// not classify the request as selected.
+    application_publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
 }
 
 impl DispatchLaunchOptions {
@@ -302,7 +305,16 @@ impl DispatchLaunchOptions {
             root_dispatch_evidence,
             project_path,
             captured_generation: None,
+            application_publication: None,
         })
+    }
+
+    pub(crate) fn with_application_publication(
+        mut self,
+        publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
+    ) -> Self {
+        self.application_publication = publication;
+        self
     }
 
     pub(crate) fn retain_captured_generation(
@@ -629,7 +641,11 @@ fn spawn_dispatch_launch_inner(
     options: DispatchLaunchOptions,
     launch_handoff: Option<ryeos_executor::execution::launch::LaunchHandoff>,
 ) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
-    let state_clone = state.clone();
+    let application_publication = options.application_publication;
+    let state_clone = application_publication
+        .as_ref()
+        .map(|publication| publication.app().as_ref().clone())
+        .unwrap_or_else(|| state.clone());
     let project_path_buf = options.project_path.clone();
     assert_eq!(
         provenance.effective_path(),
@@ -725,39 +741,51 @@ fn spawn_dispatch_launch_inner(
             effect_authority: None,
         };
 
-        let dispatched = match launch_handoff.as_ref() {
-            Some(handoff) => {
-                ryeos_executor::dispatch::dispatch_with_launch_handoff(
-                    item_ref.as_str(),
-                    handler_context,
-                    &dispatch_req,
-                    &exec_ctx,
-                    &state_clone,
-                    handoff,
-                )
-                .await
+        let dispatched = if let Some(publication) = application_publication.as_ref() {
+            ryeos_executor::dispatch::dispatch_with_application_publication(
+                item_ref.as_str(),
+                publication,
+                handler_context,
+                &dispatch_req,
+                &exec_ctx,
+                launch_handoff.as_ref(),
+            )
+            .await
+        } else {
+            match launch_handoff.as_ref() {
+                Some(handoff) => {
+                    ryeos_executor::dispatch::dispatch_with_launch_handoff(
+                        item_ref.as_str(),
+                        handler_context,
+                        &dispatch_req,
+                        &exec_ctx,
+                        &state_clone,
+                        handoff,
+                    )
+                    .await
+                }
+                None => match handler_context {
+                    Some(context) => {
+                        ryeos_executor::dispatch::dispatch_with_handler_context(
+                            item_ref.as_str(),
+                            context,
+                            &dispatch_req,
+                            &exec_ctx,
+                            &state_clone,
+                        )
+                        .await
+                    }
+                    None => {
+                        ryeos_executor::dispatch::dispatch(
+                            item_ref.as_str(),
+                            &dispatch_req,
+                            &exec_ctx,
+                            &state_clone,
+                        )
+                        .await
+                    }
+                },
             }
-            None => match handler_context {
-                Some(context) => {
-                    ryeos_executor::dispatch::dispatch_with_handler_context(
-                        item_ref.as_str(),
-                        context,
-                        &dispatch_req,
-                        &exec_ctx,
-                        &state_clone,
-                    )
-                    .await
-                }
-                None => {
-                    ryeos_executor::dispatch::dispatch(
-                        item_ref.as_str(),
-                        &dispatch_req,
-                        &exec_ctx,
-                        &state_clone,
-                    )
-                    .await
-                }
-            },
         };
         if dispatched.is_err()
             && let Some(timings) = launch_timings.as_ref()

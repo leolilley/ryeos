@@ -114,3 +114,6 @@ pub mod thread_lifecycle;
 pub mod vault;
 pub mod worker_handoff;
 pub mod write_barrier;
+
+// Original bearer custody only; opaque admission is issued separately.
+pub use callback_token::{DedicatedWorkerCredentialTransport, SelectedDedicatedWorkerAdmission};

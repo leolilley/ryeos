@@ -396,6 +396,20 @@ fn check_dispatch_capabilities(
     Ok(())
 }
 
+// Protected root availability is separate from a request for its selected
+// driver. Neither variant is native admission; the closed dedicated proof is
+// still required at the actual finalized dependency/owner boundary.
+#[derive(Clone, Copy)]
+pub(crate) enum InvocationRootCarrier<'a> {
+    Ordinary,
+    Available(&'a crate::SelectedInvocationAttachment),
+    Required(&'a crate::SelectedInvocationAttachment),
+}
+
+impl InvocationRootCarrier<'_> {
+    fn requires_selected(self) -> bool { matches!(self, Self::Required(_)) }
+}
+
 /// Context struct for subprocess dispatch, carrying all the hop-derived
 /// data plus the shared request/ctx/state.
 pub(crate) struct SubprocessDispatchContext<'a> {
@@ -410,6 +424,7 @@ pub(crate) struct SubprocessDispatchContext<'a> {
     root_subject: Option<RootSubject>,
     hop_runtime: Option<VerifiedRuntime>,
     launch_handoff: Option<&'a crate::execution::launch::LaunchHandoff>,
+    invocation_root: InvocationRootCarrier<'a>,
 }
 
 // ── A4: per-hop resolution helper + HopAction ─────────────────────────
@@ -3355,6 +3370,7 @@ async fn dispatch_via_method_executor(
         &exec_ctx,
         state,
         launch_handoff,
+        InvocationRootCarrier::Ordinary,
     ))
     .await;
     drop(dispatch_req);
@@ -3524,7 +3540,7 @@ pub async fn dispatch(
     // and constructing the unboxed nested future can exhaust the worker stack
     // before the selected leaf gets a chance to run.
     Box::pin(dispatch_inner(
-        item_ref, None, None, request, ctx, state, None,
+        item_ref, None, None, request, ctx, state, None, InvocationRootCarrier::Ordinary,
     ))
     .await
 }
@@ -3550,6 +3566,7 @@ pub async fn dispatch_with_handler_context(
             request,
             ctx,
             state,
+            None,
         )
         .await
         .map_err(|error| {
@@ -3566,6 +3583,7 @@ pub async fn dispatch_with_handler_context(
         ctx,
         state,
         None,
+        InvocationRootCarrier::Ordinary,
     ))
     .await
 }
@@ -3583,7 +3601,7 @@ pub fn dispatch_daemon_owned(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
-    dispatch_daemon_owned_inner(item_ref, None, None, request, ctx, state)
+    dispatch_daemon_owned_inner(item_ref, None, None, request, ctx, state, None)
 }
 
 fn dispatch_daemon_owned_inner(
@@ -3593,6 +3611,7 @@ fn dispatch_daemon_owned_inner(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    available_root: Option<crate::SelectedInvocationAttachment>,
 ) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
     let item_ref = item_ref.to_owned();
     let launch_mode = request.launch_mode.to_owned();
@@ -3656,6 +3675,10 @@ fn dispatch_daemon_owned_inner(
             &ctx,
             &state,
             None,
+            match available_root.as_ref() {
+                Some(attachment) => InvocationRootCarrier::Available(attachment),
+                None => InvocationRootCarrier::Ordinary,
+            },
         ))
         .await;
         drop(request);
@@ -3685,6 +3708,7 @@ pub async fn dispatch_with_launch_handoff(
         ctx,
         state,
         Some(launch_handoff),
+        InvocationRootCarrier::Ordinary,
     ))
     .await;
     match &result {
@@ -3713,7 +3737,7 @@ pub async fn dispatch_verified(
     if request.lifecycle_authority.ownership
         == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
-        return dispatch_daemon_owned_inner(item_ref, Some(verified), None, request, ctx, state)
+        return dispatch_daemon_owned_inner(item_ref, Some(verified), None, request, ctx, state, None)
             .await
             .map_err(|error| {
                 DispatchError::Internal(anyhow::anyhow!(
@@ -3729,6 +3753,7 @@ pub async fn dispatch_verified(
         ctx,
         state,
         None,
+        InvocationRootCarrier::Ordinary,
     ))
     .await
 }
@@ -3754,6 +3779,7 @@ pub async fn dispatch_verified_with_handler_context(
             request,
             ctx,
             state,
+            None,
         )
         .await
         .map_err(|error| {
@@ -3770,8 +3796,63 @@ pub async fn dispatch_verified_with_handler_context(
         ctx,
         state,
         None,
+        InvocationRootCarrier::Ordinary,
     ))
     .await
+}
+
+/// Carry the matching publication as available context without selecting an
+/// invocation. Only exact admitted dependency proof may choose its owner path.
+/// Ordinary wait/detached/validation/method requests keep ordinary semantics.
+pub async fn dispatch_with_application_publication(
+    item_ref: &str,
+    publication: &crate::SelectedApplicationPublication,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
+) -> Result<Value, DispatchError> {
+    let state = publication.app().as_ref();
+    if launch_handoff.is_none() && request.lifecycle_authority.ownership
+        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    {
+        return dispatch_daemon_owned_inner(
+            item_ref, None, handler_context, request, ctx, state,
+            Some(publication.attachment().clone()),
+        ).await.map_err(|error| DispatchError::Internal(anyhow::anyhow!(
+            "daemon-owned publication dispatch ended before settlement: {error}"
+        )))?;
+    }
+    let result = Box::pin(dispatch_inner(
+        item_ref, None, handler_context, request, ctx, state, launch_handoff,
+        InvocationRootCarrier::Available(publication.attachment()),
+    )).await;
+    if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
+        handoff.publish_dispatch_failure(error);
+    }
+    result
+}
+
+/// Fresh selected dispatch retains its protected root carrier out of band.
+/// An error never retries through an ordinary dispatch entry.
+pub async fn dispatch_with_selected_invocation(
+    item_ref: &str,
+    attachment: &crate::SelectedInvocationAttachment,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
+) -> Result<Value, DispatchError> {
+    attachment.validate_for_store(&state.state_store).map_err(DispatchError::Internal)?;
+    let result = Box::pin(dispatch_inner(
+        item_ref, None, handler_context, request, ctx, state,
+        launch_handoff, InvocationRootCarrier::Required(attachment),
+    )).await;
+    if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
+        handoff.publish_dispatch_failure(error);
+    }
+    result
 }
 
 async fn dispatch_inner(
@@ -3782,6 +3863,7 @@ async fn dispatch_inner(
     ctx: &ExecutionContext,
     state: &AppState,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
+    invocation_root: InvocationRootCarrier<'_>,
 ) -> Result<Value, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
@@ -4014,6 +4096,7 @@ async fn dispatch_inner(
                     &role,
                     local_handler_context,
                     launch_handoff,
+                    invocation_root,
                 ))
                 .await;
             }
@@ -4025,6 +4108,11 @@ async fn dispatch_inner(
                 method_name,
                 method_decl,
             } => {
+                if invocation_root.requires_selected() {
+                    return Err(DispatchError::Internal(anyhow::anyhow!(
+                        "selected method owner driver is not admitted; ordinary fallback forbidden"
+                    )));
+                }
                 return Box::pin(dispatch_method(
                     &kind,
                     &method_name,
@@ -6140,6 +6228,7 @@ async fn dispatch_by(
     role: &SubprocessRole,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
+    invocation_root: InvocationRootCarrier<'_>,
 ) -> Result<Value, DispatchError> {
     let DispatchByParams {
         terminator,
@@ -6149,6 +6238,11 @@ async fn dispatch_by(
         runtime,
         root_subject,
     } = params;
+    if invocation_root.requires_selected() && !matches!(&terminator, TerminatorDecl::Subprocess { .. }) {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected invocation requires its owned subprocess driver"
+        )));
+    }
     match terminator {
         TerminatorDecl::Subprocess { .. } => {
             let tp = thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
@@ -6167,6 +6261,7 @@ async fn dispatch_by(
                 root_subject,
                 hop_runtime: runtime,
                 launch_handoff,
+                invocation_root,
             }))
             .await
         }

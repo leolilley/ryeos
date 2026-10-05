@@ -1,7 +1,8 @@
 use lillux::time::{Duration, MonotonicDeadline};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -549,13 +550,151 @@ impl CallbackCapability {
     }
 }
 
+/// Original transport custody only. These strings confer no selected admission.
+/// No Clone, Debug or serialization can copy bearer custody into evidence.
+pub struct DedicatedWorkerCredentialTransport {
+    callback: String,
+    thread_auth: String,
+}
+
+impl DedicatedWorkerCredentialTransport {
+    pub fn from_transport(callback: String, thread_auth: String) -> Result<Self> {
+        anyhow::ensure!(!callback.is_empty() && !thread_auth.is_empty(),
+            "dedicated worker requires both original transport credentials");
+        Ok(Self { callback, thread_auth })
+    }
+}
+
+/// Exact selected Store registration bound to the original credential pair.
+/// Private construction is reserved to the guarded paired Store/root issuer.
+/// This proof alone owns neither financial funding nor native launch authority.
+pub struct SelectedDedicatedWorkerAdmission {
+    ticket: crate::SelectedTicket,
+    credentials: DedicatedWorkerCredentialTransport,
+    occurrence: Arc<SelectedCredentialOccurrence>,
+    credential_expiry: MonotonicDeadline,
+}
+
+impl SelectedDedicatedWorkerAdmission {
+    pub fn invocation(&self) -> &crate::SelectedTicket { &self.ticket }
+
+    // Narrowing input only. It cannot manufacture funded cleanup authority.
+    pub(crate) fn original_pair_expiry(&self) -> MonotonicDeadline {
+        self.credential_expiry
+    }
+
+    pub fn matches_guarded_issuer(
+        &self, callback: &str, thread_auth: &str, thread: &str, claim: &str, owner: &str,
+    ) -> bool {
+        self.credentials.callback == callback && self.credentials.thread_auth == thread_auth
+            && self.ticket.matches_claim(thread, claim, owner)
+            && !self.credential_expiry.has_elapsed()
+            && self.occurrence.state.load(Ordering::Acquire) == 0
+    }
+
+    // GPU's real financial owner consumes this original pair transition before
+    // its own ContactReady -> ContactTaken export. No public contact producer.
+    pub(crate) fn take_original_contact_authorization(&mut self) -> Result<()> {
+        if self.credential_expiry.has_elapsed() {
+            self.occurrence.revoke();
+            bail!("selected original credential service bound expired");
+        }
+        self.occurrence.take_contact()
+    }
+
+    pub(crate) fn require_original_service(&self) -> Result<()> {
+        if self.credential_expiry.has_elapsed() {
+            self.occurrence.revoke();
+        }
+        anyhow::ensure!(self.occurrence.service_open(),
+            "selected original pair service is closed");
+        Ok(())
+    }
+}
+
+// One actual credential occurrence, attached under BOTH original store locks.
+// Record snapshots deliberately omit this state. Contact and revocation share
+// one atomic linearization; neither state owns or drops financial/root custody.
+struct SelectedCredentialOccurrence { state: AtomicU8 }
+const SELECTED_REVOKED: u8 = 1;
+const SELECTED_CONTACT_TAKEN: u8 = 2;
+
+impl SelectedCredentialOccurrence {
+    fn revoke(&self) { self.state.fetch_or(SELECTED_REVOKED, Ordering::AcqRel); }
+    fn take_contact(&self) -> Result<()> {
+        self.state.compare_exchange(0, SELECTED_CONTACT_TAKEN,
+            Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| anyhow::anyhow!("selected contact revoked or already consumed"))?;
+        Ok(())
+    }
+    fn service_open(&self) -> bool {
+        self.state.load(Ordering::Acquire) == SELECTED_CONTACT_TAKEN
+    }
+}
+
+// The record, never the public cloned projection, owns revocation membership.
+struct CredentialRecord<T> {
+    projection: T,
+    selected: Option<Arc<SelectedCredentialOccurrence>>,
+}
+
+impl<T> CredentialRecord<T> {
+    fn new(projection: T) -> Self { Self { projection, selected: None } }
+}
+impl<T> std::ops::Deref for CredentialRecord<T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.projection }
+}
+impl<T> std::ops::DerefMut for CredentialRecord<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // Fresh ordinary setters retain their existing semantics. Once bound,
+        // changing an original role/owner/scope cannot leave issued service
+        // live against a stale projection. Revoke without dropping custody.
+        if let Some(selected) = &self.selected { selected.revoke(); }
+        &mut self.projection
+    }
+}
+// Called only after actual record checks beneath callback -> TAT locks.
+// Installing membership is NOT issuance: Store attempt/root install must still
+// complete in that same critical section before an admission can escape.
+fn bind_selected_occurrence(
+    callback: &mut CredentialRecord<CallbackCapability>,
+    auth: &mut CredentialRecord<ThreadAuthState>,
+    prepared: &Arc<SelectedCredentialOccurrence>,
+) -> Result<Arc<SelectedCredentialOccurrence>> {
+    match (&callback.selected, &auth.selected) {
+        (None, None) => {
+            anyhow::ensure!(prepared.state.load(Ordering::Acquire) == 0,
+                "prepared credential occurrence is not fresh");
+            callback.selected = Some(Arc::clone(prepared));
+            auth.selected = Some(Arc::clone(prepared));
+            Ok(Arc::clone(prepared))
+        }
+        (Some(callback), Some(auth))
+            if Arc::ptr_eq(callback, auth) && Arc::ptr_eq(callback, prepared) => {
+            anyhow::ensure!(callback.state.load(Ordering::Acquire) == 0,
+                "selected credential occurrence already revoked or consumed");
+            Ok(Arc::clone(callback))
+        }
+        _ => bail!("selected credential records belong to another occurrence"),
+    }
+}
+
+impl<T> Drop for CredentialRecord<T> {
+    fn drop(&mut self) {
+        // remove/prune/expiry/whole-store destruction all revoke the original
+        // occurrence. A previously returned snapshot cannot keep it live.
+        if let Some(selected) = &self.selected { selected.revoke(); }
+    }
+}
+
 pub struct CallbackCapabilityStore {
     // Keep one callback-capability owner. A long-lived worker may receive a
     // freshly minted pair for each attached boot, but its bearer still uses
     // this same validation/revocation path. A second store would split method,
     // project, principal, expiry, and detach authority across competing
     // implementations.
-    capabilities: Mutex<HashMap<String, CallbackCapability>>,
+    capabilities: Mutex<HashMap<String, CredentialRecord<CallbackCapability>>>,
 }
 
 impl Default for CallbackCapabilityStore {
@@ -651,7 +790,7 @@ impl CallbackCapabilityStore {
             remote_consumer_grant: None,
         };
 
-        self.capabilities.lock().unwrap().insert(token, cap.clone());
+        self.capabilities.lock().unwrap().insert(token, CredentialRecord::new(cap.clone()));
         cap
     }
 
@@ -872,7 +1011,7 @@ impl CallbackCapabilityStore {
             bail!("callback capability does not match project_path");
         }
 
-        Ok(cap.clone())
+        Ok(cap.projection.clone())
     }
 
     /// Validate a callback token without binding it to a thread. Returns the
@@ -890,7 +1029,7 @@ impl CallbackCapabilityStore {
             bail!("callback capability expired");
         }
 
-        Ok(cap.clone())
+        Ok(cap.projection.clone())
     }
 
     pub fn invalidate(&self, token: &str) {
@@ -954,7 +1093,7 @@ impl CallbackCapabilityStore {
             bail!("callback capability does not match thread_id");
         }
 
-        Ok(cap.clone())
+        Ok(cap.projection.clone())
     }
 
     pub fn invalidate_for_thread(&self, thread_id: &str) {
@@ -1070,7 +1209,7 @@ pub struct ThreadAuthStore {
     // This is the paired ingress-principal proof for runtime callbacks. Hosted
     // workload clients reuse it and narrow the retained handler authority;
     // they must not invent a workload-specific principal or signing key.
-    states: Mutex<HashMap<String, ThreadAuthState>>,
+    states: Mutex<HashMap<String, CredentialRecord<ThreadAuthState>>>,
 }
 
 /// Observation of the actual paired stores and admitted born root. This is
@@ -1249,7 +1388,7 @@ impl ThreadAuthStore {
             expires_at: MonotonicDeadline::after(ttl),
         };
 
-        self.states.lock().unwrap().insert(token, state.clone());
+        self.states.lock().unwrap().insert(token, CredentialRecord::new(state.clone()));
         Ok(state)
     }
 
@@ -1267,7 +1406,7 @@ impl ThreadAuthStore {
             bail!("thread auth token does not match thread_id");
         }
 
-        Ok(state.clone())
+        Ok(state.projection.clone())
     }
 
     pub fn invalidate(&self, token: &str) {
@@ -1325,6 +1464,70 @@ mod tests {
             ),
             vec![],
         ))
+    }
+
+    #[test]
+    fn original_paired_records_revoke_on_either_removal_despite_snapshots() {
+        for remove_callback in [true, false] {
+            let callbacks = CallbackCapabilityStore::new();
+            let auths = ThreadAuthStore::new();
+            let cap = callbacks.generate("T-selected", PathBuf::from("/p"),
+                Duration::from_secs(60), vec![], provenance(PathBuf::from("/p")), "0".repeat(64));
+            let auth = auths.mint("T-selected", "principal".into(), vec![],
+                None, "site", "site", Duration::from_secs(60)).unwrap();
+            let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
+            {
+                let mut callback_records = callbacks.capabilities.lock().unwrap();
+                let mut auth_records = auths.states.lock().unwrap();
+                bind_selected_occurrence(callback_records.get_mut(&cap.token).unwrap(),
+                    auth_records.get_mut(&auth.token).unwrap(), &occurrence).unwrap();
+            }
+            let cap_snapshot = callbacks.validate_token_and_thread(&cap.token, "T-selected").unwrap();
+            let auth_snapshot = auths.validate(&auth.token, "T-selected").unwrap();
+            if remove_callback { callbacks.invalidate_for_thread("T-selected"); }
+            else { auths.invalidate(&auth.token); }
+            assert!(occurrence.take_contact().is_err());
+            assert_eq!(cap_snapshot.thread_id, "T-selected");
+            assert_eq!(auth_snapshot.thread_id, "T-selected");
+        }
+    }
+
+    #[test]
+    fn later_original_authority_mutation_revokes_bound_occurrence() {
+        let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
+        let mut original = CredentialRecord { projection: String::from("original"),
+            selected: Some(Arc::clone(&occurrence)) };
+        original.push_str("-changed");
+        assert!(occurrence.take_contact().is_err());
+        assert_eq!(&original.projection, "original-changed");
+    }
+
+    #[test]
+    fn prune_original_record_revokes_contact_winner_without_erasing_occurrence() {
+        let callbacks = CallbackCapabilityStore::new();
+        let auths = ThreadAuthStore::new();
+        let cap = callbacks.generate("T-selected", PathBuf::from("/p"),
+            Duration::from_secs(60), vec![], provenance(PathBuf::from("/p")), "0".repeat(64));
+        let auth = auths.mint("T-selected", "principal".into(), vec![],
+            None, "site", "site", Duration::from_secs(60)).unwrap();
+        let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
+        {
+            let mut callback_records = callbacks.capabilities.lock().unwrap();
+            let mut auth_records = auths.states.lock().unwrap();
+            // Mechanical pruning setup BEFORE membership binding. The direct
+            // latch below is not the production expiry-checking issuer.
+            callback_records.get_mut(&cap.token).unwrap().expires_at = MonotonicDeadline::after(Duration::ZERO);
+            bind_selected_occurrence(callback_records.get_mut(&cap.token).unwrap(),
+                auth_records.get_mut(&auth.token).unwrap(), &occurrence).unwrap();
+        }
+        assert_eq!(occurrence.state.load(Ordering::Acquire), 0);
+        occurrence.take_contact().unwrap();
+        assert!(occurrence.service_open());
+        assert_eq!(occurrence.state.load(Ordering::Acquire), SELECTED_CONTACT_TAKEN);
+        assert_eq!(callbacks.prune_expired(), 1);
+        assert!(!occurrence.service_open());
+        assert_eq!(occurrence.state.load(Ordering::Acquire), SELECTED_REVOKED | SELECTED_CONTACT_TAKEN);
+        assert!(auths.validate(&auth.token, "T-selected").is_ok());
     }
 
     fn provenance(path: PathBuf) -> TestProvenance {
@@ -2219,5 +2422,43 @@ mod tests {
                 .authorize_workspace_access("tool:project/check", None)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod selected_occurrence_controls {
+    use super::*;
+
+    #[test]
+    fn revocation_before_contact_refuses_without_reset() {
+        let occurrence = SelectedCredentialOccurrence { state: AtomicU8::new(0) };
+        occurrence.revoke();
+        assert!(occurrence.take_contact().is_err());
+        assert!(!occurrence.service_open());
+        occurrence.revoke();
+        assert!(occurrence.take_contact().is_err());
+    }
+
+    #[test]
+    fn contact_winner_is_one_use_and_later_revoke_closes_service() {
+        let occurrence = SelectedCredentialOccurrence { state: AtomicU8::new(0) };
+        occurrence.take_contact().unwrap();
+        assert!(occurrence.service_open());
+        assert!(occurrence.take_contact().is_err());
+        occurrence.revoke();
+        assert!(!occurrence.service_open());
+        assert_eq!(occurrence.state.load(Ordering::Acquire),
+            SELECTED_CONTACT_TAKEN | SELECTED_REVOKED);
+    }
+
+    #[test]
+    fn projection_clone_cannot_keep_removed_membership_live() {
+        let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
+        let record = CredentialRecord { projection: String::from("projection"),
+            selected: Some(Arc::clone(&occurrence)) };
+        let snapshot = record.projection.clone();
+        drop(record);
+        assert_eq!(snapshot, "projection");
+        assert!(occurrence.take_contact().is_err());
     }
 }

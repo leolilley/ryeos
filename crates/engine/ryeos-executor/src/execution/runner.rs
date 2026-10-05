@@ -138,12 +138,19 @@ pub(super) struct ExecutionGuard {
     launch_owner: Option<String>,
 }
 
+// Distinct opaque purpose-specific proof classes. Dedicated selection never
+// widens the remote consumer's four-method surface or reuses its custody.
+pub(super) enum SelectedInvocationCustody {
+    Remote(ryeos_app::callback_token::PairedRemoteConsumerCustody),
+    Dedicated(ryeos_app::SelectedDedicatedWorkerAdmission),
+}
+
 /// Inert precontact owner shape. No constructor exposes it to native launch;
 /// activation requires the separately reviewed composition root and bounds.
 pub(super) struct SelectedQualificationInvocation<
     G = ExecutionGuard,
     C = ThreadLaunchClaim,
-    P = ryeos_app::callback_token::PairedRemoteConsumerCustody,
+    P = SelectedInvocationCustody,
 > {
     // Guard drops before claim, preserving exact claim through cleanup.
     guard: G,
@@ -165,6 +172,40 @@ impl SelectedQualificationInvocation {
     pub(super) fn claim_identity(&self) -> (&str, &str, &str) {
         self.claim.selected_claim_identity()
     }
+    pub(super) fn dedicated_admission(&self) -> Option<&ryeos_app::SelectedDedicatedWorkerAdmission> {
+        match &self.paired {
+            SelectedInvocationCustody::Dedicated(admission) => Some(admission),
+            SelectedInvocationCustody::Remote(_) => None,
+        }
+    }
+    // Called only by the concrete selected root factory after actual pair/
+    // Store installation. Admission is not constructible from a caller DTO.
+    // Financial and lower owners remain required in that whole-root factory.
+    fn from_dedicated_precontact(
+        guard: ExecutionGuard,
+        claim: ThreadLaunchClaim,
+        admission: ryeos_app::SelectedDedicatedWorkerAdmission,
+    ) -> Result<Self> {
+        let invocation = Self { guard, claim,
+            paired: SelectedInvocationCustody::Dedicated(admission) };
+        invocation.checked(|invocation| {
+            let (thread, claim, owner) = invocation.claim.selected_claim_identity();
+            let guard = &invocation.guard;
+            let SelectedInvocationCustody::Dedicated(admission) = &invocation.paired else {
+                bail!("dedicated precontact requires the distinct dedicated proof");
+            };
+            anyhow::ensure!(guard.thread_id.as_deref() == Some(thread)
+                && guard.launch_owner.as_deref() == Some(owner),
+                "dedicated guard differs from the exact original claim");
+            anyhow::ensure!(admission.matches_guarded_issuer(
+                guard.callback_token.as_deref().context("dedicated guard has no callback")?,
+                guard.thread_auth_token.as_deref().context("dedicated guard has no TAT")?,
+                thread, claim, owner,
+            ), "dedicated proof differs from original guarded credential/claim");
+            Ok(())
+        })
+    }
+
     /// Only the complete precontact owners may be moved here. This constructor
     /// grants no selected spawn; no postcontact caller uses this inert shape.
     fn from_precontact(
@@ -174,13 +215,16 @@ impl SelectedQualificationInvocation {
     ) -> Result<Self> {
         // Construct BEFORE any fallible check: parameter drop ordering must
         // never release the claim before the guard finishes its cleanup.
-        let invocation = Self { guard, claim, paired };
+        let invocation = Self { guard, claim, paired: SelectedInvocationCustody::Remote(paired) };
         invocation.checked(|invocation| {
             let owner = invocation.claim.canonical_owner()?;
             let guard = &invocation.guard;
             let thread = guard.thread_id.as_deref().context("selected precontact guard has no born thread")?;
+            let SelectedInvocationCustody::Remote(paired) = &invocation.paired else {
+                bail!("remote precontact requires the distinct remote proof");
+            };
             if guard.launch_owner.as_deref() != Some(owner.as_str())
-                || !invocation.paired.matches_guarded_issuer(
+                || !paired.matches_guarded_issuer(
                     guard.callback_token.as_deref().context("selected guard has no callback")?,
                     guard.thread_auth_token.as_deref().context("selected guard has no TAT")?,
                     thread, &owner,

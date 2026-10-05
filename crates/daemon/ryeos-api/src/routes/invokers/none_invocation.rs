@@ -211,6 +211,7 @@ mod tests {
             workspace_lifeline: None,
             launch_timings: None,
             state,
+            publication: None,
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         };
         let result = compiled.invoke(ctx).await.unwrap();

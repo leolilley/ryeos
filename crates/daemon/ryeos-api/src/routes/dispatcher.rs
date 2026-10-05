@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
@@ -71,7 +72,21 @@ pub async fn route_dispatcher_from_ingress(
     ingress_started_at: Instant,
 ) -> Response {
     let table = api_state.route_table.load_full();
-    let app_state = (*api_state.app).clone();
+    let publication = api_state.publication.clone();
+    let app = publication
+        .as_ref()
+        .map(|publication| publication.app())
+        .unwrap_or(&api_state.app);
+    if !Arc::ptr_eq(app, &api_state.app) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "error": "application publication generation mismatch"
+            })),
+        )
+            .into_response();
+    }
+    let app_state = (**app).clone();
     let webhook_dedupe = api_state.webhook_dedupe.clone();
 
     let method = request.method().clone();
@@ -187,6 +202,7 @@ pub async fn route_dispatcher_from_ingress(
         workspace_lifeline: None,
         launch_timings: launch_timings.clone(),
         state: app_state.clone(),
+        publication: publication.clone(),
         webhook_dedupe: webhook_dedupe.clone(),
     };
 
@@ -227,6 +243,7 @@ pub async fn route_dispatcher_from_ingress(
         body_raw,
         principal,
         state: app_state,
+        publication,
         launch_timings,
         webhook_dedupe,
     };

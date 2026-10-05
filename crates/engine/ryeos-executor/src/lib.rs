@@ -5,8 +5,23 @@ pub mod dispatch_role;
 pub mod execution;
 pub use execution::{
     SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier,
+    SelectedInvocationCompositionBarrier, SelectedDedicatedInvocationLoan,
 };
+/// Immutable daemon publication. Attachment presence never admits a worker.
+pub struct SelectedApplicationPublication {
+    pub(crate) app: std::sync::Arc<ryeos_app::state::AppState>,
+    pub(crate) attachment: SelectedInvocationAttachment,
+}
+
+impl SelectedApplicationPublication {
+    pub fn app(&self) -> &std::sync::Arc<ryeos_app::state::AppState> { &self.app }
+    pub fn attachment(&self) -> &SelectedInvocationAttachment { &self.attachment }
+}
+
+/// Positive closure means no retained selected slot or ambiguous storage lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedRootClose { Closed, Unresolved }
+
 pub mod executor;
 pub(crate) mod resolved_config_cache;
 pub mod structured_error;

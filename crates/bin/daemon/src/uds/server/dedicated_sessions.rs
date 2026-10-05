@@ -725,6 +725,8 @@ pub(super) async fn start(
     params: &Value,
     state: &AppState,
     cap: &CallbackCapability,
+    _publication: Option<&ryeos_executor::SelectedApplicationPublication>,
+    _credentials: Option<ryeos_app::DedicatedWorkerCredentialTransport>,
 ) -> Result<Value> {
     require_start_authority(state, cap)?;
     if cap

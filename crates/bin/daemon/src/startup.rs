@@ -635,7 +635,7 @@ impl StartupCoordinator {
 
     pub fn publish_application(
         &self,
-        app: Arc<ryeos_app::state::AppState>,
+        publication: Arc<ryeos_executor::SelectedApplicationPublication>,
         api: ryeos_api::ApiState,
     ) -> Result<()> {
         let _publication = self
@@ -651,9 +651,17 @@ impl StartupCoordinator {
         if self.uds.application_is_published() || self.http.application_is_published() {
             anyhow::bail!("application surfaces may be published exactly once");
         }
+        let Some(api_publication) = api.publication.as_ref() else {
+            anyhow::bail!("HTTP application lacks the paired Executor publication");
+        };
+        if !Arc::ptr_eq(api_publication, &publication)
+            || !Arc::ptr_eq(api_publication.app(), &api.app)
+        {
+            anyhow::bail!("HTTP and UDS application publications do not share one generation");
+        }
         // Runtime callbacks use AppState; HTTP routes use the richer ApiState.
         // Both pointers are release-published before readiness can be observed.
-        self.uds.publish_application(app);
+        self.uds.publish_application(publication);
         self.http.publish_application(api);
         Ok(())
     }

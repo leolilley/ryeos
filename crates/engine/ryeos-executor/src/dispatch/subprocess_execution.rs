@@ -206,7 +206,13 @@ pub(crate) async fn dispatch_subprocess(
         root_subject,
         hop_runtime,
         launch_handoff,
+        invocation_root,
     } = sctx;
+    if invocation_root.requires_selected() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected dedicated owner issuer is not yet joined; contact and ordinary fallback refused"
+        )));
+    }
     let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
         available.sort();
@@ -311,6 +317,7 @@ pub(crate) async fn dispatch_subprocess(
                     root_subject,
                     hop_runtime,
                     launch_handoff,
+                    invocation_root,
                 },
                 protocol,
             ))
@@ -350,8 +357,14 @@ async fn dispatch_managed_subprocess(
         handler_context,
         role,
         launch_handoff,
+        invocation_root,
     } = sctx;
 
+    if invocation_root.requires_selected() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected managed owner driver is not admitted"
+        )));
+    }
     if classify_managed_protocol(protocol, &canonical_ref.kind)?
         == ManagedProtocolRoute::FramedStreaming
     {

@@ -51,7 +51,7 @@ pub(crate) use routing::dispatch;
 
 struct DynamicServerInner {
     lifecycle: ArcSwap<ryeos_node::LifecycleResponse>,
-    application: ArcSwapOption<AppState>,
+    application: ArcSwapOption<ryeos_executor::SelectedApplicationPublication>,
 }
 
 /// Request-level UDS publication state. The listener can begin serving with
@@ -76,8 +76,11 @@ impl DynamicServerState {
         })
     }
 
-    pub fn publish_application(&self, state: Arc<AppState>) {
-        self.inner.application.store(Some(state));
+    pub fn publish_application(
+        &self,
+        publication: Arc<ryeos_executor::SelectedApplicationPublication>,
+    ) {
+        self.inner.application.store(Some(publication));
     }
 
     pub fn unpublish_application(&self) {
@@ -113,14 +116,18 @@ impl DynamicServerState {
         self.inner.application.load().is_some()
     }
 
-    fn application(&self) -> Option<Arc<AppState>> {
+    fn application(&self) -> Option<Arc<ryeos_executor::SelectedApplicationPublication>> {
         self.inner.application.load_full()
     }
 }
 
-pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
-    let dynamic = DynamicServerState::bootstrap(ready_lifecycle_response(&state))?;
-    dynamic.publish_application(state);
+pub async fn serve(
+    listener: UnixListener,
+    publication: Arc<ryeos_executor::SelectedApplicationPublication>,
+) -> Result<()> {
+    let app = publication.app().clone();
+    let dynamic = DynamicServerState::bootstrap(ready_lifecycle_response(&app))?;
+    dynamic.publish_application(publication);
     serve_dynamic(listener, dynamic).await
 }
 
@@ -248,6 +255,16 @@ pub(crate) async fn dispatch_runtime_method(
     params: &serde_json::Value,
     state: &AppState,
     peer: Option<&AuthenticatedUnixPeer>,
+) -> Result<serde_json::Value> {
+    dispatch_runtime_method_with_publication(method, params, state, peer, None).await
+}
+
+pub(crate) async fn dispatch_runtime_method_with_publication(
+    method: &str,
+    params: &serde_json::Value,
+    state: &AppState,
+    peer: Option<&AuthenticatedUnixPeer>,
+    publication: Option<&ryeos_executor::SelectedApplicationPublication>,
 ) -> Result<serde_json::Value> {
     // Validate the callback token on ALL runtime.* methods, by access class:
     //
@@ -426,6 +443,27 @@ pub(crate) async fn dispatch_runtime_method(
 
     enforce_runtime_callback_admission(method, params, state)?;
 
+    // Retain both original bearer strings in a confidential, move-only owner
+    // before stripping them from the typed service payload. This owner is not
+    // proof of selected admission; dedicated-session start performs the
+    // paired Store issuer only after its actual financial owner is prepared.
+    let dedicated_credentials = if method == "runtime.start_dedicated_session" {
+        let callback = params
+            .get("callback_token")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("dedicated-session start requires callback_token"))?;
+        let thread_auth = params
+            .get("thread_auth_token")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("dedicated-session start requires thread_auth_token"))?;
+        Some(ryeos_app::DedicatedWorkerCredentialTransport::from_transport(
+            callback.to_owned(),
+            thread_auth.to_owned(),
+        )?)
+    } else {
+        None
+    };
+
     // Strip transport-level fields before typed deserialization so
     // deny_unknown_fields on the RPC param structs doesn't reject
     // callback_token.
@@ -489,7 +527,14 @@ pub(crate) async fn dispatch_runtime_method(
             let cap = callback_cap
                 .as_ref()
                 .ok_or_else(|| anyhow!("dedicated-session start requires callback authority"))?;
-            dedicated_sessions::start(&clean_params, state, cap).await
+            dedicated_sessions::start(
+                &clean_params,
+                state,
+                cap,
+                publication,
+                dedicated_credentials,
+            )
+            .await
         }
         "runtime.dedicated_session_status" => {
             let cap = callback_cap
@@ -2730,7 +2775,11 @@ mod tests {
         // while ordinary external admission is still closed. A missing token
         // therefore fails at callback authentication, not at startup gating.
         let (_app_tmp, app) = setup_app_state();
-        state.publish_application(Arc::new(app));
+        let app = Arc::new(app);
+        let (mut barrier, _) =
+            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        barrier.arm_from_app_generation(&app).unwrap();
+        state.publish_application(barrier.publication(app).unwrap());
         let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
         assert_eq!(rpc_err(&health).code, "node_starting");
         let callback =
@@ -2738,6 +2787,22 @@ mod tests {
         let callback_error = rpc_err(&callback);
         assert_eq!(callback_error.code, "request_failed");
         assert!(callback_error.message.contains("missing callback_token"));
+    }
+
+    #[test]
+    fn captured_application_publication_refuses_installation_after_shutdown_close() {
+        let (_tmp, app) = setup_app_state();
+        let app = Arc::new(app);
+        let (mut barrier, _) =
+            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        barrier.arm_from_app_generation(&app).unwrap();
+        let publication = barrier.publication(app).unwrap();
+
+        assert_eq!(barrier.close(), ryeos_executor::SelectedRootClose::Closed);
+        assert_eq!(
+            publication.attachment().installation_refusal(),
+            ryeos_executor::SelectedInstallationRefusal::Closed
+        );
     }
 
     #[tokio::test]

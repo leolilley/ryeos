@@ -141,6 +141,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         principal,
         state: state.clone(),
         launch_timings: None,
+        publication: None,
         webhook_dedupe: Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new()),
     }).await.unwrap();
     let status = response.status();

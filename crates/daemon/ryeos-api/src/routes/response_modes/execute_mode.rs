@@ -951,12 +951,13 @@ impl CompiledResponseMode for CompiledExecuteMode {
         .map_err(|e| RouteDispatchError::Forbidden(e.to_string()))?;
         // HTTP only owns ingress/response adaptation, never a second admission.
         let accepted = ctx.request_parts.uri.path() == "/execute/launch";
-        let outcome = admit_execution(
+        let outcome = admit_execution_with_publication(
             request,
             ctx.principal.handler_context(),
             ctx.state,
             accepted,
             ctx.launch_timings,
+            ctx.publication,
         )
         .await?;
         Ok((outcome.status, axum::Json(outcome.body)).into_response())
@@ -988,11 +989,30 @@ impl From<(StatusCode, Value)> for AdmissionOutcome {
 /// not reconstructed principals or synthetic HTTP requests. A nested call
 /// retains identity/grants/origin but receives its own service-local root.
 pub(crate) async fn admit_execution(
+    request: ExecuteRequest,
+    principal: crate::handler_context::HandlerContext,
+    state: ryeos_app::state::AppState,
+    accepted_ingress: bool,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<AdmissionOutcome, RouteDispatchError> {
+    admit_execution_with_publication(
+        request,
+        principal,
+        state,
+        accepted_ingress,
+        launch_timings,
+        None,
+    )
+    .await
+}
+
+async fn admit_execution_with_publication(
     mut request: ExecuteRequest,
     principal: crate::handler_context::HandlerContext,
     state: ryeos_app::state::AppState,
     accepted_ingress: bool,
     launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
 ) -> Result<AdmissionOutcome, RouteDispatchError> {
     principal
         .require_verified()
@@ -1722,7 +1742,8 @@ pub(crate) async fn admit_execution(
             RouteDispatchError::Internal(format!(
                 "validated accepted-launch policy rejected at dispatch boundary: {error:#}"
             ))
-        })?;
+        })?
+        .with_application_publication(publication.clone());
         launch_options.usage_subject = usage_subject.clone();
         launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
         launch_options.call = request.call().cloned();
@@ -2044,14 +2065,29 @@ pub(crate) async fn admit_execution(
     };
 
     let handler_context = principal.clone();
-    let dispatch_result = ryeos_executor::dispatch::dispatch_with_handler_context(
-        item_ref,
-        handler_context,
-        &dispatch_req,
-        &exec_ctx,
-        &state,
-    )
-    .await;
+    let dispatch_result = match publication.as_ref() {
+        Some(publication) => {
+            ryeos_executor::dispatch::dispatch_with_application_publication(
+                item_ref,
+                publication,
+                Some(handler_context),
+                &dispatch_req,
+                &exec_ctx,
+                None,
+            )
+            .await
+        }
+        None => {
+            ryeos_executor::dispatch::dispatch_with_handler_context(
+                item_ref,
+                handler_context,
+                &dispatch_req,
+                &exec_ctx,
+                &state,
+            )
+            .await
+        }
+    };
 
     match dispatch_result {
         Ok(mut value) => {

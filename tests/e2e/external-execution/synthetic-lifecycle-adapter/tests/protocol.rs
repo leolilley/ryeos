@@ -3783,7 +3783,11 @@ async fn run_production_tls_candidate(
 
         let state = Arc::new(state);
         ryeosd::init_shutdown_channel();
-        let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, state.clone()));
+        let (mut uds_composition, _) =
+            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        uds_composition.arm_from_app_generation(&state).unwrap();
+        let uds_publication = uds_composition.publication(state.clone()).unwrap();
+        let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, uds_publication));
         tokio::task::yield_now().await;
         assert!(
             !uds_server.is_finished(),
@@ -4046,6 +4050,7 @@ async fn run_production_tls_candidate(
             publication,
         )
         .await;
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
         uds_server.abort();
         let _ = uds_server.await;
         return;
@@ -4192,7 +4197,11 @@ async fn run_production_tls_candidate(
     .unwrap();
     let state = Arc::new(state);
     ryeosd::init_shutdown_channel();
-    let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, state.clone()));
+    let (mut uds_composition, _) =
+        ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+    uds_composition.arm_from_app_generation(&state).unwrap();
+    let uds_publication = uds_composition.publication(state.clone()).unwrap();
+    let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, uds_publication));
     tokio::task::yield_now().await;
     assert!(
         !uds_server.is_finished(),
@@ -4333,6 +4342,7 @@ async fn run_production_tls_candidate(
         .await;
         stop.store(true, Ordering::Release);
         let handled = controller.join().unwrap();
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
         uds_server.abort();
         let _ = uds_server.await;
         cancelled.unwrap();
@@ -4719,6 +4729,7 @@ async fn run_production_tls_candidate(
         publication,
     )
     .await;
+    close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
     uds_server.abort();
     let _ = uds_server.await;
     assert_ne!(
@@ -4726,6 +4737,20 @@ async fn run_production_tls_candidate(
         Some(false),
         "guest shell and admitted rg must run before qualifying Codex authoring"
     );
+}
+
+async fn close_test_composition_before_uds_stop<T>(
+    composition: &ryeos_executor::SelectedInvocationCompositionBarrier,
+    app: Arc<ryeos_app::state::AppState>,
+    server: &tokio::task::JoinHandle<T>,
+) {
+    if matches!(composition.close(), ryeos_executor::SelectedRootClose::Unresolved) {
+        // Preserve the exact root, AppState and listener task if any selected
+        // owner remains. The fixture must not turn an unresolved close into a
+        // successful teardown by aborting its only callback surface.
+        let _retained = (app, server);
+        std::future::pending::<()>().await;
+    }
 }
 
 // Continue from the public session owner's retained C. Both public dispatch

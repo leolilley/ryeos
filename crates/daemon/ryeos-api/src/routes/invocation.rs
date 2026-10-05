@@ -144,6 +144,9 @@ pub struct RouteInvocationContext {
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     /// Shared daemon state.
     pub state: AppState,
+    /// Exact paired application/Executor publication captured at ingress.
+    /// This is process-local authority and is never serialized.
+    pub publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
     /// Process-wide webhook delivery-id dedupe store. Read by HMAC
     /// auth verifiers when a route configures dedupe. Plumbed here
     /// because it lives on `ApiState` (not `AppState`).

@@ -350,6 +350,7 @@ impl CompiledResponseMode for CompiledHandlerMode {
             workspace_lifeline: Some(workspace_guard),
             launch_timings: None,
             state: ctx.state,
+            publication: ctx.publication,
             webhook_dedupe: ctx.webhook_dedupe,
         };
 

@@ -1459,6 +1459,7 @@ mod tests {
             workspace_lifeline: None,
             launch_timings: None,
             state,
+            publication: None,
             webhook_dedupe,
         }
     }

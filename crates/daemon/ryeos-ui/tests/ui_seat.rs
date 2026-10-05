@@ -32,6 +32,7 @@ async fn invoke_seat_route(
         workspace_lifeline: None,
         launch_timings: None,
         state: state.as_ref().clone(),
+        publication: None,
         webhook_dedupe: Arc::new(Default::default()),
     };
     let verifier = ryeos_ui::invokers::browser_session_invocation::CompiledBrowserSessionVerifier {
@@ -55,6 +56,7 @@ async fn invoke_seat_route(
         workspace_lifeline: None,
         launch_timings: None,
         state: state.as_ref().clone(),
+        publication: None,
         webhook_dedupe: Arc::new(Default::default()),
     };
     let invoker = ryeos_api::routes::invokers::service_invocation::CompiledServiceInvocation {

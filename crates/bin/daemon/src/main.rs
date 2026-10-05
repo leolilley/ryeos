@@ -106,7 +106,7 @@ impl Drop for LifecycleExitGuard {
 }
 
 /// Main owns the original exclusion/lifecycle guards and Render custody outside
-/// the run future. The selected root remains structurally empty in this cut.
+/// the run future, retaining them until the selected root and Render owners close.
 struct DaemonSelectedComposition {
     root: ryeos_executor::SelectedInvocationCompositionBarrier,
     process_state_lock: Option<state_lock::StateLock>,
@@ -149,11 +149,20 @@ impl DaemonSelectedComposition {
     }
 
     fn release_app_state_after_drain(&mut self) {
-        self.app_state_custody.take();
+        match self.root.close() {
+            ryeos_executor::SelectedRootClose::Closed => {
+                self.app_state_custody.take();
+            }
+            ryeos_executor::SelectedRootClose::Unresolved => {
+                self.hold_unresolved_render_custody_sync();
+            }
+        }
     }
 
     fn has_unresolved_render_custody(&self) -> bool {
-        self.persistent_pool_custody.is_some() || self.app_state_custody.is_some()
+        self.persistent_pool_custody.is_some()
+            || self.app_state_custody.is_some()
+            || self.root.has_unresolved_owners()
     }
 
     async fn hold_unresolved_render_custody(&self) -> ! {
@@ -184,10 +193,19 @@ impl DaemonSelectedComposition {
     }
 
     fn close_after_run(&self) {
-        if self.has_unresolved_render_custody() {
+        if matches!(
+            self.root.close(),
+            ryeos_executor::SelectedRootClose::Unresolved
+        ) {
             self.hold_unresolved_render_custody_sync();
         }
-        self.root.close_empty_bootstrap();
+    }
+
+    /// Close selected issuance as soon as shutdown starts. Captured immutable
+    /// publications remain readable, but their attachment can no longer admit
+    /// another selected owner. Existing owners still get the normal drain.
+    fn close_root_admission(&self) {
+        let _ = self.root.close();
     }
 
     fn record_exit(&mut self, reason: &str, error: Option<&str>) {
@@ -647,9 +665,8 @@ fn main() -> Result<()> {
         .build()
         .context("build daemon async runtime")?;
     // Catch only the run boundary so the external envelope closes before
-    // runtime shutdown on both return and unwind. No selected native owner can
-    // be installed in this cut; this is an empty-root close, not panic recovery
-    // or native restitution proof.
+    // runtime shutdown on both return and unwind. The nonempty selected root
+    // closes only after external unpublication and the complete shutdown drain.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(run(cli, &mut composition, external_host_runtime))
     }));
@@ -1782,8 +1799,13 @@ async fn run(
             // No global middleware layer — each route declares its own auth
             // policy (auth: "none" for public, auth: "ryeos_signed" for
             // authenticated). The fallback dispatcher handles everything.
+            let publication = composition
+                .root
+                .publication(Arc::new(app_state.clone()))
+                .context("pair HTTP/UDS AppState with selected Executor generation")?;
             let api_state = ryeos_api::ApiState {
-                app: Arc::new(app_state.clone()),
+                app: publication.app().clone(),
+                publication: Some(publication.clone()),
                 route_table,
                 webhook_dedupe,
             };
@@ -1811,8 +1833,7 @@ async fn run(
             // Publish callback-capable application state while external admission is
             // still closed. UDS runtime callbacks from recovered work can now succeed;
             // ordinary HTTP/content requests continue to receive node_starting.
-            let callback_app = api_state.app.clone();
-            startup.publish_application(callback_app, api_state)?;
+            startup.publish_application(publication, api_state)?;
 
             // Claim and enqueue every classified thread recovery action. The executor
             // preparation APIs persist SQLite launch ownership before detaching the
@@ -1964,6 +1985,10 @@ async fn run(
             result = &mut http_task => (FirstExit::HttpListener, classify_http_listener_exit(result)),
             result = &mut uds_task => (FirstExit::UdsListener, classify_uds_listener_exit(result)),
         };
+        // A request may already hold the immutable application publication.
+        // Close its selected attachment before awaiting daemon work, listeners,
+        // or cleanup; the returned Unresolved state is held only after drain.
+        composition.close_root_admission();
         let shutdown_was_requested = ryeosd::shutdown_requested();
         let first_exit_was_clean = result.is_ok();
 
