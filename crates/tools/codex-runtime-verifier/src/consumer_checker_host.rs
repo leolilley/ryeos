@@ -928,6 +928,233 @@ mod tests {
     use lillux::time::Duration;
     use std::sync::mpsc;
 
+    // Exact-runtime component controls, authored and UNRUN. Resource paths only
+    // locate authentic retained bytes; they never confer Tool/admission authority.
+    #[cfg(target_os = "linux")]
+    const CONFORMANCE_TREE: &str = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf";
+    #[cfg(target_os = "linux")]
+    const CONFORMANCE_PREFIX: &str = "/ryeos/realizations/producer-python";
+
+    #[cfg(target_os = "linux")]
+    fn verify_conformance_member(member: &lillux::PinnedRegularFile, bytes: u64, hash: &str) -> Result<()> {
+        member.require_executable()?;
+        ensure!(member.permission_mode()? & 0o777 == 0o755, "selected executable mode changed");
+        let (actual, _) = lillux::secure_fs::digest_open_regular_file_stable_exact(&member.try_clone_descriptor()?, bytes)?;
+        ensure!(actual == hash, "selected executable content changed");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, Debug)]
+    enum ConformanceCase { Positive, ScriptHash, ChunkSize, HeaderTruncated, DescriptorClosed, Oversized, Nonzero, Trailing, NoEof, WritableMount, SubstituteMount, ExtraFdAlias, ChunkOrder, AmbientEnvironment }
+
+    #[cfg(target_os = "linux")]
+    fn run_runtime_conformance(case: ConformanceCase) -> Result<()> {
+        use std::ffi::OsString;
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::AsFd as _;
+        use std::path::{Path, PathBuf};
+        use lillux::{LinuxSandboxMount, LinuxSandboxMountAccess as Access};
+        let deadline = MonotonicDeadline::after(Duration::from_secs(60));
+        let manifest_path = std::env::var_os("RYEOS_CHECKER_CONFORMANCE_MANIFEST").context("NOT ESTABLISHED: exact retained manifest resource absent")?;
+        let runtime_path = std::env::var_os("RYEOS_CHECKER_CONFORMANCE_RUNTIME").context("NOT ESTABLISHED: exact retained runtime resource absent")?;
+        let manifest_member = lillux::secure_fs::open_pinned_regular_file_no_follow(Path::new(&manifest_path))?;
+        let manifest_observation = manifest_member.observation()?;
+        let raw = manifest_member.read_stable_bounded(&manifest_observation, 2 * 1024 * 1024)?;
+        let manifest_source = manifest_member.inherited_descriptor_authority()?;
+        ensure!(lillux::sha256_hex(&raw) == CONFORMANCE_TREE, "runtime manifest resource identity changed");
+        let manifest = ryeos_state::objects::ExternalContentManifestObject::from_value(&serde_json::from_slice(&raw)?)?;
+        ensure!(manifest.entry_count == 4480 && manifest.total_bytes == 68732630, "runtime manifest closure bounds changed");
+        let root = lillux::PinnedDirectory::open(Path::new(&runtime_path))?.context("runtime locator absent")?;
+        let runtime_source = root.inherited_descriptor_authority()?;
+        let verify_root = |source: &InheritedDescriptorAuthority| {
+            ryeos_state::external_content::realization_verification::verify_staged_external_realization(
+                source, &manifest_source, ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+                CONFORMANCE_TREE, raw.len() as u64, ryeos_state::objects::ExternalContentKind::Tree, 68732630)
+        };
+        verify_root(&runtime_source)?;
+        if matches!(case, ConformanceCase::SubstituteMount) {
+            let substitute = tempfile::tempdir()?;
+            let substitute_root = lillux::PinnedDirectory::open(substitute.path())?.context("substitute absent")?;
+            let substitute_source = substitute_root.inherited_descriptor_authority()?;
+            ensure!(verify_root(&substitute_source).is_err(), "substitute runtime unexpectedly verified");
+            bail!("selected substitute closure refused");
+        }
+        let loader = root.open_pinned_regular_descendant(Path::new("lib/ld-musl-x86_64.so.1"), false)?.context("loader absent")?;
+        let interpreter = root.open_pinned_regular_descendant(Path::new("python/bin/python3.14"), false)?.context("interpreter absent")?;
+        verify_conformance_member(&loader, 662120, "1cc5c3f502179e2a4befae29658fb109102effefc75742893aa4a449fd3fbb03")?;
+        verify_conformance_member(&interpreter, 22166488, "2d8886b2bad1105014ce23e2439b20d47a78416281b906e21ac0e37085d19e9d")?;
+        let runtime_mount = runtime_source.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?;
+        let loader_mount = loader.inherited_descriptor_authority()?.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?;
+        let interpreter_fd = interpreter.inherited_descriptor_authority()?.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?;
+        let canary = tempfile::tempdir()?;
+        let canary_name = "ryeos_unselected_host_canary_c4ea728d";
+        let canary_path = canary.path().join(format!("{canary_name}.py"));
+        std::fs::write(&canary_path, b"raise RuntimeError('ambient import')")?;
+        // Test-local transport probe only; no captured checker-code witness.
+        let mut script = br#"def check_conversation(envelope):
+    import os
+    if envelope['probe'] != 'runtime-only' or envelope['stream'] != {'probe': 1}:
+        raise ValueError('transport input changed')
+    if os.path.exists(envelope['canary']) or any(os.path.exists(p) for p in ('/usr', '/bin', '/lib', '/lib64')):
+        raise ValueError('ambient filesystem exposed')
+    try:
+        __import__(envelope['canary_name'])
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise ValueError('ambient Python import succeeded')
+    try:
+        with open('/ryeos/realizations/producer-python/lib/ld-musl-x86_64.so.1', 'wb'):
+            pass
+    except OSError:
+        pass
+    else:
+        raise ValueError('runtime writable')
+    return {'schema':'ryeos.test.checker_transport.v1','ok':True}
+"#.to_vec();
+        match case {
+            ConformanceCase::Oversized => script.extend_from_slice(b"\ndef check_conversation(envelope): return {'overflow':'x'*65536}\n"),
+            ConformanceCase::Nonzero => script.extend_from_slice(b"\nraise RuntimeError('test refusal')\n"),
+            ConformanceCase::Trailing => script.extend_from_slice(b"\nprint('unselected-frame')\n"),
+            ConformanceCase::NoEof => script.extend_from_slice(b"\ndef check_conversation(envelope):\n    import sys\n    sys.stdout.write('{\"ok\":true,\"schema\":\"ryeos.test.checker_transport.v1\"}\\n')\n    sys.stdout.flush()\n    while True: pass\n"),
+            _ => {}
+        }
+        let script_hash = lillux::sha256_hex(&script);
+        let script_fd = lillux::exec::sealed_memfd(c"conformance-script", &script).map_err(anyhow::Error::msg)?;
+        let chunk_fd = lillux::exec::sealed_memfd(c"conformance-chunk", br#"{"probe":1}"#).map_err(anyhow::Error::msg)?;
+        // Source owners are all >=256; mapped closed role table uses 100..103.
+        let owners = vec![interpreter_fd, script_fd.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?, chunk_fd.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?];
+        let hash = if matches!(case, ConformanceCase::ScriptHash) { "0".repeat(64) } else { script_hash };
+        let mut table = DescriptorTable { schema: TABLE_SCHEMA, script: ScriptDescriptor { fd:101, bytes:script.len() as u64, sha256:&hash },
+            chunks:vec![ChunkDescriptor { index:0, fd:102, bytes:if matches!(case, ConformanceCase::ChunkSize) { 12 } else { 11 } }] };
+        if matches!(case, ConformanceCase::ChunkOrder) { table.chunks[0].index = 1; }
+        let metadata = lillux::canonical_json(&serde_json::json!({"probe":"runtime-only", "canary":canary_path.to_str().context("canary path UTF8")?, "canary_name":canary_name}))?;
+        let size = table_encoded_size(&table)?;
+        let total = combined_header_size(metadata.len(), size, MAX_HEADER_BYTES)?;
+        let table_bytes = lillux::canonical_json(&serde_json::to_value(&table)?)?;
+        let mut header = Vec::with_capacity(total);
+        header.extend_from_slice(HEADER_MAGIC); header.extend_from_slice(&u32::try_from(metadata.len())?.to_be_bytes()); header.extend_from_slice(metadata.as_bytes());
+        header.extend_from_slice(&u32::try_from(table_bytes.len())?.to_be_bytes()); header.extend_from_slice(table_bytes.as_bytes());
+        ensure!(header.len() == total, "header preflight differs");
+        if matches!(case, ConformanceCase::HeaderTruncated) { header.pop(); }
+        let header_fd = lillux::exec::sealed_memfd(c"conformance-header", &header).map_err(anyhow::Error::msg)?.duplicate_at_or_above(256).map_err(anyhow::Error::msg)?;
+        let mut channels = owners.iter().zip([100,101,102]).map(|(o,t)| o.inherited_descriptor().map(|s| (s,t))).collect::<std::result::Result<Vec<_>,_>>().map_err(anyhow::Error::msg)?;
+        if matches!(case, ConformanceCase::DescriptorClosed) { channels.retain(|(_, target)| *target != 102); }
+        channels.push((header_fd.inherited_descriptor().map_err(anyhow::Error::msg)?,103));
+        let executable = PathBuf::from(format!("{CONFORMANCE_PREFIX}/lib/ld-musl-x86_64.so.1"));
+        if matches!(case, ConformanceCase::ExtraFdAlias) { channels[1].1 = 100; }
+        let mut request = lillux::LinuxSandboxRequest {
+            executable:executable.clone(), argv0:OsString::from("ryeos-admitted-checker-loader"),
+            arguments:vec!["--library-path".into(), format!("{CONFORMANCE_PREFIX}/lib").into(), "/proc/self/fd/100".into(), "-I".into(), "-S".into(), "-B".into(), "-X".into(), "utf8".into(), "-u".into(), "-c".into(), TRANSPORT_BOOTSTRAP.into(), format!("{CONFORMANCE_PREFIX}/python").into()],
+            cwd:CONFORMANCE_PREFIX.into(), environment:Default::default(),
+            mounts:vec![LinuxSandboxMount {source_fd:runtime_mount.inherited_descriptor().map_err(anyhow::Error::msg)?,destination:CONFORMANCE_PREFIX.into(),access:Access::ReadOnly,layer:0},
+                LinuxSandboxMount {source_fd:loader_mount.inherited_descriptor().map_err(anyhow::Error::msg)?,destination:executable,access:Access::ReadOnly,layer:20}],
+            fixed_parent_views:vec![],overlay:None,network:lillux::LinuxSandboxNetwork::Isolated,private_tmp:true,
+            proc_filesystem:lillux::LinuxSandboxProcFilesystem::PidNamespace,minimal_devices:true,character_devices:vec![],target_channels:channels,
+            lifecycle:lillux::LinuxSandboxLifecycle::Run,contain_process_group:true,nested_sandbox:false,aggregate_limits:None,
+            target_limits:Some(SubprocessLimits {deny_process_creation:true,..Default::default()}),
+        };
+        if matches!(case, ConformanceCase::AmbientEnvironment) {
+            // Adversarial component control, not production environment data.
+            request.environment.insert("PYTHONPATH".into(), canary.path().as_os_str().into());
+            request.environment.insert("PYTHONHOME".into(), canary.path().as_os_str().into());
+        }
+        let expected_mounts = lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(&request.mounts,&[]).map_err(anyhow::Error::msg)?;
+        let expected_launch = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(lillux::LinuxSandboxAppliedLaunchTarget {
+            executable:&request.executable,argv0:&request.argv0,arguments:&request.arguments,cwd:&request.cwd,environment:&request.environment }).map_err(anyhow::Error::msg)?;
+        if matches!(case, ConformanceCase::WritableMount) { request.mounts[0].access = Access::Writable; }
+        let (mut held,pipes) = match lillux::prepare_linux_sandbox_piped(request) {
+            Ok(value) => value,
+            Err(error) if matches!(case, ConformanceCase::ExtraFdAlias)
+                && error.contains("uniquely target-fd sorted") => bail!("selected descriptor alias refused"),
+            Err(error) => return Err(anyhow::Error::msg(error)),
+        };
+        let result = (|| -> Result<()> {
+            let observed = held.mount_preparation_receipt().map_err(anyhow::Error::msg)?;
+            ensure!(observed.owned_child_pid == held.child_pid() && observed.matches_commitments(&expected_mounts), "held runtime mounts differ");
+            verify_conformance_member(&loader,662120,"1cc5c3f502179e2a4befae29658fb109102effefc75742893aa4a449fd3fbb03")?;
+            verify_conformance_member(&interpreter,22166488,"2d8886b2bad1105014ce23e2439b20d47a78416281b906e21ac0e37085d19e9d")?;
+            verify_root(&runtime_source)?;
+            ensure!(!deadline.has_elapsed(),"runtime preparation original deadline expired");
+            held.release_once().map_err(anyhow::Error::msg)?;
+            let mut input = lillux::exec::DeadlinePipeStream::new(pipes.stdin.as_fd(),deadline)?;
+            input.write_all(b"103\n")?;
+            drop(input);
+            // Bootstrap consumes stdin EOF before opening the sealed header.
+            drop(pipes.stdin);
+            let mut output = lillux::exec::DeadlinePipeStream::new(pipes.stdout.as_fd(),deadline)?;
+            let mut diagnostics = lillux::exec::DeadlinePipeStream::new(pipes.stderr.as_fd(),deadline)?;
+            // Both pipes are serviced in one nonblocking bounded loop: a noisy
+            // refusal cannot block stdout behind a full diagnostic pipe.
+            let mut bytes = Vec::new(); let mut out_eof=false; let mut err_eof=false;
+            while !out_eof || !err_eof {
+                ensure!(!deadline.has_elapsed(), "runtime pipe original deadline expired");
+                let (out_ready, err_ready) = if !out_eof && !err_eof {
+                    let ready = output.wait_readable_with_stream(&diagnostics)?;
+                    (ready.channel_readable(), ready.auxiliary_readable())
+                } else { (!out_eof, !err_eof) };
+                for (stream,is_output,eof,ready) in [(&mut output,true,&mut out_eof,out_ready),(&mut diagnostics,false,&mut err_eof,err_ready)] {
+                    if *eof || !ready {continue;}
+                    let mut buf=[0u8;1024];
+                    match stream.read(&mut buf) {
+                        Ok(0)=>*eof=true,
+                        Ok(n)=>if is_output {ensure!(bytes.len()+n<=MAX_RESPONSE_BYTES,"runtime response overflow");bytes.extend_from_slice(&buf[..n]);},
+                        Err(e) if e.kind()==std::io::ErrorKind::WouldBlock=>{},
+                        Err(e)=>return Err(e.into()),
+                    }
+                }
+            }
+            let applied = loop {
+                if let Some(receipt)=held.try_observe_applied_launch().map_err(anyhow::Error::msg)? {break receipt;}
+                ensure!(!deadline.has_elapsed(),"applied launch original deadline expired");std::thread::yield_now();
+            };
+            ensure!(applied.owned_child_pid==held.child_pid() && applied.matches_commitments(&expected_launch) && applied.matches_post_release_mounts(&expected_mounts),"runtime applied launch differs");
+            let termination = loop {
+                if let Some(exit)=held.try_observe_target_exit().map_err(anyhow::Error::msg)? {break exit.into_termination();}
+                ensure!(!deadline.has_elapsed(),"namespace reap original deadline expired");std::thread::yield_now();
+            };
+            ensure!(termination.exit()==lillux::LinuxSandboxExit::Code(0) && termination.launch_failure().is_none(),"runtime transport refused");
+            ensure!(held.child_pid()==0,"namespace owner not consumed");
+            ensure!(bytes==b"{\"ok\":true,\"schema\":\"ryeos.test.checker_transport.v1\"}\n","runtime response not exact single frame");
+            Ok(())
+        })();
+        if result.is_err() {
+            let _bounded_cleanup=held.terminate_namespace_for_export_until(deadline);
+            // Best-effort terminal TEST cleanup may block/fail, never proves
+            // settlement or renews service. All source/pipe owners outlive it.
+            drop(held);
+        }
+        let _ = (&owners, &header_fd, &runtime_mount, &loader_mount, &root, &loader, &interpreter, &canary, &manifest_source, &manifest_member);
+        result.context("actual runtime attempt refused")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "actual retained producer-Python resources and Linux namespaces required; source-only control"]
+    fn authentic_python_fd_bootstrap_and_readonly_enclosure() {
+        run_runtime_conformance(ConformanceCase::Positive).expect("NOT ESTABLISHED: authentic runtime conformance failed");
+        run_runtime_conformance(ConformanceCase::AmbientEnvironment).expect("NOT ESTABLISHED: hostile Python environment affected isolated bootstrap");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "real-runtime refusal controls; UNRUN, not checker-code qualification"]
+    fn authentic_python_transport_substitutions_refuse() {
+        // Establish the same real runtime first, so missing resources/startup
+        // cannot make every negative case appear to pass vacuously.
+        run_runtime_conformance(ConformanceCase::Positive).expect("NOT ESTABLISHED: positive runtime baseline absent");
+        for case in [ConformanceCase::ScriptHash,ConformanceCase::ChunkSize,ConformanceCase::HeaderTruncated,
+            ConformanceCase::DescriptorClosed,ConformanceCase::Oversized,ConformanceCase::Nonzero,ConformanceCase::Trailing,ConformanceCase::NoEof,ConformanceCase::WritableMount,
+            ConformanceCase::SubstituteMount,ConformanceCase::ExtraFdAlias,ConformanceCase::ChunkOrder] {
+            let error = run_runtime_conformance(case).expect_err("runtime refused-control accepted");
+            assert!(error.to_string().contains("actual runtime attempt refused")
+                || (matches!(case, ConformanceCase::SubstituteMount) && error.to_string()=="selected substitute closure refused")
+                || (matches!(case, ConformanceCase::ExtraFdAlias) && error.to_string()=="selected descriptor alias refused"),
+                "control failed before actual runtime attempt, not refusal evidence: {case:?}: {error:#}");
+        }
+    }
+
     // These controls are authored/unrun. Mechanical shell peers below are NOT
     // checker runtimes, admitted source pins, Python conformance or authority.
     fn peer(script: &str) -> SubordinateProcess {
