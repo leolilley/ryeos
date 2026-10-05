@@ -767,6 +767,44 @@ impl AdoptedOriginalNamespaceOccupancy {
         })
     }
 
+    /// Borrow the original service bound while retaining clock custody.
+    /// Repeated observations return the same stored local deadline, never a
+    /// renewed timer. Callers must also re-observe BOOTTIME after bounded waits.
+    pub fn original_service_parts(
+        &self,
+    ) -> Result<(OccupancyLimit, Duration, MonotonicDeadline), String> {
+        original_window::require_same_clock_namespace(self.clock_namespace.file())?;
+        self.wire.validate(&occupancy_now()?)?;
+        self.wire
+            .require_clock_namespace(self.clock_namespace.file())?;
+        let cleanup = Duration::from_nanos(self.wire.cleanup_ns);
+        original_window::require_window(&self.wire.limit, cleanup, self.deadline)?;
+        Ok((self.wire.limit.clone(), cleanup, self.deadline))
+    }
+
+    /// Observe the reserve within the SAME original occupancy maximum.
+    /// Contact expiry closes service but must not hide the cleanup interval.
+    /// A Service observation alone does not authorize service: callers must
+    /// also pass original_service_parts. Parent cleanup policy may narrow this
+    /// bound. Remaining duration grants neither a new timer nor settlement.
+    pub fn original_cleanup_window(&self) -> Result<OccupancyWindowState, String> {
+        self.wire
+            .require_clock_namespace(self.clock_namespace.file())?;
+        if self.wire.version != 1
+            || self.wire.cleanup_ns == 0
+            || self.wire.contact_expiry_tick_ns == 0
+        {
+            return Err("original cleanup handoff has unsupported version or shape".into());
+        }
+        self.wire.limit.validate()?;
+        // One fresh durable observation validates the original boot/clock and
+        // supplies both phase and remaining time; no local Instant is created.
+        let now = occupancy_now()?;
+        self.wire
+            .limit
+            .window_at(&now, Duration::from_nanos(self.wire.cleanup_ns))
+    }
+
     /// Consume the exact adopted coordinates. Recheck original expiry and both
     /// actual clock-namespace views immediately before watcher preparation.
     pub fn into_original_parts(
@@ -1017,6 +1055,98 @@ mod original_window_tests {
         assert_eq!(actual_limit, limit);
         assert_eq!(actual_cleanup, cleanup);
         assert!(actual_deadline.deadline <= deadline.deadline);
+    }
+
+    fn adopt_original_bound(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        deadline: MonotonicDeadline,
+    ) -> AdoptedOriginalNamespaceOccupancy {
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        unsafe {
+            AdoptedOriginalNamespaceOccupancy::take_inherited(
+                duplicate(sealed.file().as_raw_fd()),
+                duplicate(namespace.file().as_raw_fd()),
+            )
+        }
+        .unwrap()
+    }
+
+    #[test]
+    fn borrowed_original_service_preserves_deadline_and_clock_owner() {
+        let (limit, cleanup, deadline) = window();
+        let adopted = adopt_original_bound(&limit, cleanup, deadline);
+        let clock_fd = adopted.clock_namespace.inherited_descriptor().unwrap();
+        for _ in 0..3 {
+            let (observed_limit, observed_cleanup, observed_deadline) =
+                adopted.original_service_parts().unwrap();
+            assert_eq!(observed_limit, limit);
+            assert_eq!(observed_cleanup, cleanup);
+            assert_eq!(observed_deadline.deadline, adopted.deadline.deadline);
+            assert_eq!(
+                adopted.clock_namespace.inherited_descriptor().unwrap(),
+                clock_fd
+            );
+            assert_ne!(unsafe { libc::fcntl(clock_fd as i32, libc::F_GETFD) }, -1);
+        }
+    }
+
+    #[test]
+    fn borrowed_original_contact_cutoff_does_not_reopen_service() {
+        let (limit, cleanup, _) = window();
+        let adopted = adopt_original_bound(
+            &limit,
+            cleanup,
+            MonotonicDeadline::after(Duration::from_millis(100)),
+        );
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(adopted.original_service_parts().is_err());
+        assert!(matches!(
+            adopted.original_cleanup_window().unwrap(),
+            OccupancyWindowState::Service { .. }
+        ));
+        assert!(adopted.original_service_parts().is_err());
+        assert!(adopted.clock_namespace.file().metadata().is_ok());
+    }
+
+    #[test]
+    fn borrowed_original_cleanup_and_expiry_remain_inside_original_maximum() {
+        let cleanup = Duration::from_secs(1);
+        let limit = OccupancyLimit::new(occupancy_now().unwrap(), 1_200_000_000).unwrap();
+        let adopted = adopt_original_bound(
+            &limit,
+            cleanup,
+            MonotonicDeadline::after(Duration::from_secs(2)),
+        );
+        std::thread::sleep(Duration::from_millis(220));
+        assert!(adopted.original_service_parts().is_err());
+        let remaining = match adopted.original_cleanup_window().unwrap() {
+            OccupancyWindowState::Cleanup { remaining } => remaining,
+            other => panic!("expected original cleanup reserve, observed {other:?}"),
+        };
+        assert!(remaining > Duration::ZERO && remaining <= cleanup);
+        std::thread::sleep(remaining + Duration::from_millis(10));
+        assert_eq!(
+            adopted.original_cleanup_window().unwrap(),
+            OccupancyWindowState::Expired
+        );
+        assert!(adopted.original_service_parts().is_err());
+        assert!(adopted.clock_namespace.file().metadata().is_ok());
+    }
+
+    #[test]
+    fn borrowed_original_bounds_refuse_substituted_clock_owner() {
+        let (limit, cleanup, deadline) = window();
+        let mut adopted = adopt_original_bound(&limit, cleanup, deadline);
+        let original_clock = adopted.clock_namespace.clone();
+        adopted.clock_namespace = crate::sealed_memfd(c"foreign-clock", b"not a clock").unwrap();
+        assert!(adopted.original_service_parts().is_err());
+        assert!(adopted.original_cleanup_window().is_err());
+        assert!(original_clock.file().metadata().is_ok());
+        assert!(adopted.clock_namespace.file().metadata().is_ok());
     }
 
     #[test]
