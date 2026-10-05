@@ -1,0 +1,24 @@
+version: "1.0.0"
+category: codex
+description: Retain authored semantic checker source through the existing pinned Graph producer lifecycle.
+effects: recorded
+product_recipe: config:codex/semantic-checker-code-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.codex/semantic-checker-code-products
+config:
+  start: retained
+  max_steps: 1
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    retained:
+      node_type: return
+      output:
+        retained_source: bundles/codex/.ai/tools/codex/qualification/semantic-checker
+        checker_executed: false
+        consumer_bound: false
