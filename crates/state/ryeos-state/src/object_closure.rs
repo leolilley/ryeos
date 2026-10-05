@@ -389,7 +389,7 @@ pub fn load_exact_cas_object_with_cas(
         anyhow::bail!("invalid requested CAS object hash {requested_hash}");
     }
     let value = cas
-        .get_object(requested_hash)?
+        .get_object_bounded(requested_hash, max_bytes)?
         .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
     let canonical = lillux::canonical_json(&value)
         .with_context(|| format!("failed to canonicalize CAS object {requested_hash}"))?;
