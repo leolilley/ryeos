@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T23:05:06Z:f2a45fb08a17f9ec5bc921dd6c44990337ba10f9ecb7094ee9e526c7aff35a54:KjuGuAJiZfSmIfJnekAvTQu5emxbB1YOBB7R8X/kMCETkQIKJRUZJ7o+yC0etjUZZgm6uCxdWXergACJA4P4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T00:26:48Z:780f19660ddd1f737a2b18425f2ea9d5e6fb3a5e3a18b92abfc822e738398d91:/QAD6EmirjFWLoxZaHrJDKSSwidRCTf7pZWjT8qXAjSeRiNod9AWBJzwppu1DGDtgGLzaapombAMjzO0asEuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: README
 title: Future RyeOS Design Notes
 description: Index and ownership rules for scheduled and deferred RyeOS design work
 entry_type: reference
-version: "1.6.0"
+version: "1.6.1"
 ```
 
 # Future RyeOS Design Notes
@@ -22,6 +22,11 @@ version: "1.6.0"
 - [Experience to reusable knowledge](experience-to-reusable-knowledge.md) —
   proposed scoped adoption, selection, correction and privacy of lessons drawn
   from execution evidence; not an implemented memory service.
+
+- [Language-neutral application development and execution](language-neutral-application-development-and-execution.md)
+  — authoring and driving applications across execution forms, admitted content,
+  environments and placement; staged client APIs over existing authority and
+  lifecycle owners, with current support distinguished from future SDK work.
 
 These are working discussion designs, not scheduled implementation promises.
 
