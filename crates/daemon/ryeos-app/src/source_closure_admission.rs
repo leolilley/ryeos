@@ -5,7 +5,7 @@
 //! durable capture floor, publishes immutable blobs and objects under a
 //! staged root, and inserts only the bounded derived projection.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, ensure};
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -15,6 +15,10 @@ use ryeos_engine::project_content::{AuthoritativeProjectContent, ProjectContentE
 use ryeos_engine::source_closure::{
     AuthoritativeSourceContent, CapturedSourceCandidate, SourceClosureProof, SourceClosureStore,
     SourceRootRequest, SourceRootSelection,
+};
+use ryeos_engine::source_closure::source_view::{
+    DirectorySourceContent, canonical_item_source_path, executor_source_request,
+    item_directory_binding_root,
 };
 use ryeos_state::PendingCasPublication;
 use ryeos_state::objects::{
@@ -1144,175 +1148,6 @@ fn verify_owner_signed_files(
     )
 }
 
-/// Resolve the root executable from the canonical item coordinate and the
-/// signed kind's extension order. Host paths are deliberately absent: the
-/// typed content root has already selected the authority, while the kind
-/// schema defines the only filenames that may represent this canonical ref.
-/// Select the canonical source unit for both admission and owner signing.
-/// This only selects bytes from the supplied authoritative view; it grants no
-/// execution, signing, or publication authority to its caller.
-pub fn item_namespace_source_request(
-    source: &dyn AuthoritativeSourceContent,
-    expected_kind: &str,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_ref: &str,
-    expected_source_digest: &str,
-    max_file_bytes: u64,
-) -> anyhow::Result<(SourceRootRequest, String)> {
-    let selected = canonical_item_source_path(
-        source,
-        expected_kind,
-        kind_schema,
-        canonical_ref,
-        expected_source_digest,
-        max_file_bytes,
-    )?;
-    let (_, bare_id) = canonical_ref
-        .split_once(':')
-        .expect("canonical item lookup validated the ref");
-    let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
-    let components = Path::new(bare_id).components().collect::<Vec<_>>();
-    if components.len() == 1 {
-        let entry = selected
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-            .to_owned();
-        return Ok((
-            SourceRootRequest {
-                id: "source".to_owned(),
-                selection: SourceRootSelection::File { path: selected },
-            },
-            entry,
-        ));
-    }
-
-    let prefix = kind_root.join(components[0].as_os_str());
-    let entry = selected
-        .strip_prefix(&prefix)
-        .map_err(|_| anyhow::anyhow!("source item escaped its canonical namespace"))?
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-        .to_owned();
-    Ok((
-        SourceRootRequest {
-            id: "source".to_owned(),
-            selection: SourceRootSelection::Tree { prefix },
-        },
-        entry,
-    ))
-}
-
-/// Select a source unit no broader than the signed kind's item-namespace
-/// ceiling. `item_directory` is the closed narrow form: it captures only the
-/// canonical item's containing directory while retaining the same exact root
-/// item and owner-signed-files testimony.
-pub fn executor_source_request(
-    source: &dyn AuthoritativeSourceContent,
-    location: ryeos_engine::source_closure::ExecutorSourceLocation,
-    expected_kind: &str,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_ref: &str,
-    expected_source_digest: &str,
-    max_file_bytes: u64,
-) -> anyhow::Result<(SourceRootRequest, String)> {
-    match location {
-        ryeos_engine::source_closure::ExecutorSourceLocation::ItemNamespace => {
-            item_namespace_source_request(
-                source,
-                expected_kind,
-                kind_schema,
-                canonical_ref,
-                expected_source_digest,
-                max_file_bytes,
-            )
-        }
-        ryeos_engine::source_closure::ExecutorSourceLocation::ItemDirectory => {
-            item_directory_binding_root(canonical_ref)?;
-            let selected = canonical_item_source_path(
-                source,
-                expected_kind,
-                kind_schema,
-                canonical_ref,
-                expected_source_digest,
-                max_file_bytes,
-            )?;
-            let (prefix, entry) = item_directory_selection(&selected)?;
-            Ok((
-                SourceRootRequest {
-                    id: "source".to_owned(),
-                    selection: SourceRootSelection::Tree { prefix },
-                },
-                entry,
-            ))
-        }
-    }
-}
-
-fn item_directory_binding_root(canonical_ref: &str) -> anyhow::Result<String> {
-    let bare_id = canonical_ref
-        .split_once(':')
-        .map(|(_, bare_id)| bare_id)
-        .ok_or_else(|| anyhow::anyhow!("source owner ref is not canonical"))?;
-    ryeos_state::objects::validate_canonical_project_relative_path(bare_id)?;
-    Path::new(bare_id)
-        .parent()
-        .and_then(Path::to_str)
-        .filter(|root| !root.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("item_directory source owner has no containing directory"))
-}
-
-fn item_directory_selection(selected: &Path) -> anyhow::Result<(PathBuf, String)> {
-    let prefix = selected
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("source item has no containing directory"))?
-        .to_path_buf();
-    let entry = selected
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-        .to_owned();
-    Ok((prefix, entry))
-}
-
-fn canonical_item_source_path(
-    source: &dyn AuthoritativeSourceContent,
-    expected_kind: &str,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_ref: &str,
-    expected_source_digest: &str,
-    max_file_bytes: u64,
-) -> anyhow::Result<PathBuf> {
-    let (kind, bare_id) = canonical_ref
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("source owner ref is not canonical"))?;
-    if kind != expected_kind {
-        anyhow::bail!("source owner ref contradicts its signed kind");
-    }
-    ryeos_state::objects::validate_canonical_project_relative_path(bare_id)?;
-    let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
-
-    let mut selected = None;
-    for format in &kind_schema.extensions {
-        let relative = kind_root.join(format!("{bare_id}{}", format.ext));
-        let Some(bytes) = source.read_file(&relative, max_file_bytes)? else {
-            continue;
-        };
-        if lillux::sha256_hex(&bytes) != expected_source_digest {
-            anyhow::bail!(
-                "canonical source coordinate contradicts the resolved executable identity"
-            );
-        }
-        selected = Some(relative);
-        break;
-    }
-    let selected = selected.ok_or_else(|| {
-        anyhow::anyhow!("canonical source coordinate is absent from its typed content root")
-    })?;
-    Ok(selected)
-}
-
 fn require_manifest_entry(candidate: &CapturedSourceCandidate, entry: &str) -> anyhow::Result<()> {
     if !candidate
         .manifest
@@ -1399,129 +1234,6 @@ impl AuthoritativeSourceContent for ProjectSourceContent<'_> {
     ) -> Result<Option<Vec<u8>>, ryeos_engine::error::EngineError> {
         self.content.read_file(path, max_bytes)
     }
-}
-
-/// Read-only, path-pinned source view shared by admission and owner signing.
-/// Constructing this view does not authorize signing or execution.
-pub struct DirectorySourceContent<'a> {
-    root: lillux::PinnedDirectory,
-    identity: String,
-    configured_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
-}
-
-impl<'a> DirectorySourceContent<'a> {
-    pub fn new(
-        root: &Path,
-        identity: String,
-        configured_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
-    ) -> anyhow::Result<Self> {
-        let root = lillux::PinnedDirectory::open(root)?
-            .ok_or_else(|| anyhow::anyhow!("source content root is unavailable"))?;
-        Ok(Self {
-            root,
-            identity,
-            configured_ignore,
-        })
-    }
-
-    fn included(&self, relative: &Path) -> anyhow::Result<bool> {
-        let relative = relative
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("source content path is not UTF-8"))?;
-        Ok(
-            !ryeos_state::project_sync::is_durable_content_capture_floor_excluded(relative)
-                && !self.configured_ignore.is_ignored(relative),
-        )
-    }
-}
-
-impl AuthoritativeSourceContent for DirectorySourceContent<'_> {
-    fn authority_identity(&self) -> Result<String, ryeos_engine::error::EngineError> {
-        self.root.ensure_path_binding().map_err(engine_internal)?;
-        Ok(self.identity.clone())
-    }
-
-    fn list_files(
-        &self,
-        prefix: &Path,
-        max_entries: usize,
-    ) -> Result<Vec<ProjectContentEntry>, ryeos_engine::error::EngineError> {
-        let path = self.root.path().join(prefix);
-        let mut entries = Vec::new();
-        let present = lillux::visit_regular_files_no_follow_bounded(
-            &path,
-            lillux::DirectoryTraversalBudget::new(max_entries.saturating_mul(2), 64),
-            |relative, _is_directory| {
-                let full = prefix.join(relative);
-                self.included(&full).map(|included| !included)
-            },
-            |relative, file| {
-                if entries.len() >= max_entries {
-                    anyhow::bail!("source content exceeds its signed file ceiling");
-                }
-                let full = prefix.join(relative);
-                if !self.included(&full)? {
-                    return Ok(());
-                }
-                let metadata = file.metadata()?;
-                #[cfg(unix)]
-                let normalized_mode = {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    if metadata.permissions().mode() & 0o111 == 0 {
-                        0o644
-                    } else {
-                        0o755
-                    }
-                };
-                #[cfg(not(unix))]
-                let normalized_mode = 0o644;
-                let bytes = lillux::read_open_regular_file_bounded(
-                    file,
-                    ryeos_state::objects::MAX_SOURCE_FILE_BYTES,
-                )?;
-                entries.push(ProjectContentEntry {
-                    relative_path: relative.to_path_buf(),
-                    content_hash: lillux::sha256_hex(&bytes),
-                    size: bytes.len() as u64,
-                    normalized_mode,
-                });
-                Ok(())
-            },
-        )
-        .map_err(engine_internal)?;
-        if !present {
-            return Err(ryeos_engine::error::EngineError::Internal(
-                "source content root is absent".to_owned(),
-            ));
-        }
-        self.root.ensure_path_binding().map_err(engine_internal)?;
-        entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-        Ok(entries)
-    }
-
-    fn read_file(
-        &self,
-        path: &Path,
-        max_bytes: u64,
-    ) -> Result<Option<Vec<u8>>, ryeos_engine::error::EngineError> {
-        if !self.included(path).map_err(engine_internal)? {
-            return Ok(None);
-        }
-        let file = self
-            .root
-            .open_pinned_regular_descendant(path, false)
-            .map_err(engine_internal)?;
-        let bytes = file
-            .map(|file| file.read_bounded(max_bytes))
-            .transpose()
-            .map_err(engine_internal)?;
-        self.root.ensure_path_binding().map_err(engine_internal)?;
-        Ok(bytes)
-    }
-}
-
-fn engine_internal(error: anyhow::Error) -> ryeos_engine::error::EngineError {
-    ryeos_engine::error::EngineError::Internal(error.to_string())
 }
 
 /// Temporary C2 source-only fixture. It uses production admission/publication
@@ -1777,72 +1489,7 @@ mod directory_source_tests {
         // full recovered-member/binder custody controls are still required.
     }
 
-    #[test]
-    fn item_directory_selection_is_exactly_the_owner_directory() {
-        let selected = Path::new(".ai/tools/ryeos/development/runtime/runtime.yaml");
-        let (prefix, entry) = item_directory_selection(selected).unwrap();
-        assert_eq!(prefix, Path::new(".ai/tools/ryeos/development/runtime"));
-        assert_eq!(entry, "runtime.yaml");
-        assert!(!Path::new(".ai/tools/ryeos/development/sibling/tool.py").starts_with(prefix));
-        assert_eq!(
-            item_directory_binding_root(
-                "tool:ryeos/development/authoring-environment-production/runtime"
-            )
-            .unwrap(),
-            "ryeos/development/authoring-environment-production"
-        );
-        assert!(item_directory_binding_root("tool:runtime").is_err());
-    }
 
-    #[test]
-    fn absent_extension_candidate_is_not_a_read_failure() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".ai/tools/test")).unwrap();
-        std::fs::write(root.path().join(".ai/tools/test/item.yaml"), b"descriptor").unwrap();
-        let ignore =
-            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-                patterns: Vec::new(),
-            })
-            .unwrap();
-        let source = DirectorySourceContent::new(root.path(), "test".into(), &ignore).unwrap();
-        assert_eq!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.py"), 32)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.yaml"), 32)
-                .unwrap(),
-            Some(b"descriptor".to_vec())
-        );
-        assert!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.yaml"), 2)
-                .is_err()
-        );
-        assert!(source.read_file(Path::new("../outside"), 32).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unsafe_extension_candidate_is_not_treated_as_absent() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".ai/tools/test")).unwrap();
-        std::os::unix::fs::symlink("missing", root.path().join(".ai/tools/test/item.py")).unwrap();
-        let ignore =
-            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-                patterns: Vec::new(),
-            })
-            .unwrap();
-        let source = DirectorySourceContent::new(root.path(), "test".into(), &ignore).unwrap();
-        assert!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.py"), 32)
-                .is_err()
-        );
-    }
 }
 
 struct RetainedSourceClosureStore {
