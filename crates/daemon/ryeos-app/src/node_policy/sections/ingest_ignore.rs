@@ -10,7 +10,7 @@ use anyhow::{Context as _, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::ignore::{IgnoreConfig, IgnoreMatcher};
+use ryeos_state::ignore::{IgnoreConfig, IgnoreMatcher};
 use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection, TypedNodePolicy};
 
 pub const SECTION_NAME: &str = "ingest_ignore";
