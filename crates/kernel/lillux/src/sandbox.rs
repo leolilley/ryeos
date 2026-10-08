@@ -2178,6 +2178,14 @@ mod imp {
                 available.nested_sandbox = false;
                 continue;
             }
+            let deadline = std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(5))
+                .ok_or("sandbox inspection fork wait bound overflow")?;
+            let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(deadline)?;
+            let preserved = [inherited_directory.file().as_raw_fd(), inherited_bytes.file().as_raw_fd()]
+                .into_iter().collect();
+            let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
+            let child_barrier = fork_guard.prepare_child_descriptor_barrier(&preserved)?;
             let mut report = [0; 2];
             syscall_zero(
                 unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -2193,6 +2201,8 @@ mod imp {
                 ));
             }
             if pid == 0 {
+                for fd in &child_close_fds { unsafe { libc::close(*fd) }; }
+                unsafe { child_barrier.install_in_actual_fork_child() };
                 close_fd(report[0]);
                 let result = (|| {
                     // The shared-view probe reaps its creator before starting
@@ -2231,12 +2241,17 @@ mod imp {
             let outcome = read_child_ready(report[0]);
             close_fd(report[0]);
             let mut status = 0;
-            if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
-                return Err(format!(
-                    "wait for native sandbox inspection: {}",
-                    std::io::Error::last_os_error()
-                ));
+            loop {
+                let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if waited == pid { break; }
+                let error = std::io::Error::last_os_error();
+                if waited < 0 && error.raw_os_error() == Some(libc::EINTR) { continue; }
+                // No disposal/death proof for this exact child: retain shared
+                // exclusion rather than mint parent lease-close completion.
+                std::mem::forget(fork_guard);
+                return Err(format!("wait for native sandbox inspection (fork exclusion retained): {error}"));
             }
+            drop(fork_guard);
             if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
                 if nested {
                     available.nested_sandbox = false;
@@ -4607,6 +4622,30 @@ mod imp {
         } else {
             None
         };
+        // Reserve the exclusive fork interval before creating child control
+        // descriptors. Preserve only actual admitted/setup inputs; borrowed
+        // native lease descriptors may never become target capabilities.
+        let before_clock = std::time::Instant::now();
+        let remaining = occupancy.as_ref().map(|watchdog| watchdog.original_deadline().remaining())
+            .unwrap_or(std::time::Duration::from_secs(5));
+        let fork_deadline = before_clock.checked_add(remaining)
+            .ok_or("sandbox target fork deadline overflow")?;
+        let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(fork_deadline)?;
+        let mut preserved = request.target_channels.iter().map(|(source, _)| raw_fd(*source))
+            .chain(request.mounts.iter().map(|mount| raw_fd(mount.source_fd)))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if let Some(stdio) = stdio { preserved.extend(stdio.iter().map(AsRawFd::as_raw_fd)); }
+        if let LinuxSandboxLifecycle::AwaitRelease { release_fd, release_keepalive_fd } = request.lifecycle {
+            preserved.insert(raw_fd(release_fd)?);
+            preserved.insert(raw_fd(release_keepalive_fd)?);
+        }
+        // This registered writer is disposed by the explicit first-child hook,
+        // whose consumed close is checked; avoid closing it twice.
+        if let Some(fd) = terminal_scrub_descriptor { preserved.insert(fd); }
+        let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
+        let mut child_preserved = preserved.clone();
+        if let Some(fd) = terminal_scrub_descriptor { child_preserved.remove(&fd); }
+        let child_barrier = fork_guard.prepare_child_descriptor_barrier(&child_preserved)?;
         let mut ready = [0; 2];
         syscall_zero(
             unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -4707,6 +4746,7 @@ mod imp {
             if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
                 unsafe { libc::_exit(125) };
             }
+            for fd in &child_close_fds { unsafe { libc::close(*fd) }; }
             if let Some(descriptor) = terminal_scrub_descriptor {
                 // Immediately after the existing first PDEATHSIG syscall:
                 // the target must not retain the adapter's publication end.
@@ -4721,6 +4761,9 @@ mod imp {
                     }
                 }
             }
+            // Only the actual fork==0 branch installs the fresh child owner,
+            // after snapshot/control disposal and before Rust setup uses it.
+            unsafe { child_barrier.install_in_actual_fork_child() };
             close_fd(ready[0]);
             close_fd(launch_failure[0]);
             close_fd(applied_launch[0]);
@@ -4737,6 +4780,9 @@ mod imp {
             }
             unsafe { libc::_exit(125) };
         }
+        // Every subsequent early error retains exclusion. Readiness, not a
+        // dropped process owner or signal request, proves inherited FD disposal.
+        let mut fork_guard = std::mem::ManuallyDrop::new(fork_guard);
         close_fd(ready[1]);
         close_fd(launch_failure[1]);
         close_fd(applied_launch[1]);
@@ -4781,6 +4827,9 @@ mod imp {
         } else {
             read_child_target_ready(ready_reader.as_raw_fd())?
         };
+        // The child emitted readiness after the explicit close snapshot and
+        // its final setup checks. Only this observed boundary releases exclusion.
+        unsafe { std::mem::ManuallyDrop::drop(&mut fork_guard) };
         mount_preparation.owned_child_pid = pid as u32;
         process.mount_preparation = Some(mount_preparation);
         if let Some(watchdog) = occupancy.as_ref() {

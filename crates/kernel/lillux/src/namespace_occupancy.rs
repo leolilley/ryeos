@@ -123,6 +123,12 @@ impl PendingNamespaceWatchdog {
             duplicate(launcher.as_raw_fd())?,
         ];
         let raw_inputs = inputs.each_ref().map(AsRawFd::as_raw_fd);
+        // Map the already-owned deadline conservatively; neither readiness
+        // nor fork preparation grants a fresh service interval.
+        let before_clock = Instant::now();
+        let fork_deadline = before_clock.checked_add(original_deadline.remaining())
+            .ok_or("original namespace fork deadline overflow")?;
+        let fork_guard = quiesce_fork_sensitive_descriptors(fork_deadline)?;
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err(format!(
@@ -154,9 +160,16 @@ impl PendingNamespaceWatchdog {
         if let Err(error) = pending.read_ack(&expected) {
             // No native fork can have occurred before this constructor returns.
             // Cancellation here is the distinct, proved prebirth failure.
-            pending.cancel_proven_prebirth()?;
+            if let Err(cleanup) = pending.cancel_proven_prebirth() {
+                // No readiness or death proof: keep inherited-lock exclusion
+                // even if the surrounding error owner is subsequently lost.
+                std::mem::forget(fork_guard);
+                return Err(format!("{error}; namespace watchdog disposal unproved: {cleanup}"));
+            }
             return Err(error);
         }
+        // READY follows the child dup2/close_range/stdio disposal boundary.
+        drop(fork_guard);
         Ok(pending)
     }
 

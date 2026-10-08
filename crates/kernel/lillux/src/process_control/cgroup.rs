@@ -489,6 +489,16 @@ pub(crate) fn install_oci_controller_mount(
         ));
     }
     let mount_tree = unsafe { File::from_raw_fd(mount_fd) };
+    // This child never execs. Protect the inherited descriptor interval using
+    // the same exclusion as native lease owners, then close its snapshot
+    // before any mount setup. This is a local fork-wait cap, not service
+    // authority or a renewal of a caller's admitted operation window.
+    let fork_deadline = Instant::now().checked_add(Duration::from_secs(5))
+        .ok_or("OCI mount fork wait bound overflow")?;
+    let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(fork_deadline)?;
+    let preserved = [namespace.as_raw_fd(), membership.as_raw_fd(), target.as_raw_fd(),
+        mount_tree.as_raw_fd()].into_iter().collect();
+    let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
@@ -497,6 +507,9 @@ pub(crate) fn install_oci_controller_mount(
         ));
     }
     if child == 0 {
+        for fd in &child_close_fds {
+            unsafe { libc::close(*fd) };
+        }
         let result = (|| -> Result<(), io::Error> {
             if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
                 return Err(io::Error::last_os_error());
@@ -529,11 +542,15 @@ pub(crate) fn install_oci_controller_mount(
         if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
         }
+        // No child death/disposal proof: keep fork exclusion rather than
+        // permit an original lease close to claim inherited locks settled.
+        std::mem::forget(fork_guard);
         return Err(format!(
-            "wait for OCI mount installer: {}",
+            "wait for OCI mount installer (fork exclusion retained): {}",
             io::Error::last_os_error()
         ));
     }
+    drop(fork_guard);
     if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
         return Err("install writable OCI controller-root mount failed".to_owned());
     }
@@ -1704,10 +1721,16 @@ impl ProcessCgroup {
                 libc::_exit(0);
             }
         }
+        // Successful clone may have a live child before its close snapshot.
+        // Any unresolved early return/unwind must retain fork exclusion.
+        let mut fork_guard = std::mem::ManuallyDrop::new(fork_guard);
+        let mut child_disposal_proved = false;
         let child_pidfd = unsafe { File::from_raw_fd(child_pidfd) };
         drop(writer);
         let outcome = (|| {
             read_placement_report(&reader, deadline)?;
+            // The child closes the whole inventory before writing its report.
+            child_disposal_proved = true;
             let frozen = self.freeze(deadline.saturating_duration_since(Instant::now()))?;
             frozen.terminate(deadline.saturating_duration_since(Instant::now()))
         })();
@@ -1734,6 +1757,9 @@ impl ProcessCgroup {
             super::linux::wait_pidfd_exit(child_pidfd.as_raw_fd(), deadline).map_err(|error| {
                 format!("{error}; signal error: {signal_error:?}; probe thaw error: {thaw_error:?}")
             })?;
+            // Pinned lifetime exit proves physical FD disposal, independently
+            // of whether subsequent exclusive reap or scope-empty checks pass.
+            child_disposal_proved = true;
             let mut status = 0;
             loop {
                 let waited = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
@@ -1748,6 +1774,11 @@ impl ProcessCgroup {
             }
             self.wait_empty(deadline.saturating_duration_since(Instant::now()))
         })();
+        if child_disposal_proved {
+            unsafe { std::mem::ManuallyDrop::drop(&mut fork_guard) };
+        }
+        // Otherwise the original exclusive guard remains deliberately retained;
+        // a cleanup error is never evidence that inherited locks were released.
         match (outcome, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),

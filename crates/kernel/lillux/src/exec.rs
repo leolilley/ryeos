@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::process::{self, Stdio};
@@ -3856,6 +3856,9 @@ pub(crate) struct OccupancyWatchdog {
 #[cfg(target_os = "linux")]
 impl OccupancyWatchdog {
     pub(crate) fn cancel_and_reap(&mut self) -> Result<(), String> {
+        if self.pid <= 0 {
+            return Err("original watchdog has no retained exclusive reap authority".into());
+        }
         if let Some(mut cancel) = self.cancel.take() {
             let _ = cancel.write_all(&[1]);
             drop(cancel);
@@ -3864,6 +3867,9 @@ impl OccupancyWatchdog {
         loop {
             let result = unsafe { libc::waitpid(self.pid, &mut status, 0) };
             if result == self.pid {
+                if !libc::WIFEXITED(status) && !libc::WIFSIGNALED(status) {
+                    return Err("original watchdog lacks a supported terminal status".into());
+                }
                 self.pid = -1;
                 return Ok(());
             }
@@ -3872,10 +3878,9 @@ impl OccupancyWatchdog {
                 if error.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                if error.raw_os_error() == Some(libc::ECHILD) {
-                    self.pid = -1;
-                    return Ok(());
-                }
+                // Missing wait ownership is uncertainty, never child death.
+                // Retain the same identity so callers cannot release inherited
+                // descriptor exclusion from an ECHILD observation.
                 return Err(format!("reap occupancy watchdog: {error}"));
             }
         }
@@ -4160,6 +4165,17 @@ fn arm_occupancy_watchdog_inner(
     let child_target_pidfd = duplicate_for_child(target_pidfd.as_raw_fd())?;
     let child_cancel_keepalive = duplicate_for_child(cancel_writer.as_raw_fd())?;
     let child_ready_writer = duplicate_for_child(ready_writer.as_raw_fd())?;
+    // Hold the same exclusive fork boundary until the child acknowledges
+    // physical descriptor disposal. Parent-side lease close must not race
+    // this non-exec child's inherited lock descriptions.
+    let before_clock = Instant::now();
+    let now = crate::time::occupancy_now()?;
+    let remaining_ns = service_tick.checked_sub(now.tick_ns)
+        .ok_or("original watchdog service window elapsed before fork")?;
+    let setup_deadline = before_clock.checked_add(
+        Duration::from_nanos(remaining_ns).min(Duration::from_secs(5)))
+        .ok_or("watchdog fork deadline overflow")?;
+    let fork_guard = quiesce_fork_sensitive_descriptors(setup_deadline)?;
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
@@ -4194,7 +4210,8 @@ fn arm_occupancy_watchdog_inner(
         events: libc::POLLIN,
         revents: 0,
     };
-    let polled = unsafe { libc::poll(&mut readiness_poll, 1, 5_000) };
+    let poll_ms = setup_deadline.saturating_duration_since(Instant::now()).as_millis().min(5_000) as i32;
+    let polled = unsafe { libc::poll(&mut readiness_poll, 1, poll_ms) };
     let mut ready = [0_u8; 1];
     let acknowledged = polled == 1
         && readiness_poll.revents & libc::POLLIN != 0
@@ -4204,15 +4221,27 @@ fn arm_occupancy_watchdog_inner(
         let mut cancel = std::fs::File::from(cancel_writer);
         let _ = cancel.write_all(&[1]);
         let mut status = 0;
-        while unsafe { libc::waitpid(child, &mut status, 0) } < 0 {
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break;
+        let reaped = loop {
+            let result = unsafe { libc::waitpid(child, &mut status, 0) };
+            if result == child { break true; }
+            if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
             }
+            break false;
+        };
+        if !reaped {
+            // No disposal or death proof: retain exclusion rather than permit
+            // parent close to claim this potentially inherited lock settled.
+            std::mem::forget(fork_guard);
+            return Err("watchdog child disposal unproved; fork exclusion retained".to_owned());
         }
         return Err(
             "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned(),
         );
     }
+    // Readiness is emitted only after dup2 and close_range consumed all
+    // unrelated inherited descriptors, including registered native leases.
+    drop(fork_guard);
     let watchdog = OccupancyWatchdog {
         pid: child,
         cancel: Some(std::fs::File::from(cancel_writer)),
@@ -4448,6 +4477,10 @@ unsafe fn kill_occupancy_target_and_exit(kill_fd: i32, namespace_init: bool) -> 
 /// release, or the runtime's lifetime, so independent executions remain
 /// concurrent.
 static DIRECT_ATTACHMENT_FORK_BARRIER: OnceLock<DescriptorForkBarrier> = OnceLock::new();
+// Child installation is copy-on-write process-local and never changes the
+// parent barrier. Installed storage intentionally survives for this process.
+static CHILD_DESCRIPTOR_FORK_BARRIER: std::sync::atomic::AtomicPtr<DescriptorForkBarrier> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct DescriptorLeaseLocation {
@@ -4465,10 +4498,194 @@ struct DescriptorForkBarrierState {
     fork_quiesced: bool,
     pending_fork_control_fds: BTreeSet<i32>,
     fork_child_close_fds: BTreeSet<i32>,
+    owned_registration_generations: BTreeMap<i32, u64>,
+    next_owned_registration_generation: u64,
+    borrowed_child_close: BorrowedChildCloseRegistry,
     // Files, not registered wrappers: release must close+deregister without
     // recursively entering this barrier through another registered Drop.
     // At most one entry per descriptor already registered at quiescence.
     deferred_child_closes: Vec<(i32, std::fs::File)>,
+}
+
+const BORROWED_CHILD_CLOSE_LIMIT: usize = 64;
+
+struct BorrowedChildCloseRegistry {
+    slots: [Option<(Option<i32>, u64)>; BORROWED_CHILD_CLOSE_LIMIT],
+    next_generation: u64,
+}
+
+impl Default for BorrowedChildCloseRegistry {
+    fn default() -> Self {
+        Self {
+            slots: [None; BORROWED_CHILD_CLOSE_LIMIT],
+            next_generation: 0,
+        }
+    }
+}
+
+/// Registration of a descriptor owned by a native backend, not by Rust.
+/// Dropping this token neither closes nor unregisters the descriptor. Failed
+/// owners must retain it until explicit physical disposal under the fork lease.
+#[must_use]
+pub struct BorrowedForkChildCloseRegistration {
+    barrier_identity: usize,
+    slot: usize,
+    generation: u64,
+    parent_pid: u32,
+}
+
+impl BorrowedForkChildCloseRegistration {
+    /// Remove the child-close entry after the native owner consumed its FD.
+    ///
+    /// # Safety
+    /// The supplied lease must have been acquired before physical close and
+    /// remain held through this call. The descriptor must actually be consumed;
+    /// an unconsumed close refusal must retain this registration. Never retry a
+    /// consumed descriptor number or release the guard before deregistration.
+    pub unsafe fn unregister_consumed(
+        self,
+        lease: &ForkSensitiveDescriptorLease,
+    ) -> Result<(), Self> {
+        if self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || self.barrier_identity != lease.barrier_identity
+            || self.parent_pid != std::process::id()
+            || lease.parent_pid != std::process::id()
+            || !lease.retained
+            || lease.owner != thread::current().id()
+        {
+            return Err(self);
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.fork_quiesced
+            || !state.retained_scope_owners.contains_key(&lease.owner)
+            || state.borrowed_child_close.slots[self.slot]
+                .is_none_or(|(fd, generation)| fd.is_none() || generation != self.generation)
+        {
+            return Err(self);
+        }
+        state.borrowed_child_close.slots[self.slot] = None;
+        Ok(())
+    }
+}
+
+/// Reserved inventory capacity with no descriptor effects yet.
+/// Drop is inert: abandoned capacity remains excluded until explicit cancel.
+#[must_use]
+pub struct BorrowedForkChildCloseReservation {
+    registration: BorrowedForkChildCloseRegistration,
+}
+
+impl BorrowedForkChildCloseReservation {
+    /// Bind the actual acquired FD without a post-open capacity allocation.
+    ///
+    /// # Safety
+    /// Acquire and keep this lease before native open through this call. `fd`
+    /// must be uniquely owned by the native backend with no external close or
+    /// registration. On refusal retain both the owner and the lease until the
+    /// FD is physically consumed or correctly enrolled. No unguarded unwind.
+    pub unsafe fn bind(
+        self,
+        lease: &ForkSensitiveDescriptorLease,
+        fd: i32,
+    ) -> Result<BorrowedForkChildCloseRegistration, Self> {
+        let registration = &self.registration;
+        if fd < 0
+            || registration.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || registration.barrier_identity != lease.barrier_identity
+            || registration.parent_pid != std::process::id()
+            || lease.parent_pid != std::process::id()
+            || !lease.retained
+            || lease.owner != thread::current().id()
+        {
+            return Err(self);
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.fork_quiesced
+            || !state.retained_scope_owners.contains_key(&lease.owner)
+            || state.borrowed_child_close.slots[registration.slot]
+                != Some((None, registration.generation))
+            || state.fork_child_close_fds.contains(&fd)
+            || state.pending_fork_control_fds.contains(&fd)
+            || state
+                .borrowed_child_close
+                .slots
+                .iter()
+                .flatten()
+                .any(|(registered, _)| *registered == Some(fd))
+        {
+            return Err(self);
+        }
+        state.borrowed_child_close.slots[registration.slot] =
+            Some((Some(fd), registration.generation));
+        Ok(self.registration)
+    }
+
+    /// Cancel unused capacity. A reservation has no bound descriptor.
+    pub fn cancel(self, lease: &ForkSensitiveDescriptorLease) -> Result<(), Self> {
+        let registration = &self.registration;
+        if registration.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || registration.barrier_identity != lease.barrier_identity
+            || registration.parent_pid != std::process::id()
+            || lease.parent_pid != std::process::id()
+            || !lease.retained
+            || lease.owner != thread::current().id()
+        {
+            return Err(self);
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.fork_quiesced
+            || !state.retained_scope_owners.contains_key(&lease.owner)
+            || state.borrowed_child_close.slots[registration.slot]
+                != Some((None, registration.generation))
+        {
+            return Err(self);
+        }
+        state.borrowed_child_close.slots[registration.slot] = None;
+        Ok(())
+    }
+}
+
+/// Reserve fixed child-close inventory capacity BEFORE native descriptor open.
+/// This has no File ownership and performs no per-registration allocation.
+pub fn reserve_borrowed_fork_child_close_descriptor(
+    lease: &ForkSensitiveDescriptorLease,
+) -> Result<BorrowedForkChildCloseReservation, &'static str> {
+    if lease.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        || lease.parent_pid != std::process::id()
+        || !lease.retained
+        || lease.owner != thread::current().id()
+    {
+        return Err("borrowed descriptor requires its current fork lease");
+    }
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+    if state.fork_quiesced || !state.retained_scope_owners.contains_key(&lease.owner) {
+        return Err("borrowed descriptor reservation during fork");
+    }
+    let slot = state
+        .borrowed_child_close
+        .slots
+        .iter()
+        .position(Option::is_none)
+        .ok_or("borrowed child-close inventory exhausted")?;
+    let generation = state
+        .borrowed_child_close
+        .next_generation
+        .checked_add(1)
+        .ok_or("borrowed child-close generation exhausted")?;
+    state.borrowed_child_close.next_generation = generation;
+    state.borrowed_child_close.slots[slot] = Some((None, generation));
+    Ok(BorrowedForkChildCloseReservation {
+        registration: BorrowedForkChildCloseRegistration {
+            barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+            slot,
+            generation,
+            parent_pid: std::process::id(),
+        },
+    })
 }
 
 struct DescriptorForkBarrier {
@@ -4478,6 +4695,12 @@ struct DescriptorForkBarrier {
 }
 
 fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
+    let child = CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire);
+    if !child.is_null() {
+        // SAFETY: installation leaks the preallocated owner for this process;
+        // no installed pointer is freed or mutated through shared references.
+        return unsafe { &*child };
+    }
     DIRECT_ATTACHMENT_FORK_BARRIER.get_or_init(|| DescriptorForkBarrier {
         state: Mutex::new(DescriptorForkBarrierState::default()),
         changed: Condvar::new(),
@@ -4488,6 +4711,8 @@ fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
 /// Shared proof that the current scope may own descriptor-backed authority
 /// which a pre-exec attachment child must not inherit.
 pub struct ForkSensitiveDescriptorLease {
+    barrier_identity: usize,
+    parent_pid: u32,
     owner: thread::ThreadId,
     location: DescriptorLeaseLocation,
     retained: bool,
@@ -4586,6 +4811,8 @@ fn retain_fork_sensitive_descriptors_inner(
         .checked_add(1)
         .expect("fork-sensitive descriptor location count overflow");
     Ok(ForkSensitiveDescriptorLease {
+        barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+        parent_pid: std::process::id(),
         owner,
         location,
         retained: true,
@@ -4595,7 +4822,9 @@ fn retain_fork_sensitive_descriptors_inner(
 
 impl Drop for ForkSensitiveDescriptorLease {
     fn drop(&mut self) {
-        if !self.retained {
+        if !self.retained || self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
             return;
         }
         let barrier = direct_attachment_fork_barrier();
@@ -4643,26 +4872,84 @@ impl Drop for ForkSensitiveDescriptorLease {
 // Kernel-only probes which fork without exec must use this same barrier and
 // child-close inventory. CLOEXEC alone cannot keep them from retaining a
 // daemon lock, release pipe, or transferred authority for their lifetime.
-pub(crate) struct QuiescedForkSensitiveDescriptors;
+pub(crate) struct QuiescedForkSensitiveDescriptors {
+    barrier_identity: usize,
+    parent_pid: u32,
+}
+
+/// Fresh bookkeeping allocated by the parent before fork, with no FD ownership.
+/// Only explicitly preserved registered descriptors populate the child ledger.
+pub(crate) struct PreparedForkChildDescriptorBarrier {
+    barrier: Box<DescriptorForkBarrier>,
+}
+
+impl PreparedForkChildDescriptorBarrier {
+    /// # Safety
+    /// Call only in the single-threaded child of the protecting fork, after
+    /// physically closing every snapshot FD. Preserved owners remain live;
+    /// closed inherited wrappers must never be used to recover authority.
+    /// No Rust destructor or descriptor-lease acquisition may precede this.
+    pub(crate) unsafe fn install_in_actual_fork_child(self) {
+        // The actual kernel fork==0 branch is the witness. Numeric PID
+        // inequality cannot identify a child across nested PID namespaces.
+        let pointer = Box::into_raw(self.barrier);
+        CHILD_DESCRIPTOR_FORK_BARRIER.store(pointer, Ordering::Release);
+    }
+}
 
 impl QuiescedForkSensitiveDescriptors {
+    pub(crate) fn prepare_child_descriptor_barrier(
+        &self,
+        preserved: &BTreeSet<i32>,
+    ) -> Result<PreparedForkChildDescriptorBarrier, String> {
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            return Err("child barrier preparation requires the original parent".into());
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !state.fork_quiesced || !state.pending_fork_control_fds.is_disjoint(preserved)
+            || state.borrowed_child_close.slots.iter().flatten()
+                .any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
+        { return Err("child barrier cannot preserve native/control custody".into()); }
+        let mut child_state = DescriptorForkBarrierState::default();
+        child_state.fork_child_close_fds = state.fork_child_close_fds
+            .intersection(preserved).copied().collect();
+        child_state.next_owned_registration_generation = state.next_owned_registration_generation;
+        child_state.owned_registration_generations = state.owned_registration_generations.iter()
+            .filter(|(fd, _)| preserved.contains(fd)).map(|(fd, generation)| (*fd, *generation)).collect();
+        Ok(PreparedForkChildDescriptorBarrier {
+            barrier: Box::new(DescriptorForkBarrier {
+                state: Mutex::new(child_state), changed: Condvar::new(),
+                waiting_descriptor_closers: AtomicUsize::new(0),
+            }),
+        })
+    }
+
     pub(crate) fn fork_child_close_fds(
         &self,
         preserved: &BTreeSet<i32>,
     ) -> Result<Vec<i32>, String> {
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        { return Err("fork snapshot requires its original bookkeeping owner".into()); }
         let barrier = direct_attachment_fork_barrier();
         let state = barrier
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
-        if !state.pending_fork_control_fds.is_disjoint(preserved) {
+        if !state.pending_fork_control_fds.is_disjoint(preserved)
+            || state.borrowed_child_close.slots.iter().flatten().any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
+        {
             return Err("inherited authority aliases parent process-control authority".to_owned());
         }
         Ok(state
             .pending_fork_control_fds
             .iter()
             .chain(state.fork_child_close_fds.difference(preserved))
+            .chain(state.borrowed_child_close.slots.iter().flatten().filter_map(|(fd, _)| fd.as_ref()))
             .copied()
             .collect())
     }
@@ -4689,6 +4976,9 @@ impl QuiescedForkSensitiveDescriptors {
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct ForkChildCloseFile {
+    barrier_identity: usize,
+    parent_pid: u32,
+    generation: u64,
     fd: i32,
     file: Option<std::fs::File>,
 }
@@ -4718,6 +5008,25 @@ impl Drop for ForkChildCloseFile {
             // Selected bounded close already removed the exact registration.
             return;
         }
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            let child = CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire);
+            if child.is_null() {
+                // No reviewed child transition: never enter the copied mutex
+                // or close a numeric coordinate whose custody was discarded.
+                if let Some(file) = self.file.take() { std::mem::forget(file); }
+                return;
+            }
+            let barrier = unsafe { &*child };
+            let state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.owned_registration_generations.get(&self.fd) != Some(&self.generation) {
+                // Snapshot disposal already consumed this inherited FD. Its
+                // number may now name a different child-local descriptor.
+                if let Some(file) = self.file.take() { std::mem::forget(file); }
+                return;
+            }
+        }
         let barrier = direct_attachment_fork_barrier();
         barrier
             .waiting_descriptor_closers
@@ -4743,6 +5052,7 @@ impl Drop for ForkChildCloseFile {
             // Close before deregistration, while no fork can consume a stale
             // coordinate or see an unregistered live authority.
             drop(self.file.take());
+            state.owned_registration_generations.remove(&self.fd);
             assert!(
                 state.fork_child_close_fds.remove(&self.fd),
                 "fork-child-close descriptor was not registered"
@@ -4799,6 +5109,7 @@ fn selected_close_inherited_copies(
                 if original.has_elapsed() {
                     return Ok(false);
                 }
+                state.owned_registration_generations.remove(&handle.fd);
                 if !state.fork_child_close_fds.remove(&handle.fd) {
                     return Err("selected inherited descriptor registration missing".into());
                 }
@@ -4828,11 +5139,18 @@ pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCl
         !state.fork_quiesced,
         "fork-child-close descriptor registered during a fork"
     );
+    let generation = state.next_owned_registration_generation.checked_add(1)
+        .expect("owned descriptor registration generation exhausted");
     assert!(
         state.fork_child_close_fds.insert(fd),
         "fork-child-close descriptor was already registered"
     );
+    state.next_owned_registration_generation = generation;
+    state.owned_registration_generations.insert(fd, generation);
     ForkChildCloseFile {
+        barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+        parent_pid: std::process::id(),
+        generation,
         fd,
         file: Some(file),
     }
@@ -4983,6 +5301,9 @@ fn register_pending_fork_control_file(file: std::fs::File) -> PendingForkControl
 
 impl Drop for QuiescedForkSensitiveDescriptors {
     fn drop(&mut self) {
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        { return; }
         let barrier = direct_attachment_fork_barrier();
         let mut state = barrier
             .state
@@ -4991,6 +5312,7 @@ impl Drop for QuiescedForkSensitiveDescriptors {
         debug_assert!(state.fork_quiesced);
         for (fd, file) in std::mem::take(&mut state.deferred_child_closes) {
             drop(file);
+            state.owned_registration_generations.remove(&fd);
             assert!(
                 state.fork_child_close_fds.remove(&fd),
                 "deferred descriptor was not registered"
@@ -5079,8 +5401,54 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
         .checked_sub(1)
         .expect("fork-sensitive descriptor waiter count underflow");
     state.fork_quiesced = true;
-    Ok(QuiescedForkSensitiveDescriptors)
+    Ok(QuiescedForkSensitiveDescriptors {
+        barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+        parent_pid: std::process::id(),
+    })
 }
+/// Install the descriptor scrub before every other user pre-exec hook.
+/// The parent exclusion must survive process creation until successful exec.
+#[cfg(unix)]
+fn prepare_command_fork_custody(
+    command: &mut process::Command,
+    preserved: &BTreeSet<i32>,
+    deadline: Instant,
+) -> Result<QuiescedForkSensitiveDescriptors, String> {
+    use std::os::unix::process::CommandExt as _;
+    let guard = quiesce_fork_sensitive_descriptors(deadline)?;
+    let close_fds = guard.fork_child_close_fds(preserved)?;
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &close_fds {
+                // Never retry close: the descriptor number may already be consumed.
+                if libc::close(*fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    Ok(guard)
+}
+
+/// An error does not expose an owned child or prove descriptor disposal here.
+/// Retain exclusion on error/unwind rather than assuming libc/std reaped it.
+#[cfg(unix)]
+fn spawn_command_with_fork_custody(
+    command: &mut process::Command,
+    guard: Option<QuiescedForkSensitiveDescriptors>,
+) -> std::io::Result<process::Child> {
+    let mut guard = guard.map(std::mem::ManuallyDrop::new);
+    let result = command.spawn();
+    if result.is_ok() {
+        if let Some(guard) = guard.as_mut() {
+            // Successful Command::spawn has crossed exec, including its pre-exec hooks.
+            unsafe { std::mem::ManuallyDrop::drop(guard); }
+        }
+    }
+    result
+}
+
 #[cfg(unix)]
 const ATTACHMENT_ABORT_SIGNAL: i32 = libc::SIGKILL;
 #[cfg(not(unix))]
@@ -10177,6 +10545,10 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     // fork. Quiesce scopes which own descriptor-backed authority until the
     // worker reports the final hold boundary; otherwise a concurrent child can
     // inherit an advisory lock and deadlock the owner's durable attach path.
+    // From thread creation onward, worker failure/panic does not itself prove
+    // that a partially created child disposed its inherited descriptors.
+    // Retain exclusion across every uncertain abort and unwinding boundary.
+    let mut fork_sensitive_descriptors = std::mem::ManuallyDrop::new(fork_sensitive_descriptors);
     let worker = thread::Builder::new()
         .name("lillux-attachment-spawn".to_string())
         .spawn(move || {
@@ -10191,6 +10563,9 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
             )
         })
         .map_err(|error| {
+            // Builder refused before running the closure: no child creation
+            // attempt occurred, so the original exclusion can be released.
+            unsafe { std::mem::ManuallyDrop::drop(&mut fork_sensitive_descriptors); }
             spawn_failure(
                 start,
                 format!("Failed to spawn awaiting attachment worker: {error}"),
@@ -10310,7 +10685,8 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     // any caller-declared inherited descriptor.
     let release_registration =
         fork_sensitive_descriptors.register_pending_fork_control(release_writer);
-    drop(fork_sensitive_descriptors);
+    // READY is emitted only after the child's known snapshot was scrubbed.
+    unsafe { std::mem::ManuallyDrop::drop(&mut fork_sensitive_descriptors); }
 
     verify_scoped_attachment(
         ProcessAwaitingAttachment {
@@ -11016,6 +11392,30 @@ fn lib_spawn_with_stdio_custody_into(
     } else {
         Stdio::piped()
     });
+    #[cfg(unix)]
+    let ordinary_fork_guard = {
+        #[cfg(target_os = "linux")]
+        let already_quiesced = attachment_gate.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let already_quiesced = false;
+        if already_quiesced {
+            None
+        } else {
+            let mut preserved = BTreeSet::from([0, 1, 2]);
+            preserved.extend(raw_inherited_fds.iter().copied());
+            for (source, target) in &raw_inherited_fd_mappings {
+                preserved.insert(*source);
+                preserved.insert(*target);
+            }
+            let mut deadline = supervised_setup_deadline(start, timeout);
+            if let Some(original) = absolute_deadline {
+                let observed = Instant::now();
+                deadline = deadline.min(observed.checked_add(original.remaining()).unwrap_or(observed));
+            }
+            Some(prepare_command_fork_custody(&mut command, &preserved, deadline)
+                .map_err(|error| spawn_failure(start, format!("fork custody: {error}")))?)
+        }
+    };
     // Placement must precede inherited-descriptor remapping, final attachment
     // hold and exec. Platform code owns the exact operation and closes its
     // controls at exec; they never enter workload channel/mount authority.
@@ -11227,7 +11627,11 @@ fn lib_spawn_with_stdio_custody_into(
                 .map_err(|detail| spawn_failure(start, detail))?;
         }
     }
-    let child = match command.spawn() {
+    #[cfg(unix)]
+    let spawn_result = spawn_command_with_fork_custody(&mut command, ordinary_fork_guard);
+    #[cfg(not(unix))]
+    let spawn_result = command.spawn();
+    let child = match spawn_result {
         Ok(c) => c,
         Err(_) if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) => {
             return Err(SpawnWithStdioError::WithoutRunningOwner {
@@ -15123,7 +15527,19 @@ fn do_stream(
     });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = match command.spawn() {
+    #[cfg(unix)]
+    let guard = match prepare_command_fork_custody(
+        &mut command, &BTreeSet::from([0, 1, 2]),
+        supervised_setup_deadline(Instant::now(), timeout),
+    ) {
+        Ok(guard) => guard,
+        Err(error) => { eprintln!("fork custody: {error}"); return 125; }
+    };
+    #[cfg(unix)]
+    let spawn_result = spawn_command_with_fork_custody(&mut command, Some(guard));
+    #[cfg(not(unix))]
+    let spawn_result = command.spawn();
+    let mut child = match spawn_result {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to spawn: {e}");
@@ -15259,6 +15675,11 @@ fn spawn_detached(
         Stdio::null()
     });
     setup_log(&mut command, log)?;
+    let mut preserved = BTreeSet::from([0, 1, 2]);
+    preserved.extend(inherited_fds.iter().map(|fd| fd.file().as_raw_fd()));
+    let guard = prepare_command_fork_custody(
+        &mut command, &preserved, supervised_setup_deadline(Instant::now(), 0.0),
+    )?;
     configure_inherited_fds(&mut command, inherited_fds)?;
     unsafe {
         command.pre_exec(|| {
@@ -15266,8 +15687,7 @@ fn spawn_detached(
             Ok(())
         });
     }
-    let mut child = command
-        .spawn()
+    let mut child = spawn_command_with_fork_custody(&mut command, Some(guard))
         .map_err(|e| format!("Failed to spawn: {e}"))?;
     write_stdin(&mut child, stdin_data);
     Ok(child.id())
