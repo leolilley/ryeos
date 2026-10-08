@@ -6629,8 +6629,34 @@ fn ensure_entry_matches(
     display_path: &Path,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
-    let current = open_regular_at(parent, name, display_path)?;
-    match (expected, current.as_ref()) {
+    // Conditional mutation compares identity only. Opening a data descriptor
+    // here could disturb a live SQLite inode's process-wide POSIX locks.
+    let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut observed,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    let current = if result == 0 {
+        anyhow::ensure!(
+            observed.st_mode & libc::S_IFMT == libc::S_IFREG,
+            "secure target is not a regular file: {}",
+            display_path.display()
+        );
+        Some((observed.st_dev as u64, observed.st_ino as u64))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).with_context(|| {
+                format!("inspect secure regular identity {}", display_path.display())
+            });
+        }
+        None
+    };
+    match (expected, current) {
         (None, None) => Ok(()),
         (None, Some(_)) => anyhow::bail!(
             "secure target appeared before publication: {}",
@@ -6642,8 +6668,7 @@ fn ensure_entry_matches(
         ),
         (Some(expected), Some(current)) => {
             let expected = expected.metadata()?;
-            let current = current.metadata()?;
-            if expected.dev() != current.dev() || expected.ino() != current.ino() {
+            if (expected.dev(), expected.ino()) != current {
                 anyhow::bail!(
                     "secure target changed before mutation: {}",
                     display_path.display()
