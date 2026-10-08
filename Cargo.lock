@@ -3394,6 +3394,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-scheduler-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "cron",
+ "ryeos-engine",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+]
+
+
+[[package]]
 name = "ryeos-session-exec"
 version = "0.5.102"
 

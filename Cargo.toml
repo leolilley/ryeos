@@ -32,6 +32,7 @@ members = [
     "crates/engine/ryeos-project-capture",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
+    "crates/engine/ryeos-scheduler-contract",
     "crates/state/ryeos-scheduler",
     "crates/state/ryeos-state",
     "crates/tools/core-tools",
@@ -106,6 +107,7 @@ ryeos-provider-contract = { path = "crates/engine/ryeos-provider-contract" }
 ryeos-project-capture = { path = "crates/engine/ryeos-project-capture" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
+ryeos-scheduler-contract = { path = "crates/engine/ryeos-scheduler-contract" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
 ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }
