@@ -20,10 +20,11 @@ pub fn build_effective_item_engine(
     project_path: Option<&Path>,
     bundle_roots: &[PathBuf],
 ) -> anyhow::Result<Engine> {
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            ..Default::default()
+        })?;
     let isolation =
         ryeos_app::engine_init::load_locked_registered_definition_isolation(&config.app_root)
             .context("load node isolation policy")?;

@@ -57,11 +57,12 @@ pub async fn try_offline_dispatch(
     // Freeze one registered generation before consuming command or bundle
     // records. The caller's earlier snapshot is only a fast dispatch hint; a
     // standalone execution re-verifies it with the retained trust snapshot.
-    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
+    let node_config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            ..Default::default()
+        })
+        .map_err(local_err)?;
     let isolation =
         ryeos_app::engine_init::load_locked_registered_definition_isolation(&node_config.app_root)
             .map_err(|error| CliError::Local {
@@ -263,7 +264,7 @@ pub async fn try_offline_dispatch(
 // ---------------------------------------------------------------------------
 
 fn boot_engine(
-    config: &ryeos_app::config::Config,
+    config: &ryeos_node_runtime::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
     isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
@@ -969,8 +970,8 @@ fn run_standalone_service(
 }
 
 fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError> {
-    let lock_path = ryeos_app::state_lock::default_lock_path(app_root);
-    match ryeos_app::state_lock::StateLock::acquire(&lock_path) {
+    let lock_path = ryeos_node_runtime::state_lock::default_lock_path(app_root);
+    match ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path) {
         Ok(lock) => {
             drop(lock);
             Ok(())

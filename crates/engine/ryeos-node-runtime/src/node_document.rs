@@ -3,14 +3,14 @@
 //! Configuration and policy have different semantic owners, but both use the
 //! same bounded, path-owned, node-signed document envelope.
 
+pub const MAX_ITEM_BYTES: u64 = 1024 * 1024;
+pub const MAX_SIGNATURE_OVERHEAD_BYTES: u64 = 512;
+
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
 use crate::identity::NodeIdentity;
-
-pub const MAX_ITEM_BYTES: u64 = 1024 * 1024;
-pub const MAX_SIGNATURE_OVERHEAD_BYTES: u64 = 512;
 
 pub struct VerifiedNodeDocument {
     pub body: serde_json::Value,

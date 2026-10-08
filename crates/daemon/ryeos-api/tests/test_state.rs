@@ -64,7 +64,7 @@ fn build_test_state_at(
     let runtime_state_dir = root.join(".ai").join("state");
     let runtime_db_path = root.join("runtime.sqlite3");
     let key_path = root.join("identity").join("node-key.pem");
-    let config = ryeos_app::config::Config {
+    let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
         uds_path: root.join("test.sock"),
@@ -74,16 +74,17 @@ fn build_test_state_at(
         authorized_keys_dir: root.join("auth"),
     };
     let identity = if create_identity {
-        ryeos_app::identity::NodeIdentity::create(&key_path).unwrap()
+        ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap()
     } else {
-        ryeos_app::identity::NodeIdentity::load(&key_path).unwrap()
+        ryeos_node_runtime::identity::NodeIdentity::load(&key_path).unwrap()
     };
     // Admission classifies the configured operator separately from remote
     // node claimants. Keep that authority real in the shared fixture so tests
     // exercise the production identity check instead of failing before the
     // claim contract is reached.
     if create_identity {
-        ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
+            .unwrap();
     }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
@@ -204,8 +205,8 @@ fn build_test_state_with_hosted_policy_choices(
 // Test fixture: one argument per AppState component under test.
 #[allow(clippy::too_many_arguments)]
 fn build_app_state(
-    config: ryeos_app::config::Config,
-    identity: ryeos_app::identity::NodeIdentity,
+    config: ryeos_node_runtime::config::Config,
+    identity: ryeos_node_runtime::identity::NodeIdentity,
     state_store: Arc<ryeos_app::state_store::StateStore>,
     engine: Arc<ryeos_engine::engine::Engine>,
     threads: Arc<ryeos_app::thread_lifecycle::ThreadLifecycleService>,
@@ -228,7 +229,7 @@ fn build_app_state(
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     let controller_lifetime =
-        ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),

@@ -1111,7 +1111,9 @@ mod tests {
     async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
         use base64::Engine as _;
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+        use ryeos_node_runtime::identity::{
+            AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy,
+        };
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
@@ -1120,7 +1122,7 @@ mod tests {
         let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
         let scopes =
             vec!["ryeos.execute.service.external-content/launch-product-qualification".to_owned()];
-        ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
             &state.config.authorized_keys_dir,
             operator.fingerprint(),
             &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),

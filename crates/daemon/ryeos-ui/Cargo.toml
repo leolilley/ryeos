@@ -6,6 +6,7 @@ license.workspace = true
 description = "RyeOS UI/browser session handlers and session event substrate"
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 axum = { workspace = true, features = ["default"] }
@@ -29,6 +30,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

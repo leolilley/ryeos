@@ -289,7 +289,7 @@ pub fn resolve_execution_project_authority(
         PinnedProjectRealization, PinnedTerminalPublication,
     };
 
-    ryeos_app::identity::validate_canonical_site_id(project_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(project_site_id)?;
 
     // Authorization scopes are a set. Authorized-key files and composed
     // grants need not preserve a particular ordering, while the immutable
@@ -904,7 +904,8 @@ impl ResponseMode for ExecuteMode {
             RawRequestBody::Json => {}
             RawRequestBody::ObjectsPutV1 => {
                 return Err(RouteConfigError::InvalidResponseSpec {
-                    id: raw.id.clone(), mode: "execute".into(),
+                    id: raw.id.clone(),
+                    mode: "execute".into(),
                     reason: "execute mode does not accept the objects_put_v1 body profile".into(),
                 });
             }
@@ -943,7 +944,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
         // This assertion belongs to the authenticated wire ingress. Nested
         // admission consumes verified handler authority, not a second proof.
-        ryeos_app::identity::validate_forwarding_origin_assertion(
+        ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
             request.required_origin_site_id.as_deref(),
             ctx.principal.authorized_key_class,
             ctx.principal.authenticated_origin_site_id.as_deref(),

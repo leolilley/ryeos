@@ -443,7 +443,7 @@ pub struct NodeIdentitySigner {
 }
 
 impl NodeIdentitySigner {
-    pub fn from_identity(identity: &crate::identity::NodeIdentity) -> Self {
+    pub fn from_identity(identity: &ryeos_node_runtime::identity::NodeIdentity) -> Self {
         Self {
             fingerprint: identity.fingerprint().to_string(),
             signing_key: identity.signing_key().clone(),
@@ -1640,7 +1640,11 @@ enum SelectedMutationOperation<'a> {
 }
 
 impl SelectedMutationPermit<'_, '_> {
-    fn authorize(&self, db: &runtime_db::RuntimeDb, operation: SelectedMutationOperation<'_>) -> Result<()> {
+    fn authorize(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        operation: SelectedMutationOperation<'_>,
+    ) -> Result<()> {
         if !std::ptr::eq(db, self.db)
             || !std::ptr::eq(self.db, &self.guard.runtime_db)
             || self.operation != operation
@@ -1650,25 +1654,64 @@ impl SelectedMutationPermit<'_, '_> {
         Ok(())
     }
 
-    pub(crate) fn authorize_claim(&self, db: &runtime_db::RuntimeDb, thread: &str, claim: &str, owner: &str) -> Result<()> {
+    pub(crate) fn authorize_claim(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+        claim: &str,
+        owner: &str,
+    ) -> Result<()> {
         self.authorize(db, SelectedMutationOperation::Claim(thread, claim, owner))
     }
-    pub(crate) fn authorize_release(&self, db: &runtime_db::RuntimeDb, thread: &str, claim: &str) -> Result<()> {
+    pub(crate) fn authorize_release(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+        claim: &str,
+    ) -> Result<()> {
         self.authorize(db, SelectedMutationOperation::Release(thread, claim))
     }
-    pub(crate) fn authorize_rotate(&self, db: &runtime_db::RuntimeDb, thread: &str, owner: &str, claim: &str, generation: &str, attempts: u32) -> Result<()> {
-        self.authorize(db, SelectedMutationOperation::Rotate(thread, owner, claim, generation, attempts))
+    pub(crate) fn authorize_rotate(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+        owner: &str,
+        claim: &str,
+        generation: &str,
+        attempts: u32,
+    ) -> Result<()> {
+        self.authorize(
+            db,
+            SelectedMutationOperation::Rotate(thread, owner, claim, generation, attempts),
+        )
     }
-    pub(crate) fn authorize_sweep(&self, db: &runtime_db::RuntimeDb, generation: &str) -> Result<()> {
+    pub(crate) fn authorize_sweep(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        generation: &str,
+    ) -> Result<()> {
         self.authorize(db, SelectedMutationOperation::ClearStale(generation))
     }
-    pub(crate) fn authorize_delete_thread(&self, db: &runtime_db::RuntimeDb, thread: &str) -> Result<()> {
+    pub(crate) fn authorize_delete_thread(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+    ) -> Result<()> {
         self.authorize(db, SelectedMutationOperation::DeleteThread(thread))
     }
-    pub(crate) fn authorize_discard_birth(&self, db: &runtime_db::RuntimeDb, thread: &str) -> Result<()> {
+    pub(crate) fn authorize_discard_birth(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+    ) -> Result<()> {
         self.authorize(db, SelectedMutationOperation::DiscardBirth(thread))
     }
-    pub(crate) fn authorize_delete_chain(&self, db: &runtime_db::RuntimeDb, root: &str, threads: &[String]) -> Result<()> {
+    pub(crate) fn authorize_delete_chain(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        root: &str,
+        threads: &[String],
+    ) -> Result<()> {
         self.authorize(db, SelectedMutationOperation::DeleteChain(root, threads))
     }
 }
@@ -1806,7 +1849,10 @@ fn cooperate_while_blocking<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
-enum SelectedMetadataAccess { Start, Return }
+enum SelectedMetadataAccess {
+    Start,
+    Return,
+}
 
 pub struct StateStore {
     state_authority: ryeos_state::PinnedStateAuthority,
@@ -1831,7 +1877,8 @@ pub struct StateStore {
     attached_thread_ids: Mutex<BTreeSet<String>>,
     /// Shared across all AppState clones; metadata owns no native resources.
     /// Active-owner data lives inside Inner under the same Store mutex.
-    selected_invocations: Mutex<crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping>,
+    selected_invocations:
+        Mutex<crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping>,
     /// Process-local cancellation signals for durable, still-unbound launch
     /// admissions. Persisted planning state remains the authority; this map
     /// only stops work promptly after that state commits cancelled.
@@ -4758,7 +4805,9 @@ impl StateStore {
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(BTreeSet::new()),
-            selected_invocations: Mutex::new(crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new()),
+            selected_invocations: Mutex::new(
+                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
+            ),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
@@ -4803,7 +4852,9 @@ impl StateStore {
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(attached_thread_ids),
-            selected_invocations: Mutex::new(crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new()),
+            selected_invocations: Mutex::new(
+                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
+            ),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
@@ -4922,7 +4973,9 @@ impl StateStore {
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(attached_thread_ids),
-            selected_invocations: Mutex::new(crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new()),
+            selected_invocations: Mutex::new(
+                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
+            ),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
@@ -5280,7 +5333,9 @@ impl StateStore {
     }
 
     pub fn is_launch_owner_active(&self, launch_owner: &str) -> bool {
-        self.lock().map(|g| Self::is_launch_owner_active_locked(&g, launch_owner)).unwrap_or(false)
+        self.lock()
+            .map(|g| Self::is_launch_owner_active_locked(&g, launch_owner))
+            .unwrap_or(false)
     }
 
     // Callers already holding Store must not acquire it recursively.
@@ -8914,7 +8969,8 @@ impl StateStore {
         if cas.store_canonical_object_bytes_bounded(
             &target_capsule_bytes,
             ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
-        )? != capsule_hash {
+        )? != capsule_hash
+        {
             bail!("stored target placement capsule digest changed");
         }
         if cas.put_blob(&prepared_seed.launch_metadata_bytes)?.hash
@@ -9130,7 +9186,9 @@ impl StateStore {
         if !std::ptr::eq(g.store_mutex, &self.inner) {
             bail!("selected mutation requires this SAME StateStore guard");
         }
-        let selected = self.selected_invocations.lock()
+        let selected = self
+            .selected_invocations
+            .lock()
             .map_err(|_| anyhow!("selected invocation registry poisoned; mutation refused"))?;
         let blocked = match &operation {
             SelectedMutationOperation::Claim(thread, ..)
@@ -9138,20 +9196,27 @@ impl StateStore {
             | SelectedMutationOperation::Rotate(thread, ..)
             | SelectedMutationOperation::DeleteThread(thread)
             | SelectedMutationOperation::DiscardBirth(thread) => selected.has_thread(thread),
-            SelectedMutationOperation::ClearStale(_) | SelectedMutationOperation::DeleteChain(..) => selected.has_any(),
+            SelectedMutationOperation::ClearStale(_)
+            | SelectedMutationOperation::DeleteChain(..) => selected.has_any(),
         };
         if blocked {
             bail!("selected invocation retains destructive mutation ownership");
         }
         drop(selected);
-        Ok(SelectedMutationPermit { guard: g, db: &g.runtime_db, operation })
+        Ok(SelectedMutationPermit {
+            guard: g,
+            db: &g.runtime_db,
+            operation,
+        })
     }
 
     fn require_selected_bulk_exclusion(&self, g: &StateStoreGuard<'_>) -> Result<()> {
         if !std::ptr::eq(g.store_mutex, &self.inner) {
             bail!("selected cleanup requires this SAME StateStore guard");
         }
-        let selected = self.selected_invocations.lock()
+        let selected = self
+            .selected_invocations
+            .lock()
             .map_err(|_| anyhow!("selected invocation registry poisoned; cleanup refused"))?;
         if selected.has_any() {
             bail!("selected invocation retains bulk cleanup ownership");
@@ -9163,8 +9228,13 @@ impl StateStore {
     /// projection at the same StateStore linearization point. Runtime rows are
     /// normally removed before target release, but rollback must remain exact
     /// if a future caller reaches this path after an attachment was recorded.
-    fn delete_thread_runtime_locked(&self, g: &StateStoreGuard<'_>, thread_id: &str) -> Result<usize> {
-        let permit = self.selected_mutation_permit(g, SelectedMutationOperation::DeleteThread(thread_id))?;
+    fn delete_thread_runtime_locked(
+        &self,
+        g: &StateStoreGuard<'_>,
+        thread_id: &str,
+    ) -> Result<usize> {
+        let permit =
+            self.selected_mutation_permit(g, SelectedMutationOperation::DeleteThread(thread_id))?;
         let deleted = g.runtime_db.delete_thread_runtime(&permit, thread_id)?;
         if deleted > 0 {
             self.attached_process_registry().remove(thread_id);
@@ -9753,7 +9823,10 @@ impl StateStore {
                     }
                     Ok(RootCommitReadback::ProvenAbsent) => {}
                 }
-                let _selected_exclusion = self.selected_mutation_permit(&g, SelectedMutationOperation::DeleteThread(&thread.thread_id))?;
+                let _selected_exclusion = self.selected_mutation_permit(
+                    &g,
+                    SelectedMutationOperation::DeleteThread(&thread.thread_id),
+                )?;
                 if let Err(settle_error) = g.runtime_db.fail_launch_planning(&thread.thread_id) {
                     tracing::error!(
                         thread_id = %thread.thread_id,
@@ -11032,7 +11105,10 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
-                let _selected_exclusion = self.selected_mutation_permit(&g, SelectedMutationOperation::DeleteThread(&successor.thread_id))?;
+                let _selected_exclusion = self.selected_mutation_permit(
+                    &g,
+                    SelectedMutationOperation::DeleteThread(&successor.thread_id),
+                )?;
                 if let Err(settle_error) = g.runtime_db.fail_launch_planning(&successor.thread_id) {
                     tracing::error!(
                         thread_id = %successor.thread_id,
@@ -13234,8 +13310,10 @@ impl StateStore {
         head_already_absent: bool,
         result: &mut TerminalChainRetirement,
     ) -> Result<()> {
-        let selected_permit = self.selected_mutation_permit(g,
-            SelectedMutationOperation::DeleteChain(&chain.chain_root_id, &chain.thread_ids))?;
+        let selected_permit = self.selected_mutation_permit(
+            g,
+            SelectedMutationOperation::DeleteChain(&chain.chain_root_id, &chain.thread_ids),
+        )?;
         if !head_already_absent
             && !g
                 .state_db
@@ -13246,9 +13324,11 @@ impl StateStore {
                 chain.chain_root_id
             );
         }
-        result.deleted_runtime_rows += g
-            .runtime_db
-            .delete_chain_runtime(&selected_permit, &chain.chain_root_id, &chain.thread_ids)?;
+        result.deleted_runtime_rows += g.runtime_db.delete_chain_runtime(
+            &selected_permit,
+            &chain.chain_root_id,
+            &chain.thread_ids,
+        )?;
         self.refresh_attached_process_registry_locked(g)?;
         result.deleted_runtime_files += delete_thread_runtime_files(runtime_paths)?;
         result.deleted_projection_rows += g
@@ -18774,8 +18854,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("workspace contact has no current launch owner"))?;
-        if !g.active_launch_owners.contains(&claim.claimed_by)
-        {
+        if !g.active_launch_owners.contains(&claim.claimed_by) {
             bail!("workspace contact requires its active launch owner");
         }
         Self::authorize_thread_workspace_contact_locked(&g, thread_id)
@@ -19618,8 +19697,11 @@ impl StateStore {
         {
             bail!("refusing to discard in-process birth `{thread_id}` with an authoritative root");
         }
-        g.runtime_db
-            .discard_pending_in_process_handler_birth(&self.selected_mutation_permit(&g, SelectedMutationOperation::DiscardBirth(thread_id))?, thread_id)
+        g.runtime_db.discard_pending_in_process_handler_birth(
+            &self
+                .selected_mutation_permit(&g, SelectedMutationOperation::DiscardBirth(thread_id))?,
+            thread_id,
+        )
     }
 
     /// Complete pending→running reconciliation only after reading the
@@ -19765,8 +19847,13 @@ impl StateStore {
     ) -> Result<Vec<runtime_db::StaleLaunchClaimCleared>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        g.runtime_db
-            .clear_stale_launch_claims(&self.selected_mutation_permit(&g, SelectedMutationOperation::ClearStale(current_daemon_generation_id))?, current_daemon_generation_id)
+        g.runtime_db.clear_stale_launch_claims(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::ClearStale(current_daemon_generation_id),
+            )?,
+            current_daemon_generation_id,
+        )
     }
 
     /// Atomically claim the right to launch a thread. The sole authorization for
@@ -19780,8 +19867,15 @@ impl StateStore {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        g.runtime_db
-            .claim_thread_launch(&self.selected_mutation_permit(&g, SelectedMutationOperation::Claim(thread_id, claim_id, claimed_by))?, thread_id, claim_id, claimed_by)
+        g.runtime_db.claim_thread_launch(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, claimed_by),
+            )?,
+            thread_id,
+            claim_id,
+            claimed_by,
+        )
     }
 
     /// Claim an existing thread and publish its in-process owner before the
@@ -19798,8 +19892,13 @@ impl StateStore {
         let mut g = self.lock()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         let outcome = g.runtime_db.claim_thread_launch(
-            &self.selected_mutation_permit(&g, SelectedMutationOperation::Claim(thread_id, claim_id, daemon_generation_id))?,
-            thread_id, claim_id, daemon_generation_id,
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, daemon_generation_id),
+            )?,
+            thread_id,
+            claim_id,
+            daemon_generation_id,
         )?;
         match outcome {
             runtime_db::LaunchClaimOutcome::AlreadyClaimed => Ok(None),
@@ -19812,8 +19911,14 @@ impl StateStore {
                 if !active.insert(claim.claimed_by.clone()) {
                     // No owner mutation happened; the mutable field borrow ends
                     // before exact rollback beneath the same Store guard.
-                    g.runtime_db
-                        .release_thread_launch_claim(&self.selected_mutation_permit(&g, SelectedMutationOperation::Release(thread_id, claim_id))?, thread_id, claim_id)?;
+                    g.runtime_db.release_thread_launch_claim(
+                        &self.selected_mutation_permit(
+                            &g,
+                            SelectedMutationOperation::Release(thread_id, claim_id),
+                        )?,
+                        thread_id,
+                        claim_id,
+                    )?;
                     bail!("launch owner is already registered in this daemon");
                 }
                 Ok(Some(claim))
@@ -19839,8 +19944,15 @@ impl StateStore {
                 "fresh launch reservation requires an unpublished thread ID; thread already exists: {thread_id}"
             );
         }
-        g.runtime_db
-            .claim_thread_launch(&self.selected_mutation_permit(&g, SelectedMutationOperation::Claim(thread_id, claim_id, claimed_by))?, thread_id, claim_id, claimed_by)
+        g.runtime_db.claim_thread_launch(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, claimed_by),
+            )?,
+            thread_id,
+            claim_id,
+            claimed_by,
+        )
     }
 
     /// Fresh-thread counterpart to [`Self::claim_thread_launch_active`]. The
@@ -19860,8 +19972,13 @@ impl StateStore {
             );
         }
         let outcome = g.runtime_db.claim_thread_launch(
-            &self.selected_mutation_permit(&g, SelectedMutationOperation::Claim(thread_id, claim_id, daemon_generation_id))?,
-            thread_id, claim_id, daemon_generation_id,
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, daemon_generation_id),
+            )?,
+            thread_id,
+            claim_id,
+            daemon_generation_id,
         )?;
         match outcome {
             runtime_db::LaunchClaimOutcome::AlreadyClaimed => Ok(None),
@@ -19874,8 +19991,14 @@ impl StateStore {
                 if !active.insert(claim.claimed_by.clone()) {
                     // No owner mutation happened; the mutable field borrow ends
                     // before exact rollback beneath the same Store guard.
-                    g.runtime_db
-                        .release_thread_launch_claim(&self.selected_mutation_permit(&g, SelectedMutationOperation::Release(thread_id, claim_id))?, thread_id, claim_id)?;
+                    g.runtime_db.release_thread_launch_claim(
+                        &self.selected_mutation_permit(
+                            &g,
+                            SelectedMutationOperation::Release(thread_id, claim_id),
+                        )?,
+                        thread_id,
+                        claim_id,
+                    )?;
                     bail!("launch owner is already registered in this daemon");
                 }
                 Ok(Some(claim))
@@ -19885,19 +20008,23 @@ impl StateStore {
 
     /// Register the actual process generation in the shared metadata domain.
     /// This does not admit a selected invocation or install any native owner.
-    pub fn register_selected_bookkeeping_generation(
-        &self,
-    ) -> Result<crate::SelectedGeneration> {
+    pub fn register_selected_bookkeeping_generation(&self) -> Result<crate::SelectedGeneration> {
         if self.read_only {
             bail!("selected bookkeeping is unavailable on a read-only store");
         }
         let _store = self.lock()?;
-        let mut selected = self.selected_invocations.lock()
+        let mut selected = self
+            .selected_invocations
+            .lock()
             .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
-        if !self.process_attachment_admission_open.load(Ordering::Acquire) {
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
             bail!("selected bookkeeping admission is closed");
         }
-        selected.register_generation(runtime_db::daemon_generation_id())
+        selected
+            .register_generation(runtime_db::daemon_generation_id())
             .map_err(|error| anyhow!("selected generation registration refused: {error:?}"))
     }
 
@@ -19907,37 +20034,54 @@ impl StateStore {
         &self,
         borrower: &crate::SelectedBorrowTicket,
     ) -> Result<crate::SelectedBorrowReturn> {
-        self.with_selected_metadata_claim(borrower.invocation(), SelectedMetadataAccess::Return, |selected| {
-            selected.ack_selected_borrow_return(borrower)
-        })
+        self.with_selected_metadata_claim(
+            borrower.invocation(),
+            SelectedMetadataAccess::Return,
+            |selected| selected.ack_selected_borrow_return(borrower),
+        )
     }
 
     /// Metadata only; no production pending-ticket issuer exists yet.
     pub fn confirm_selected_metadata_install(&self, ticket: &crate::SelectedTicket) -> Result<()> {
-        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| selected.install(ticket))
+        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| {
+            selected.install(ticket)
+        })
     }
 
     /// Names a metadata borrower, not a native loan or contact permission.
     pub fn begin_selected_metadata_borrow(
-        &self, ticket: &crate::SelectedTicket,
+        &self,
+        ticket: &crate::SelectedTicket,
     ) -> Result<crate::SelectedBorrowTicket> {
-        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| selected.borrow(ticket))
+        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| {
+            selected.borrow(ticket)
+        })
     }
 
-    pub fn mark_selected_metadata_restored(&self, borrower: &crate::SelectedBorrowTicket) -> Result<()> {
-        self.with_selected_metadata_claim(borrower.invocation(), SelectedMetadataAccess::Return, |selected| selected.restored(borrower))
+    pub fn mark_selected_metadata_restored(
+        &self,
+        borrower: &crate::SelectedBorrowTicket,
+    ) -> Result<()> {
+        self.with_selected_metadata_claim(
+            borrower.invocation(),
+            SelectedMetadataAccess::Return,
+            |selected| selected.restored(borrower),
+        )
     }
 
     /// Row-only dependency fixture. No capsule/native/root/loan issuer, and
     /// absent from production builds. Uses the actual current active claim.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fixture_selected_restored_metadata(
-        &self, thread_id: &str,
+        &self,
+        thread_id: &str,
     ) -> Result<crate::SelectedBorrowTicket> {
         let generation = self.register_selected_bookkeeping_generation()?;
         let store = self.lock()?;
         let active = &store.active_launch_owners;
-        let claim = store.runtime_db.get_launch_claim(thread_id)?
+        let claim = store
+            .runtime_db
+            .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("metadata fixture requires a genuine current claim"))?;
         if !active.contains(&claim.claimed_by)
             || claim.owner.daemon_generation_id != runtime_db::daemon_generation_id()
@@ -19947,10 +20091,15 @@ impl StateStore {
         // Complete the durable check before taking the metadata mutex. The
         // Store guard keeps claim/owner state stable until the pure fixture
         // transition has completed.
-        let mut selected = self.selected_invocations.lock()
+        let mut selected = self
+            .selected_invocations
+            .lock()
             .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
         Ok(selected.fixture_restored_borrow(
-            &generation, thread_id, &claim.claim_id, &claim.claimed_by,
+            &generation,
+            thread_id,
+            &claim.claim_id,
+            &claim.claimed_by,
         ))
     }
 
@@ -19960,21 +20109,32 @@ impl StateStore {
         &self,
         ticket: &crate::SelectedTicket,
         access: SelectedMetadataAccess,
-        operation: impl FnOnce(&mut crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping)
-            -> std::result::Result<T, crate::selected_invocation_bookkeeping::SelectedBookkeepingError>,
+        operation: impl FnOnce(
+            &mut crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping,
+        ) -> std::result::Result<
+            T,
+            crate::selected_invocation_bookkeeping::SelectedBookkeepingError,
+        >,
     ) -> Result<T> {
         let store = self.lock()?;
         let active = &store.active_launch_owners;
         if matches!(access, SelectedMetadataAccess::Start)
-            && (self.read_only || !self.process_attachment_admission_open.load(Ordering::Acquire))
+            && (self.read_only
+                || !self
+                    .process_attachment_admission_open
+                    .load(Ordering::Acquire))
         {
             bail!("selected metadata admission is closed");
         }
         let (thread_id, claim_id, owner) = ticket.claim_identity();
-        let claim = store.runtime_db.get_launch_claim(thread_id)?
+        let claim = store
+            .runtime_db
+            .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("selected borrower durable claim is absent"))?;
-        if claim.thread_id != thread_id || claim.claim_id != claim_id
-            || claim.claimed_by != owner || !active.contains(owner)
+        if claim.thread_id != thread_id
+            || claim.claim_id != claim_id
+            || claim.claimed_by != owner
+            || !active.contains(owner)
             || claim.owner.thread_id != thread_id
             || claim.owner.daemon_generation_id != runtime_db::daemon_generation_id()
         {
@@ -19983,10 +20143,15 @@ impl StateStore {
         // All fallible durable checks precede the metadata lock. The Store
         // guard keeps the claim and active-owner association stable while the
         // selected registry is reacquired for this pure transition.
-        let mut selected = self.selected_invocations.lock()
+        let mut selected = self
+            .selected_invocations
+            .lock()
             .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
         if matches!(access, SelectedMetadataAccess::Start)
-            && (self.read_only || !self.process_attachment_admission_open.load(Ordering::Acquire))
+            && (self.read_only
+                || !self
+                    .process_attachment_admission_open
+                    .load(Ordering::Acquire))
         {
             bail!("selected metadata admission is closed");
         }
@@ -19997,23 +20162,42 @@ impl StateStore {
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        g.runtime_db
-            .release_thread_launch_claim(&self.selected_mutation_permit(&g, SelectedMutationOperation::Release(thread_id, claim_id))?, thread_id, claim_id)
+        g.runtime_db.release_thread_launch_claim(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Release(thread_id, claim_id),
+            )?,
+            thread_id,
+            claim_id,
+        )
     }
 
     /// Atomically retire the in-process owner and its exact durable claim with
     /// respect to live reconciliation. A replacement claim cannot be confused
     /// with the owner being dropped because deletion remains claim-id-qualified.
     pub fn release_active_thread_launch_claim(
-        &self, thread_id: &str, claim_id: &str, launch_owner: &str,
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        launch_owner: &str,
     ) -> Result<bool> {
         let mut g = self.lock()?;
-        let selected_permit = self.selected_mutation_permit(&g, SelectedMutationOperation::Release(thread_id, claim_id))?;
-        let Some(claim) = g.runtime_db.get_launch_claim(thread_id)? else { return Ok(false); };
-        if claim.thread_id != thread_id || claim.claim_id != claim_id || claim.claimed_by != launch_owner {
+        let selected_permit = self.selected_mutation_permit(
+            &g,
+            SelectedMutationOperation::Release(thread_id, claim_id),
+        )?;
+        let Some(claim) = g.runtime_db.get_launch_claim(thread_id)? else {
+            return Ok(false);
+        };
+        if claim.thread_id != thread_id
+            || claim.claim_id != claim_id
+            || claim.claimed_by != launch_owner
+        {
             return Ok(false);
         }
-        let deleted = g.runtime_db.release_thread_launch_claim(&selected_permit, thread_id, claim_id)?;
+        let deleted =
+            g.runtime_db
+                .release_thread_launch_claim(&selected_permit, thread_id, claim_id)?;
         drop(selected_permit);
         if deleted {
             // Same Store guard owns this set: no lock, allocation or fallible
@@ -20026,13 +20210,26 @@ impl StateStore {
     /// Consume a completed runtime recovery attempt and replace the current
     /// in-process launch owner as one StateStore-visible operation.
     pub fn rotate_active_thread_launch_claim_after_runtime_recovery(
-        &self, thread_id: &str, expected_launch_owner: &str,
-        next_claim_id: &str, daemon_generation_id: &str, max_attempts: u32,
+        &self,
+        thread_id: &str,
+        expected_launch_owner: &str,
+        next_claim_id: &str,
+        daemon_generation_id: &str,
+        max_attempts: u32,
     ) -> Result<runtime_db::RuntimeRecoveryClaimRotation> {
         let _permit = self.acquire_write_permit()?;
         let mut g = self.lock()?;
         // Occupancy refusal precedes every LostOwner/Exhausted shortcut.
-        let selected_permit = self.selected_mutation_permit(&g, SelectedMutationOperation::Rotate(thread_id, expected_launch_owner, next_claim_id, daemon_generation_id, max_attempts))?;
+        let selected_permit = self.selected_mutation_permit(
+            &g,
+            SelectedMutationOperation::Rotate(
+                thread_id,
+                expected_launch_owner,
+                next_claim_id,
+                daemon_generation_id,
+                max_attempts,
+            ),
+        )?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         if !g.active_launch_owners.contains(expected_launch_owner) {
             return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
@@ -20045,7 +20242,10 @@ impl StateStore {
         }
         let next_owner = runtime_db::LaunchOwner {
             thread_id: thread_id.to_owned(),
-            monotonic_launch_epoch: current.owner.monotonic_launch_epoch.checked_add(1)
+            monotonic_launch_epoch: current
+                .owner
+                .monotonic_launch_epoch
+                .checked_add(1)
                 .ok_or_else(|| anyhow!("launch epoch overflow"))?,
             unpredictable_nonce: next_claim_id.to_owned(),
             daemon_generation_id: daemon_generation_id.to_owned(),
@@ -20057,14 +20257,35 @@ impl StateStore {
         // Finish the immutable permit borrow before reserving the Store-owned
         // set, then revalidate occupancy under this unchanged guard.
         drop(selected_permit);
-        g.active_launch_owners.try_reserve(1).map_err(|error| anyhow!("cannot reserve replacement active owner: {error}"))?;
-        let selected_permit = self.selected_mutation_permit(&g, SelectedMutationOperation::Rotate(thread_id, expected_launch_owner, next_claim_id, daemon_generation_id, max_attempts))?;
-        let outcome = g.runtime_db.rotate_thread_launch_claim_after_runtime_recovery(
-            &selected_permit, thread_id, expected_launch_owner, next_claim_id,
-            daemon_generation_id, max_attempts, &next_owner,
+        g.active_launch_owners
+            .try_reserve(1)
+            .map_err(|error| anyhow!("cannot reserve replacement active owner: {error}"))?;
+        let selected_permit = self.selected_mutation_permit(
+            &g,
+            SelectedMutationOperation::Rotate(
+                thread_id,
+                expected_launch_owner,
+                next_claim_id,
+                daemon_generation_id,
+                max_attempts,
+            ),
         )?;
+        let outcome = g
+            .runtime_db
+            .rotate_thread_launch_claim_after_runtime_recovery(
+                &selected_permit,
+                thread_id,
+                expected_launch_owner,
+                next_claim_id,
+                daemon_generation_id,
+                max_attempts,
+                &next_owner,
+            )?;
         drop(selected_permit);
-        if matches!(&outcome, runtime_db::RuntimeRecoveryClaimRotation::Rotated { .. }) {
+        if matches!(
+            &outcome,
+            runtime_db::RuntimeRecoveryClaimRotation::Rotated { .. }
+        ) {
             // RuntimeDb validates next_owner before commit. Capacity and owned
             // key are ready; same guard prevents a competing owner insertion.
             g.active_launch_owners.remove(expected_launch_owner);
@@ -20519,7 +20740,8 @@ impl StateStore {
         if g.runtime_db
             .get_launch_claim(thread_id)?
             .is_some_and(|claim| {
-                claim.claimed_by == launch_owner && Self::is_launch_owner_active_locked(&g, &claim.claimed_by)
+                claim.claimed_by == launch_owner
+                    && Self::is_launch_owner_active_locked(&g, &claim.claimed_by)
             })
         {
             bail!("workspace launch owner is still active in this daemon");
@@ -22894,8 +23116,8 @@ mod tests {
             AdmittedDirectCommandClosure as Command, AdmittedExecutionClosure as Closure,
             AdmittedLaunchArtifactIdentity as Artifact, DirectExecutableIdentity as Executable,
             DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
-            ExecutionLifecycleAuthority, ExecutionOwnershipAuthority, ExecutionRecoveryAuthority,
-            ExecutionProjectAuthority, ExecutionLaunchDriver, RetainedItemSpaceV1 as Space,
+            ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,
+            ExecutionProjectAuthority, ExecutionRecoveryAuthority, RetainedItemSpaceV1 as Space,
             RetainedTrustClassV1 as Trust,
         };
 
@@ -22915,20 +23137,12 @@ mod tests {
             "kind": "source_manifest",
             "item_source_hashes": { item_ref.clone(): item_source_hash.clone() },
         });
-        let manifest_hash = lillux::sha256_hex(lillux::canonical_json(&manifest).unwrap().as_bytes());
+        let manifest_hash =
+            lillux::sha256_hex(lillux::canonical_json(&manifest).unwrap().as_bytes());
         let manifest_ref_body = format!("ryeos:bundle-executor-manifest\n{manifest_hash}\n");
-        let signed_manifest_ref = lillux::signature::sign_content(
-            &manifest_ref_body,
-            key,
-            "#",
-            None,
-        );
-        let signed_sidecar = lillux::signature::sign_content(
-            &item_source_bytes,
-            key,
-            "#",
-            None,
-        );
+        let signed_manifest_ref =
+            lillux::signature::sign_content(&manifest_ref_body, key, "#", None);
+        let signed_sidecar = lillux::signature::sign_content(&item_source_bytes, key, "#", None);
         let proof = ryeos_state::objects::BundleExecutorMemberSourceProofV1 {
             requested_binary_ref: "bin:runner".to_owned(),
             request_origin: ryeos_state::objects::BundleExecutorRequestOriginV1::WrapperBundle {
@@ -23028,10 +23242,8 @@ mod tests {
     fn rooted_bundle_member_proof_rechecks_current_owner_and_signatures() {
         let key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
         let fingerprint = lillux::crypto::fingerprint(&key.verifying_key());
-        let trust = ryeos_state::refs::TrustStore::from([(
-            fingerprint.clone(),
-            key.verifying_key(),
-        )]);
+        let trust =
+            ryeos_state::refs::TrustStore::from([(fingerprint.clone(), key.verifying_key())]);
         let capsule = rooted_bundle_proof_fixture(&key, &fingerprint);
         verify_rooted_bundle_member_source_proof(&capsule, &trust)
             .expect("rooted proof verifies with current owner and source signer");
@@ -23044,7 +23256,8 @@ mod tests {
                     ..
                 },
             ..
-        } = &mut bad_signature.artifact_identity else {
+        } = &mut bad_signature.artifact_identity
+        else {
             unreachable!("fixture uses BundleExecutor identity");
         };
         let mut sidecar =
@@ -23073,7 +23286,8 @@ mod tests {
                     ..
                 },
             ..
-        } = &mut revoked_owner.artifact_identity else {
+        } = &mut revoked_owner.artifact_identity
+        else {
             unreachable!("fixture uses BundleExecutor identity");
         };
         member_source_proof
@@ -23191,8 +23405,9 @@ mod tests {
         let temporary = tempdir().unwrap();
         let app_root = temporary.path().to_path_buf();
         let runtime_state_dir = app_root.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -23469,8 +23684,9 @@ mod tests {
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -23492,68 +23708,176 @@ mod tests {
     fn store_owned_active_access_and_release_share_actual_guard() {
         let store = test_store();
         let thread = "T-store-active-release";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", "daemon:test").unwrap().unwrap();
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", "daemon:test")
+            .unwrap()
+            .unwrap();
         {
             let g = store.lock().unwrap();
-            assert!(StateStore::is_launch_owner_active_locked(&g, &claim.claimed_by));
-            assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claimed_by, claim.claimed_by);
+            assert!(StateStore::is_launch_owner_active_locked(
+                &g,
+                &claim.claimed_by
+            ));
+            assert_eq!(
+                g.runtime_db
+                    .get_launch_claim(thread)
+                    .unwrap()
+                    .unwrap()
+                    .claimed_by,
+                claim.claimed_by
+            );
         }
-        assert!(store.release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by).unwrap());
+        assert!(
+            store
+                .release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by)
+                .unwrap()
+        );
         let g = store.lock().unwrap();
         assert!(g.runtime_db.get_launch_claim(thread).unwrap().is_none());
-        assert!(!StateStore::is_launch_owner_active_locked(&g, &claim.claimed_by));
+        assert!(!StateStore::is_launch_owner_active_locked(
+            &g,
+            &claim.claimed_by
+        ));
     }
 
     #[test]
     fn prepared_rotation_mismatch_rolls_back_epoch_attempt_and_preserves_active_owner() {
         let store = test_store();
         let thread = "T-prepared-rotation";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "first", "daemon:test").unwrap().unwrap();
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "first", "daemon:test")
+            .unwrap()
+            .unwrap();
         let g = store.lock().unwrap();
-        let permit = store.selected_mutation_permit(&g, SelectedMutationOperation::Rotate(thread, &claim.claimed_by, "next", "daemon:test", 3)).unwrap();
+        let permit = store
+            .selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Rotate(
+                    thread,
+                    &claim.claimed_by,
+                    "next",
+                    "daemon:test",
+                    3,
+                ),
+            )
+            .unwrap();
         let wrong = runtime_db::LaunchOwner {
             thread_id: thread.to_owned(),
             monotonic_launch_epoch: claim.owner.monotonic_launch_epoch + 2,
             unpredictable_nonce: "next".to_owned(),
             daemon_generation_id: "daemon:test".to_owned(),
         };
-        assert!(g.runtime_db.rotate_thread_launch_claim_after_runtime_recovery(&permit, thread, &claim.claimed_by, "next", "daemon:test", 3, &wrong).is_err());
-        assert_eq!(g.runtime_db.fixture_launch_epoch(thread).unwrap(), Some(claim.owner.monotonic_launch_epoch as i64));
+        assert!(
+            g.runtime_db
+                .rotate_thread_launch_claim_after_runtime_recovery(
+                    &permit,
+                    thread,
+                    &claim.claimed_by,
+                    "next",
+                    "daemon:test",
+                    3,
+                    &wrong
+                )
+                .is_err()
+        );
+        assert_eq!(
+            g.runtime_db.fixture_launch_epoch(thread).unwrap(),
+            Some(claim.owner.monotonic_launch_epoch as i64)
+        );
         assert_eq!(g.runtime_db.get_resume_attempts(thread).unwrap(), 0);
-        assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claimed_by, claim.claimed_by);
-        assert!(StateStore::is_launch_owner_active_locked(&g, &claim.claimed_by));
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claimed_by,
+            claim.claimed_by
+        );
+        assert!(StateStore::is_launch_owner_active_locked(
+            &g,
+            &claim.claimed_by
+        ));
     }
 
     #[test]
     fn prepared_rotation_publishes_exact_replacement_under_same_store() {
         let store = test_store();
         let thread = "T-prepared-rotation-success";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let first = store.claim_thread_launch_active(thread, "first", "daemon:test").unwrap().unwrap();
-        let outcome = store.rotate_active_thread_launch_claim_after_runtime_recovery(thread, &first.claimed_by, "next", "daemon:test", 3).unwrap();
-        let runtime_db::RuntimeRecoveryClaimRotation::Rotated { claim, next_attempt } = outcome else { panic!("expected rotation"); };
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let first = store
+            .claim_thread_launch_active(thread, "first", "daemon:test")
+            .unwrap()
+            .unwrap();
+        let outcome = store
+            .rotate_active_thread_launch_claim_after_runtime_recovery(
+                thread,
+                &first.claimed_by,
+                "next",
+                "daemon:test",
+                3,
+            )
+            .unwrap();
+        let runtime_db::RuntimeRecoveryClaimRotation::Rotated {
+            claim,
+            next_attempt,
+        } = outcome
+        else {
+            panic!("expected rotation");
+        };
         let g = store.lock().unwrap();
         assert_eq!(next_attempt, 1);
-        assert_eq!(claim.owner.monotonic_launch_epoch, first.owner.monotonic_launch_epoch + 1);
-        assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claimed_by, claim.claimed_by);
-        assert!(!StateStore::is_launch_owner_active_locked(&g, &first.claimed_by));
-        assert!(StateStore::is_launch_owner_active_locked(&g, &claim.claimed_by));
+        assert_eq!(
+            claim.owner.monotonic_launch_epoch,
+            first.owner.monotonic_launch_epoch + 1
+        );
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claimed_by,
+            claim.claimed_by
+        );
+        assert!(!StateStore::is_launch_owner_active_locked(
+            &g,
+            &first.claimed_by
+        ));
+        assert!(StateStore::is_launch_owner_active_locked(
+            &g,
+            &claim.claimed_by
+        ));
     }
 
     // Row-only fixtures; no selected issuer, native contact or settlement proof.
-    fn selected_fence_fixture(phase: crate::selected_invocation_bookkeeping::SelectedFixturePhase, refused: bool)
-        -> (StateStore, runtime_db::LaunchClaim)
-    {
+    fn selected_fence_fixture(
+        phase: crate::selected_invocation_bookkeeping::SelectedFixturePhase,
+        refused: bool,
+    ) -> (StateStore, runtime_db::LaunchClaim) {
         let store = test_store();
         let thread = "T-selected-fence";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id()).unwrap().unwrap();
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
         let borrower = store.fixture_selected_restored_metadata(thread).unwrap();
         {
             let _g = store.lock().unwrap();
-            store.selected_invocations.lock().unwrap().fixture_retained_phase(borrower.invocation(), phase, refused);
+            store
+                .selected_invocations
+                .lock()
+                .unwrap()
+                .fixture_retained_phase(borrower.invocation(), phase, refused);
         }
         (store, claim)
     }
@@ -23561,24 +23885,89 @@ mod tests {
     #[test]
     fn selected_fences_all_phases_and_refusal_before_claim_release_rotation_and_sweep() {
         use crate::selected_invocation_bookkeeping::SelectedFixturePhase::*;
-        for phase in [Pending, Occupied, Borrowed, RestoredAwaitingBorrowAck, Retiring] {
+        for phase in [
+            Pending,
+            Occupied,
+            Borrowed,
+            RestoredAwaitingBorrowAck,
+            Retiring,
+        ] {
             for refused in [false, true] {
                 let (store, claim) = selected_fence_fixture(phase, refused);
-                assert!(store.release_thread_launch_claim(&claim.thread_id, &claim.claim_id).is_err());
-                assert!(store.release_thread_launch_claim(&claim.thread_id, "stale").is_err());
-                assert!(store.release_active_thread_launch_claim(&claim.thread_id, "stale", "wrong").is_err());
-                assert!(store.release_active_thread_launch_claim(&claim.thread_id, &claim.claim_id, &claim.claimed_by).is_err());
-                assert!(store.claim_thread_launch(&claim.thread_id, "new", "foreign").is_err());
-                assert!(store.claim_thread_launch_active(&claim.thread_id, "new", runtime_db::daemon_generation_id()).is_err());
-                assert!(store.rotate_active_thread_launch_claim_after_runtime_recovery(&claim.thread_id, &claim.claimed_by, "next", runtime_db::daemon_generation_id(), 3).is_err());
-                assert!(store.clear_stale_launch_claims("foreign-generation").is_err());
+                assert!(
+                    store
+                        .release_thread_launch_claim(&claim.thread_id, &claim.claim_id)
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .release_thread_launch_claim(&claim.thread_id, "stale")
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .release_active_thread_launch_claim(&claim.thread_id, "stale", "wrong")
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .release_active_thread_launch_claim(
+                            &claim.thread_id,
+                            &claim.claim_id,
+                            &claim.claimed_by
+                        )
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .claim_thread_launch(&claim.thread_id, "new", "foreign")
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .claim_thread_launch_active(
+                            &claim.thread_id,
+                            "new",
+                            runtime_db::daemon_generation_id()
+                        )
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .rotate_active_thread_launch_claim_after_runtime_recovery(
+                            &claim.thread_id,
+                            &claim.claimed_by,
+                            "next",
+                            runtime_db::daemon_generation_id(),
+                            3
+                        )
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .clear_stale_launch_claims("foreign-generation")
+                        .is_err()
+                );
                 let retained = store.get_launch_claim(&claim.thread_id).unwrap().unwrap();
                 assert_eq!(retained.claim_id, claim.claim_id);
                 assert_eq!(retained.claimed_by, claim.claimed_by);
-                assert!(store.lock().unwrap().active_launch_owners.contains(&claim.claimed_by));
+                assert!(
+                    store
+                        .lock()
+                        .unwrap()
+                        .active_launch_owners
+                        .contains(&claim.claimed_by)
+                );
                 let g = store.lock().unwrap();
-                assert_eq!(g.runtime_db.get_resume_attempts(&claim.thread_id).unwrap(), 0);
-                assert!(store.delete_thread_runtime_locked(&g, &claim.thread_id).is_err());
+                assert_eq!(
+                    g.runtime_db.get_resume_attempts(&claim.thread_id).unwrap(),
+                    0
+                );
+                assert!(
+                    store
+                        .delete_thread_runtime_locked(&g, &claim.thread_id)
+                        .is_err()
+                );
                 assert!(store.require_selected_bulk_exclusion(&g).is_err());
             }
         }
@@ -23590,26 +23979,81 @@ mod tests {
         let (store, claim) = selected_fence_fixture(Pending, false);
         {
             let g = store.lock().unwrap();
-            g.runtime_db.fixture_release_thread_launch_claim(&claim.thread_id, &claim.claim_id).unwrap();
+            g.runtime_db
+                .fixture_release_thread_launch_claim(&claim.thread_id, &claim.claim_id)
+                .unwrap();
         }
-        let before_epoch = store.lock().unwrap().runtime_db.fixture_launch_epoch(&claim.thread_id).unwrap();
-        assert!(store.claim_thread_launch(&claim.thread_id, "replacement", "foreign").is_err());
+        let before_epoch = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_launch_epoch(&claim.thread_id)
+            .unwrap();
+        assert!(
+            store
+                .claim_thread_launch(&claim.thread_id, "replacement", "foreign")
+                .is_err()
+        );
         assert!(store.get_launch_claim(&claim.thread_id).unwrap().is_none());
-        assert_eq!(store.lock().unwrap().runtime_db.fixture_launch_epoch(&claim.thread_id).unwrap(), before_epoch);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .fixture_launch_epoch(&claim.thread_id)
+                .unwrap(),
+            before_epoch
+        );
         let fresh = "T-selected-unpublished";
-        let fresh_claim = store.reserve_fresh_thread_launch_active(fresh, "fresh", runtime_db::daemon_generation_id()).unwrap().unwrap();
+        let fresh_claim = store
+            .reserve_fresh_thread_launch_active(fresh, "fresh", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
         let borrower = store.fixture_selected_restored_metadata(fresh).unwrap();
         {
             let g = store.lock().unwrap();
-            g.runtime_db.fixture_release_thread_launch_claim(fresh, &fresh_claim.claim_id).unwrap();
+            g.runtime_db
+                .fixture_release_thread_launch_claim(fresh, &fresh_claim.claim_id)
+                .unwrap();
         }
-        let fresh_epoch = store.lock().unwrap().runtime_db.fixture_launch_epoch(fresh).unwrap();
-        assert!(store.reserve_fresh_thread_launch(fresh, "new", "foreign").is_err());
-        assert!(store.reserve_fresh_thread_launch_active(fresh, "new", runtime_db::daemon_generation_id()).is_err());
+        let fresh_epoch = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_launch_epoch(fresh)
+            .unwrap();
+        assert!(
+            store
+                .reserve_fresh_thread_launch(fresh, "new", "foreign")
+                .is_err()
+        );
+        assert!(
+            store
+                .reserve_fresh_thread_launch_active(
+                    fresh,
+                    "new",
+                    runtime_db::daemon_generation_id()
+                )
+                .is_err()
+        );
         assert!(store.get_launch_claim(fresh).unwrap().is_none());
-        assert_eq!(store.lock().unwrap().runtime_db.fixture_launch_epoch(fresh).unwrap(), fresh_epoch);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .fixture_launch_epoch(fresh)
+                .unwrap(),
+            fresh_epoch
+        );
         assert!(store.mark_selected_metadata_restored(&borrower).is_err());
-        assert!(store.lock().unwrap().active_launch_owners.contains(&fresh_claim.claimed_by));
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .active_launch_owners
+                .contains(&fresh_claim.claimed_by)
+        );
     }
 
     #[test]
@@ -23618,47 +24062,120 @@ mod tests {
         let other = test_store();
         let g = store.lock().unwrap();
         let other_g = other.lock().unwrap();
-        assert!(store.selected_mutation_permit(&other_g, SelectedMutationOperation::Release("T", "claim")).is_err());
-        let permit = store.selected_mutation_permit(&g, SelectedMutationOperation::Release("T", "claim")).unwrap();
-        assert!(other_g.runtime_db.release_thread_launch_claim(&permit, "T", "claim").is_err());
-        assert!(g.runtime_db.release_thread_launch_claim(&permit, "other", "claim").is_err());
-        assert!(g.runtime_db.claim_thread_launch(&permit, "T", "claim", "generation").is_err());
-        assert!(!g.runtime_db.release_thread_launch_claim(&permit, "T", "claim").unwrap());
+        assert!(
+            store
+                .selected_mutation_permit(
+                    &other_g,
+                    SelectedMutationOperation::Release("T", "claim")
+                )
+                .is_err()
+        );
+        let permit = store
+            .selected_mutation_permit(&g, SelectedMutationOperation::Release("T", "claim"))
+            .unwrap();
+        assert!(
+            other_g
+                .runtime_db
+                .release_thread_launch_claim(&permit, "T", "claim")
+                .is_err()
+        );
+        assert!(
+            g.runtime_db
+                .release_thread_launch_claim(&permit, "other", "claim")
+                .is_err()
+        );
+        assert!(
+            g.runtime_db
+                .claim_thread_launch(&permit, "T", "claim", "generation")
+                .is_err()
+        );
+        assert!(
+            !g.runtime_db
+                .release_thread_launch_claim(&permit, "T", "claim")
+                .unwrap()
+        );
     }
 
     #[test]
     fn selected_registry_poison_refuses_without_durable_claim_change() {
         let store = test_store();
         let thread = "T-selected-poison";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id()).unwrap().unwrap();
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Deliberate private poison injection isolates registry refusal;
             // no ordinary SQL or selected capability is issued by this fixture.
             let _selected = store.selected_invocations.lock().unwrap();
             panic!("injected selected registry poison");
         }));
-        assert!(store.release_thread_launch_claim(thread, &claim.claim_id).is_err());
+        assert!(
+            store
+                .release_thread_launch_claim(thread, &claim.claim_id)
+                .is_err()
+        );
         let g = store.lock().unwrap();
-        assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claim_id, claim.claim_id);
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claim_id,
+            claim.claim_id
+        );
     }
 
     #[test]
     fn selected_pending_birth_veto_retains_reservation_and_runtime_row() {
         let store = test_store();
         let thread = "T-selected-pending-birth";
-        let claim = store.reserve_fresh_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id()).unwrap().unwrap();
+        let claim = store
+            .reserve_fresh_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
         {
             let g = store.lock().unwrap();
-            g.runtime_db.reserve_in_process_handler_birth(thread, thread, &in_process_launch_metadata()).unwrap();
+            g.runtime_db
+                .reserve_in_process_handler_birth(thread, thread, &in_process_launch_metadata())
+                .unwrap();
         }
         store.fixture_selected_restored_metadata(thread).unwrap();
-        assert!(store.discard_uncommitted_in_process_handler_birth(thread).is_err());
+        assert!(
+            store
+                .discard_uncommitted_in_process_handler_birth(thread)
+                .is_err()
+        );
         let g = store.lock().unwrap();
-        assert!(store.selected_mutation_permit(&g, SelectedMutationOperation::DeleteThread(thread)).is_err());
-        assert!(g.runtime_db.in_process_handler_reservation(thread).unwrap().is_some());
-        assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claim_id, claim.claim_id);
-        assert_eq!(g.runtime_db.inspect_thread_history_discard().unwrap().thread_runtime, 1);
+        assert!(
+            store
+                .selected_mutation_permit(&g, SelectedMutationOperation::DeleteThread(thread))
+                .is_err()
+        );
+        assert!(
+            g.runtime_db
+                .in_process_handler_reservation(thread)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claim_id,
+            claim.claim_id
+        );
+        assert_eq!(
+            g.runtime_db
+                .inspect_thread_history_discard()
+                .unwrap()
+                .thread_runtime,
+            1
+        );
     }
 
     #[test]
@@ -23666,29 +24183,82 @@ mod tests {
         let store = test_store();
         let thread = "T-selected-terminal";
         let mut record = thread_record(thread, thread);
-        record.captured_history_policy.as_mut().unwrap().retention = ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
         store.create_thread_for_test(&record).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id()).unwrap().unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
         finish_workspace_test_thread(&store, thread);
         store.fixture_selected_restored_metadata(thread).unwrap();
         {
             let g = store.lock().unwrap();
             let lock = g.state_db.acquire_chain_lock(thread).unwrap();
-            let chain = g.state_db.authoritative_terminal_chain_under_lock(thread, &lock).unwrap().unwrap();
+            let chain = g
+                .state_db
+                .authoritative_terminal_chain_under_lock(thread, &lock)
+                .unwrap()
+                .unwrap();
             let mut result = TerminalChainRetirement::default();
-            assert!(store.finish_terminal_chain_removal(&g, &chain, &lock, &[], false, &mut result).is_err());
-            assert!(g.state_db.pending_chain_transition(thread).unwrap().is_none());
-            assert!(g.state_db.authoritative_terminal_chain_under_lock(thread, &lock).unwrap().is_some());
+            assert!(
+                store
+                    .finish_terminal_chain_removal(&g, &chain, &lock, &[], false, &mut result)
+                    .is_err()
+            );
+            assert!(
+                g.state_db
+                    .pending_chain_transition(thread)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                g.state_db
+                    .authoritative_terminal_chain_under_lock(thread, &lock)
+                    .unwrap()
+                    .is_some()
+            );
             // Deliberately construct an actual crash-boundary contradiction in
             // private unit code; no production issuer or cleanup permission.
             assert!(g.state_db.remove_chain_head_ref(thread, &lock).unwrap());
         }
-        let before = store.lock().unwrap().state_db.pending_chain_transition(thread).unwrap().unwrap().transition_id;
-        assert!(store.recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0)).is_err());
+        let before = store
+            .lock()
+            .unwrap()
+            .state_db
+            .pending_chain_transition(thread)
+            .unwrap()
+            .unwrap()
+            .transition_id;
+        assert!(
+            store
+                .recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0))
+                .is_err()
+        );
         let g = store.lock().unwrap();
-        assert_eq!(g.state_db.pending_chain_transition(thread).unwrap().unwrap().transition_id, before);
-        assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claim_id, claim.claim_id);
-        assert_eq!(g.runtime_db.inspect_thread_history_discard().unwrap().thread_runtime, 1);
+        assert_eq!(
+            g.state_db
+                .pending_chain_transition(thread)
+                .unwrap()
+                .unwrap()
+                .transition_id,
+            before
+        );
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claim_id,
+            claim.claim_id
+        );
+        assert_eq!(
+            g.runtime_db
+                .inspect_thread_history_discard()
+                .unwrap()
+                .thread_runtime,
+            1
+        );
     }
 
     #[test]
@@ -23696,9 +24266,21 @@ mod tests {
         for advanced in [false, true] {
             let store = test_store();
             let thread = "T-selected-replay";
-            store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-            let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id()).unwrap().unwrap();
-            let head_path = store.lock().unwrap().state_db.refs_root().join("generic/chains").join(thread).join("head");
+            store
+                .create_thread_for_test(&thread_record(thread, thread))
+                .unwrap();
+            let claim = store
+                .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+                .unwrap()
+                .unwrap();
+            let head_path = store
+                .lock()
+                .unwrap()
+                .state_db
+                .refs_root()
+                .join("generic/chains")
+                .join(thread)
+                .join("head");
             let expected = std::fs::read(&head_path).unwrap();
             finish_workspace_test_thread(&store, thread);
             let newer = std::fs::read(&head_path).unwrap();
@@ -23712,22 +24294,61 @@ mod tests {
                 std::fs::write(&head_path, &expected).unwrap();
                 g.state_db.remove_chain_head_ref(thread, &lock).unwrap();
                 std::fs::write(&head_path, if advanced { &newer } else { &expected }).unwrap();
-                let transition = g.state_db.pending_chain_transition(thread).unwrap().unwrap();
-                let actual = g.state_db.pending_chain_removal_head_state(thread, &transition.transition_id, &lock).unwrap();
+                let transition = g
+                    .state_db
+                    .pending_chain_transition(thread)
+                    .unwrap()
+                    .unwrap();
+                let actual = g
+                    .state_db
+                    .pending_chain_removal_head_state(thread, &transition.transition_id, &lock)
+                    .unwrap();
                 if advanced {
-                    assert!(matches!(actual, ryeos_state::PendingRemoveHeadState::AdvancedHeadVisible { .. }));
+                    assert!(matches!(
+                        actual,
+                        ryeos_state::PendingRemoveHeadState::AdvancedHeadVisible { .. }
+                    ));
                 } else {
-                    assert!(matches!(actual, ryeos_state::PendingRemoveHeadState::ExpectedHeadVisible));
+                    assert!(matches!(
+                        actual,
+                        ryeos_state::PendingRemoveHeadState::ExpectedHeadVisible
+                    ));
                 }
                 transition.transition_id
             };
             let head_before = std::fs::read(&head_path).unwrap();
-            assert!(store.recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0)).is_err());
+            assert!(
+                store
+                    .recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(
+                        0
+                    ))
+                    .is_err()
+            );
             let g = store.lock().unwrap();
-            assert_eq!(g.state_db.pending_chain_transition(thread).unwrap().unwrap().transition_id, transition);
+            assert_eq!(
+                g.state_db
+                    .pending_chain_transition(thread)
+                    .unwrap()
+                    .unwrap()
+                    .transition_id,
+                transition
+            );
             assert_eq!(std::fs::read(&head_path).unwrap(), head_before);
-            assert_eq!(g.runtime_db.get_launch_claim(thread).unwrap().unwrap().claim_id, claim.claim_id);
-            assert_eq!(g.runtime_db.inspect_thread_history_discard().unwrap().thread_runtime, 1);
+            assert_eq!(
+                g.runtime_db
+                    .get_launch_claim(thread)
+                    .unwrap()
+                    .unwrap()
+                    .claim_id,
+                claim.claim_id
+            );
+            assert_eq!(
+                g.runtime_db
+                    .inspect_thread_history_discard()
+                    .unwrap()
+                    .thread_runtime,
+                1
+            );
         }
     }
 
@@ -23737,14 +24358,24 @@ mod tests {
         let (store, _) = selected_fence_fixture(Occupied, false);
         let due = "T-unrelated-due";
         let mut record = thread_record(due, due);
-        record.captured_history_policy.as_mut().unwrap().retention = ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
         store.create_thread_for_test(&record).unwrap();
         finish_workspace_test_thread(&store, due);
-        assert!(store.retire_due_terminal_chains("2099-01-01T00:00:00Z", false, |_| Ok(0)).is_err());
+        assert!(
+            store
+                .retire_due_terminal_chains("2099-01-01T00:00:00Z", false, |_| Ok(0))
+                .is_err()
+        );
         let g = store.lock().unwrap();
         assert!(g.state_db.pending_chain_transition(due).unwrap().is_none());
         let lock = g.state_db.acquire_chain_lock(due).unwrap();
-        assert!(g.state_db.authoritative_terminal_chain_under_lock(due, &lock).unwrap().is_some());
+        assert!(
+            g.state_db
+                .authoritative_terminal_chain_under_lock(due, &lock)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -23752,7 +24383,8 @@ mod tests {
         let store = test_store();
         let thread = "T-ordinary-replay";
         let mut record = thread_record(thread, thread);
-        record.captured_history_policy.as_mut().unwrap().retention = ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
         store.create_thread_for_test(&record).unwrap();
         finish_workspace_test_thread(&store, thread);
         {
@@ -23760,10 +24392,23 @@ mod tests {
             let lock = g.state_db.acquire_chain_lock(thread).unwrap();
             assert!(g.state_db.remove_chain_head_ref(thread, &lock).unwrap());
         }
-        store.recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0)).unwrap();
+        store
+            .recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0))
+            .unwrap();
         let g = store.lock().unwrap();
-        assert!(g.state_db.pending_chain_transition(thread).unwrap().is_none());
-        assert_eq!(g.runtime_db.inspect_thread_history_discard().unwrap().thread_runtime, 0);
+        assert!(
+            g.state_db
+                .pending_chain_transition(thread)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            g.runtime_db
+                .inspect_thread_history_discard()
+                .unwrap()
+                .thread_runtime,
+            0
+        );
     }
 
     #[test]
@@ -23773,17 +24418,44 @@ mod tests {
         let same_store = Arc::clone(&store);
         let generation = store.register_selected_bookkeeping_generation().unwrap();
         let thread = "T-selected-ack";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
-            .unwrap().unwrap();
-        let borrower = same_store.selected_invocations.lock().unwrap()
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let borrower = same_store
+            .selected_invocations
+            .lock()
+            .unwrap()
             .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
-        store.lock().unwrap().active_launch_owners.remove(&claim.claimed_by);
+        store
+            .lock()
+            .unwrap()
+            .active_launch_owners
+            .remove(&claim.claimed_by);
         assert!(same_store.ack_selected_borrow_return(&borrower).is_err());
-        assert!(store.selected_invocations.lock().unwrap().fixture_awaiting_ack(&borrower));
-        store.lock().unwrap().active_launch_owners.insert(claim.claimed_by.clone());
-        assert_eq!(same_store.ack_selected_borrow_return(&borrower).unwrap(), SelectedBorrowReturn::Returned);
-        assert_eq!(store.ack_selected_borrow_return(&borrower).unwrap(), SelectedBorrowReturn::AlreadyReturned);
+        assert!(
+            store
+                .selected_invocations
+                .lock()
+                .unwrap()
+                .fixture_awaiting_ack(&borrower)
+        );
+        store
+            .lock()
+            .unwrap()
+            .active_launch_owners
+            .insert(claim.claimed_by.clone());
+        assert_eq!(
+            same_store.ack_selected_borrow_return(&borrower).unwrap(),
+            SelectedBorrowReturn::Returned
+        );
+        assert_eq!(
+            store.ack_selected_borrow_return(&borrower).unwrap(),
+            SelectedBorrowReturn::AlreadyReturned
+        );
         let other = test_store();
         other.register_selected_bookkeeping_generation().unwrap();
         assert!(other.ack_selected_borrow_return(&borrower).is_err());
@@ -23794,10 +24466,17 @@ mod tests {
         let store = test_store();
         let generation = store.register_selected_bookkeeping_generation().unwrap();
         let thread = "T-selected-return-close";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
-            .unwrap().unwrap();
-        let first = store.selected_invocations.lock().unwrap()
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let first = store
+            .selected_invocations
+            .lock()
+            .unwrap()
             .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
         let ticket = first.invocation().clone();
         store.mark_selected_metadata_restored(&first).unwrap();
@@ -23807,8 +24486,14 @@ mod tests {
         store.close_process_attachment_admission().unwrap();
         store.mark_selected_metadata_restored(&second).unwrap();
         store.mark_selected_metadata_restored(&second).unwrap();
-        assert_eq!(store.ack_selected_borrow_return(&second).unwrap(), crate::SelectedBorrowReturn::Returned);
-        assert_eq!(store.ack_selected_borrow_return(&second).unwrap(), crate::SelectedBorrowReturn::AlreadyReturned);
+        assert_eq!(
+            store.ack_selected_borrow_return(&second).unwrap(),
+            crate::SelectedBorrowReturn::Returned
+        );
+        assert_eq!(
+            store.ack_selected_borrow_return(&second).unwrap(),
+            crate::SelectedBorrowReturn::AlreadyReturned
+        );
         assert!(store.begin_selected_metadata_borrow(&ticket).is_err());
         assert!(store.ack_selected_borrow_return(&first).is_err());
     }
@@ -23818,36 +24503,77 @@ mod tests {
         let store = test_store();
         let generation = store.register_selected_bookkeeping_generation().unwrap();
         let thread = "T-selected-missing-claim";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
-            .unwrap().unwrap();
-        let borrower = store.selected_invocations.lock().unwrap()
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let borrower = store
+            .selected_invocations
+            .lock()
+            .unwrap()
             .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
         // Deliberate private unit-fixture corruption, not a Store bypass API.
-        store.lock().unwrap().runtime_db.fixture_release_thread_launch_claim(thread, &claim.claim_id).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_release_thread_launch_claim(thread, &claim.claim_id)
+            .unwrap();
         assert!(store.ack_selected_borrow_return(&borrower).is_err());
-        assert!(store.selected_invocations.lock().unwrap().fixture_awaiting_ack(&borrower));
+        assert!(
+            store
+                .selected_invocations
+                .lock()
+                .unwrap()
+                .fixture_awaiting_ack(&borrower)
+        );
     }
 
     #[test]
     fn active_claim_release_refuses_stale_claim_or_wrong_owner_without_mutation() {
         let store = test_store();
         let thread = "T-release-order";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let claim = store.claim_thread_launch_active(thread, "claim-current", "daemon:test")
-            .unwrap().unwrap();
-        assert!(!store.release_active_thread_launch_claim(thread, "claim-stale", &claim.claimed_by).unwrap());
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim-current", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, "claim-stale", &claim.claimed_by)
+                .unwrap()
+        );
         assert!(store.is_launch_owner_active(&claim.claimed_by));
         let retained = store.get_launch_claim(thread).unwrap().unwrap();
         assert_eq!(retained.claim_id, claim.claim_id);
         assert_eq!(retained.claimed_by, claim.claimed_by);
-        assert!(!store.release_active_thread_launch_claim(thread, &claim.claim_id, "wrong-owner").unwrap());
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, &claim.claim_id, "wrong-owner")
+                .unwrap()
+        );
         assert!(store.is_launch_owner_active(&claim.claimed_by));
-        assert_eq!(store.get_launch_claim(thread).unwrap().unwrap().claimed_by, claim.claimed_by);
+        assert_eq!(
+            store.get_launch_claim(thread).unwrap().unwrap().claimed_by,
+            claim.claimed_by
+        );
         // Model an already-absent durable row while the actual active registry
         // still retains this owner. A missing-row refusal must not erase it.
-        assert!(store.release_thread_launch_claim(thread, &claim.claim_id).unwrap());
-        assert!(!store.release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by).unwrap());
+        assert!(
+            store
+                .release_thread_launch_claim(thread, &claim.claim_id)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by)
+                .unwrap()
+        );
         assert!(store.is_launch_owner_active(&claim.claimed_by));
     }
 
@@ -23855,15 +24581,29 @@ mod tests {
     fn exact_active_claim_release_acknowledges_both_domains_and_preserves_replacement() {
         let store = test_store();
         let thread = "T-release-replaced";
-        store.create_thread_for_test(&thread_record(thread, thread)).unwrap();
-        let first = store.claim_thread_launch_active(thread, "claim-first", "daemon:test")
-            .unwrap().unwrap();
-        assert!(store.release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by).unwrap());
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let first = store
+            .claim_thread_launch_active(thread, "claim-first", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by)
+                .unwrap()
+        );
         assert!(store.get_launch_claim(thread).unwrap().is_none());
         assert!(!store.is_launch_owner_active(&first.claimed_by));
-        let replacement = store.claim_thread_launch_active(thread, "claim-replacement", "daemon:test")
-            .unwrap().unwrap();
-        assert!(!store.release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by).unwrap());
+        let replacement = store
+            .claim_thread_launch_active(thread, "claim-replacement", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by)
+                .unwrap()
+        );
         assert!(store.is_launch_owner_active(&replacement.claimed_by));
         let retained = store.get_launch_claim(thread).unwrap().unwrap();
         assert_eq!(retained.claim_id, replacement.claim_id);
@@ -23999,7 +24739,7 @@ mod tests {
         let provisional = metadata.admitted_launch_capsule().unwrap().unwrap();
         let authority = provisional.launch_authority();
         let cas_root = store.cas_root().unwrap();
-        let identity = crate::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &cas_root.ancestors().nth(3).unwrap().join("node-key.pem"),
         )
         .unwrap();
@@ -25769,8 +26509,9 @@ mod tests {
     fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         let tmp = tempdir().expect("tempdir");
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+                .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -26541,8 +27282,9 @@ mod tests {
     fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -26605,8 +27347,9 @@ mod tests {
     fn recreated_credential_profile_persists_its_advanced_generation() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -26679,8 +27422,9 @@ mod tests {
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -26893,8 +27637,9 @@ mod tests {
     fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
         let tmp = tempdir().unwrap();
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -29468,7 +30213,7 @@ mod tests {
         use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
         let root = tempfile::tempdir().unwrap();
         let key = root.path().join("node-key.pem");
-        let identity = crate::identity::NodeIdentity::create(&key).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap();
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
@@ -30454,8 +31199,9 @@ mod tests {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
         let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(

@@ -679,9 +679,9 @@ mod tests {
     fn open_store(root: &std::path::Path) -> StateStore {
         let identity_path = root.join("node-key.pem");
         let identity = if identity_path.exists() {
-            crate::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         } else {
-            crate::identity::NodeIdentity::create(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap()
         };
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,

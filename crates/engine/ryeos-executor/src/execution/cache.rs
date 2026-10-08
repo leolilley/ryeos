@@ -1381,9 +1381,9 @@ pub(super) mod tests {
         use std::sync::Arc;
         let key = root.join("test-node-key.pem");
         let identity = if key.exists() {
-            ryeos_app::identity::NodeIdentity::load(&key).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&key).unwrap()
         } else {
-            ryeos_app::identity::NodeIdentity::create(&key).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap()
         };
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());

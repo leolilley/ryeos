@@ -9,9 +9,9 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
-use ryeos_app::identity::NodeIdentity;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
 use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
+use ryeos_node_runtime::identity::NodeIdentity;
 
 /// Bootstrap options.
 ///
@@ -335,7 +335,7 @@ fn write_operator_authorized(
         .ok_or_else(|| anyhow::anyhow!("authorized-key path has no parent directory"))?;
     let now = lillux::time::iso8601_now();
 
-    let _path = ryeos_app::identity::write_authorized_key_toml(
+    let _path = ryeos_node_runtime::identity::write_authorized_key_toml(
         auth_dir,
         &fp,
         &key_b64,
@@ -344,7 +344,7 @@ fn write_operator_authorized(
         &fp,
         &now,
         node_signing_key,
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
 
     tracing::info!(
@@ -848,7 +848,7 @@ fn load_node_config_two_phase_with_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::identity::NodeIdentity;
+    use ryeos_node_runtime::identity::NodeIdentity;
 
     /// Build a minimal Config for testing with all paths under a tempdir.
     fn test_config(tmp: &std::path::Path) -> Config {

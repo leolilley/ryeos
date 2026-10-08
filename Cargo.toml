@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/engine/ryeos-node-runtime",
     "crates/kernel/lillux",
     "crates/daemon/ryeos-api",
     "crates/daemon/ryeos-app",
@@ -83,6 +84,7 @@ opt-level = 3
 opt-level = 3
 
 [workspace.dependencies]
+ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }
 ryeos-accounting = { path = "crates/engine/ryeos-accounting" }

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, ensure};
 use serde::Serialize;
 
-use crate::config::{Config, ConfigSources};
-use crate::state_lock::{StateLock, default_lock_path};
+use ryeos_node_runtime::config::{Config, ConfigSources};
+use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
 #[derive(Debug, Clone, Default)]
 pub struct LegacyProductQualificationRetirementOptions {
@@ -47,7 +47,7 @@ pub fn run_legacy_product_qualification_retirement(
     let runtime_lock = runtime_directory
         .lock_exclusive()
         .context("lock offline runtime-state namespace")?;
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)?;
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)?;
     let mut trust = ryeos_state::refs::TrustStore::new();
     trust.insert(
         identity.fingerprint().to_string(),

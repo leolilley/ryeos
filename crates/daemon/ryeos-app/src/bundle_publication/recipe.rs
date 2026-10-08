@@ -953,7 +953,8 @@ mod tests {
         let request = request();
         let temp = tempfile::tempdir().unwrap();
         let identity =
-            crate::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem"))
+                .unwrap();
         let body = request.config_body().unwrap();
         let signed = lillux::signature::sign_content(&body, identity.signing_key(), "#", None);
         let response = json!({"schema":"ryeos.bundle_build_recipe_authorization.v1",

@@ -9,6 +9,7 @@ name = "ryeos_core_tools"
 path = "src/lib.rs"
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -44,6 +45,7 @@ ryeos-app = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [features]
@@ -53,7 +55,7 @@ default = []
 # need a manifest-stable copy of the `core` bundle (eliminates the
 # dev-tree manifest concurrency race documented in
 # `docs/operations/dev-tree-caveats.md`).
-test-support = []
+test-support = ["ryeos-node-runtime/test-support", ]
 
 # ── Unified core tools binary ──────────────────────────────────────
 # Subcommands: sign, fetch, verify, identity. Invoked by tool YAMLs

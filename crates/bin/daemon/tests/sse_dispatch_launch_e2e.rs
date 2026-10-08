@@ -635,10 +635,10 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
 /// is OsRng-backed and operationally collision-free.
 #[test]
 fn sse_dispatch_launch_collision() {
-    use ryeos_app::identity::NodeIdentity;
     use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
     use ryeos_app::thread_lifecycle::new_thread_id;
     use ryeos_app::write_barrier::WriteBarrier;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use std::sync::Arc;
 
     let tmpdir = tempfile::TempDir::new().expect("tempdir");

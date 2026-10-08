@@ -3797,7 +3797,7 @@ impl ThreadLifecycleService {
         event_hub: Arc<ThreadEventHub>,
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        crate::identity::validate_canonical_site_id(current_site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)
             .context("node identity produced a non-canonical site id")?;
 
         Ok(Self::new_with_site_id(
@@ -3819,7 +3819,7 @@ impl ThreadLifecycleService {
         event_hub: Arc<ThreadEventHub>,
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        crate::identity::validate_canonical_site_id(current_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)?;
         Ok(Self::new_with_site_id(
             state_store,
             engine,

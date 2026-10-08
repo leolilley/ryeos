@@ -900,9 +900,11 @@ mod transport_binding_tests {
     fn trusted_uploader_cannot_sign_publisher_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let publisher =
-            crate::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem"))
+                .unwrap();
         let uploader =
-            crate::identity::NodeIdentity::create(&temp.path().join("uploader.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("uploader.pem"))
+                .unwrap();
         let mut trust = ryeos_state::TrustStore::new();
         trust.insert(
             publisher.fingerprint().to_owned(),

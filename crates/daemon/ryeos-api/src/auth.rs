@@ -8,8 +8,8 @@ use anyhow::{Result, bail};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
 
@@ -101,9 +101,12 @@ fn load_authorized_key(
     auth_dir: &Path,
     node_identity: &NodeIdentity,
 ) -> Result<AuthorizedKey> {
-    let grant =
-        ryeos_app::identity::load_verified_authorized_key(fingerprint, auth_dir, node_identity)?
-            .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+        fingerprint,
+        auth_dir,
+        node_identity,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
     Ok(AuthorizedKey {
         public_key: grant.public_key,
         scopes: grant.scopes,
@@ -350,7 +353,7 @@ pub(crate) fn verify_request(
                     );
                     }
                 };
-            ryeos_app::identity::validate_canonical_site_id(forwarding_site_id)
+            ryeos_node_runtime::identity::validate_canonical_site_id(forwarding_site_id)
                 .map_err(|error| error.to_string())?;
             if auth_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
                 return Err(
@@ -373,11 +376,9 @@ pub(crate) fn verify_request(
                     "forwarding proof must be signed by an admitted remote_node".to_string()
                 );
             }
-            if !forwarding_key
-                .scopes
-                .iter()
-                .any(|scope| scope == ryeos_app::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE)
-            {
+            if !forwarding_key.scopes.iter().any(|scope| {
+                scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE
+            }) {
                 return Err(
                     "forwarding-node grant lacks forwarded-operator attestation authority"
                         .to_string(),
@@ -461,7 +462,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use ryeos_app::identity::NodeIdentity;
+    use ryeos_node_runtime::identity::NodeIdentity;
 
     fn make_node_identity(sk: &SigningKey, dir: &std::path::Path) -> NodeIdentity {
         let pem = sk.to_pkcs8_pem(Default::default()).unwrap();
@@ -560,7 +561,7 @@ mod tests {
             "ryeos.execute.service.remote/admin".to_string(),
             "ryeos.execute.service.bundle/install".to_string(),
         ];
-        let _path = ryeos_app::identity::write_authorized_key_toml(
+        let _path = ryeos_node_runtime::identity::write_authorized_key_toml(
             &auth_dir,
             &client_fp,
             &client_key_b64,
@@ -569,7 +570,7 @@ mod tests {
             "test-granter",
             "2026-01-01T00:00:00Z",
             &node_signer,
-            ryeos_app::identity::WildcardPolicy::Reject,
+            ryeos_node_runtime::identity::WildcardPolicy::Reject,
         )
         .unwrap();
 
@@ -608,7 +609,7 @@ mod tests {
         let client_fp = lillux::signature::compute_fingerprint(&client_vk);
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(client_vk.as_bytes());
 
-        ryeos_app::identity::write_authorized_remote_node_key_toml(
+        ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
             &auth_dir,
             &client_fp,
             &key_b64,
@@ -799,7 +800,7 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
 
         // Write a valid node-signed key file via the canonical writer.
-        let file_path = ryeos_app::identity::write_authorized_key_toml(
+        let file_path = ryeos_node_runtime::identity::write_authorized_key_toml(
             &auth_dir,
             &fp,
             &key_b64,
@@ -808,7 +809,7 @@ mod tests {
             "test-granter",
             "2026-01-01T00:00:00Z",
             &node_signer,
-            ryeos_app::identity::WildcardPolicy::Reject,
+            ryeos_node_runtime::identity::WildcardPolicy::Reject,
         )
         .unwrap();
 
@@ -849,7 +850,7 @@ mod tests {
         let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
-        let config = ryeos_app::config::Config {
+        let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             db_path: runtime_db_path.clone(),
             uds_path: tmpdir.path().join("test.sock"),
@@ -858,7 +859,7 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
-        let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -922,7 +923,7 @@ mod tests {
         );
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -1000,7 +1001,7 @@ mod tests {
         let vk = client_key.verifying_key();
         let fp = lillux::signature::compute_fingerprint(&vk);
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-        ryeos_app::identity::write_authorized_key_toml(
+        ryeos_node_runtime::identity::write_authorized_key_toml(
             &state.config.authorized_keys_dir,
             &fp,
             &key_b64,
@@ -1009,7 +1010,7 @@ mod tests {
             "test-granter",
             "2026-01-01T00:00:00Z",
             state.identity.signing_key(),
-            ryeos_app::identity::WildcardPolicy::Reject,
+            ryeos_node_runtime::identity::WildcardPolicy::Reject,
         )
         .unwrap();
         fp
@@ -1023,7 +1024,7 @@ mod tests {
         let vk = operator_key.verifying_key();
         let fp = lillux::signature::compute_fingerprint(&vk);
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-        ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
             &state.config.authorized_keys_dir,
             &fp,
             &key_b64,
@@ -1032,7 +1033,7 @@ mod tests {
             "test-granter",
             "2026-01-01T00:00:00Z",
             &state.identity,
-            ryeos_app::identity::WildcardPolicy::Reject,
+            ryeos_node_runtime::identity::WildcardPolicy::Reject,
             false,
             Some(site_id),
             false,
@@ -1049,11 +1050,11 @@ mod tests {
         let vk = node_key.verifying_key();
         let fp = lillux::signature::compute_fingerprint(&vk);
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-        ryeos_app::identity::write_authorized_remote_node_key_toml(
+        ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
             &state.config.authorized_keys_dir,
             &fp,
             &key_b64,
-            &[ryeos_app::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()],
+            &[ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()],
             "test-forwarding-node",
             "test-granter",
             "2026-01-01T00:00:00Z",

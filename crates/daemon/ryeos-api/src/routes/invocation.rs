@@ -37,7 +37,7 @@ pub struct RoutePrincipal {
     pub verified: bool,
     /// Closed node-signed authorized-key class. `None` for non-RyeOS
     /// verifiers; policies must not infer this class from origin presence.
-    pub authorized_key_class: Option<ryeos_app::identity::AuthorizedKeyPrincipalClass>,
+    pub authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
     /// Site identity cryptographically established by a remote-node request,
     /// or by a remote-operator request plus its source-node co-signature.
     /// `None` for local clients and non-RyeOS verifiers. Execute routes must

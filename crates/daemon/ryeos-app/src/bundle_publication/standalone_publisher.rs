@@ -1321,14 +1321,14 @@ fn validate_substrate_receipt_tree(manifest: &ExternalContentManifestObject) -> 
 
 pub struct ManifestOnlyTreePublisher {
     cas: Arc<lillux::CasStore>,
-    identity: crate::identity::NodeIdentity,
+    identity: ryeos_node_runtime::identity::NodeIdentity,
     policy: StandalonePublisherPolicy,
 }
 
 impl ManifestOnlyTreePublisher {
     pub fn new(
         cas: Arc<lillux::CasStore>,
-        identity: crate::identity::NodeIdentity,
+        identity: ryeos_node_runtime::identity::NodeIdentity,
         policy: StandalonePublisherPolicy,
     ) -> anyhow::Result<Self> {
         policy.validate()?;

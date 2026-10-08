@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-pub use ryeos_app::config::{Config, ConfigSources};
+pub use ryeos_node_runtime::config::{Config, ConfigSources};
 
 #[derive(Debug, Parser)]
 #[command(name = "ryeosd", about = "Rust control plane daemon for Rye OS")]
@@ -53,7 +53,7 @@ pub struct Cli {
 
 impl Cli {
     /// Convert the parsed CLI into the plain-data `ConfigSources`
-    /// consumed by `ryeos_app::config::Config::load`.
+    /// consumed by `ryeos_node_runtime::config::Config::load`.
     pub fn to_sources(&self) -> ConfigSources {
         ConfigSources {
             config_file: self.config.clone(),

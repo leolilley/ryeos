@@ -374,7 +374,7 @@ fn read_thread_meta(state: &AppState, thread_id: &str) -> ThreadMetaRead {
 /// predecessor-node record masquerade as current durable evidence.
 fn verify_thread_meta_document(
     signed: &str,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> std::result::Result<Value, &'static str> {
     let (body, header) =
         lillux::signature::strip_canonical_signature_with_envelope(signed, "#", None, false)
@@ -585,10 +585,12 @@ mod tests {
     fn thread_meta_requires_the_current_node_signature() {
         let directory = tempfile::tempdir().unwrap();
         let current =
-            ryeos_app::identity::NodeIdentity::create(&directory.path().join("node.pem")).unwrap();
-        let predecessor =
-            ryeos_app::identity::NodeIdentity::create(&directory.path().join("old-node.pem"))
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem"))
                 .unwrap();
+        let predecessor = ryeos_node_runtime::identity::NodeIdentity::create(
+            &directory.path().join("old-node.pem"),
+        )
+        .unwrap();
         let body = serde_json::json!({"thread_id":"T-signed"}).to_string();
         let signed = lillux::signature::sign_content(&body, predecessor.signing_key(), "#", None);
         assert_eq!(

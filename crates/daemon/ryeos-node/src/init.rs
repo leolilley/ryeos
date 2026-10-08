@@ -183,7 +183,7 @@ pub struct InitReport {
 const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v3";
 const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v1";
 const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
-const INIT_SEED_MAX_BYTES: u64 = ryeos_app::node_document::MAX_ITEM_BYTES;
+const INIT_SEED_MAX_BYTES: u64 = ryeos_node_runtime::node_document::MAX_ITEM_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -444,8 +444,8 @@ fn run_init_internal(
     // Init is an offline mutation of the same node namespace owned by the
     // daemon. Acquire the exact operational lock before creating or changing
     // any app-root entry, and retain it through final completion testimony.
-    let state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&opts.app_root),
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
     )
     .context("acquire stopped-node authority for initialization")?;
 
@@ -465,16 +465,17 @@ fn run_init_internal(
             )?;
         }
     }
-    ryeos_app::config::retire_pre_node_policy_config(&opts.app_root)
+    ryeos_node_runtime::config::retire_pre_node_policy_config(&opts.app_root)
         .context("retire predecessor daemon policy fields")?;
-    let bootstrap_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(opts.app_root.clone()),
-        bind: opts.bind,
-        uds_path: opts.uds_path.clone(),
-        ..Default::default()
-    })
-    .context("resolve node bootstrap configuration")?;
-    ryeos_app::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
+    let bootstrap_config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(opts.app_root.clone()),
+            bind: opts.bind,
+            uds_path: opts.uds_path.clone(),
+            ..Default::default()
+        })
+        .context("resolve node bootstrap configuration")?;
+    ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
         .context("seed node bootstrap configuration")?;
     // Operator config root (`<app_root>/.ai/config`) — the single trust
     // source for `ryeos init`. Bundles are never a trust source.
@@ -527,7 +528,7 @@ fn run_init_internal(
     let node_key = load_or_create_key(&node_key_path, false)
         .with_context(|| format!("node key at {}", node_key_path.display()))?;
     let node_fp = compute_fingerprint(&node_key.verifying_key());
-    ryeos_app::identity::NodeIdentity::load(&node_key_path)
+    ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
         .with_context(|| format!("load node identity {}", node_key_path.display()))?
         .write_public_identity(&node_key_path.with_file_name("public-identity.json"))
         .with_context(|| {
@@ -977,7 +978,7 @@ fn run_init_internal(
     // ── 8b. Node-owned default policies ──
     materialize_node_derived_views(&opts.app_root)?;
     if let Some(update) = selected_node_policy_update.as_ref() {
-        let identity = ryeos_app::identity::NodeIdentity::load(&node_key_path)
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
             .context("load node identity for policy-set bootstrap")?;
         ryeos_app::node_policy::generation::publish_policy_update(
             &opts.app_root,
@@ -1364,7 +1365,7 @@ fn seal_current_init_completion(
 pub fn seal_init_completion_after_policy_update(
     app_root: &Path,
     expected_policy_generation_digest: &str,
-    state_lock: &ryeos_app::state_lock::StateLock,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
 ) -> Result<()> {
     state_lock
         .ensure_protects_app_root(app_root)
@@ -1428,7 +1429,7 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         .join(ryeos_engine::AI_DIR)
         .join("node/identity/public-identity.json");
     let node_identity =
-        ryeos_app::identity::NodeIdentity::load_public_identity(&node_identity_path)
+        ryeos_node_runtime::identity::NodeIdentity::load_public_identity(&node_identity_path)
             .context("load pinned public node identity for init-completion verification")?;
     if node_identity.verified_fingerprint()? != document.body.node_fingerprint {
         bail!("init completion node fingerprint does not match the current key");
@@ -2312,11 +2313,12 @@ mod tests {
                 .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
                 .exists()
         );
-        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-            app_root: Some(state.clone()),
-            ..Default::default()
-        })
-        .expect("load init-owned bootstrap config");
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .expect("load init-owned bootstrap config");
         assert_eq!(config.app_root, state);
         assert!(state.join(".ai/node/config.yaml").is_file());
     }
@@ -2451,8 +2453,8 @@ mod tests {
         let opts = make_opts(&state, &user);
         run_init(&opts).expect("initial generation");
 
-        let state_lock = ryeos_app::state_lock::StateLock::acquire(
-            &ryeos_app::state_lock::default_lock_path(&state),
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
         )
         .expect("stopped-node authority");
         let table = ryeos_app::node_policy::NodePolicyTable::new();
@@ -2473,7 +2475,7 @@ mod tests {
             .prepare_replacement(&table, policies, Path::new("operator-policy.yaml"))
             .expect("prepared policy replacement");
         let replacement_digest = update.generation().digest().to_owned();
-        let identity = ryeos_app::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &state.join(".ai/node/identity/private_key.pem"),
         )
         .expect("node identity");
@@ -2610,7 +2612,7 @@ mod tests {
         let opts = make_opts(&state, &user);
         run_init(&opts).expect("initial current generation");
 
-        let identity = ryeos_app::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &state.join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
@@ -2618,7 +2620,7 @@ mod tests {
             "schema": 1,
             "additional_patterns": [],
         });
-        let bytes = ryeos_app::node_document::render_signed_item(
+        let bytes = ryeos_node_runtime::node_document::render_signed_item(
             "ingest_ignore",
             "policy",
             &predecessor,

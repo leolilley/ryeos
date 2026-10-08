@@ -261,7 +261,7 @@ mod tests {
             verifier_key: "ryeos_signed",
             verified: true,
             authorized_key_class: Some(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             ),
             authenticated_origin_site_id: Some("site:remote".to_string()),
             authenticated_grant_authority: None,

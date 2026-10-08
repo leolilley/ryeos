@@ -475,8 +475,9 @@ product_qualification_policy:
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         )
     })?;
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-    crate::identity::write_authorized_key_toml(
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -485,7 +486,7 @@ product_qualification_policy:
         "fixture",
         "2026-01-01T00:00:00Z",
         state.identity.signing_key(),
-        crate::identity::WildcardPolicy::Reject,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
     )?;
     let grant = crate::operator_authority::admitted_operator_authority_digest(
         &state,

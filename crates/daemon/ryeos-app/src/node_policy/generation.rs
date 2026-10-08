@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{NodePolicyContext, NodePolicyTable};
-use crate::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 
 pub const POLICIES_DIRECTORY: &str = "policies";
 const POLICY_STAGING_DIRECTORY: &str = ".policies.staging";
@@ -195,8 +195,8 @@ pub fn validate_policy_bodies(
         let body_bytes = serde_yaml::to_string(body)
             .with_context(|| format!("serialize `{section_name}` node policy"))?
             .len() as u64;
-        let maximum_body_bytes = crate::node_document::MAX_ITEM_BYTES
-            .saturating_sub(crate::node_document::MAX_SIGNATURE_OVERHEAD_BYTES);
+        let maximum_body_bytes = ryeos_node_runtime::node_document::MAX_ITEM_BYTES
+            .saturating_sub(ryeos_node_runtime::node_document::MAX_SIGNATURE_OVERHEAD_BYTES);
         if body_bytes > maximum_body_bytes {
             bail!(
                 "node policy section `{section_name}` exceeds {maximum_body_bytes} portable body bytes"
@@ -343,7 +343,8 @@ fn validate_schema_cut_directory_occupant(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .context("existing node policy entry disappeared")?;
-        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
+        let verified =
+            ryeos_node_runtime::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
         if verified.signer_fingerprint != node_fingerprint {
             bail!("existing policy generation is not signed by the current node identity");
         }
@@ -397,7 +398,8 @@ fn read_signed_policy_bodies(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .with_context(|| format!("node policy disappeared: {}", path.display()))?;
-        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
+        let verified =
+            ryeos_node_runtime::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
         if verified.signer_fingerprint != node_fingerprint {
             bail!(
                 "node policy {} is signed by {}, expected current node {}",
@@ -423,7 +425,7 @@ pub fn publish_policy_update(
     update: &NodePolicyUpdate,
     identity: &NodeIdentity,
     trust_store: &ryeos_engine::trust::TrustStore,
-    state_lock: &crate::state_lock::StateLock,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
 ) -> Result<PathBuf> {
     state_lock
         .ensure_protects_app_root(app_root)
@@ -493,8 +495,12 @@ pub fn publish_policy_update(
     let result = (|| {
         for (section_name, body) in &update.generation.policies {
             let filename = OsString::from(format!("{section_name}.yaml"));
-            let bytes =
-                crate::node_document::render_signed_item(section_name, "policy", body, identity)?;
+            let bytes = ryeos_node_runtime::node_document::render_signed_item(
+                section_name,
+                "policy",
+                body,
+                identity,
+            )?;
             staging.atomic_write_pinned_if_same(&filename, None, &bytes, 0o600)?;
         }
         staging.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(
@@ -640,8 +646,10 @@ mod tests {
         for (section, body) in &policies {
             std::fs::write(
                 directory.join(format!("{section}.yaml")),
-                crate::node_document::render_signed_item(section, "policy", body, &identity)
-                    .unwrap(),
+                ryeos_node_runtime::node_document::render_signed_item(
+                    section, "policy", body, &identity,
+                )
+                .unwrap(),
             )
             .unwrap();
         }
@@ -666,7 +674,7 @@ mod tests {
         // byte authority matters even though the retired schema is opaque.
         std::fs::write(
             directory.join("isolation.yaml"),
-            crate::node_document::render_signed_item(
+            ryeos_node_runtime::node_document::render_signed_item(
                 "isolation",
                 "policy",
                 &serde_json::json!({"different_retired_shape": true}),
@@ -675,9 +683,9 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
-            root.path(),
-        ))
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(root.path()),
+        )
         .unwrap();
         let error =
             publish_policy_update(root.path(), &update, &identity, &trust, &lock).unwrap_err();

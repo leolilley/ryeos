@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
-use ryeos_app::node_document;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_node_runtime::node_document;
 use ryeos_scheduler::crontab;
 use ryeos_scheduler::projection;
 use ryeos_scheduler::types::{
@@ -383,7 +383,7 @@ impl<'a> ScheduleSourceMutation<'a> {
     fn publish(
         &self,
         body: &Value,
-        identity: &ryeos_app::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<(PathBuf, projection::VerifiedScheduleSource)> {
         let schedule_id = self
             .path

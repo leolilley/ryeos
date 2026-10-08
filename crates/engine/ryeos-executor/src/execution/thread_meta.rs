@@ -7,7 +7,7 @@ use ryeos_engine::resolution::TrustClass;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ryeos_app::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -350,7 +350,7 @@ pub fn populate_initialized_state_with_identities(
     // would otherwise see a null result. Mirrors what
     // `bootstrap::init` writes after generating the node key.
     let public_identity_path = node_identity_dir.join("public-identity.json");
-    ryeos_app::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
+    ryeos_node_runtime::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
         .context("re-load node identity to write public doc")?
         .write_public_identity_at(&public_identity_path, FAST_FIXTURE_TIME)
         .context("write node public identity")?;
@@ -697,7 +697,7 @@ pub fn write_authorized_key_with_scopes(
         .join("auth")
         .join("authorized_keys");
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &auth_dir,
         &fp,
         &key_b64,
@@ -709,7 +709,7 @@ pub fn write_authorized_key_with_scopes(
         &lillux::signature::compute_fingerprint(&signer_sk.verifying_key()),
         FAST_FIXTURE_TIME,
         signer_sk,
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
     Ok(())
 }

@@ -35,15 +35,15 @@ const BINDING_HEAD_NAMESPACE: &str = ryeos_state::objects::EXTERNAL_CONTENT_BIND
 /// active heads cannot remain roots under the new decoder and are never
 /// translated.
 pub fn discard_binding_heads_offline(
-    config: &crate::config::Config,
+    config: &ryeos_node_runtime::config::Config,
     dry_run: bool,
 ) -> anyhow::Result<usize> {
-    let _state_lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
-        &config.app_root,
-    ))
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
+    )
     .context("external-content binding reset requires the daemon to be stopped")?;
     let runtime_state_dir = config.runtime_state_dir();
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for external-content binding reset")?;
     let mut trust = ryeos_state::refs::TrustStore::new();
     trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());

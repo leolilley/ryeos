@@ -85,9 +85,9 @@ impl GuestOwnerMaterializationSource {
             "unsupported guest owner materialization source"
         );
         self.operator_authority.validate()?;
-        crate::identity::validate_canonical_site_id(&self.node_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.node_site_id)?;
         if self.operator_authority.principal_class
-            == crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+            == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
         {
             ensure!(
                 self.operator_authority.origin_site_id == self.node_site_id,
@@ -538,7 +538,7 @@ pub fn prepare_current_guest_owner_runtime(
                 .authorized_key_class
                 .context("operator class is missing")?
             && (operator_authority.principal_class
-                == crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+                == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
                 || context.authenticated_origin_site_id.as_deref()
                     == Some(operator_authority.origin_site_id.as_str())),
         "materialization owner differs from the authenticated operator grant"
@@ -816,7 +816,8 @@ mod tests {
             operator_authority: AdmittedOperatorAuthority {
                 owner_principal: format!("fp:{}", hash('4')),
                 origin_site_id: "site:controller".into(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
                 grant_digest: hash('5'),
                 scopes: vec!["ryeos.execute.service.guest-runtime/materialize".into()],
             },

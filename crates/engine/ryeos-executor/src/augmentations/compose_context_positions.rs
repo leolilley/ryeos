@@ -2394,7 +2394,7 @@ pub(crate) mod tests {
         let runtime_state_dir = temp.path().join(".ai/state");
         let runtime_db_path = temp.path().join("runtime.sqlite3");
         let key_path = temp.path().join("identity/node-key.pem");
-        let config = ryeos_app::config::Config {
+        let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().expect("test bind"),
             db_path: runtime_db_path.clone(),
             uds_path: temp.path().join("test.sock"),
@@ -2403,8 +2403,8 @@ pub(crate) mod tests {
             operator_signing_key_path: temp.path().join("user-key.pem"),
             authorized_keys_dir: temp.path().join("auth"),
         };
-        let identity =
-            ryeos_app::identity::NodeIdentity::create(&key_path).expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)
+            .expect("test node identity");
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -2464,7 +2464,7 @@ pub(crate) mod tests {
             commands: Vec::new(),
         };
         let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),

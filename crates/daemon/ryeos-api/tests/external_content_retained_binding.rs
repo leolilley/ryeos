@@ -6,12 +6,12 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ryeos_api::handlers::external_content_import;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_app::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
 };
 use ryeos_app::operator_external_content::{ImportRequest, RetainedBindingImportRequest};
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_state::objects::{ExternalContentBinding, ExternalContentConsumerAuthority};
 use serde_json::json;
 
@@ -53,7 +53,7 @@ fn fixture(
     );
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/import".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -93,7 +93,7 @@ fn fixture(
             "entry_count":1, "total_bytes":11,
         }))
         .unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -157,7 +157,7 @@ fn replace_binding_with_remote_owner(
     let remote_origin = format!("site:{}", "c".repeat(64));
     let remote = NodeIdentity::create(&directory.path().join("remote-operator.pem")).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(remote.verifying_key().as_bytes()),
@@ -172,7 +172,7 @@ fn replace_binding_with_remote_owner(
         false,
     )
     .unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         remote.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -393,7 +393,7 @@ async fn bind_through_managed_activation_owner(
     );
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -897,7 +897,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
 
     let remote_identity =
         NodeIdentity::load(&directory.path().join("remote-operator.pem")).unwrap();
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote_identity.fingerprint(),
         &base64::engine::general_purpose::STANDARD
@@ -978,7 +978,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         .is_err()
     );
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),

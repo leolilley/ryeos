@@ -5,9 +5,26 @@ use base64::Engine;
 use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+/// Load the current node fingerprint through its single canonical key owner.
+pub fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
+    let key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("identity")
+        .join("private_key.pem");
+    let identity = NodeIdentity::load(&key_path).with_context(|| {
+        format!(
+            "load node identity for node-owned command registration policy from {}",
+            key_path.display()
+        )
+    })?;
+    Ok(identity.fingerprint().to_string())
+}
+
 #[derive(Clone)]
 pub struct NodeIdentity {
-    signing_key: SigningKey,
+    // Immutable identity handles share the original secret allocation.
+    signing_key: std::sync::Arc<SigningKey>,
     verifying_key: VerifyingKey,
     fingerprint: String,
 }
@@ -100,7 +117,7 @@ impl NodeIdentity {
         let verifying_key = signing_key.verifying_key();
         let fingerprint = lillux::sha256_hex(verifying_key.as_bytes());
         Ok(Self {
-            signing_key,
+            signing_key: std::sync::Arc::new(signing_key),
             verifying_key,
             fingerprint,
         })
@@ -970,6 +987,21 @@ mod tests {
     }
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn cloned_identity_retains_same_secret_allocation_and_redacted_debug() {
+        let original = NodeIdentity::from_signing_key(test_signing_key()).unwrap();
+        let clone = original.clone();
+        assert!(std::ptr::eq(original.signing_key(), clone.signing_key()));
+        assert_eq!(original.fingerprint(), clone.fingerprint());
+        assert!(format!("{clone:?}").contains("<redacted>"));
+        drop(original);
+        let signature: Signature = clone.signing_key().sign(b"same original identity");
+        clone
+            .verifying_key()
+            .verify_strict(b"same original identity", &signature)
+            .unwrap();
+    }
 
     fn test_signing_key() -> SigningKey {
         SigningKey::generate(&mut OsRng)

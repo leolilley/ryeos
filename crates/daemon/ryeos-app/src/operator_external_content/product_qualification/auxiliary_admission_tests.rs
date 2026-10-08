@@ -627,9 +627,10 @@ fn fixture() -> Result<Fixture> {
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
         ],
     ));
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     let scopes = vec!["ryeos.execute.service.external-content/launch-product-qualification".into()];
-    crate::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -638,13 +639,13 @@ fn fixture() -> Result<Fixture> {
         "fixture",
         "2026-09-29T00:00:00Z",
         state.identity.signing_key(),
-        crate::identity::WildcardPolicy::Reject,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
     )?;
     let context = HandlerContext::new_with_authority(
         operator.principal_id(),
         scopes,
         true,
-        Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
         None,
     );
     let authority = state.state_store.pinned_state_authority()?;

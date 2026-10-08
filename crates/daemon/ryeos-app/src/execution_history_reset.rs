@@ -12,9 +12,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
-use crate::state_lock::{StateLock, default_lock_path};
+use ryeos_node_runtime::config::{Config, ConfigSources};
+use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
 /// Only this module captures actual offline exclusion and publishes intent.
 /// The token owns connection identity without borrowing the mutable RuntimeDb.
@@ -29,7 +29,11 @@ pub(crate) struct OfflineResetAuthority<'locks> {
 }
 
 #[derive(PartialEq, Eq)]
-enum OfflineResetAuthorityPhase { Captured, IntentPublished, Finished }
+enum OfflineResetAuthorityPhase {
+    Captured,
+    IntentPublished,
+    Finished,
+}
 
 impl<'locks> OfflineResetAuthority<'locks> {
     fn capture(
@@ -45,15 +49,20 @@ impl<'locks> OfflineResetAuthority<'locks> {
         // Capture only a mutating offline database; inspection obtains no issuer.
         db.require_reset_incarnation(&incarnation, &config.db_path)?;
         Ok(Self {
-            state_lock, runtime_directory, namespace_lock, incarnation,
-            app_root: &config.app_root, db_target: &config.db_path,
+            state_lock,
+            runtime_directory,
+            namespace_lock,
+            incarnation,
+            app_root: &config.app_root,
+            db_target: &config.db_path,
             phase: OfflineResetAuthorityPhase::Captured,
         })
     }
 
     fn require_held(&self, db: &RuntimeDb) -> Result<()> {
         self.state_lock.ensure_protects_app_root(self.app_root)?;
-        self.namespace_lock.ensure_protects(self.runtime_directory)?;
+        self.namespace_lock
+            .ensure_protects(self.runtime_directory)?;
         db.require_reset_incarnation(&self.incarnation, self.db_target)
     }
 
@@ -260,7 +269,7 @@ fn run_execution_history_reset_inner(
     // Signed chain heads belong to the node-identity trust domain, matching
     // ordinary daemon startup. Item/publisher trust is a separate domain and
     // must never be substituted for head authority here.
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for signed-head verification")?;
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
@@ -444,7 +453,11 @@ fn run_execution_history_reset_inner(
     }
 
     let mut reset_authority = OfflineResetAuthority::capture(
-        &state_lock, &runtime_directory, &runtime_directory_lock, &config, &runtime_db,
+        &state_lock,
+        &runtime_directory,
+        &runtime_directory_lock,
+        &config,
+        &runtime_db,
     )?;
     reset_authority.require_held(&runtime_db)?;
     publish_progress(
@@ -921,37 +934,72 @@ mod tests {
     #[test]
     fn offline_capability_requires_actual_locks_exact_opened_db_and_published_intent() {
         let tmp = TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources { app_root: Some(tmp.path().to_owned()), ..Default::default() }).unwrap();
-        let identity = crate::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
+        let config = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path)
+                .unwrap();
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let trust = Arc::new(trust);
         drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::clone(&trust)).unwrap());
         drop(RuntimeDb::open(&config.db_path).unwrap());
         let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
-        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir()).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir())
+            .unwrap()
+            .unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let mut state = ryeos_state::StateDb::open_for_projection_rebuild(&config.runtime_state_dir(), trust).unwrap();
+        let mut state =
+            ryeos_state::StateDb::open_for_projection_rebuild(&config.runtime_state_dir(), trust)
+                .unwrap();
         let pinned = state.pinned_authority().unwrap();
         let cas_guard = pinned.acquire_exclusive_guard(true).unwrap();
         let mut db = open_runtime_db(&config, &directory, &namespace, false).unwrap();
-        let mut authority = OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &db).unwrap();
-        assert!(db.apply_explicit_history_reset(&authority, &config.db_path).is_err());
+        let mut authority =
+            OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &db)
+                .unwrap();
+        assert!(
+            db.apply_explicit_history_reset(&authority, &config.db_path)
+                .is_err()
+        );
         assert!(db.discard_all_thread_history(&authority).is_err());
         let other = open_runtime_db(&config, &directory, &namespace, false).unwrap();
         assert!(authority.require_held(&other).is_err());
         drop(other);
         let wrong_directory_fixture = TempDir::new().unwrap();
-        let wrong_directory = lillux::PinnedDirectory::open(wrong_directory_fixture.path()).unwrap().unwrap();
+        let wrong_directory = lillux::PinnedDirectory::open(wrong_directory_fixture.path())
+            .unwrap()
+            .unwrap();
         let wrong_namespace = wrong_directory.lock_exclusive().unwrap();
-        assert!(OfflineResetAuthority::capture(&state_lock, &directory, &wrong_namespace, &config, &db).is_err());
+        assert!(
+            OfflineResetAuthority::capture(&state_lock, &directory, &wrong_namespace, &config, &db)
+                .is_err()
+        );
         let inspection = open_runtime_db(&config, &directory, &namespace, true).unwrap();
-        assert!(OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &inspection).is_err());
+        assert!(
+            OfflineResetAuthority::capture(
+                &state_lock,
+                &directory,
+                &namespace,
+                &config,
+                &inspection
+            )
+            .is_err()
+        );
         drop(inspection);
-        state.begin_thread_history_discard_admitted(&cas_guard).unwrap();
+        state
+            .begin_thread_history_discard_admitted(&cas_guard)
+            .unwrap();
         authority.phase = OfflineResetAuthorityPhase::IntentPublished;
-        assert!(db.apply_explicit_history_reset(&authority, Path::new("wrong-target")).is_err());
-        db.apply_explicit_history_reset(&authority, &config.db_path).unwrap();
+        assert!(
+            db.apply_explicit_history_reset(&authority, Path::new("wrong-target"))
+                .is_err()
+        );
+        db.apply_explicit_history_reset(&authority, &config.db_path)
+            .unwrap();
         assert!(authority.require_held(&db).is_ok());
         db.discard_all_thread_history(&authority).unwrap();
         // Authority still borrows original locks; later opener has a new marker.
@@ -964,15 +1012,28 @@ mod tests {
     #[test]
     fn offline_capability_wrong_root_refuses_before_intent() {
         let tmp = TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources { app_root: Some(tmp.path().to_owned()), ..Default::default() }).unwrap();
+        let config = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
         drop(RuntimeDb::open(&config.db_path).unwrap());
         let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
-        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir()).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir())
+            .unwrap()
+            .unwrap();
         let namespace = directory.lock_exclusive().unwrap();
         let db = open_runtime_db(&config, &directory, &namespace, false).unwrap();
         let other_root = TempDir::new().unwrap();
-        let other_config = Config::load(&ConfigSources { app_root: Some(other_root.path().to_owned()), ..Default::default() }).unwrap();
-        assert!(OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &other_config, &db).is_err());
+        let other_config = Config::load(&ConfigSources {
+            app_root: Some(other_root.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &other_config, &db)
+                .is_err()
+        );
         assert!(db.inspect_thread_history_discard().is_ok());
     }
 
@@ -1022,7 +1083,8 @@ mod tests {
         })
         .unwrap();
         let identity =
-            crate::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path)
+                .unwrap();
         let identity_bytes = std::fs::read(&config.node_signing_key_path).unwrap();
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());

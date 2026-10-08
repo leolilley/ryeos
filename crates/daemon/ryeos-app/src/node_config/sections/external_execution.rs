@@ -344,11 +344,12 @@ impl BindingDocument {
                 && self.schema
                     == match &self.controller_transport {
                         ExternalControllerTransportSelection::HttpJson(_) => 17,
-                        ExternalControllerTransportSelection::ControllerFileRelay(_) => match &self.workload {
-                            ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
-                            ExternalWorkloadBinding::StructuredSession(_) => 19,
-                            ExternalWorkloadBinding::DirectCommand {} => 0,
-                        },
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) =>
+                            match &self.workload {
+                                ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
+                                ExternalWorkloadBinding::StructuredSession(_) => 19,
+                                ExternalWorkloadBinding::DirectCommand {} => 0,
+                            },
                     },
             "unsupported external placement binding schema for selected transport"
         );
@@ -621,7 +622,8 @@ impl RetainedExternalExecutionBinding {
         );
         ensure!(
             !self.signed_source.is_empty()
-                && self.signed_source.len() <= crate::node_document::MAX_ITEM_BYTES as usize,
+                && self.signed_source.len()
+                    <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
             "retained placement signed source is invalid"
         );
         self.document.validate()?;
@@ -1041,7 +1043,7 @@ pub fn provision_installed_test_placement_credential(
     // Reverify the exact signed source, including its document, capacity owner
     // and digest, before opening a vault that may perform recovery writes.
     binding.retained_generation()?;
-    let identity = crate::identity::NodeIdentity::load(
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(
         &app_root
             .join(ryeos_engine::AI_DIR)
             .join("node/identity/private_key.pem"),
@@ -1363,7 +1365,9 @@ mod workload_binding_tests {
         document.controller_transport = ExternalControllerTransportSelection::ControllerFileRelay(
             ryeos_state::external_execution::transport::ExternalControllerFileRelayContract {
                 schema: 3,
-                route_contract: ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                route_contract:
+                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT
+                        .into(),
                 owner_workspace_id: "render-owner".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
@@ -1848,7 +1852,7 @@ mod persistent_placement_credential_tests {
 
     fn fixture() -> (tempfile::TempDir, InstalledExternalExecutionBinding) {
         let root = tempfile::tempdir().unwrap();
-        let identity = crate::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();

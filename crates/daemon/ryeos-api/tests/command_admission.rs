@@ -3,8 +3,8 @@ mod test_state;
 use ryeos_api::handlers::commands_dispatch::{self, Request};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_app::service_registry::ServiceRegistry;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use serde_json::{Value, json};
 use std::sync::Arc;
 

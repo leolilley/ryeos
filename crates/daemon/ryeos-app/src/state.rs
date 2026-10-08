@@ -13,12 +13,10 @@ use ryeos_scheduler::db::SchedulerDb;
 
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
-use crate::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
-use crate::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
@@ -30,6 +28,8 @@ use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
 use crate::vault::NodeVault;
 use crate::write_barrier::WriteBarrier;
+use ryeos_node_runtime::config::Config;
+use ryeos_node_runtime::identity::NodeIdentity;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogHealth {
@@ -83,7 +83,7 @@ pub struct AppState {
     /// admitted by this controller may retain it while a blocking host call
     /// settles, preventing a replacement controller from overlapping the old
     /// generation.
-    pub controller_lifetime: Arc<crate::state_lock::StateLockLease>,
+    pub controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
     /// Generic extension state bag for composition-root state that
     /// doesn't belong in core (e.g., UI state). Populated by the
     /// daemon composition root. Use `extensions.get::<T>()` to
@@ -315,7 +315,7 @@ pub mod test_support {
         let runtime_state_dir = root.join(".ai/state");
         let runtime_db_path = root.join("runtime.sqlite3");
         let key_path = root.join("identity/node-key.pem");
-        let config = crate::config::Config {
+        let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse()?,
             db_path: runtime_db_path.clone(),
             uds_path: root.join("test.sock"),
@@ -324,8 +324,8 @@ pub mod test_support {
             operator_signing_key_path: root.join("identity/operator-key.pem"),
             authorized_keys_dir: root.join("auth"),
         };
-        let identity = crate::identity::NodeIdentity::create(&key_path)?;
-        crate::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
+        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -368,7 +368,7 @@ pub mod test_support {
             kind_profiles,
             events.clone(),
         ));
-        let controller_lifetime = crate::state_lock::test_controller_lifetime(root)?;
+        let controller_lifetime = ryeos_node_runtime::state_lock::test_controller_lifetime(root)?;
         Ok(AppState {
             config: Arc::new(config),
             daemon_build: crate::build_info::get(),

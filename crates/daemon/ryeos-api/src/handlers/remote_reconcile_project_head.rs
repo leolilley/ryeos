@@ -176,10 +176,10 @@ impl ReconciliationOperation {
                 bail!("project-head reconciliation {label} is invalid");
             }
         }
-        ryeos_app::identity::validate_canonical_site_id(&self.source_site_id)?;
-        ryeos_app::identity::validate_canonical_site_id(&self.remote_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.source_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.remote_site_id)?;
         if let Some(origin) = self.requested_origin_site_id.as_deref() {
-            ryeos_app::identity::validate_canonical_site_id(origin)?;
+            ryeos_node_runtime::identity::validate_canonical_site_id(origin)?;
         }
         if !Path::new(&self.local_project_path).is_absolute() {
             bail!("project-head reconciliation local project path is not absolute");

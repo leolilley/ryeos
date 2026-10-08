@@ -892,15 +892,16 @@ fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
         return Ok(None);
     };
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     let principal_id = &attachment.compiled_binding.binding.principal_id;
     Ok((principal_id.as_str() != operator.principal_id().as_str()).then(|| principal_id.clone()))
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
     if let Some(attachment) = crate::seat_auth::compiled_ui_attachment() {
-        let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.config.operator_signing_key_path,
+        )?;
         if attachment.compiled_binding.binding.principal_id != operator.principal_id() {
             return Err(HandlerError::Forbidden(
                 "UI session has no retained local-operator store authority".into(),

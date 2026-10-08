@@ -219,14 +219,14 @@ impl CalibrationManifestResult {
 
 pub struct CalibrationManifestAuthority {
     cas: Arc<lillux::CasStore>,
-    node_identity: crate::identity::NodeIdentity,
+    node_identity: ryeos_node_runtime::identity::NodeIdentity,
     source: Arc<dyn BundleSourceSnapshotAuthority>,
 }
 
 impl CalibrationManifestAuthority {
     pub fn new(
         cas: Arc<lillux::CasStore>,
-        node_identity: crate::identity::NodeIdentity,
+        node_identity: ryeos_node_runtime::identity::NodeIdentity,
         source: Arc<dyn BundleSourceSnapshotAuthority>,
     ) -> Self {
         Self {
@@ -324,7 +324,7 @@ impl CalibrationManifestAuthority {
     }
 }
 
-struct NodeSigner<'a>(&'a crate::identity::NodeIdentity);
+struct NodeSigner<'a>(&'a ryeos_node_runtime::identity::NodeIdentity);
 
 impl Signer for NodeSigner<'_> {
     fn fingerprint(&self) -> &str {
@@ -474,7 +474,7 @@ mod tests {
         cas: &lillux::CasStore,
         result: &CalibrationManifestResult,
         expected_body: &str,
-        identity: &crate::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) {
         let output = ExternalContentManifestObject::from_value(
             &cas.get_object(result.evidence().output_content_manifest_hash())
@@ -520,9 +520,10 @@ mod tests {
         let tree = temporary.path().join("tree");
         write_source_manifest(&project, "core");
         fs::create_dir_all(tree.join(".ai")).unwrap();
-        let identity =
-            crate::identity::NodeIdentity::create(&temporary.path().join("node-signing-key.pem"))
-                .unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &temporary.path().join("node-signing-key.pem"),
+        )
+        .unwrap();
         let expected =
             super::super::admitted_build::materialize_release_manifest(&project, "core").unwrap();
         let unsigned = serde_yaml::to_string(&expected).unwrap();
@@ -661,9 +662,10 @@ mod tests {
         let tree = temporary.path().join("portable-tree");
         fs::create_dir_all(tree.join(".ai")).unwrap();
         fs::write(tree.join(".ai/manifest.yaml"), &canonical_json).unwrap();
-        let identity =
-            crate::identity::NodeIdentity::create(&temporary.path().join("derived-node.pem"))
-                .unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &temporary.path().join("derived-node.pem"),
+        )
+        .unwrap();
         let cas = Arc::new(lillux::CasStore::new(temporary.path().join("derived-cas")));
         let captured = super::super::tree::capture_bundle_tree(&tree, cas.as_ref()).unwrap();
         let snapshot = "c".repeat(64);
@@ -719,9 +721,10 @@ mod tests {
         let expected =
             super::super::admitted_build::materialize_release_manifest(project, "core").unwrap();
         let body = serde_yaml::to_string(&expected).unwrap();
-        let identity =
-            crate::identity::NodeIdentity::create(&temporary.path().join("source-key.pem"))
-                .unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &temporary.path().join("source-key.pem"),
+        )
+        .unwrap();
         let signed = lillux::signature::sign_content(&body, identity.signing_key(), "#", None);
         fs::write(project.join("bundles/core/.ai/manifest.yaml"), signed).unwrap();
 

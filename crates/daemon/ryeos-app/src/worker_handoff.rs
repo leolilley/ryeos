@@ -2679,12 +2679,12 @@ impl WorkerPlacementPreflightEvidence {
             bail!("preflight target operator authority contradicts its owner or origin");
         }
         match self.target_operator_authority.principal_class {
-            crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
                 if self.target_chain_owner_anchor_hash.is_none() =>
             {
                 bail!("local-operator preflight has no target chain owner anchor");
             }
-            crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator
                 if self.target_chain_owner_anchor_hash.is_some() =>
             {
                 bail!("remote-operator preflight carries a local chain owner anchor");
@@ -5025,7 +5025,8 @@ mod tests {
             crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: request.owner_principal.clone(),
                 origin_site_id: request.origin_site_id.clone(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "e".repeat(64),
                 scopes: vec!["*".to_owned()],
             },
@@ -5205,7 +5206,8 @@ mod tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: format!("fp:{}", "e".repeat(64)),
                 origin_site_id: "site:a".into(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "5".repeat(64),
                 scopes: vec!["*".into()],
             },

@@ -448,8 +448,8 @@ async fn state_lock_prevents_concurrent_daemons() {
         .expect("register core bundle");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&state_path),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&state_path),
     )
     .expect("hold first daemon state lock");
 

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use ryeos_app::node_document;
+use ryeos_node_runtime::node_document;
 use ryeos_scheduler::types::ScheduleSpecRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

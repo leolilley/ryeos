@@ -86,7 +86,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             ADMISSION_CLAIM_PROTOCOL_VERSION, req.protocol_version
         )));
     }
-    if ryeos_app::identity::validate_canonical_site_id(&req.origin_site_id).is_err() {
+    if ryeos_node_runtime::identity::validate_canonical_site_id(&req.origin_site_id).is_err() {
         return Err(HandlerError::BadRequest(
             "origin_site_id must use the canonical `site:<name>` form".to_string(),
         ));
@@ -125,10 +125,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     let (key_b64, verifying_key, fingerprint) = parse_public_key(&req.public_key)?;
-    let configured_operator = ryeos_app::identity::NodeIdentity::load(
-        &state.config.operator_signing_key_path,
-    )
-    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+    let configured_operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+            .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
             "configured operator cannot be admitted as remote_node; use the stopped-daemon offline conversion path"
@@ -158,7 +157,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
 
     let created_at = lillux::time::iso8601_now();
     let auth_dir = state.config.authorized_keys_dir.clone();
-    ryeos_app::identity::write_authorized_remote_node_key_toml(
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &auth_dir,
         &fingerprint,
         &key_b64,
@@ -174,8 +173,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     )
     .map_err(|e| {
         if matches!(
-            e.downcast_ref::<ryeos_app::identity::AuthorizedKeyCreateError>(),
-            Some(ryeos_app::identity::AuthorizedKeyCreateError::AlreadyExists)
+            e.downcast_ref::<ryeos_node_runtime::identity::AuthorizedKeyCreateError>(),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyCreateError::AlreadyExists)
         ) {
             HandlerError::Conflict(
                 "authorized-key fingerprint already exists; admission cannot replace or reclassify it"

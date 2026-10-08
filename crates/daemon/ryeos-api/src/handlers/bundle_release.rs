@@ -1646,7 +1646,7 @@ async fn run_authority_calibration(
         execution_environment,
     };
     evidence.validate()?;
-    struct IdentitySigner<'a>(&'a ryeos_app::identity::NodeIdentity);
+    struct IdentitySigner<'a>(&'a ryeos_node_runtime::identity::NodeIdentity);
     impl ryeos_state::signer::Signer for IdentitySigner<'_> {
         fn fingerprint(&self) -> &str {
             self.0.fingerprint()

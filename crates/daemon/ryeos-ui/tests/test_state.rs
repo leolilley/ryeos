@@ -99,7 +99,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
-    let config = ryeos_app::config::Config {
+    let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
         uds_path: tmpdir.path().join("test.sock"),
@@ -108,8 +108,8 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
-    let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
-    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
+    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
+    ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -183,7 +183,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
-    let config = ryeos_app::config::Config {
+    let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
         uds_path: tmpdir.path().join("test.sock"),
@@ -192,8 +192,8 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
-    let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
-    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
+    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
+    ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -258,13 +258,14 @@ pub fn local_operator_context(
     state: &AppState,
     scopes: Vec<String>,
 ) -> ryeos_app::handler_context::HandlerContext {
-    let operator = ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-        .expect("load fixture operator");
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+            .expect("load fixture operator");
     ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
         scopes,
         true,
-        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
         None,
     )
 }
@@ -305,8 +306,8 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
 #[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
-    config: ryeos_app::config::Config,
-    identity: ryeos_app::identity::NodeIdentity,
+    config: ryeos_node_runtime::config::Config,
+    identity: ryeos_node_runtime::identity::NodeIdentity,
     state_store: Arc<ryeos_app::state_store::StateStore>,
     engine: Arc<ryeos_engine::engine::Engine>,
     threads: Arc<ryeos_app::thread_lifecycle::ThreadLifecycleService>,
@@ -330,7 +331,7 @@ fn build_app_state(
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     let controller_lifetime =
-        ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),

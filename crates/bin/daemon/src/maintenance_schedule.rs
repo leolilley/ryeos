@@ -28,12 +28,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use ryeos_app::identity::NodeIdentity;
-use ryeos_app::node_document;
 use ryeos_app::node_policy::sections::maintenance::{
     NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy,
 };
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::node_document;
 
 /// Exact ownership discriminator written into generated schedule specs.
 /// Both fields must match before reconciliation may mutate or remove a spec.

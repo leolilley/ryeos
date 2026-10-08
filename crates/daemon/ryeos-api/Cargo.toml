@@ -11,6 +11,7 @@ default = []
 handoff-test-support = ["ryeos-app/test-support"]
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-stream = { workspace = true }
@@ -64,6 +65,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 rusqlite = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }

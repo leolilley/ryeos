@@ -36,11 +36,11 @@ use crate::runtime_db::external_execution::{
 };
 use crate::runtime_db::{WorkspaceRecord, WorkspaceState};
 use crate::state::AppState;
-use crate::state_lock::StateLockLease;
 use crate::vault::NodeVault;
 use crate::vault::external_channel::{ExternalChannelAuthority, ExternalChannelAuthorityAccess};
 use crate::vault::external_relay_bootstrap::ExternalRelayBootstrapAccess;
 use crate::vault::placement::PlacementCredential;
+use ryeos_node_runtime::state_lock::StateLockLease;
 
 /// Trusted controller adapter metadata and offline contract verification. This
 /// method must not perform provider I/O; all provider mutation is fenced by the
@@ -7938,9 +7938,10 @@ pub mod test_support {
                 .checked_add(30_000)
                 .context("ordinary external fixture contact deadline overflow")?,
         };
-        let operator =
-            crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?
-                .principal_id();
+        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.config.operator_signing_key_path,
+        )?
+        .principal_id();
         let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
             "project:external-placement-test".to_owned(),
             Some(project_root.to_path_buf()),
@@ -8306,9 +8307,10 @@ pub mod test_support {
         let occurrence_id = format!("occ-{}", &reservation.request_digest[..48]);
         if let Some((project_root, lifeline)) = workspace {
             let session_owner = reservation.owner.dedicated_session()?;
-            let operator =
-                crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?
-                    .principal_id();
+            let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+                &state.config.operator_signing_key_path,
+            )?
+            .principal_id();
             state
                 .state_store
                 .install_external_placement_test_fixture_with_workspace_owner(
@@ -9344,12 +9346,13 @@ mod tests {
         std::path::PathBuf,
     ) {
         let root = tempfile::tempdir().unwrap().keep();
-        let lock_path = crate::state_lock::default_lock_path(&root);
-        let controller = crate::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&root);
+        let controller = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
         let controller_lifetime = Arc::new(controller.retain());
         drop(controller);
         let state_dir = root.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -9443,7 +9446,8 @@ mod tests {
             .author_external_guest_assignment(&reservation, &occurrence, &intent, &contract)
             .unwrap();
         let root = lock_path.ancestors().nth(3).unwrap();
-        let identity = crate::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let verified = ryeos_external_execution::guest_import_authorization::verify_signed_guest_occurrence_assignment(
             signed.clone(),
             identity.verifying_key(),
@@ -9591,10 +9595,14 @@ mod tests {
         lock_path: &std::path::Path,
     ) -> (Arc<crate::state_store::StateStore>, Arc<StateLockLease>) {
         let root = lock_path.ancestors().nth(3).unwrap().to_path_buf();
-        assert_eq!(crate::state_lock::default_lock_path(&root), lock_path);
-        let controller = crate::state_lock::StateLock::acquire(lock_path).unwrap();
+        assert_eq!(
+            ryeos_node_runtime::state_lock::default_lock_path(&root),
+            lock_path
+        );
+        let controller = ryeos_node_runtime::state_lock::StateLock::acquire(lock_path).unwrap();
         let replacement_lifetime = Arc::new(controller.retain());
-        let identity = crate::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -12481,12 +12489,13 @@ mod tests {
         );
 
         let root = tempfile::tempdir().unwrap().keep();
-        let lock_path = crate::state_lock::default_lock_path(&root);
-        let controller = crate::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&root);
+        let controller = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
         let lifetime = Arc::new(controller.retain());
         drop(controller);
         let state_dir = root.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -12773,10 +12782,10 @@ mod tests {
         // bounded runtime shutdown. The in-flight permit is now the only
         // holder and must still exclude the replacement controller.
         drop(controller_lifetime);
-        assert!(crate::state_lock::StateLock::acquire(&lock_path).is_err());
+        assert!(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).is_err());
 
         drop(permit);
-        crate::state_lock::StateLock::acquire(&lock_path)
+        ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path)
             .expect("replacement remained excluded after the contact permit stopped");
     }
 }

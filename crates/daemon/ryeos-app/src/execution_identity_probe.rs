@@ -63,7 +63,7 @@ pub fn probe_node_execution_identity(
 /// execution evidence and must never be stamped on later launches.
 pub fn boot_node_execution_identity(
     state_store: &crate::state_store::StateStore,
-    identity: &crate::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     build: &crate::build_info::BuildInfo,
 ) -> Result<Arc<NodeExecutionIdentity>> {
     let substrate = probe_node_execution_identity(build, identity.fingerprint())?;
@@ -182,7 +182,7 @@ fn build_attestation(
 /// wrongly scoped, expired, or differently signed evidence fails closed.
 fn validate_current_attestation(
     attestation: &ryeos_state::objects::Attestation,
-    node_identity: &crate::identity::NodeIdentity,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
     subject_identity_digest: &str,
     identity_hash: &str,
     identity_digest: &str,
@@ -256,10 +256,14 @@ fn parse_linux_cpuinfo(cpuinfo: &str) -> (Option<String>, Vec<String>) {
 mod tests {
     use super::*;
 
-    fn node_identity() -> (tempfile::TempDir, crate::identity::NodeIdentity) {
+    fn node_identity() -> (
+        tempfile::TempDir,
+        ryeos_node_runtime::identity::NodeIdentity,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let identity =
-            crate::identity::NodeIdentity::create(&directory.path().join("node.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem"))
+                .unwrap();
         (directory, identity)
     }
 

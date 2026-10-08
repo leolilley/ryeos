@@ -29,7 +29,9 @@ pub async fn handle(
         // Standalone dispatch already owns this exact lock. Borrow that
         // authority, not a boolean mode flag or a second flock acquisition.
         // The live daemon deliberately does not expose its lifecycle lock.
-        let stopped_node = state.extensions.get::<ryeos_app::state_lock::StateLock>();
+        let stopped_node = state
+            .extensions
+            .get::<ryeos_node_runtime::state_lock::StateLock>();
         let result = ryeos_core_tools::actions::authorize::run_authorize_client_with_authority(
             params,
             &state.identity,

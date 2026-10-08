@@ -338,7 +338,7 @@ fn validate_retained_binding(
     raw: &str,
 ) -> Result<crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding>{
     ensure!(
-        raw.len() <= crate::node_document::MAX_ITEM_BYTES as usize + 16 * 1024,
+        raw.len() <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize + 16 * 1024,
         "retained bootstrap authority exceeds bound"
     );
     let binding: crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding =

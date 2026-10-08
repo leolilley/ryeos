@@ -1846,8 +1846,8 @@ fn validate_operation(operation: &Operation) -> Result<()> {
     {
         bail!("remote-worker workflow operator authority is invalid");
     }
-    ryeos_app::identity::validate_canonical_site_id(&operation.source_site_id)?;
-    ryeos_app::identity::validate_canonical_site_id(&operation.target_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(&operation.source_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(&operation.target_site_id)?;
     if !Path::new(&operation.local_project_path).is_absolute() {
         bail!("remote-worker workflow local project path is not absolute");
     }
@@ -2981,7 +2981,8 @@ mod tests {
 
     fn test_state_store(root: &Path) -> ryeos_app::state_store::StateStore {
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem"))
+                .unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -4024,8 +4025,10 @@ mod tests {
         });
         let directory = tempfile::tempdir().unwrap();
         let identity = Arc::new(
-            ryeos_app::identity::NodeIdentity::create(&directory.path().join("operator.pem"))
-                .unwrap(),
+            ryeos_node_runtime::identity::NodeIdentity::create(
+                &directory.path().join("operator.pem"),
+            )
+            .unwrap(),
         );
         let client = RemoteClient::new(&format!("http://{address}"), "fp:peer", identity);
 

@@ -27,11 +27,11 @@ use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
-use crate::config::Config;
 use crate::node_config::BundleRecord;
 use ryeos_isolation_protocol::{
     AdapterInspectionRequest, AdapterInspectionResponse, IsolationAdapterProtocolVersion,
 };
+use ryeos_node_runtime::config::Config;
 
 #[derive(Debug)]
 pub struct VerifiedBundleGeneration {
@@ -1320,7 +1320,7 @@ pub(crate) mod temporary_registered_backend_fixture {
         publisher_key_path: PathBuf,
         publisher: lillux::crypto::SigningKey,
         declaration: IsolationBackendDeclaration,
-        node_identity: crate::identity::NodeIdentity,
+        node_identity: ryeos_node_runtime::identity::NodeIdentity,
     }
 
     pub(crate) struct AdmittedRealm {
@@ -1370,7 +1370,7 @@ pub(crate) mod temporary_registered_backend_fixture {
             profile.validated_generation(&table, std::path::Path::new("c3a-profile.yaml"))?;
         let temporary = tempfile::tempdir()?;
         let app_root = temporary.path().canonicalize()?;
-        let node_identity = crate::identity::NodeIdentity::create(
+        let node_identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &app_root.join(".ai/node/identity/private_key.pem"),
         )?;
         let compiled = crate::node_policy::compile_generation(
@@ -1470,9 +1470,9 @@ pub(crate) mod temporary_registered_backend_fixture {
             registrations.join(format!("{BUNDLE}.yaml")),
             lillux::signature::sign_content(&registration, node_identity.signing_key(), "#", None),
         )?;
-        let lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
-            &app_root,
-        ))?;
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+        )?;
         crate::node_policy::generation::publish_policy_update(
             &app_root,
             &crate::node_policy::generation::NodePolicyUpdate::initial(generation),

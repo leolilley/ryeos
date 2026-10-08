@@ -111,7 +111,7 @@ pub fn default_lock_path(app_root: &Path) -> PathBuf {
 /// Production composition must retain the lease from the state lock it
 /// acquired before startup. A test application has no outer daemon process,
 /// so this helper performs that same acquisition once and returns only the
-/// restricted lifetime authority carried by [`crate::state::AppState`].
+/// restricted lifetime authority carried by the App service container.
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_controller_lifetime(app_root: &Path) -> Result<Arc<StateLockLease>> {
     let lock = StateLock::acquire(&default_lock_path(app_root))?;

@@ -224,20 +224,21 @@ pub(crate) fn configure_host_endpoints_while_locked(
     lifecycle: &crate::LifecycleStartLock,
 ) -> Result<NodeConfig> {
     lifecycle.ensure_protects_app_root(app_root)?;
-    let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
-        &ryeos_app::state_lock::default_lock_path(app_root),
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
         lillux::time::Duration::from_secs(30),
     )
     .context("endpoint configuration requires a stopped node")?;
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        bind,
-        uds_path,
-        force: true,
-        ..Default::default()
-    })
-    .context("resolve replacement node endpoints")?;
-    ryeos_app::config::replace_bootstrap_config(&config, &state_lock)?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            bind,
+            uds_path,
+            force: true,
+            ..Default::default()
+        })
+        .context("resolve replacement node endpoints")?;
+    ryeos_node_runtime::config::replace_bootstrap_config(&config, &state_lock)?;
     Ok(NodeConfig::from_app_config(&config))
 }
 
@@ -263,8 +264,8 @@ pub fn provision_host_service(
     // controller before returning, otherwise this root-only setup would leave
     // the node unable to perform its normal unprivileged lifecycle.
     lifecycle.grant_controller(&account)?;
-    let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
-        &ryeos_app::state_lock::default_lock_path(app_root),
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
         lillux::time::Duration::from_secs(5),
     )
     .context("host setup requires the selected node to be stopped")?;
@@ -278,7 +279,7 @@ pub fn provision_host_service(
         .open_pinned_regular_descendant(&identity_path, false)?
         .context("host setup requires an initialized node public identity")?;
     let observation = identity_file.observation()?;
-    let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+    let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
         &identity_file.read_stable_bounded(&observation, MAX_HOST_DOCUMENT_BYTES)?,
     )?;
     let node_fingerprint = identity.verified_fingerprint()?;
@@ -645,7 +646,7 @@ impl InstalledService {
     /// existing StateLock still protects this exact app root.
     pub fn verify_loaded_node_identity(
         &self,
-        identity: &ryeos_app::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<()> {
         self.binding.runtime.account.require_current_process()?;
         self.check_binding()?;
@@ -1136,17 +1137,18 @@ mod tests {
         let app_root = tmp.path().join("node");
         std::fs::create_dir_all(app_root.join(".ai/node")).unwrap();
         std::fs::create_dir_all(app_root.join(".ai/state")).unwrap();
-        let lock = ryeos_app::state_lock::StateLock::acquire(
-            &ryeos_app::state_lock::default_lock_path(&app_root),
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
         )
         .unwrap();
-        let initial = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-            app_root: Some(app_root.clone()),
-            uds_path: Some(tmp.path().join("first.sock")),
-            ..Default::default()
-        })
-        .unwrap();
-        ryeos_app::config::seed_bootstrap_config(&initial, &lock).unwrap();
+        let initial =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(app_root.clone()),
+                uds_path: Some(tmp.path().join("first.sock")),
+                ..Default::default()
+            })
+            .unwrap();
+        ryeos_node_runtime::config::seed_bootstrap_config(&initial, &lock).unwrap();
         drop(lock);
 
         let lifecycle = crate::LifecycleStartLock::try_acquire(&app_root)

@@ -13,7 +13,6 @@ use ryeos_api::handlers::{
     external_content_import, external_content_products, product_qualification_launch,
 };
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_app::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
 };
@@ -22,6 +21,7 @@ use ryeos_app::operator_external_content::products::ProductRequest;
 use ryeos_app::operator_external_content::{ImportRequest, RetainedProductImportRequest};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::NodeIdentitySigner;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, publish_product_witness,
 };
@@ -97,7 +97,7 @@ fn fixture_with_remote_owner(
         "ryeos.execute.service.external-content/launch-product-qualification".to_owned(),
         "ryeos.execute.service.external-content/launch-content-qualification".to_owned(),
     ];
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -699,7 +699,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
     let fixture = fixture_with_remote_owner(false, 4096, true, true);
     let operator =
         NodeIdentity::load(&fixture._directory.path().join("source-operator.pem")).unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &fixture.state.config.authorized_keys_dir,
         &fixture.state.identity,
@@ -763,7 +763,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
         )
     };
     read().unwrap();
-    let (grant_path, _, _) = ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    let (grant_path, _, _) = ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &fixture.state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),

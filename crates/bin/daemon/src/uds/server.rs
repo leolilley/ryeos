@@ -456,10 +456,12 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
             .get("thread_auth_token")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow!("dedicated-session start requires thread_auth_token"))?;
-        Some(ryeos_app::DedicatedWorkerCredentialTransport::from_transport(
-            callback.to_owned(),
-            thread_auth.to_owned(),
-        )?)
+        Some(
+            ryeos_app::DedicatedWorkerCredentialTransport::from_transport(
+                callback.to_owned(),
+                thread_auth.to_owned(),
+            )?,
+        )
     } else {
         None
     };
@@ -1931,7 +1933,6 @@ mod tests {
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
     use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
-    use ryeos_app::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::{NewThreadRecord, StateStore};
@@ -1939,6 +1940,7 @@ mod tests {
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
     use ryeos_app::write_barrier::WriteBarrier;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use std::sync::Arc;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -2276,7 +2278,7 @@ mod tests {
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
         let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
         let state = AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -2776,8 +2778,7 @@ mod tests {
         // therefore fails at callback authentication, not at startup gating.
         let (_app_tmp, app) = setup_app_state();
         let app = Arc::new(app);
-        let (mut barrier, _) =
-            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        let (mut barrier, _) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
         barrier.arm_from_app_generation(&app).unwrap();
         state.publish_application(barrier.publication(app).unwrap());
         let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
@@ -2793,8 +2794,7 @@ mod tests {
     fn captured_application_publication_refuses_installation_after_shutdown_close() {
         let (_tmp, app) = setup_app_state();
         let app = Arc::new(app);
-        let (mut barrier, _) =
-            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        let (mut barrier, _) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
         barrier.arm_from_app_generation(&app).unwrap();
         let publication = barrier.publication(app).unwrap();
 

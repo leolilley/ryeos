@@ -24,7 +24,6 @@ use axum::routing::post;
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
 use lillux::time::{Duration, MonotonicTimer};
-use ryeos_app::identity::NodeIdentity;
 use ryeos_app::runtime_db::{NewCredentialProfile, NewCredentialProfileReservation};
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord, NodeIdentitySigner, StateStore};
 use ryeos_app::worker_handoff::test_support::{
@@ -46,6 +45,7 @@ use ryeos_app::worker_handoff::{
     WorkerSessionHandoffProgress,
 };
 use ryeos_app::write_barrier::WriteBarrier;
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_state::{
     FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt,
     SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS, SyncJobAttemptState, SyncJobState,
@@ -144,7 +144,7 @@ fn authorize_remote_node(
 ) -> Result<()> {
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(remote.node.verifying_key().as_bytes());
-    ryeos_app::identity::write_authorized_remote_node_key_toml(
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &state_path
             .join(ryeos_engine::AI_DIR)
             .join("node/auth/authorized_keys"),
@@ -174,7 +174,7 @@ fn authorize_remote_operator(
         .encode(remote_operator.verifying_key().as_bytes());
     let fingerprint = lillux::signature::compute_fingerprint(&remote_operator.verifying_key());
     let identity = daemon_identity(state_path)?;
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state_path
             .join(ryeos_engine::AI_DIR)
             .join("node/auth/authorized_keys"),
@@ -188,7 +188,7 @@ fn authorize_remote_operator(
         &local.node_fp(),
         &lillux::time::iso8601_now(),
         &identity,
-        ryeos_app::identity::WildcardPolicy::Reject,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
         Some(remote_site_id),
         false,
@@ -3066,7 +3066,7 @@ fn plant_target_abort_state(
     let auth_dir = state_path
         .join(ryeos_engine::AI_DIR)
         .join("node/auth/authorized_keys");
-    ryeos_app::identity::write_authorized_remote_node_key_toml(
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &auth_dir,
         &source_fingerprint,
         &source_public_key,
@@ -4353,11 +4353,11 @@ async fn wait_for_handoff_terminal_state(
 }
 
 async fn wait_for_state_lock_release(state_path: &Path) -> Result<()> {
-    let lock_path = ryeos_app::state_lock::default_lock_path(state_path);
+    let lock_path = ryeos_node_runtime::state_lock::default_lock_path(state_path);
     let timer = MonotonicTimer::start();
     let mut last_error = None;
     while timer.elapsed() < Duration::from_secs(5) {
-        match ryeos_app::state_lock::StateLock::acquire_existing_read_only(&lock_path) {
+        match ryeos_node_runtime::state_lock::StateLock::acquire_existing_read_only(&lock_path) {
             Ok(lock) => {
                 drop(lock);
                 return Ok(());
