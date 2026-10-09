@@ -155,7 +155,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
             launch_timings: None,
             state: state.clone(),
             publication: None,
-            webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
+        webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
         })
         .await
         .unwrap();
@@ -259,9 +259,12 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
     let table = ryeos_api::routes::build_route_table(&[raw], &modes)
         .expect("compile recorded public route");
-    let (mut composition, _) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+    let (mut composition, _) =
+        ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
     composition.arm_from_app_generation(&state).unwrap();
-    let publication = composition.publication(Arc::new(state.clone())).unwrap();
+    let publication = composition
+        .publication(Arc::new(state.clone()))
+        .unwrap();
     let api_state = ApiState {
         app: publication.app().clone(),
         route_table: Arc::new(ArcSwap::from_pointee(table)),
@@ -390,7 +393,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
             launch_timings: None,
             state,
             publication: None,
-            webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
+        webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
         })
         .await
     {
@@ -436,7 +439,7 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
             launch_timings: None,
             state,
             publication: None,
-            webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
+        webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
         })
         .await
     {

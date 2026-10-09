@@ -816,8 +816,7 @@ mod tests {
             operator_authority: AdmittedOperatorAuthority {
                 owner_principal: format!("fp:{}", hash('4')),
                 origin_site_id: "site:controller".into(),
-                principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
                 grant_digest: hash('5'),
                 scopes: vec!["ryeos.execute.service.guest-runtime/materialize".into()],
             },

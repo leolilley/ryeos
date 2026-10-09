@@ -904,8 +904,7 @@ impl ResponseMode for ExecuteMode {
             RawRequestBody::Json => {}
             RawRequestBody::ObjectsPutV1 => {
                 return Err(RouteConfigError::InvalidResponseSpec {
-                    id: raw.id.clone(),
-                    mode: "execute".into(),
+                    id: raw.id.clone(), mode: "execute".into(),
                     reason: "execute mode does not accept the objects_put_v1 body profile".into(),
                 });
             }

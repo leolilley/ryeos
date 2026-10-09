@@ -5025,8 +5025,7 @@ mod tests {
             crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: request.owner_principal.clone(),
                 origin_site_id: request.origin_site_id.clone(),
-                principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "e".repeat(64),
                 scopes: vec!["*".to_owned()],
             },
@@ -5206,8 +5205,7 @@ mod tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: format!("fp:{}", "e".repeat(64)),
                 origin_site_id: "site:a".into(),
-                principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "5".repeat(64),
                 scopes: vec!["*".into()],
             },

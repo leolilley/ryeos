@@ -3334,8 +3334,7 @@ mod authority_tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: owner,
                 origin_site_id: "site:source".to_string(),
-                principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "f".repeat(64),
                 scopes: vec!["*".to_string()],
             },

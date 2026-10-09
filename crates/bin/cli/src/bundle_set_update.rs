@@ -30,11 +30,10 @@ pub(crate) async fn run(argv: &[String], console: &crate::tty::Console) -> Resul
         .with_context(|| format!("read exact update request {}", args.request.display()))?;
     let request =
         serde_yaml::from_slice(&raw).context("parse strict stopped bundle-set update request")?;
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })?;
     let report =
         ryeos_api::remote::bundle_set_update::update_stopped_bundle_set(&config.app_root, request)
             .await?;

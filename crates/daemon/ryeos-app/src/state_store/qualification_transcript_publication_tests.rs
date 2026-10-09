@@ -19,8 +19,7 @@ impl Harness {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("node-key.pem"))
-                .unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("node-key.pem")).unwrap();
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(

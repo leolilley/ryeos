@@ -344,12 +344,11 @@ impl BindingDocument {
                 && self.schema
                     == match &self.controller_transport {
                         ExternalControllerTransportSelection::HttpJson(_) => 17,
-                        ExternalControllerTransportSelection::ControllerFileRelay(_) =>
-                            match &self.workload {
-                                ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
-                                ExternalWorkloadBinding::StructuredSession(_) => 19,
-                                ExternalWorkloadBinding::DirectCommand {} => 0,
-                            },
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) => match &self.workload {
+                            ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
+                            ExternalWorkloadBinding::StructuredSession(_) => 19,
+                            ExternalWorkloadBinding::DirectCommand {} => 0,
+                        },
                     },
             "unsupported external placement binding schema for selected transport"
         );
@@ -622,8 +621,7 @@ impl RetainedExternalExecutionBinding {
         );
         ensure!(
             !self.signed_source.is_empty()
-                && self.signed_source.len()
-                    <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
+                && self.signed_source.len() <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
             "retained placement signed source is invalid"
         );
         self.document.validate()?;
@@ -1365,9 +1363,7 @@ mod workload_binding_tests {
         document.controller_transport = ExternalControllerTransportSelection::ControllerFileRelay(
             ryeos_state::external_execution::transport::ExternalControllerFileRelayContract {
                 schema: 3,
-                route_contract:
-                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT
-                        .into(),
+                route_contract: ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
                 owner_workspace_id: "render-owner".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,

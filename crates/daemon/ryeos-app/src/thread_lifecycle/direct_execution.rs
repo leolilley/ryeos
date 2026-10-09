@@ -4330,8 +4330,7 @@ mod tests {
         root: &Path,
     ) -> (crate::state_store::StateStore, Engine) {
         let state_dir = root.join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));

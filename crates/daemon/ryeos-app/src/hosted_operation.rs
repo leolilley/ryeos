@@ -671,8 +671,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runtime_state_dir = dir.path().join(".ai/state");
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&dir.path().join("node-key.pem"))
-                .unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&dir.path().join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
