@@ -1,14 +1,45 @@
-# ryeos:signed:2026-09-27T22:01:05Z:787f9f346b0bf4317f838883b3e44a70e8ba4ff2115cecc7069bd7d938a95c03:a31SYWNR4FzEw4z9GNRWSmFaEMylq8MjhXUJO2ISyuAhBDVcDz56SPHw7f1uHfg7f/Cui3E64szJzDHNmhjXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
-  - central-auth
   - core
+  - scheduling
   - standard
 policies:
   bundle_publication:
     schema: 2
     # Publication is disabled until the operator installs measured release authority.
     catalogs: []
+
+  # Explicit local capacity issuance; admission/signing and operation proof remain open.
+  # The account is root/node-bound and cannot be reminted by policy refresh.
+  native_capacity:
+    schema: 5
+    issuance_nonce: "33c88bbc57daa7c765d0fc460459d25a"
+    allowance:
+      # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.
+      storage_bytes: 1073815552
+      host_control_storage_bytes: 16777216
+      allocator_steps: 320000000
+      connection_tickets: 1024
+      cleanup_steps: 4800000
+    incarnation:
+      units:
+        storage_bytes: 67108864
+        host_control_storage_bytes: 1048576
+        allocator_steps: 20000000
+        connection_tickets: 64
+        cleanup_steps: 300000
+      maximum_occupancy_ms: 7200000
+      cleanup_occupancy_ms: 120000
+      # Finite syscall-attempt allowance; no cleanup-success guarantee.
+      host_release_steps: 64
+      # Explicit share of cleanup_steps; never duplicates the paid envelope.
+      outside_cleanup_steps: 32768
+    # Burned durably per recovery attempt; never native allocation credit.
+    recovery:
+      maximum_attempts: 32
+      work_per_attempt: 65536
+      control_storage_bytes: 262144
+      maximum_duration_ms: 120000
 
   accounting:
     schema: 2
@@ -78,7 +109,6 @@ policies:
       - ryeos.register.command.root.stop
       - ryeos.register.command.root.system
     bundle_source_caps:
-      central-auth: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
@@ -90,6 +120,8 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
+      scheduling:
+        - ryeos.register.command.dispatch.direct_execute_item_ref
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
@@ -117,7 +149,22 @@ policies:
     item_authored_retention: allow
     minimum_terminal_for: null
   maintenance:
-    schema: 1
+    schema: 4
+    offline_reset:
+      max_retained_operations: 4
+      max_source_roles: 13
+      max_copied_bytes: 268435456
+      max_retained_destination_bytes: 536870912
+      max_read_bytes: 2147483648
+      max_sql_vm_steps: 20000000
+      max_memory_bytes: 67108864
+      max_native_storage_bytes: 50331648
+      max_native_allocator_steps: 1048576
+      max_native_connections: 64
+      max_operation_millis: 300000
+      max_cleanup_millis: 60000
+      max_cleanup_steps: 1024
+      max_recovery_record_bytes: 2097152
     schedules:
       - schedule_id: maintenance-gc
         item_ref: service:maintenance/gc

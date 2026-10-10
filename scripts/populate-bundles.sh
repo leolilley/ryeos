@@ -10,19 +10,22 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
-#   full            core + central-auth + standard + web + browser + ryeos-ui +
+#   full            core + central-auth + scheduling + standard + web + browser + ryeos-ui +
 #                   hosted-node + codex + render-sandbox + opencode + local-inference (default)
-#   central-host    core + central-auth + standard + web + tv-tracker-authoring —
+#   central-host    core + central-auth + scheduling + standard + web + tv-tracker-authoring —
 #                   standard node plus the rye/web/search tool and app authoring
-#   standard        core + central-auth + standard — scheduler/graph/directive node
-#   local-inference core + central-auth + standard + local-inference — provider-neutral inference node
-#   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
-#   hosted-workflow core + central-auth + standard + hosted-node + codex + render-sandbox + opencode — hosted
+#   standard        core + scheduling + standard — scheduler/graph/directive node
+#   standard-central-auth Standard + optional web-app authentication
+#   local-inference core + scheduling + standard + local-inference — provider-neutral inference node
+#   hosted-node     core + hosted-node — lean remote-admission plane
+#   hosted-workflow core + scheduling + standard + hosted-node + codex + render-sandbox + opencode — hosted
 #                   node that also runs scheduler/graph/directive and hosted workloads
-#   bundle-source   core + central-auth + bundle-source — catalog authority only
+#   bundle-source   core + bundle-source — catalog authority only
+#   core            core — scheduler-free selection
+#   core-scheduling core + scheduling — explicit schedule selection
 #   release-authority full + bundle-release — isolated release authoring node
 #   release-artifacts internal non-installable union used to compile and publish
 #                   the native archive and every release image in one build
@@ -93,7 +96,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-authority|release-artifacts) ;;
+  full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|release-authority|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -232,6 +235,7 @@ ryeos_term_info "target directory $TARGET"
 
 CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
+SCHEDULING="$ROOT/bundles/scheduling"
 WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
@@ -249,10 +253,9 @@ PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
 PUBLISHER_FP="$(publisher_fingerprint)"
 assert_node_init_profile_inventory
 
-# Bin-managed bundles for this set come from the shared definition (central-auth
-# is excluded — its Python implementation is tool support rather than a
-# target-triple binary, and it is published unconditionally
-# below, so it must never be cleaned/staged here).
+# Bin-managed bundles come from the explicit set. Optional central-auth is
+# interpreted tool support, not a target-triple executable, and is published
+# separately only when selected.
 BUNDLE_DIRS=()
 while IFS= read -r _bundle_name; do
   BUNDLE_DIRS+=("$ROOT/bundles/$_bundle_name")
@@ -391,7 +394,7 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
-  standard|local-inference)
+  standard|standard-central-auth|local-inference)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
@@ -411,7 +414,7 @@ case "$BUNDLE_SET" in
     pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
           ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
-  bundle-source)
+  bundle-source|core|core-scheduling)
     pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
           ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
@@ -442,6 +445,8 @@ if [[ -n "$CRATES_OVERRIDE" ]]; then
   fi
 fi
 
+# Publication builds must use the reviewed lockfile. A required resolution
+# change is reconciled before construction rather than signed implicitly.
 # Static admitted worker packages are built under an explicit target and must
 # not also be compiled through the ordinary host package graph.
 host_pkgs=()
@@ -496,8 +501,12 @@ if [[ "$BUILD_PROFILE" == latency-profiling ]]; then
   fi
 fi
 for p in "${host_pkgs[@]}"; do
-  if [[ "$p" == ryeos-handler-bins ]]; then
-    selected_features+=("ryeos-handler-bins/full-handlers")
+  composition_feature="$(ryeos_bundle_set_cargo_features "$BUNDLE_SET" "$p")" || {
+    ryeos_term_fail "cannot select native composition for $BUNDLE_SET/$p"
+    exit 2
+  }
+  if [[ -n "$composition_feature" ]]; then
+    selected_features+=("$composition_feature")
   fi
 done
 if (( ${#selected_features[@]} > 0 )); then
@@ -512,7 +521,7 @@ if (( ${#host_pkgs[@]} > 0 )); then
   ryeos_term_update "building selected release binaries" "${host_pkgs[*]}"
   ryeos_term_suspend
   ryeos_term_info "host release build: node, CLI, runtimes, tools, and clients"
-  "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
+  "$CARGO" build --release --locked "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
   ryeos_term_resume "selected release build complete"
 else
   ryeos_term_update "retaining release binaries" "no host packages selected"
@@ -547,7 +556,7 @@ if (( ${#static_build_labels[@]} > 0 )); then
   done
   ryeos_term_info "static worker build: ${static_build_labels[*]}"
   RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-    "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+    "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
   ryeos_term_resume "selected static worker build complete"
 else
   ryeos_term_update "retaining static worker binaries" "no static packages selected"
@@ -608,16 +617,32 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$C
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-# central-auth ships in the source tree and is discovered/parsed at init, so its
-# manifest must stay current with the manifest schema. It depends only on core's
-# tool + config kinds, so publish it right after core (now that core carries a
-# published refs root) with core as its registry root.
-ryeos_term_update "publishing central-auth bundle" "signed manifests"
-RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$ROOT/bundles/central-auth" \
-  --registry-root "$CORE" \
-  --owner "$OWNER" >/dev/null
+# Application authentication is published only for explicit app compositions.
+# Presence in the repository never makes it a baseline dependency.
+while IFS= read -r selected_bundle; do
+  if [[ "$selected_bundle" == central-auth ]]; then
+    ryeos_term_update "publishing central-auth bundle" "signed manifests"
+    RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$ROOT/bundles/central-auth" \
+      --registry-root "$CORE" \
+      --owner "$OWNER" >/dev/null
+    break
+  fi
+done < <(ryeos_bundle_set_names "$BUNDLE_SET")
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "local-inference" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+# Scheduling owns service/command content, requires only Core kinds, and has
+# no separately staged binary. Publish it according to the shared membership
+# selector rather than inferring it from Standard's presence.
+while IFS= read -r selected_bundle; do
+  if [[ "$selected_bundle" == scheduling ]]; then
+    ryeos_term_update "publishing scheduling bundle" "signed manifests"
+    RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$SCHEDULING" \
+      --registry-root "$CORE" \
+      --owner "$OWNER" >/dev/null
+    break
+  fi
+done < <(ryeos_bundle_set_names "$BUNDLE_SET")
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "standard-central-auth" || "$BUNDLE_SET" == "local-inference" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing standard bundle" "signed manifests"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.

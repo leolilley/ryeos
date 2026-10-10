@@ -1,4 +1,3 @@
-# ryeos:signed:2026-09-30T11:47:50Z:97abbe3ce4d4e3ce270c04648c74dfbeab91f56470b6d42233e8a54c23b81d1c:qVxZSRpAo+I1RwHr1kwfwcXb4oMl5lHbBcNcuF5U2buhNe5TQbnH77iFyBtwjOO6CyR4tSWKZq+yuve3JnMsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Exact publisher-authored ownership of native payloads by RyeOS bundle.
@@ -34,7 +33,7 @@ payload_ownership:
           cargo_package: ryeos-external-guest-runtime-producer
           build_class: static
     - bundle_name: core
-      bundle_sets: [bundle-source, central-host, full, hosted-node, hosted-workflow, local-inference, release-artifacts, release-authority, standard]
+      bundle_sets: [bundle-source, central-host, core, core-scheduling, full, hosted-node, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       payloads:
         - binary: rye-composer-identity
           cargo_package: ryeos-handler-bins
@@ -97,7 +96,7 @@ payload_ownership:
           cargo_package: ryeos-client-web
           build_class: release
     - bundle_name: standard
-      bundle_sets: [central-host, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard]
+      bundle_sets: [central-host, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       payloads:
         - binary: rye-composer-extends-chain
           cargo_package: ryeos-handler-bins

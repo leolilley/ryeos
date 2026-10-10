@@ -10,14 +10,14 @@ HANDLER_FEATURES_BY_BINARY = {
     "rye-parser-yaml-document": ["basic-parsers"],
     "rye-parser-yaml-header-document": ["basic-parsers"],
     "rye-parser-regex-kv": ["basic-parsers"],
-    "rye-composer-extends-chain": ["full-handlers"],
-    "rye-composer-identity": ["full-handlers"],
-    "ryeos-directive-launch-preparer": ["full-handlers"],
-    "ryeos-graph-effective-validator": ["full-handlers"],
-    "ryeos-graph-launch-preparer": ["full-handlers"],
-    "ryeos-graph-execution-evidence": ["full-handlers"],
-    "ryeos-direct-execution-evidence": ["full-handlers"],
-    "ryeos-scoped-qualification-execution-evidence": ["full-handlers"],
+    "rye-composer-extends-chain": ["extends-composer"],
+    "rye-composer-identity": ["core-handlers"],
+    "ryeos-directive-launch-preparer": ["directive-handlers"],
+    "ryeos-graph-effective-validator": ["graph-handlers"],
+    "ryeos-graph-launch-preparer": ["graph-handlers"],
+    "ryeos-graph-execution-evidence": ["graph-handlers"],
+    "ryeos-direct-execution-evidence": ["core-handlers"],
+    "ryeos-scoped-qualification-execution-evidence": ["core-handlers"],
 }
 
 def required_features(package, binary):
@@ -34,7 +34,8 @@ def feature_selections(records):
         selected.setdefault(record["cargo_package"], set()).update(record["required_features"])
     result = []
     for package, features in sorted(selected.items()):
-        if "full-handlers" in features: features = {"full-handlers"}
+        if features & {"graph-handlers", "directive-handlers"}: features -= {"core-handlers", "basic-parsers", "extends-composer"}
+        elif "core-handlers" in features: features.discard("basic-parsers")
         result.append({"cargo_package":package,"features":sorted(features)})
     return result
 

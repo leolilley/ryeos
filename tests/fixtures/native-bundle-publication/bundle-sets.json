@@ -1,24 +1,97 @@
 {
   "sets": {
-    "bundle-source": ["core", "central-auth", "bundle-source"],
-    "central-host": ["core", "central-auth", "standard", "web", "tv-tracker-authoring"],
-    "full": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "render-sandbox", "opencode", "local-inference"],
-    "hosted-node": ["core", "central-auth", "hosted-node"],
-    "hosted-workflow": ["core", "central-auth", "standard", "hosted-node", "codex", "render-sandbox", "opencode"],
-    "local-inference": ["core", "central-auth", "standard", "local-inference"],
-    "release-authority": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "render-sandbox", "opencode", "local-inference", "bundle-release"],
-    "standard": ["core", "central-auth", "standard"]
+    "bundle-source": [
+      "core",
+      "bundle-source"
+    ],
+    "central-host": [
+      "core",
+      "central-auth",
+      "scheduling",
+      "standard",
+      "web",
+      "tv-tracker-authoring"
+    ],
+    "core": [
+      "core"
+    ],
+    "core-scheduling": [
+      "core",
+      "scheduling"
+    ],
+    "full": [
+      "core",
+      "central-auth",
+      "scheduling",
+      "standard",
+      "web",
+      "browser",
+      "ryeos-ui",
+      "hosted-node",
+      "codex",
+      "render-sandbox",
+      "opencode",
+      "local-inference"
+    ],
+    "hosted-node": [
+      "core",
+      "hosted-node"
+    ],
+    "hosted-workflow": [
+      "core",
+      "scheduling",
+      "standard",
+      "hosted-node",
+      "codex",
+      "render-sandbox",
+      "opencode"
+    ],
+    "local-inference": [
+      "core",
+      "scheduling",
+      "standard",
+      "local-inference"
+    ],
+    "release-authority": [
+      "core",
+      "central-auth",
+      "scheduling",
+      "standard",
+      "web",
+      "browser",
+      "ryeos-ui",
+      "hosted-node",
+      "codex",
+      "render-sandbox",
+      "opencode",
+      "local-inference",
+      "bundle-release"
+    ],
+    "standard": [
+      "core",
+      "scheduling",
+      "standard"
+    ],
+    "standard-central-auth": [
+      "core",
+      "scheduling",
+      "standard",
+      "central-auth"
+    ]
   },
   "profiles": {
     "bundle-source": "bundle-source",
     "central-host": "central-host",
     "contained-workflow": "hosted-workflow",
+    "core": "core",
+    "core-scheduling": "core-scheduling",
     "development": "full",
     "full": "full",
     "hosted-node": "hosted-node",
     "hosted-workflow": "hosted-workflow",
     "local-inference": "local-inference",
     "release-authority": "release-authority",
-    "standard": "standard"
+    "standard": "standard",
+    "standard-central-auth": "standard-central-auth"
   }
 }

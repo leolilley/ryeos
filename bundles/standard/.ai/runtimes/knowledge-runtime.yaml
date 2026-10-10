@@ -1,4 +1,3 @@
-# ryeos:signed:2026-09-05T01:24:39Z:9751005fbd5c84e5821b0313dee07d63a7bbe98642413a8cd7a5ae6e02050c9f:/nLZC84LBU4AoPxhpPAmsm3X9a1qvGAzwPOTad2XXZvjYr8PPL4yi2qHWCG9Mqg2QQUGGhLFrgiSG3ItzJUGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: knowledge
 default: true
@@ -49,4 +48,4 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {}
-description: "Knowledge interpretation runtime — V5.3 stub, V5.4 lights up"
+description: "Knowledge interpretation runtime for verified context composition, lexical query, knowledge-graph traversal and validation"
