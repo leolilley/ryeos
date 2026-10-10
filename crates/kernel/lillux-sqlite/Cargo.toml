@@ -1,0 +1,17 @@
+# Draft; ROOT owns workspace selection and dependency activation.
+[package]
+name = "lillux-sqlite"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = { workspace = true }
+libc = { workspace = true }
+sha2 = { workspace = true }
+lillux = { path = "../lillux" }
+rusqlite = { workspace = true }
+libsqlite3-sys = { version = "0.28.0", features = ["ryeos-bound-vfs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
