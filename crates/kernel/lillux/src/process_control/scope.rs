@@ -978,6 +978,26 @@ impl ProcessScopeConfiguration {
         Err("controller process-tree observation is unavailable on this OS".to_owned())
     }
 
+    /// Controller-side proof that the current process was placed by the host
+    /// supervisor into this delegation's administrator-owned controller leaf.
+    /// Association alone is not placement: a process started directly on an
+    /// associated app root is refused, naming its cgroup and the expected leaf.
+    pub fn require_current_process_in_controller(
+        &self,
+        account: &ControllerAccount,
+    ) -> Result<(), String> {
+        self.validate()?;
+        account.validate()?;
+        #[cfg(target_os = "linux")]
+        {
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            let AccountBackend::Unix { uid, .. } = account.0;
+            super::cgroup::require_current_process_in_controller(parent, uid)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("controller placement observation is unavailable on this OS".to_owned())
+    }
+
     /// Explicit host-supervisor entry, not worker execution. Replaces this
     /// administrator process with an unprivileged controller after exact
     /// placement. It installs no service and changes no application policy.
@@ -1120,6 +1140,14 @@ impl ProcessScopeConfiguration {
             // including authorized intra-node placement changes. Install them
             // before controller placement, privilege drop and daemon exec.
             bootstrap.install_resource_limits(node_resources)?;
+            // Per-process ceilings survive credential drop and exec. Raise them
+            // while still administrator: the daemon locks its resident region
+            // at startup, and host supervisors commonly inherit a small
+            // RLIMIT_MEMLOCK. A prepared OCI controller keeps its runtime's
+            // configured ceilings.
+            if oci_lifecycle.is_none() {
+                super::cgroup::install_controller_rlimits(node_resources)?;
+            }
             command
                 .args(arguments)
                 .env_clear()

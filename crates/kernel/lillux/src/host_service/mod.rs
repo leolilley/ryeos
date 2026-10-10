@@ -35,6 +35,10 @@ pub trait HostServiceController: Send + Sync {
     fn check_available(&self) -> Result<()>;
     fn request_up(&self) -> Result<()>;
     fn request_down(&self) -> Result<()>;
+    /// Want the service down without signalling a running process: the
+    /// supervisor does not restart it after its next exit. For a supervised
+    /// process that is already exiting on its own and must not be restarted.
+    fn inhibit_restart(&self) -> Result<()>;
     /// Opaque native boot disposition retained by a client's upgrade journal.
     fn capture_upgrade_state(&self) -> Result<serde_json::Value>;
     fn restore_upgrade_state(&self, state: &serde_json::Value) -> Result<()>;

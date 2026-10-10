@@ -25,7 +25,10 @@ const HOST_SERVICE_DELEGATIONS: &str = "lillux-host-services";
 // Bounded kernel interface records, not workload output or acquisition policy.
 const MAX_CONTROL_RECORD_BYTES: usize = 4096;
 const OCI_CONTROLLER_ROOT: &str = "ryeos-controller-root";
+const CONTROLLER_LEAF: &str = "controller";
 const OCI_INIT_LEAF: &str = "ryeos-init";
+const OCI_INIT_SUBJECT: &str = "OCI init";
+const CURRENT_PROCESS_SUBJECT: &str = "current process";
 const MAX_OCI_RETIREMENT_ENTRIES: usize = 16_384;
 const MAX_OCI_RETIREMENT_DEPTH: usize = 64;
 
@@ -107,7 +110,7 @@ pub(crate) fn open_oci_membership(init_pid: u32) -> Result<File, String> {
 }
 
 fn observed_oci_membership(membership: &File) -> Result<std::path::PathBuf, String> {
-    let relative = unified_cgroup_from_file(membership)?;
+    let relative = unified_cgroup_from_file(membership, OCI_INIT_SUBJECT)?;
     Ok(Path::new("/sys/fs/cgroup").join(
         relative.strip_prefix("/")
             .map_err(|_| "OCI cgroup membership is not root-relative")?,
@@ -646,36 +649,41 @@ pub(crate) fn install_oci_controller_mount(
 
 fn unified_process_cgroup(pid: u32) -> Result<std::path::PathBuf, String> {
     let membership = open_oci_membership(pid)?;
-    unified_cgroup_from_file(&membership)
+    unified_cgroup_from_file(&membership, OCI_INIT_SUBJECT)
 }
 
-fn unified_cgroup_from_file(membership: &File) -> Result<std::path::PathBuf, String> {
+/// `subject` names the observed process in every refusal, e.g. "OCI init".
+fn unified_cgroup_from_file(
+    membership: &File,
+    subject: &str,
+) -> Result<std::path::PathBuf, String> {
     let mut bytes = vec![0_u8; MAX_CONTROL_RECORD_BYTES + 1];
     let mut offset = 0;
     while offset < bytes.len() {
         let read = membership
             .read_at(&mut bytes[offset..], offset as u64)
-            .map_err(|error| format!("read OCI init cgroup membership: {error}"))?;
+            .map_err(|error| format!("read {subject} cgroup membership: {error}"))?;
         if read == 0 {
             break;
         }
         offset += read;
     }
     bytes.truncate(offset);
-    let raw = std::str::from_utf8(&bytes).map_err(|_| "OCI init cgroup membership is not UTF-8")?;
+    let raw = std::str::from_utf8(&bytes)
+        .map_err(|_| format!("{subject} cgroup membership is not UTF-8"))?;
     if raw.len() > MAX_CONTROL_RECORD_BYTES {
-        return Err("OCI init cgroup membership exceeds the bounded record".to_owned());
+        return Err(format!("{subject} cgroup membership exceeds the bounded record"));
     }
     let mut unified = raw.lines().filter_map(|line| line.strip_prefix("0::"));
     let value = unified
         .next()
-        .ok_or("OCI init has no unified cgroup-v2 membership")?;
+        .ok_or_else(|| format!("{subject} has no unified cgroup-v2 membership"))?;
     if unified.next().is_some()
         || !value.starts_with('/')
         || value.contains("//")
         || value.split('/').any(|part| part == "." || part == "..")
     {
-        return Err("OCI init cgroup-v2 membership is not canonical".to_owned());
+        return Err(format!("{subject} cgroup-v2 membership is not canonical"));
     }
     Ok(value.into())
 }
@@ -777,6 +785,106 @@ pub(crate) fn require_controller_tree_empty(path: &Path, uid: u32) -> Result<(),
     let events = open_control(&descriptor, c"cgroup.events", libc::O_RDONLY)?;
     if parse_events(&read_control(&events)?)?.populated {
         return Err("controller process tree still has live members; retained recovery must settle before package replacement".to_owned());
+    }
+    Ok(())
+}
+
+/// Controller-side placement proof for a supervised launch. The host
+/// supervisor moves the controller into the administrator-owned `controller`
+/// leaf before dropping privileges; the account cannot place itself there.
+/// A delegation the account still owns from an earlier supervised run is not
+/// placement, so a process started directly on the associated app root is
+/// refused here, naming both cgroups.
+pub(crate) fn require_current_process_in_controller(
+    delegation: &Path,
+    uid: u32,
+) -> Result<(), String> {
+    if unsafe { libc::geteuid() } != uid {
+        return Err(
+            "supervised placement must be proved by the delegated controller account".to_owned(),
+        );
+    }
+    let membership = File::open("/proc/self/cgroup")
+        .map_err(|error| format!("open current process cgroup membership: {error}"))?;
+    require_controller_membership_file(&membership, delegation)?;
+    // Administrator ownership below proves host placement only when uid 0 is
+    // the host's uid 0, i.e. in the initial user namespace.
+    let uid_map = File::open("/proc/self/uid_map")
+        .map_err(|error| format!("open current process uid map: {error}"))?;
+    require_initial_user_namespace_file(&uid_map)?;
+    let directory = PinnedDirectory::open(delegation)
+        .map_err(display)?
+        .ok_or("host delegation is absent")?;
+    let descriptor = directory.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&descriptor)?;
+    if descriptor.metadata().map_err(display)?.uid() != uid {
+        return Err("host delegation is not owned by the controller account".to_owned());
+    }
+    for name in [c"cgroup.freeze", c"cgroup.kill"] {
+        let control = open_control(&descriptor, name, libc::O_PATH)?;
+        let metadata = control.metadata().map_err(display)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err("delegation lifecycle controls must remain administrator-owned".to_owned());
+        }
+    }
+    let controller = open_control(&descriptor, c"controller", libc::O_PATH | libc::O_DIRECTORY)?;
+    let metadata = controller.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+        return Err("controller leaf must be administrator-owned and private".to_owned());
+    }
+    Ok(())
+}
+
+/// The identity mapping of the full 32-bit uid range exists only in the
+/// initial user namespace; any nested namespace maps a narrower range.
+fn require_initial_user_namespace_file(uid_map: &File) -> Result<(), String> {
+    let mut bytes = vec![0_u8; MAX_CONTROL_RECORD_BYTES + 1];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let read = uid_map
+            .read_at(&mut bytes[offset..], offset as u64)
+            .map_err(|error| format!("read current process uid map: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        offset += read;
+    }
+    if offset > MAX_CONTROL_RECORD_BYTES {
+        return Err("current process uid map exceeds the bounded record".to_owned());
+    }
+    let raw = std::str::from_utf8(&bytes[..offset])
+        .map_err(|_| "current process uid map is not UTF-8")?;
+    let mut lines = raw.lines();
+    let initial = matches!(
+        (lines.next(), lines.next()),
+        (Some(line), None) if line.split_whitespace().eq(["0", "0", "4294967295"])
+    );
+    if !initial {
+        return Err(format!(
+            "supervised launch refused: this process is not in the initial user namespace \
+             (uid map {:?}); host placement cannot be proved from a nested namespace",
+            raw.trim_end()
+        ));
+    }
+    Ok(())
+}
+
+fn require_controller_membership_file(membership: &File, delegation: &Path) -> Result<(), String> {
+    let relative = unified_cgroup_from_file(membership, CURRENT_PROCESS_SUBJECT)?;
+    let observed = Path::new("/sys/fs/cgroup").join(
+        relative
+            .strip_prefix("/")
+            .map_err(|_| "current process cgroup membership is not root-relative")?,
+    );
+    let expected = delegation.join(CONTROLLER_LEAF);
+    if observed != expected {
+        return Err(format!(
+            "supervised launch refused: this process is in cgroup {} but its host \
+             association places the node controller in {}; start the node through its \
+             host service rather than directly",
+            observed.display(),
+            expected.display()
+        ));
     }
     Ok(())
 }
@@ -1066,6 +1174,106 @@ impl ControllerBootstrap {
         super::scope::ControllerAccount::unix(uid, gid).configure_command(command)?;
         Ok(())
     }
+}
+
+/// One per-process resource ceiling; `libc::RLIM_INFINITY` is unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessRlimit {
+    pub(crate) soft: u64,
+    pub(crate) hard: u64,
+}
+
+/// Raised per-process ceilings for one controller exec; `None` keeps the
+/// inherited value. Ceilings are only raised, never lowered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ControllerRlimitPlan {
+    pub(crate) memlock: Option<ProcessRlimit>,
+    pub(crate) nofile: Option<ProcessRlimit>,
+}
+
+/// The lock ceiling is the fixed controller requirement, bounded by the node
+/// envelope's `maximum_memory_bytes` (locked pages are charged to that memory
+/// cgroup anyway). It is not the whole envelope, because every worker the
+/// controller spawns inherits it. The descriptor soft ceiling is raised
+/// within the host's existing hard limit; no host-wide maximum is raised.
+pub(crate) fn controller_rlimit_plan(
+    limits: super::scope::ProcessScopeResourceLimits,
+    memlock: ProcessRlimit,
+    nofile: ProcessRlimit,
+) -> ControllerRlimitPlan {
+    let target = limits
+        .maximum_memory_bytes
+        .min(super::CONTROLLER_MEMLOCK_CEILING_BYTES);
+    let memlock = (memlock.soft < target).then(|| ProcessRlimit {
+        soft: target,
+        hard: memlock.hard.max(target),
+    });
+    let target = nofile.hard.min(super::CONTROLLER_NOFILE_SOFT_CEILING);
+    let nofile = (nofile.soft < target).then_some(ProcessRlimit {
+        soft: target,
+        hard: nofile.hard,
+    });
+    ControllerRlimitPlan { memlock, nofile }
+}
+
+fn display_rlimit(value: u64) -> String {
+    if value == libc::RLIM_INFINITY as u64 { "unlimited".to_owned() } else { value.to_string() }
+}
+
+/// Administrator-side, before credential drop: raising a hard ceiling needs
+/// the privilege the controller is about to give up. Each raised value is
+/// read back; any refusal names the resource, the inherited and the target
+/// ceilings, and stops the launch before exec.
+pub(crate) fn install_controller_rlimits(
+    limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+    limits.validate()?;
+    let resources = [
+        (libc::RLIMIT_MEMLOCK, "RLIMIT_MEMLOCK"),
+        (libc::RLIMIT_NOFILE, "RLIMIT_NOFILE"),
+    ];
+    // The resource type differs between C libraries; let it be inferred.
+    let current_rlimit = |resource, name: &str| -> Result<ProcessRlimit, String> {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if unsafe { libc::getrlimit(resource, &mut limit) } != 0 {
+            return Err(format!("read controller {name}: {}", io::Error::last_os_error()));
+        }
+        Ok(ProcessRlimit { soft: limit.rlim_cur as u64, hard: limit.rlim_max as u64 })
+    };
+    let memlock = current_rlimit(resources[0].0, resources[0].1)?;
+    let nofile = current_rlimit(resources[1].0, resources[1].1)?;
+    let plan = controller_rlimit_plan(limits, memlock, nofile);
+    for ((resource, name), inherited, target) in [
+        (resources[0], memlock, plan.memlock),
+        (resources[1], nofile, plan.nofile),
+    ] {
+        let Some(target) = target else { continue };
+        let requested = libc::rlimit {
+            rlim_cur: target.soft as libc::rlim_t,
+            rlim_max: target.hard as libc::rlim_t,
+        };
+        if unsafe { libc::setrlimit(resource, &requested) } != 0 {
+            return Err(format!(
+                "raise controller {name} from {}/{} to {}/{}: {}",
+                display_rlimit(inherited.soft),
+                display_rlimit(inherited.hard),
+                display_rlimit(target.soft),
+                display_rlimit(target.hard),
+                io::Error::last_os_error()
+            ));
+        }
+        let installed = current_rlimit(resource, name)?;
+        if installed.soft < target.soft || installed.hard < target.hard {
+            return Err(format!(
+                "controller {name} reads back {}/{} after raising to {}/{}",
+                display_rlimit(installed.soft),
+                display_rlimit(installed.hard),
+                display_rlimit(target.soft),
+                display_rlimit(target.hard)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Exact child within an independently authorized, descriptor-pinned parent.
@@ -2458,6 +2666,113 @@ fn display(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn supervised_claim_requires_the_exact_controller_leaf() {
+        let delegation = Path::new("/sys/fs/cgroup/lillux-host-services/ryeos-fixture");
+        for (relative, expected) in [
+            ("/lillux-host-services/ryeos-fixture/controller", true),
+            ("/lillux-host-services/ryeos-fixture", false),
+            ("/lillux-host-services/ryeos-fixture/controller/worker", false),
+            ("/lillux-host-services/ryeos-other/controller", false),
+            ("/user.slice/user-1000.slice/session-1.scope", false),
+        ] {
+            let mut fixture = tempfile::NamedTempFile::new().unwrap();
+            std::io::Write::write_all(fixture.as_file_mut(), format!("0::{relative}\n").as_bytes()).unwrap();
+            let result = require_controller_membership_file(fixture.as_file(), delegation);
+            assert_eq!(result.is_ok(), expected, "{relative}: {result:?}");
+            if let Err(error) = result {
+                assert!(error.contains("supervised launch refused"), "{error}");
+                assert!(error.contains(&format!("/sys/fs/cgroup{relative}")), "{error}");
+                assert!(error.contains("ryeos-fixture/controller"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn supervised_claim_requires_the_initial_user_namespace() {
+        for (uid_map, expected) in [
+            ("         0          0 4294967295\n", true),
+            ("0 0 4294967295", true),
+            ("         0       1000          1\n", false),
+            ("         0     100000      65536\n", false),
+            ("         0          0 4294967294\n", false),
+            ("         0          0 4294967295\n      1000       1000          1\n", false),
+            ("", false),
+        ] {
+            let mut fixture = tempfile::NamedTempFile::new().unwrap();
+            std::io::Write::write_all(fixture.as_file_mut(), uid_map.as_bytes()).unwrap();
+            let result = require_initial_user_namespace_file(fixture.as_file());
+            assert_eq!(result.is_ok(), expected, "{uid_map:?}: {result:?}");
+            if let Err(error) = result {
+                assert!(error.contains("initial user namespace"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn current_test_process_is_not_a_placed_controller() {
+        // A directly started process, such as this test, is never inside a
+        // host delegation's controller leaf.
+        let delegation = Path::new("/sys/fs/cgroup/lillux-host-services/ryeos-placement-fixture");
+        let uid = unsafe { libc::geteuid() };
+        let error = require_current_process_in_controller(delegation, uid).unwrap_err();
+        assert!(error.contains("supervised launch refused"), "{error}");
+        let error = require_current_process_in_controller(delegation, uid.wrapping_add(1)).unwrap_err();
+        assert!(error.contains("controller account"), "{error}");
+    }
+
+    #[test]
+    fn controller_rlimits_cover_the_resident_region_and_never_lower() {
+        const MIB: u64 = 1024 * 1024;
+        let infinity = libc::RLIM_INFINITY as u64;
+        let ceiling = super::super::CONTROLLER_MEMLOCK_CEILING_BYTES;
+        let limits = super::super::scope::ProcessScopeResourceLimits {
+            maximum_memory_bytes: 4096 * MIB,
+            maximum_processes: 2048,
+        };
+        // runsvdir on the reference host: 8 MiB memlock, 1024/4096 descriptors.
+        let plan = controller_rlimit_plan(
+            limits,
+            ProcessRlimit { soft: 8 * MIB, hard: 8 * MIB },
+            ProcessRlimit { soft: 1024, hard: 4096 },
+        );
+        // Bounded by the fixed controller ceiling, not the whole envelope.
+        assert_eq!(plan.memlock, Some(ProcessRlimit { soft: ceiling, hard: ceiling }));
+        assert_eq!(plan.nofile, Some(ProcessRlimit { soft: 4096, hard: 4096 }));
+        assert!(ceiling > 64 * MIB && ceiling < limits.maximum_memory_bytes);
+        // A smaller envelope bounds the lock ceiling.
+        let small = super::super::scope::ProcessScopeResourceLimits {
+            maximum_memory_bytes: 128 * MIB,
+            maximum_processes: 2048,
+        };
+        let plan = controller_rlimit_plan(
+            small,
+            ProcessRlimit { soft: 8 * MIB, hard: 8 * MIB },
+            ProcessRlimit { soft: 1024, hard: 1024 },
+        );
+        assert_eq!(plan.memlock, Some(ProcessRlimit { soft: 128 * MIB, hard: 128 * MIB }));
+        assert_eq!(plan.nofile, None);
+        // A higher inherited hard ceiling is kept; a huge descriptor hard
+        // limit raises the soft limit only to the named ceiling.
+        let plan = controller_rlimit_plan(
+            limits,
+            ProcessRlimit { soft: 8 * MIB, hard: infinity },
+            ProcessRlimit { soft: 1024, hard: 524_288 },
+        );
+        assert_eq!(plan.memlock, Some(ProcessRlimit { soft: ceiling, hard: infinity }));
+        assert_eq!(plan.nofile, Some(ProcessRlimit {
+            soft: super::super::CONTROLLER_NOFILE_SOFT_CEILING,
+            hard: 524_288,
+        }));
+        // Already sufficient or unlimited ceilings are left untouched.
+        let plan = controller_rlimit_plan(
+            limits,
+            ProcessRlimit { soft: infinity, hard: infinity },
+            ProcessRlimit { soft: 65536, hard: 1_048_576 },
+        );
+        assert_eq!(plan, ControllerRlimitPlan { memlock: None, nofile: None });
+    }
 
     #[test]
     fn prepared_mount_refuses_parent_and_controller_membership() {

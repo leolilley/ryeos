@@ -1087,6 +1087,17 @@ impl InstalledService {
         self.set_desired(DesiredState::Down)?;
         self.supervisor.request_down()
     }
+
+    /// Self-inhibition by the placed controller as it exits: record the
+    /// service as wanted down and keep the supervisor from restarting it,
+    /// without signalling the exiting controller.
+    pub fn inhibit_restart(&self) -> Result<()> {
+        let _gate = self.gate()?;
+        self.check_binding()?;
+        self.supervisor.check_available()?;
+        self.set_desired(DesiredState::Down)?;
+        self.supervisor.inhibit_restart()
+    }
 }
 
 /// The service entry must check this under the same gate before scope

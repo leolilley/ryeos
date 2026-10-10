@@ -201,6 +201,23 @@ impl HostRuntimeBinding {
         ))
     }
 
+    /// A supervised claim is placement, not association: refuse unless this
+    /// process runs as the bound account inside the exact controller leaf the
+    /// host supervisor places it in. Call before any lock, debit or allowance.
+    pub fn require_current_process_placed(&self) -> Result<()> {
+        // Placement first: for a direct launch it is the precise cause.
+        self.process_scopes
+            .require_current_process_in_controller(&self.account)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "supervised route refused for app root {}",
+                    self.app_root.display()
+                )
+            })?;
+        self.account.require_current_process()
+    }
+
     pub fn open_process_scope_provider(
         &self,
     ) -> Result<std::sync::Arc<lillux::ProcessScopeProvider>> {
@@ -333,8 +350,6 @@ pub fn exec_external_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt as _;
 
     fn binding_value() -> serde_json::Value {
         serde_json::json!({
@@ -431,12 +446,35 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("node");
         std::fs::create_dir(&root).unwrap();
-        let metadata = std::fs::metadata(&root).unwrap();
-        let binding = binding_for_directory(&root, metadata.uid(), metadata.gid());
+        let (uid, gid) = lillux::path_owner_ids(&root).unwrap();
+        let binding = binding_for_directory(&root, uid, gid);
         std::fs::rename(&root, parent.path().join("old-node")).unwrap();
         std::fs::create_dir(&root).unwrap();
         let error = binding.validate(&root).unwrap_err();
         assert!(format!("{error:#}").contains("app root has been replaced"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_process_on_an_associated_root_is_not_supervised() {
+        // This test process stands in for a directly launched daemon: it is
+        // the bound account, but no host supervisor placed it.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("node");
+        std::fs::create_dir(&root).unwrap();
+        let (uid, gid) = lillux::path_owner_ids(&root).unwrap();
+        let mut binding = binding_for_directory(&root, uid, gid);
+        binding.process_scopes = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "backend": {
+                "implementation": "linux_cgroup_v2",
+                "parent": "/sys/fs/cgroup/lillux-host-services/ryeos-direct-fixture"
+            }
+        }))
+        .unwrap();
+        let error = format!("{:#}", binding.require_current_process_placed().unwrap_err());
+        assert!(error.contains("supervised route refused"), "{error}");
+        assert!(error.contains("ryeos-direct-fixture/controller"), "{error}");
     }
 
     #[cfg(unix)]
@@ -445,8 +483,8 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("node");
         std::fs::create_dir(&root).unwrap();
-        let metadata = std::fs::metadata(&root).unwrap();
-        let binding = binding_for_directory(&root, metadata.uid().wrapping_add(1), metadata.gid());
+        let (uid, gid) = lillux::path_owner_ids(&root).unwrap();
+        let binding = binding_for_directory(&root, uid.wrapping_add(1), gid);
         let error = binding.validate(&root).unwrap_err();
         assert!(format!("{error:#}").contains("owner"));
     }

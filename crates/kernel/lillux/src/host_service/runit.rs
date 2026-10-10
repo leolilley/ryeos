@@ -155,6 +155,11 @@ impl HostServiceController for RunitService {
     fn request_down(&self) -> Result<()> {
         self.control("down")
     }
+    fn inhibit_restart(&self) -> Result<()> {
+        // runsv `o` marks the service wanted down without sending TERM/CONT
+        // to the running process; `down` would signal it mid-exit.
+        self.control("once")
+    }
     fn capture_upgrade_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(RunitUpgradeState {
             schema_version: 1,

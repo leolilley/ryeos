@@ -304,6 +304,9 @@ impl NativeAdmissionFence {
 struct DaemonSelectedComposition {
     root: ryeos_executor::SelectedInvocationCompositionBarrier,
     launch_route: Option<lifecycle_marker::LaunchRoute>,
+    // App root of a placed native host-service controller. Taken once by the
+    // failure exits that must not let the supervisor restart this node.
+    supervised_app_root: Option<std::path::PathBuf>,
     process_state_lock: Option<state_lock::StateLock>,
     #[cfg(target_os = "linux")]
     native_operator_lock: Option<std::mem::ManuallyDrop<Arc<lillux::ExactExclusiveFileLock>>>,
@@ -392,6 +395,7 @@ impl DaemonSelectedComposition {
         Self {
             root,
             launch_route: None,
+            supervised_app_root: None,
             process_state_lock: None,
             #[cfg(target_os = "linux")]
             native_operator_lock: None,
@@ -1716,7 +1720,42 @@ impl DaemonSelectedComposition {
                 lifecycle.complete_provisional("native_custody_unresolved", Some(&detail));
             }
         }
+        self.inhibit_supervised_restart("native_custody_unresolved");
         std::process::exit(70)
+    }
+
+    /// A supervisor restarts any exit while its service is wanted up. After
+    /// unresolved custody or a startup failure that may already have debited
+    /// an incarnation, each restart would burn another incarnation and a
+    /// recovery attempt, so the placed controller sets its own service down
+    /// first, without signalling itself mid-exit. Recovery stays an explicit
+    /// operator start. Best-effort: the exit proceeds either way and the
+    /// outcome is logged. Unresolved custody can also end a graceful stop;
+    /// its operator already set the service down, so this repeats that state.
+    fn inhibit_supervised_restart(&mut self, reason: &str) {
+        let Some(app_root) = self.supervised_app_root.take() else {
+            return;
+        };
+        let outcome = ryeos_node::supervision::InstalledService::discover_app_root(&app_root)
+            .and_then(|service| {
+                service
+                    .context("host service association disappeared before restart inhibition")?
+                    .inhibit_restart()
+            });
+        match outcome {
+            Ok(()) => tracing::warn!(reason,
+                "host service set down before exit; restart requires an explicit operator start"),
+            Err(error) => tracing::error!(reason, error = %format!("{error:#}"),
+                "could not set host service down before exit; the supervisor may restart this node"),
+        }
+    }
+
+    /// Native bootstrap claims its original attempt before the incarnation
+    /// debit, so any startup failure from that point on may have consumed it.
+    fn inhibit_supervised_restart_after_startup_failure(&mut self, reason: &str) {
+        if reason == "startup_failed" && self.native_bootstrap_entered {
+            self.inhibit_supervised_restart(reason);
+        }
     }
 
     /// Some workers clear their parent-death signal, so exit 70 would leave
@@ -1870,6 +1909,7 @@ impl DaemonSelectedComposition {
                 lifecycle.complete_provisional(reason, error);
             }
         }
+        self.inhibit_supervised_restart_after_startup_failure(reason);
     }
 }
 
@@ -1886,6 +1926,7 @@ impl Drop for DaemonSelectedComposition {
             && !lifecycle.recorded
         {
             lifecycle.record("startup_failed", None);
+            self.inhibit_supervised_restart_after_startup_failure("startup_failed");
         }
         // Fields then drop root -> same exclusion -> lifecycle. No replacement
         // lock, native owner, or successful selected settlement is constructed.
@@ -2523,6 +2564,16 @@ async fn run(
                 return run_service_standalone(&config, service_ref, params.as_deref()).await;
             }
         }
+    }
+
+    if let Some(service) = &host_service {
+        // An association is not placement: only a process the host supervisor
+        // put in the controller leaf may take the supervised node route. The
+        // standalone subcommands above run from an operator session on a
+        // stopped node, so they are not refused here. This precedes the state
+        // lock, the running marker and every native debit or allowance use.
+        service.binding.runtime.require_current_process_placed()?;
+        composition.supervised_app_root = Some(selected_app_root.clone());
     }
 
     // Acquire the daemon state lock BEFORE unlinking any sockets or
@@ -6348,6 +6399,7 @@ mod selected_composition_tests {
             DaemonSelectedComposition {
                 root: barrier,
                 launch_route: Some(lifecycle_marker::LaunchRoute::Direct),
+                supervised_app_root: None,
                 process_state_lock: Some(lock),
                 #[cfg(target_os = "linux")]
                 native_operator_lock: None,

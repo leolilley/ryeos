@@ -10,6 +10,17 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 mod cgroup;
+
+/// Locked-memory ceiling a host supervisor grants a node controller at exec.
+/// The only memory a controller locks is its resident native region, one
+/// fixed compile-time layout of about 64 MiB; four times that leaves room for
+/// layout growth while keeping the lockable memory every spawned worker
+/// inherits far below a node's memory envelope. Locked pages are still
+/// charged to the envelope's memory cgroup.
+pub const CONTROLLER_MEMLOCK_CEILING_BYTES: u64 = 256 * 1024 * 1024;
+/// Descriptor soft ceiling for a node controller; the inherited hard limit
+/// still bounds it, and no host-wide maximum is raised.
+pub const CONTROLLER_NOFILE_SOFT_CEILING: u64 = 65_536;
 mod oci_lifecycle;
 // This is the diagnostic witness that a namespace can outlive a process
 // group. It is not a second production lifecycle backend: membership scans

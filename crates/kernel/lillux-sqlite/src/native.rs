@@ -30,6 +30,10 @@ fn require_current_native_process() -> Result<()> {
 
 const MAX_NATIVE_CONNECTIONS: usize = 64;
 const CONTROL_STORAGE: u64 = 65_536;
+/// Compare-exchange attempts on one budget counter before refusing as busy.
+/// Each lost attempt means a concurrent debit succeeded, so the bound limits
+/// starvation under contention without changing what any debit charges.
+const ORIGINAL_NATIVE_COUNTER_ATTEMPTS: usize = 1024;
 
 /// Exactly one counter object shared by the real signed issuer and C allocator.
 /// C has a checked identical layout; callbacks never call host custody methods.
@@ -91,30 +95,39 @@ impl OriginalNativeBudget {
                 self.allocator_steps_limit - self.cleanup_reserved,
             )
         };
-        let previous = counter.load(Ordering::Acquire);
-        let total = previous
-            .checked_add(steps)
-            .context("original native work overflow")?;
-        ensure!(total <= limit, "original native work exhausted");
-        counter
-            .compare_exchange(previous, total, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| anyhow::anyhow!("original native counter busy; no effect admitted"))?;
-        Ok(())
+        let mut previous = counter.load(Ordering::Acquire);
+        // A lost exchange only means another debit landed first; recompute the
+        // total from the observed value so exhaustion is judged on what is
+        // actually charged. Bounded so contention cannot spin forever.
+        for _ in 0..ORIGINAL_NATIVE_COUNTER_ATTEMPTS {
+            let total = previous
+                .checked_add(steps)
+                .context("original native work overflow")?;
+            ensure!(total <= limit, "original native work exhausted");
+            match counter.compare_exchange(previous, total, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(()),
+                Err(observed) => previous = observed,
+            }
+        }
+        Err(anyhow!("original native counter busy; no effect admitted"))
     }
     pub fn debit_connection_ticket(&self) -> Result<u32> {
         require_current_native_process()?;
-        let previous = self.connections_issued.load(Ordering::Acquire);
-        let next = previous
-            .checked_add(1)
-            .context("original native ticket overflow")?;
-        ensure!(
-            next <= self.connections_limit,
-            "original native connection tickets exhausted"
-        );
-        self.connections_issued
-            .compare_exchange(previous, next, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| anyhow::anyhow!("original native ticket counter busy"))?;
-        Ok(next)
+        let mut previous = self.connections_issued.load(Ordering::Acquire);
+        for _ in 0..ORIGINAL_NATIVE_COUNTER_ATTEMPTS {
+            let next = previous
+                .checked_add(1)
+                .context("original native ticket overflow")?;
+            ensure!(
+                next <= self.connections_limit,
+                "original native connection tickets exhausted"
+            );
+            match self.connections_issued.compare_exchange(previous, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(next),
+                Err(observed) => previous = observed,
+            }
+        }
+        Err(anyhow!("original native ticket counter busy"))
     }
 }
 
@@ -5780,5 +5793,35 @@ impl OriginalNativeFactory {
             destination: Mutex::new(None),
             destination_authority: None,
         })))
+    }
+}
+
+#[cfg(test)]
+mod original_native_counter_controls {
+    use super::*;
+
+    #[test]
+    fn concurrent_step_debits_all_land_and_exhaustion_still_refuses() {
+        const THREADS: u64 = 2;
+        const DEBITS: u64 = 20_000;
+        const CLEANUP: u64 = 64;
+        let limit = THREADS * DEBITS + CLEANUP;
+        // SAFETY: test-only counter that funds no installed region.
+        let budget = Arc::new(unsafe {
+            OriginalNativeBudget::prepaid_by_original_issuer(16 * 1024 * 1024, limit, 1, CLEANUP)
+        }.unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS as usize));
+        let workers: Vec<_> = (0..THREADS).map(|_| {
+            let (budget, barrier) = (budget.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..DEBITS { budget.debit_steps(1, false).unwrap(); }
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
+        let error = budget.debit_steps(1, false).unwrap_err();
+        assert!(error.to_string().contains("exhausted"), "{error:#}");
+        assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
     }
 }

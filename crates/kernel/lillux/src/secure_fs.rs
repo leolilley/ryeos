@@ -7925,6 +7925,24 @@ pub fn current_user_home() -> Option<PathBuf> {
     std::env::var_os("HOME").and_then(|home| canonicalize_existing_path(Path::new(&home)).ok())
 }
 
+/// Owning (uid, gid) of one existing path, without following a final
+/// symlink. Observation only, for fixtures that bind a directory to the
+/// account that owns it; it never authorizes access.
+pub fn path_owner_ids(path: &Path) -> Result<(u32, u32)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("observe owner of {}", path.display()))?;
+        Ok((metadata.uid(), metadata.gid()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("numeric path ownership is unavailable on this OS")
+    }
+}
+
 /// Pin one already-canonical absolute mount source with `O_PATH`, without
 /// following its final component, and prove the resulting descriptor still
 /// resolves to that exact canonical spelling. Raw open/fcntl/procfs mechanics

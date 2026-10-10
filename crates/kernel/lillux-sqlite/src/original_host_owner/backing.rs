@@ -277,3 +277,19 @@ mod release_credit_controls {
         assert_eq!(credit.remaining, 2);
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod controller_lock_ceiling {
+    use super::HostStorage;
+
+    #[test]
+    fn resident_region_fits_the_supervised_controller_lock_ceiling() {
+        // A supervised controller's locked-memory limit is a fixed host
+        // constant; the region it locks must stay well inside it.
+        let bytes = HostStorage::quote_native_region().unwrap().bytes() as u64;
+        assert!(
+            bytes.checked_mul(2).unwrap() <= lillux::process_control::CONTROLLER_MEMLOCK_CEILING_BYTES,
+            "resident region {bytes} bytes outgrew the controller lock ceiling"
+        );
+    }
+}
