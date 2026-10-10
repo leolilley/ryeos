@@ -190,6 +190,28 @@ fn require_packet_count_within_source_bound(
     Ok(())
 }
 
+fn is_accounting_packet_domain(domain: Option<lillux_sqlite::OriginalNativeDomain>) -> bool {
+    matches!(domain, Some(lillux_sqlite::OriginalNativeDomain::NodeAccounting
+        | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference))
+}
+
+/// The auxiliary collection is shared, but each producer keeps its own bound:
+/// at most the Scheduler's packets and at most the accounting ledger's. A
+/// total within the shared maximum never admits a third Scheduler packet.
+fn require_auxiliary_packet_domains_within_bounds(
+    domains: impl Iterator<Item = Option<lillux_sqlite::OriginalNativeDomain>>,
+) -> Result<()> {
+    let (mut scheduler, mut accounting) = (0usize, 0usize);
+    for domain in domains {
+        if is_accounting_packet_domain(domain) { accounting += 1; } else { scheduler += 1; }
+    }
+    ensure!(scheduler <= MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES,
+        "original Scheduler packet progress exceeds its producer-owned source bound");
+    ensure!(accounting <= MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES,
+        "original accounting packet progress exceeds its producer-owned source bound");
+    Ok(())
+}
+
 fn producer_metadata_pin_phase(
     parts: &lillux_sqlite::OriginalNativeOutsideConnectionParts,
 ) -> PacketMetadataPinPhase {
@@ -216,6 +238,9 @@ pub(super) struct OriginalPacketPartsProgress {
     source_parts_consumed: bool,
     scheduler_handoff: Option<(ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
         ryeos_scheduler::db::SchedulerNativeStoreSourceRole)>,
+    // Producer domain copied when an auxiliary packet joins; it selects the
+    // per-domain bound inside the shared Scheduler/accounting collection.
+    native_domain: Option<lillux_sqlite::OriginalNativeDomain>,
     bound: ManuallyDrop<Option<OriginalPacketBoundResources>>,
     authority: ManuallyDrop<Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>>,
     destination: ManuallyDrop<Option<lillux_sqlite::OriginalDestinationOutsideCustody>>,
@@ -280,6 +305,7 @@ impl OriginalPacketPartsProgress {
         Self { process: std::process::id(), source_kind, optional_source_census: None,
             source_parts_consumed: false,
             scheduler_handoff: None,
+            native_domain: None,
             raw: ManuallyDrop::new(Some(raw)),
             parts: ManuallyDrop::new(None), bound: ManuallyDrop::new(None),
             authority: ManuallyDrop::new(None), destination: ManuallyDrop::new(None),
@@ -301,9 +327,11 @@ impl OriginalPacketPartsProgress {
         source_kind: OriginalPacketSourceKind,
     ) -> Self {
         let metadata_pin_phase = producer_metadata_pin_phase(&parts);
+        let native_domain = parts.domain;
         Self { process: std::process::id(), source_kind, optional_source_census: None,
             source_parts_consumed: false,
             scheduler_handoff,
+            native_domain,
             raw: ManuallyDrop::new(None),
             parts: ManuallyDrop::new(Some(parts)), bound: ManuallyDrop::new(None),
             authority: ManuallyDrop::new(None), destination: ManuallyDrop::new(None),
@@ -1221,8 +1249,8 @@ impl OriginalPacketPartsProgress {
 
     fn exhaust(self) {
         let Self { process: _, source_kind: _, optional_source_census: _, source_parts_consumed: _,
-            scheduler_handoff, bound, authority, destination, destination_retirement, refusal,
-            destination_retries: _, destination_started: _, requires_destination: _,
+            scheduler_handoff, native_domain: _, bound, authority, destination, destination_retirement,
+            refusal, destination_retries: _, destination_started: _, requires_destination: _,
             destination_roots_registered: _, destination_native_references_retired: _,
             destination_consumed: _, bound_root_receipt_consumed: _, metadata_pin_phase: _,
             metadata_pin_registry_identity, metadata_pin_inputs, metadata_pin_receipts, raw,
@@ -1316,6 +1344,7 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
 
     if let Some(packets) = packets {
         require_packet_count_within_source_bound(packets.len(), OriginalPacketSourceKind::Scheduler)?;
+        require_auxiliary_packet_domains_within_bounds(packets.iter().map(|packet| packet.native_domain))?;
         for packet in packets.iter() {
             let Some((packet_id, role)) = packet.scheduler_handoff.as_ref() else { continue; };
             ensure!(packet_id.same_handoff(handoff_id),
@@ -1455,6 +1484,9 @@ pub(super) fn prepare_scheduler_packet_parts(
         let next_count = packets.len().checked_add(1)
             .context("scheduler packet count overflow")?;
         require_packet_count_within_source_bound(next_count, OriginalPacketSourceKind::Scheduler)?;
+        let incoming = source.as_ref().expect("checked scheduler packet source").domain;
+        require_auxiliary_packet_domains_within_bounds(
+            packets.iter().map(|packet| packet.native_domain).chain(std::iter::once(incoming)))?;
         let source = source.take().expect("checked scheduler packet source");
         let parts = ManuallyDrop::into_inner(source);
         packets.push(OriginalPacketPartsProgress::from_parts(
@@ -1462,6 +1494,7 @@ pub(super) fn prepare_scheduler_packet_parts(
     }
     if let Some(packets) = destination.as_mut() {
         require_packet_count_within_source_bound(packets.len(), OriginalPacketSourceKind::Scheduler)?;
+        require_auxiliary_packet_domains_within_bounds(packets.iter().map(|packet| packet.native_domain))?;
         for packet in packets.iter_mut() { packet.advance_destination(factory, aggregate, prepay)?; }
     }
     Ok(())
@@ -2966,13 +2999,29 @@ mod destination_retry_tests {
     use super::{
         next_destination_retry, quote_destination_retries, quote_packet_parts,
         quote_packet_metadata_pin_retirements, quote_retired_packet_metadata_pin_receipts,
-        register_bound_root_source, require_packet_count_within_source_bound, OriginalPacketSourceKind,
+        register_bound_root_source, require_auxiliary_packet_domains_within_bounds,
+        require_packet_count_within_source_bound, OriginalPacketSourceKind,
         PACKET_OPTIONAL_SOURCE_CENSUS_STEPS,
         MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES,
         MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
         MAX_OPERATIONAL_PACKET_SOURCES, MAX_RUNTIME_PACKET_SOURCES, MAX_SELECTED_PACKET_SOURCES,
         OutsideWork, quote_retired_packet_bound_roots, quote_retired_packet_source_parts,
     };
+
+    #[test]
+    fn auxiliary_packet_bound_is_per_producer_domain() {
+        use lillux_sqlite::OriginalNativeDomain as Domain;
+        let full = [Some(Domain::NodeScheduler), Some(Domain::NodeSchedulerSchemaReference),
+            Some(Domain::NodeAccounting), Some(Domain::NodeAccountingSchemaReference)];
+        require_auxiliary_packet_domains_within_bounds(full.into_iter()).unwrap();
+        // Four packets fit the shared total, but never three from one producer.
+        let scheduler = [Some(Domain::NodeScheduler), Some(Domain::NodeSchedulerSchemaReference),
+            Some(Domain::NodeScheduler), Some(Domain::NodeAccounting)];
+        assert!(require_auxiliary_packet_domains_within_bounds(scheduler.into_iter()).is_err());
+        let accounting = [Some(Domain::NodeAccounting), Some(Domain::NodeAccountingSchemaReference),
+            Some(Domain::NodeAccounting)];
+        assert!(require_auxiliary_packet_domains_within_bounds(accounting.into_iter()).is_err());
+    }
 
     #[test]
     fn destination_retry_allowance_and_quote_are_finite() {
@@ -2998,7 +3047,8 @@ mod destination_retry_tests {
         assert_eq!(complete.steps, (MAX_SELECTED_PACKET_SOURCES
             * (4 + usize::try_from(PACKET_OPTIONAL_SOURCE_CENSUS_STEPS).unwrap()) + 2 * 4) as u64);
         assert!(quote_packet_parts(MAX_SELECTED_PACKET_SOURCES + 1, 2).is_err());
-        assert!(quote_packet_parts(MAX_SELECTED_PACKET_SOURCES, 3).is_err());
+        assert!(quote_packet_parts(MAX_SELECTED_PACKET_SOURCES, super::MAX_SELECTED_PACKET_COLLECTIONS).is_ok());
+        assert!(quote_packet_parts(MAX_SELECTED_PACKET_SOURCES, super::MAX_SELECTED_PACKET_COLLECTIONS + 1).is_err());
     }
 
     #[test]

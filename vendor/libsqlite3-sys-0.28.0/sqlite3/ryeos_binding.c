@@ -17,7 +17,8 @@
 #define RYEOS_NATIVE_MAGIC 0x7279656f736e6174ULL
 /* Free blocks are segregated by floor(log2(span/RYEOS_NATIVE_BLOCK)). */
 #define RYEOS_NATIVE_BINS 64
-/* Bounded probes of the request's own bin while a larger bin can serve it. */
+/* Probes of the request's own bin, always bounded. With no fit in these probes
+   a strictly larger bin serves the request if one exists, else it refuses. */
 #define RYEOS_NATIVE_BIN_PROBES 8
 /* ABI mirrored by repr(C) OriginalNativeBudget; limits immutable. */
 typedef struct RyeosNativeBudget {
@@ -250,8 +251,10 @@ static int ryeosNativeListRemove(RyeosNativeArena *a,RyeosNativeBlock *b){
   links->next=0; links->previous=0; return 1;
 }
 /* Allocation cost is bounded by the bin probes plus one, independent of how
-   many blocks are live: a full arena walk per request would make the paid
-   work grow with every block other connections retain. */
+   many blocks are live or free: a full own-bin walk per request would make the
+   paid work grow with every fragment other connections leave. A fit deeper in
+   the own bin than the probes reach is refused (NOMEM) when no larger bin has
+   a block, rather than searched for. */
 static void *ryeosNativeMalloc(int request){
   if(!ryeos_native_process_matches()){return 0;}
   RyeosNativeArena *a=atomic_load(&ryeosNativeOwner); RyeosNativeBlock *b,*found=0,*next;
@@ -265,7 +268,7 @@ static void *ryeosNativeMalloc(int request){
   /* Every block in a strictly larger bin is at least twice need's bin floor. */
   larger=bin+1<RYEOS_NATIVE_BINS?a->freeMap&~((2ULL<<bin)-1):0;
   for(offset=a->freeBins[bin];offset;offset=ryeosNativeLinks(b)->next){
-    if(larger && probes>=RYEOS_NATIVE_BIN_PROBES) break;
+    if(probes>=RYEOS_NATIVE_BIN_PROBES) break;
     if(!ryeosNativeCharge(a,1,ryeosNativeCleanup)) goto refused;
     probes++;
     if(!(b=ryeosNativeListed(a,offset))){atomic_store(&a->poisoned,1);goto refused;}
@@ -286,6 +289,9 @@ static void *ryeosNativeMalloc(int request){
     if((unsigned char*)next+remainder<end)
       ((RyeosNativeBlock*)((unsigned char*)next+remainder))->previous=remainder;
     ryeosNativeListInsert(a,next);
+    /* A corrupt bin head left the remainder unlisted; the arena is poisoned
+       and this block is never handed out. */
+    if(atomic_load(&a->poisoned)) goto refused;
   }
   atomic_store(&b->state,1); atomic_fetch_add(&a->liveBlocks,1);
   pthread_mutex_unlock(&a->mutex); return b+1;
@@ -475,6 +481,7 @@ SQLITE_API int ryeos_native_arena_reclaim(void *handle){
       /* No coalescing during this census: stable original forward extent. */
       atomic_store(&b->state,0);atomic_fetch_sub(&a->liveBlocks,1);
       ryeosNativeListInsert(a,b);
+      if(atomic_load(&a->poisoned)){pthread_mutex_unlock(&a->mutex);return SQLITE_MISUSE;}
     }
     if(atomic_load(&b->state)!=0){pthread_mutex_unlock(&a->mutex);return SQLITE_BUSY;}
     b=(RyeosNativeBlock*)((unsigned char*)b+b->span);
@@ -2005,6 +2012,19 @@ SQLITE_API int ryeos_sqlite_binding_main_identity(void *h,sqlite3_uint64 *dev,sq
       || osFstat(atomic_load(&c->files[0]),&st)!=0 || !S_ISREG(st.st_mode))return SQLITE_IOERR;
   *dev=(sqlite3_uint64)st.st_dev;*ino=(sqlite3_uint64)st.st_ino;return SQLITE_OK;
 }
+/* An existing main proves empty only while its retained keeper is a zero-byte
+   regular file and no WAL role was found at acquisition: nothing then exists
+   for a rollback journal to protect. No descriptor is duplicated. */
+SQLITE_API int ryeos_sqlite_binding_main_empty(void *h,int *empty){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  RyeosBinding *c=(RyeosBinding*)h;struct stat st;
+  if(!empty)return SQLITE_MISUSE;
+  *empty=0;
+  if(!c || atomic_load(&c->poisoned) || c->readonlyMain
+      || osFstat(atomic_load(&c->files[0]),&st)!=0 || !S_ISREG(st.st_mode))return SQLITE_IOERR;
+  *empty=st.st_size==0 && atomic_load(&c->files[1])<0 && atomic_load(&c->pins[1])<0;
+  return SQLITE_OK;
+}
 /* Closed original proof owns these O_PATH pins. The alias gate spans every
    data-capable open, fsync and close; a live SQLite inode is refused first. */
 SQLITE_API int ryeos_sqlite_sync_closed_main(int pin,int wal,sqlite3_uint64 dev,sqlite3_uint64 ino,int *synced,int *closeAttempted,int *closeError){
@@ -2162,6 +2182,7 @@ SQLITE_API void *ryeos_sqlite_take_ready_copy_lease(void){ return 0; }
 SQLITE_API const char *ryeos_sqlite_binding_name(void *h){ (void)h;return 0; }
 SQLITE_API const char *ryeos_sqlite_binding_path(void *h){ (void)h;return 0; }
 SQLITE_API int ryeos_sqlite_binding_main_identity(void*h,sqlite3_uint64*d,sqlite3_uint64*i){(void)h;(void)d;(void)i;return SQLITE_NOTFOUND;}
+SQLITE_API int ryeos_sqlite_binding_main_empty(void*h,int*e){(void)h;if(e)*e=0;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_sqlite_sync_closed_main(int p,int w,sqlite3_uint64 d,sqlite3_uint64 i,int*s,int*a,int*e){(void)p;(void)w;(void)d;(void)i;if(s)*s=0;if(a)*a=0;if(e)*e=0;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_projection_lease_open(int p,int m,void**o,int*f){(void)p;(void)m;if(o)*o=0;if(f)*f=-1;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_projection_lease_close(void*h,int*p,int*f){(void)h;if(p)*p=0;if(f)*f=0;return SQLITE_NOTFOUND;}

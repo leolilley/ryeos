@@ -23,11 +23,31 @@ fn now_ms() -> i64 {
     lillux::time::timestamp_millis()
 }
 
-pub async fn run_publisher(ledger: Arc<AccountingDb>, store: Arc<StateStore>) {
+/// Wait out `delay` unless the stop signal arrives first. Returns true when
+/// the publisher must stop.
+async fn pause_or_stop(delay: lillux::time::Duration, stop: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    if *stop.borrow() {
+        return true;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => *stop.borrow(),
+        // A dropped sender is also a stop: no owner can wait for this task.
+        changed = stop.changed() => changed.is_err() || *stop.borrow(),
+    }
+}
+
+/// Runs until the ledger closes, the daemon shuts down or `stop` is raised.
+/// The stop is cooperative: an in-flight blocking claim or publish always
+/// finishes and drops its Store and ledger aliases before this returns.
+pub async fn run_publisher(
+    ledger: Arc<AccountingDb>,
+    store: Arc<StateStore>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         // Native shutdown closes the ledger in place; its SQL admission never
         // reopens, so this publisher ends instead of retrying a closed owner.
-        if ledger.is_closed() || crate::shutdown_requested() {
+        if ledger.is_closed() || crate::shutdown_requested() || *stop.borrow() {
             tracing::info!("audit outbox publisher stopped for ledger close or daemon shutdown");
             return;
         }
@@ -41,17 +61,23 @@ pub async fn run_publisher(ledger: Arc<AccountingDb>, store: Arc<StateStore>) {
         let row = match claimed {
             Ok(Ok(Some(row))) => row,
             Ok(Ok(None)) => {
-                tokio::time::sleep(IDLE_POLL).await;
+                if pause_or_stop(IDLE_POLL, &mut stop).await {
+                    return;
+                }
                 continue;
             }
             Ok(Err(error)) => {
                 tracing::error!(%error, "accounting outbox claim failed");
-                tokio::time::sleep(ERROR_BACKOFF).await;
+                if pause_or_stop(ERROR_BACKOFF, &mut stop).await {
+                    return;
+                }
                 continue;
             }
             Err(join_error) => {
                 tracing::error!(%join_error, "accounting outbox claim task failed");
-                tokio::time::sleep(ERROR_BACKOFF).await;
+                if pause_or_stop(ERROR_BACKOFF, &mut stop).await {
+                    return;
+                }
                 continue;
             }
         };
@@ -66,11 +92,15 @@ pub async fn run_publisher(ledger: Arc<AccountingDb>, store: Arc<StateStore>) {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::warn!(%error, "accounting outbox publication failed; will retry");
-                tokio::time::sleep(ERROR_BACKOFF).await;
+                if pause_or_stop(ERROR_BACKOFF, &mut stop).await {
+                    return;
+                }
             }
             Err(join_error) => {
                 tracing::error!(%join_error, "accounting outbox publish task failed");
-                tokio::time::sleep(ERROR_BACKOFF).await;
+                if pause_or_stop(ERROR_BACKOFF, &mut stop).await {
+                    return;
+                }
             }
         }
     }

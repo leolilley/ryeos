@@ -13,11 +13,14 @@ pub use retention::SchedulerService;
 /// Validate the bounded scheduler-retirement journal before startup opens the
 /// scheduler database. An interrupted or unknown artifact blocks admission;
 /// startup never treats an old role snapshot as current native authority.
+/// Every guarded journal read runs inside the live native factory's scope, so
+/// the projection leases that factory already holds answer for their owner.
 pub fn validate_retirement_startup(
+    factory: &lillux_sqlite::OriginalNativeFactory,
     runtime: &lillux::PinnedDirectory,
     identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> anyhow::Result<usize> {
-    retirement_journal::RetirementJournal::validate_admission(runtime, identity)
+    retirement_journal::RetirementJournal::validate_admission_in(Some(factory), runtime, identity)
 }
 
 #[doc(hidden)]

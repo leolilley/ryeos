@@ -2035,13 +2035,32 @@ impl OriginalNativeFactory {
             // journal file, so a database this owner just created cannot take
             // its first write through one. It enters WAL through an in-memory
             // rollback journal; there is no prior content for that to protect.
+            // An existing main that is provably empty (a create interrupted
+            // before its first WAL commit) is staged the same way; any other
+            // non-WAL existing main keeps refusing its first rollback write.
             if let NativeConnectionBody::Bound(owner) = body {
-                if owner.origin() == crate::BoundSqliteOrigin::Created {
+                let writable_existing = matches!(
+                    &destination,
+                    OriginalNativeDestinationInputs::Bound(inputs) if matches!(
+                        inputs.mode,
+                        OriginalNativeBoundMode::Existing | OriginalNativeBoundMode::OpenOrCreate
+                    )
+                );
+                let stage = match owner.origin() {
+                    crate::BoundSqliteOrigin::Created => true,
+                    crate::BoundSqliteOrigin::Existing => {
+                        writable_existing
+                            && owner.binding.as_ref().context("bound binding missing")?.main_empty()?
+                            && owner.connection()
+                                .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))? == 0
+                    }
+                };
+                if stage {
                     let staged: String = owner.connection()
                         .query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
                     let mode: String = owner.connection()
                         .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-                    ensure!(staged == "memory" && mode == "wal", "created bound database did not enter WAL");
+                    ensure!(staged == "memory" && mode == "wal", "empty bound database did not enter WAL");
                 }
             }
             self.require_original(false)?;

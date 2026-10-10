@@ -580,6 +580,69 @@ mod tests {
         }
     }
 
+    /// With no larger free bin, a request that fits none of its own bin's
+    /// fragments must be refused after a bounded probe, not after walking
+    /// every fragment in that bin.
+    #[test]
+    fn own_bin_walk_is_bounded_without_a_larger_bin() {
+        // Request sizes whose native spans are 512 (fragment) and 768 (probe
+        // request), both in the 512..1024 bin, plus 256-byte separators.
+        const FRAGMENT: i32 = 400;
+        const SEPARATOR: i32 = 1;
+        const PROBE: i32 = 700;
+        let host = TestNativeHost::acquire();
+        let warm = host.open_transient();
+        host.close(warm);
+        let steps = || host.factory().budget_snapshot().unwrap().allocator_steps;
+        let (fragments, cost, probe) = host.scope(|| {
+            let malloc = |n: i32| unsafe { libsqlite3_sys::sqlite3_malloc(n) };
+            let mut fragments = Vec::new();
+            let mut separators = Vec::new();
+            // Exhaust every block that could serve a 512 span, leaving each
+            // fragment between live separators so freeing cannot coalesce.
+            loop {
+                let fragment = malloc(FRAGMENT);
+                if fragment.is_null() {
+                    break;
+                }
+                let separator = malloc(SEPARATOR);
+                if separator.is_null() {
+                    // The last fragment has no live right neighbour; keep it
+                    // live so it cannot coalesce.
+                    separators.push(fragment);
+                    break;
+                }
+                fragments.push(fragment);
+                separators.push(separator);
+            }
+            loop {
+                let separator = malloc(SEPARATOR);
+                if separator.is_null() {
+                    break;
+                }
+                separators.push(separator);
+            }
+            let count = fragments.len();
+            for fragment in fragments.drain(..) {
+                unsafe { libsqlite3_sys::sqlite3_free(fragment) };
+            }
+            let before = steps();
+            let probe = malloc(PROBE);
+            let cost = steps() - before;
+            if !probe.is_null() {
+                unsafe { libsqlite3_sys::sqlite3_free(probe) };
+            }
+            for separator in separators {
+                unsafe { libsqlite3_sys::sqlite3_free(separator) };
+            }
+            (count, cost, probe.is_null())
+        });
+        assert!(fragments >= 256, "too few fragments to show a bound: {fragments}");
+        assert!(probe, "no fragment can serve the probe request");
+        // One entry charge plus at most the bounded own-bin probes.
+        assert!(cost <= 9, "own-bin walk cost {cost} with {fragments} fragments");
+    }
+
     /// The bound VFS has no rollback-journal role, so a database the native
     /// factory creates must already be in WAL when it is handed over, and
     /// ordinary writes must then succeed.
@@ -610,6 +673,52 @@ mod tests {
             assert!(!tmp.path().join("runtime.sqlite3-journal").exists());
             host.close(connection);
         }
+    }
+
+    /// A create interrupted before its first WAL commit leaves a zero-byte
+    /// main. Reopened as Existing it must still enter WAL and take writes.
+    #[test]
+    fn interrupted_create_leaves_an_existing_main_writable_in_wal() {
+        let host = TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let created = match host.open_bound(Arc::clone(&root), OsStr::new("runtime.sqlite3"),
+            OriginalNativeBoundMode::CreateExclusive, OriginalNativeDomain::NodeRuntime) {
+            Ok(connection) => connection,
+            Err(failure) => {
+                let error = failure.to_string();
+                host.retire_open_failure(failure);
+                panic!("bound create refused: {error}");
+            }
+        };
+        host.close(created);
+        // The completed create staged its header; replay the crash window by
+        // leaving the exclusively created main empty again.
+        std::fs::remove_file(tmp.path().join("runtime.sqlite3")).unwrap();
+        std::fs::File::create(tmp.path().join("runtime.sqlite3")).unwrap();
+        for sidecar in ["runtime.sqlite3-wal", "runtime.sqlite3-shm"] {
+            let _ = std::fs::remove_file(tmp.path().join(sidecar));
+        }
+        let connection = match host.open_bound(root, OsStr::new("runtime.sqlite3"),
+            OriginalNativeBoundMode::Existing, OriginalNativeDomain::NodeRuntime) {
+            Ok(connection) => connection,
+            Err(failure) => {
+                let error = failure.to_string();
+                host.retire_open_failure(failure);
+                panic!("empty existing bound open refused: {error}");
+            }
+        };
+        let (journal, value) = connection
+            .with_sql(|sql| {
+                sql.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(9);")?;
+                let journal: String = sql.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+                let value: i64 = sql.query_row("SELECT x FROM t", [], |row| row.get(0))?;
+                Ok((journal, value))
+            })
+            .unwrap();
+        assert_eq!((journal.as_str(), value), ("wal", 9));
+        assert!(!tmp.path().join("runtime.sqlite3-journal").exists());
+        host.close(connection);
     }
 
     /// A generated projection's closed-main durability gate consults the

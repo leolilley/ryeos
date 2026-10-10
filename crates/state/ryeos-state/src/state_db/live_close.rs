@@ -1171,7 +1171,7 @@ mod outside_quote_tests {
         assert_eq!(crate::operational::quote_operational_marker_receipt(),
             OutsideWork { bytes: 0, steps: 16 });
         assert_eq!(super::super::live_native::quote_live_state_finalization_root_receipts().unwrap(),
-            OutsideWork { bytes: 0, steps: 328 });
+            OutsideWork { bytes: 0, steps: 324 });
     }
 }
 

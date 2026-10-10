@@ -863,7 +863,9 @@ impl OriginalPhysicalRegistry {
         let retained = match slot.source.as_ref() {
             Some(Source::ControlRecord(actual)) => Arc::ptr_eq(actual, owner),
             Some(_) => false,
-            None => slot.observation.owner.get().is_some_and(|actual| Arc::ptr_eq(actual, owner)),
+            None => matches!(slot.observation.source_identity,
+                    OriginalPhysicalSourceIdentity::ControlRecord { device: _, inode: _ })
+                && slot.observation.owner.get().is_some_and(|actual| Arc::ptr_eq(actual, owner)),
         };
         ensure!(retained, "original control-record source is foreign or changed owner");
         Ok(())

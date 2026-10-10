@@ -33,6 +33,8 @@ mod maintenance_schedule;
 mod startup;
 
 const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
+/// Bound on waiting for the audit publisher's in-flight blocking work.
+const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = Duration::from_secs(30);
 const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
 const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
 
@@ -348,7 +350,7 @@ struct DaemonSelectedComposition {
     // The audit outbox publisher holds Store and ledger aliases. Its handle
     // is filled from inside the startup future and ended before native
     // shutdown, so the consuming Store close sees no service owner.
-    accounting_publisher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    accounting_publisher: Arc<Mutex<Option<(tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<bool>)>>>,
     #[cfg(feature = "scheduling")]
     scheduler_db_custody: Option<Arc<scheduler::db::SchedulerDb>>,
     #[cfg(feature = "scheduling")]
@@ -707,16 +709,30 @@ impl DaemonSelectedComposition {
         false
     }
 
-    /// End the audit outbox publisher before native shutdown. Its claims are
-    /// lease-bound and its acknowledgements identity-checked, so an abort is
-    /// equivalent to a crash that the next publisher recovers.
+    /// End the audit outbox publisher before native shutdown. Stop is
+    /// cooperative so an in-flight publish finishes and releases its Store
+    /// alias; claims are lease-bound and acknowledgements identity-checked, so
+    /// a bounded abort after timeout is recovered by the next publisher.
     async fn stop_accounting_publisher(&mut self) {
         let publisher = self.accounting_publisher.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(publisher) = publisher {
-            publisher.abort();
-            let _ = publisher.await;
+        if let Some((mut publisher, stop)) = publisher {
+            // Cooperative stop: an in-flight blocking claim or publish holds
+            // Store and ledger aliases that an abort would leave running, so
+            // wait for it to finish, within a bound.
+            let _ = stop.send(true);
+            match tokio::time::timeout(ACCOUNTING_PUBLISHER_STOP_BOUND, &mut publisher).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(%error, "accounting outbox publisher ended abnormally"),
+                Err(_) => {
+                    // The Store close that follows refuses while an alias
+                    // survives, keeping custody; nothing is forced here.
+                    tracing::error!(bound = ?ACCOUNTING_PUBLISHER_STOP_BOUND,
+                        "accounting outbox publisher did not stop within its bound");
+                    publisher.abort();
+                }
+            }
         }
     }
 
@@ -1090,7 +1106,7 @@ impl DaemonSelectedComposition {
         let terminal = Arc::clone(self.native_terminal.as_ref().context("original live aggregate terminal absent")?);
         let terminal = &terminal;
         let outside = self.native_outside_store.as_mut()
-            .context("actual Store outside graph disappeared during Scheduler handoff")?;
+            .context("actual Store outside graph disappeared before destination join")?;
         outside.require_original_process()?;
         if self.native_prepared_registry.is_none() && !outside.has_prepared_physical_registry() {
             self.native_prepared_registry = Some(producer.take_prepared_physical_registry(terminal)?);
@@ -1100,12 +1116,14 @@ impl DaemonSelectedComposition {
         // concrete supervisor/source slots; no late replacement is issued.
         unsafe { outside.accept_prepared_physical_registry(
             &mut self.native_prepared_registry, &factory, terminal) }?;
-        #[cfg(feature = "scheduling")]
-        self.advance_scheduler_sources_in_store(&factory, producer, terminal)?;
         let outside = self.native_outside_store.as_mut()
-            .context("actual Store outside graph disappeared during Scheduler handoff")?;
+            .context("actual Store outside graph disappeared before its destination join")?;
         outside.prepare_destination_join(&factory, terminal, &|bytes, steps|
             producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal destination join")?;
+        // Scheduler and accounting packets carry the Store's live authority;
+        // their leaf transfer needs the receiver prepared just above.
+        #[cfg(feature = "scheduling")]
+        self.advance_scheduler_sources_in_store(&factory, producer, terminal)?;
         self.advance_accounting_sources_in_store(&factory, producer, terminal)?;
         let outside = self.native_outside_store.as_mut()
             .context("actual Store outside graph disappeared during accounting handoff")?;
@@ -3036,15 +3054,16 @@ async fn run(
                     lillux::PinnedDirectory::open(&scheduler_runtime_path)?
                         .context("scheduler runtime directory is absent before DB open")?,
                 );
+                let original_factory = composition.native_factory.as_ref()
+                    .context("scheduler requires retained live native factory")?.ready_factory()?;
                 ryeos_scheduler_service::validate_retirement_startup(
+                    &original_factory,
                     &scheduler_runtime_directory,
                     &identity,
                 )
                 .context("validate scheduler retirement journal before DB open")?;
                 let scheduler_runtime_gate = Arc::new(tokio::sync::RwLock::new(()));
                 let scheduler_startup_guard = scheduler_runtime_gate.clone().write_owned().await;
-                let original_factory = composition.native_factory.as_ref()
-                    .context("scheduler requires retained live native factory")?.ready_factory()?;
                 let admission = state_store.live_scheduler_native_admission()
                     .map_err(|error| composition.retain_scheduler_admission_failure(error))?;
                 composition.scheduler_admission_custody = Some(admission);
@@ -3430,11 +3449,12 @@ async fn run(
             // reservation.
             if let Some(ledger) = app_state.accounting.clone() {
                 let outbox_store = app_state.state_store.clone();
+                let (stop, stopped) = tokio::sync::watch::channel(false);
                 let publisher = tokio::spawn(async move {
-                    ryeosd::accounting_outbox::run_publisher(ledger, outbox_store).await;
+                    ryeosd::accounting_outbox::run_publisher(ledger, outbox_store, stopped).await;
                 });
                 *accounting_publisher_slot.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(publisher);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((publisher, stop));
             }
             // A durable Remove journal record may survive after its signed head was
             // already unlinked. Finish its runtime/projection cleanup before any

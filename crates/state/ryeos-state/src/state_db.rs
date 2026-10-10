@@ -3816,7 +3816,6 @@ impl StateDb {
         &self.projection
     }
 
-    /// Exact generation-selected projection instance.
     /// Owner of this State's projection leases, when it has native custody.
     /// Guarded evidence reads run inside its scope; without one they stay
     /// unscoped, which is sound only while this process lists no lease.
@@ -3826,6 +3825,7 @@ impl StateDb {
             .map(|context| context.factory.as_ref())
     }
 
+    /// Exact generation-selected projection instance.
     pub fn selected_projection_path(&self) -> &Path {
         self.projection.path()
     }

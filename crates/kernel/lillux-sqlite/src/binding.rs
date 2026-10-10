@@ -56,6 +56,7 @@ unsafe extern "C" {
         dev: *mut u64,
         ino: *mut u64,
     ) -> c_int;
+    fn ryeos_sqlite_binding_main_empty(context: *mut c_void, empty: *mut c_int) -> c_int;
     fn ryeos_sqlite_binding_sync_live(
         context: *mut c_void,
         db: *mut libsqlite3_sys::sqlite3,
@@ -538,6 +539,19 @@ impl Binding {
             "original native main identity refused ({code})"
         );
         Ok((dev, ino))
+    }
+    /// The retained existing main keeper is zero bytes and no WAL role was
+    /// found when it was acquired.
+    pub(super) fn main_empty(&self) -> Result<bool> {
+        let mut empty = 0;
+        let code = unsafe {
+            ryeos_sqlite_binding_main_empty(self.0.expect("owned native context").as_ptr(), &mut empty)
+        };
+        ensure!(
+            code == libsqlite3_sys::SQLITE_OK,
+            "original native main emptiness refused ({code})"
+        );
+        Ok(empty != 0)
     }
     pub(super) fn sync_live(&self, connection: &rusqlite::Connection) -> LiveSyncOutcome {
         let (mut wal_synced, mut main_synced) = (0, 0);

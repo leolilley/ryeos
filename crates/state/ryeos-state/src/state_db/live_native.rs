@@ -160,7 +160,6 @@ pub fn quote_live_state_finalization_root_receipts()
     normal_roots.checked_add(recovery_roots)?
         .checked_add(normal_roots)?
         .checked_add(recovery_roots)?
-        .checked_add(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 4 })?
         .checked_add(crate::operational::quote_operational_retired_shared_roots()?)?
         .checked_add(crate::operational::quote_operational_marker_receipt())
 }

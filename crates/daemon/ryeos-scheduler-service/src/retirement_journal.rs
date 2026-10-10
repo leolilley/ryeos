@@ -419,7 +419,16 @@ impl<'a> RetirementJournal<'a> {
         runtime: &'a lillux::PinnedDirectory,
         identity: &'a NodeIdentity,
     ) -> Result<usize> {
-        let artifacts = Self::preflight(runtime, identity)?;
+        Self::validate_admission_in(None, runtime, identity)
+    }
+
+    /// Admission with its guarded reads inside `factory`'s native scope.
+    pub(crate) fn validate_admission_in(
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+        runtime: &'a lillux::PinnedDirectory,
+        identity: &'a NodeIdentity,
+    ) -> Result<usize> {
+        let artifacts = Self::preflight_in(factory, runtime, identity)?;
         let names = runtime.entry_names_bounded(MAX_DIRECTORY_ENTRIES)?;
         let mut generations = std::collections::BTreeSet::new();
         let mut terminal = std::collections::BTreeSet::new();
@@ -433,7 +442,7 @@ impl<'a> RetirementJournal<'a> {
                 generations.insert(generation.clone());
                 if sequence == 27 {
                     let record: SchedulerRetirementRecord =
-                        read_signed(runtime, &phase_name(&generation, sequence), identity)?;
+                        read_signed_in(factory, runtime, &phase_name(&generation, sequence), identity)?;
                     ensure!(
                         record.phase
                             == ryeos_scheduler_contract::SchedulerRetirementPhase::Complete,
@@ -453,7 +462,7 @@ impl<'a> RetirementJournal<'a> {
             for generation in settled {
                 let intent_name = format!("{INTENT_PREFIX}{generation}");
                 let intent: SchedulerRetirementIntent =
-                    read_signed(runtime, &intent_name, identity)?;
+                    read_signed_in(factory, runtime, &intent_name, identity)?;
                 if let Some(binding) = intent.recovery {
                     // `preflight` has already authenticated this exact parent
                     // intent and dense phase chain. Follow the bounded lineage
@@ -478,9 +487,17 @@ impl<'a> RetirementJournal<'a> {
         runtime: &lillux::PinnedDirectory,
         identity: &NodeIdentity,
     ) -> Result<usize> {
+        Self::preflight_in(None, runtime, identity)
+    }
+
+    fn preflight_in(
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+        runtime: &lillux::PinnedDirectory,
+        identity: &NodeIdentity,
+    ) -> Result<usize> {
         // One authenticated reader owns prefix, resolution and ancestry rules.
         // Startup admission below still refuses any unresolved leaf.
-        Self::scan_interrupted_evidence(runtime, identity)?;
+        Self::scan_interrupted_evidence_in(factory, runtime, identity)?;
         Ok(runtime
             .entry_names_bounded(MAX_DIRECTORY_ENTRIES)?
             .iter()
@@ -492,6 +509,16 @@ impl<'a> RetirementJournal<'a> {
     /// a legal incomplete phase prefix and one last intent without an outcome;
     /// it never turns an old pathname observation into mutation authority.
     pub(crate) fn scan_interrupted_evidence(
+        runtime: &lillux::PinnedDirectory,
+        identity: &NodeIdentity,
+    ) -> Result<Vec<AuthenticatedInterruptedGeneration>> {
+        Self::scan_interrupted_evidence_in(None, runtime, identity)
+    }
+
+    /// The same scan with its guarded reads inside `factory`'s native scope,
+    /// so projection leases that factory holds answer for their owner.
+    pub(crate) fn scan_interrupted_evidence_in(
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
         runtime: &lillux::PinnedDirectory,
         identity: &NodeIdentity,
     ) -> Result<Vec<AuthenticatedInterruptedGeneration>> {
@@ -565,7 +592,7 @@ impl<'a> RetirementJournal<'a> {
         let mut signed_bytes = 0usize;
         for name in &signed_names {
             signed_bytes = signed_bytes
-                .checked_add(read_signed_bytes(runtime, name)?.len())
+                .checked_add(read_signed_bytes_in(factory, runtime, name)?.len())
                 .context("scheduler campaign signed-byte total overflow")?;
         }
         ensure!(
@@ -601,7 +628,7 @@ impl<'a> RetirementJournal<'a> {
         }
         let mut child_parents = std::collections::BTreeSet::new();
         for intent_name in generation_intents.values() {
-            let intent: SchedulerRetirementIntent = read_signed(runtime, intent_name, identity)?;
+            let intent: SchedulerRetirementIntent = read_signed_in(factory, runtime, intent_name, identity)?;
             intent.validate()?;
             if let Some(binding) = intent.recovery {
                 child_parents.insert(binding.parent_generation);
@@ -611,10 +638,10 @@ impl<'a> RetirementJournal<'a> {
         for (generation, intent_name) in &generation_intents {
             let is_terminal = terminal.contains(generation);
             let generation_intent: SchedulerRetirementIntent =
-                read_signed(runtime, intent_name, identity)?;
+                read_signed_in(factory, runtime, intent_name, identity)?;
             generation_intent.validate()?;
             let generation_intent_sha256 =
-                lillux::sha256_hex(&read_signed_bytes(runtime, intent_name)?);
+                lillux::sha256_hex(&read_signed_bytes_in(factory, runtime, intent_name)?);
             ensure!(
                 generation_intent.generation == *generation
                     && generation_intent.owner_fingerprint == identity.fingerprint()
@@ -636,9 +663,9 @@ impl<'a> RetirementJournal<'a> {
             let mut previous_hash = None;
             for sequence in &sequences {
                 let filename = phase_name(generation, *sequence);
-                let record: SchedulerRetirementRecord = read_signed(runtime, &filename, identity)?;
+                let record: SchedulerRetirementRecord = read_signed_in(factory, runtime, &filename, identity)?;
                 record.validate()?;
-                let bytes = read_signed_bytes(runtime, &filename)?;
+                let bytes = read_signed_bytes_in(factory, runtime, &filename)?;
                 ensure!(
                     record.generation == *generation
                         && record.sequence == *sequence
@@ -681,7 +708,7 @@ impl<'a> RetirementJournal<'a> {
                     );
                     let intent_name = files.intent.as_ref().unwrap();
                     let intent: SchedulerRetirementResolutionIntent =
-                        read_signed(runtime, intent_name, identity)?;
+                        read_signed_in(factory, runtime, intent_name, identity)?;
                     intent.validate_for_generation(&generation_intent)?;
                     ensure!(
                         intent.generation == *generation
@@ -729,7 +756,7 @@ impl<'a> RetirementJournal<'a> {
                         parent_matches,
                         "interrupted resolution intent lacks its exact latest signed parent phase"
                     );
-                    let intent_bytes = read_signed_bytes(runtime, intent_name)?;
+                    let intent_bytes = read_signed_bytes_in(factory, runtime, intent_name)?;
                     let intent_sha256 = lillux::sha256_hex(&intent_bytes);
                     ensure!(
                         !is_terminal || files.outcome.is_some(),
@@ -738,7 +765,7 @@ impl<'a> RetirementJournal<'a> {
                     let (outcome, outcome_sha256) =
                         if let Some(outcome_name) = files.outcome.as_ref() {
                             let outcome: SchedulerRetirementResolutionOutcome =
-                                read_signed(runtime, outcome_name, identity)?;
+                                read_signed_in(factory, runtime, outcome_name, identity)?;
                             ensure!(
                                 intent.outcome_filename()? == *outcome_name,
                                 "interrupted scheduler outcome filename mismatch"
@@ -752,7 +779,7 @@ impl<'a> RetirementJournal<'a> {
                                     .is_some_and(|coordinate| coordinate.ordinal == *ordinal),
                                 "scheduler resolution outcome omitted its allocated R coordinate"
                             );
-                            let bytes = read_signed_bytes(runtime, outcome_name)?;
+                            let bytes = read_signed_bytes_in(factory, runtime, outcome_name)?;
                             let hash = lillux::sha256_hex(&bytes);
                             prior_outcome[role_i] = Some(hash.clone());
                             (Some(outcome), Some(hash))
@@ -2673,7 +2700,19 @@ fn read_signed<T>(
 where
     T: for<'de> serde::Deserialize<'de> + serde::Serialize,
 {
-    let bytes = read_signed_bytes(runtime, name)?;
+    read_signed_in(None, runtime, name, identity)
+}
+
+fn read_signed_in<T>(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    runtime: &lillux::PinnedDirectory,
+    name: &str,
+    identity: &NodeIdentity,
+) -> Result<T>
+where
+    T: for<'de> serde::Deserialize<'de> + serde::Serialize,
+{
+    let bytes = read_signed_bytes_in(factory, runtime, name)?;
     verify_signed(&bytes, identity)
 }
 
@@ -2703,14 +2742,25 @@ fn read_optional_signed_bytes(
     runtime: &lillux::PinnedDirectory,
     name: &str,
 ) -> Result<Option<Vec<u8>>> {
+    read_optional_signed_bytes_in(None, runtime, name)
+}
+
+/// With the owning native factory the guarded read runs in that factory's
+/// scope, so its own held projection leases answer for their owner; without
+/// one the read refuses whenever any lease is listed.
+fn read_optional_signed_bytes_in(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    runtime: &lillux::PinnedDirectory,
+    name: &str,
+) -> Result<Option<Vec<u8>>> {
     // Only copied bounded bytes escape the native exclusion gate. Never open
     // an observer File here: closing a hardlink alias could drop SQLite locks
     // before signature validation gets a chance to refuse the evidence.
-    let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
-        runtime,
-        OsStr::new(name),
-        ryeos_scheduler_contract::SCHEDULER_RETIREMENT_RECORD_MAX_BYTES,
-    )
+    let maximum = ryeos_scheduler_contract::SCHEDULER_RETIREMENT_RECORD_MAX_BYTES;
+    let bytes = match factory {
+        Some(factory) => factory.read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum),
+        None => lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum),
+    }
     .with_context(|| format!("read guarded scheduler retirement record {name}"))?;
     if let Some(bytes) = &bytes {
         ensure!(
@@ -2722,7 +2772,15 @@ fn read_optional_signed_bytes(
 }
 
 fn read_signed_bytes(runtime: &lillux::PinnedDirectory, name: &str) -> Result<Vec<u8>> {
-    read_optional_signed_bytes(runtime, name)?
+    read_signed_bytes_in(None, runtime, name)
+}
+
+fn read_signed_bytes_in(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    runtime: &lillux::PinnedDirectory,
+    name: &str,
+) -> Result<Vec<u8>> {
+    read_optional_signed_bytes_in(factory, runtime, name)?
         .with_context(|| format!("scheduler retirement record {name} is absent"))
 }
 
@@ -3185,6 +3243,81 @@ mod terminal_scanner_controls {
             &intent,
         )?;
         Ok(child)
+    }
+
+    struct HeldProjectionLease;
+    impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for HeldProjectionLease {
+        fn require_original(
+            &self,
+            _factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn fork_deadline(
+            &self,
+            _factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)))
+        }
+    }
+
+    /// Startup admission runs after the State projection lease is held. A
+    /// completed retirement journal must then still be admitted through the
+    /// live factory's scope, while the unscoped read keeps refusing.
+    #[test]
+    fn startup_admission_reads_completed_journal_under_a_held_projection_lease() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let identity = NodeIdentity::create(&directory.path().join("identity.key"))?;
+        let runtime_path = directory.path().join("runtime");
+        std::fs::create_dir(&runtime_path)?;
+        let runtime =
+            lillux::PinnedDirectory::open(&runtime_path)?.context("test runtime absent")?;
+        completed_recovery_fixture(&runtime, &identity)?;
+        // Leave only the completed parent and its terminal recovery child.
+        std::fs::remove_file(runtime_path.join(format!("{INTENT_PREFIX}{}", "33".repeat(16))))?;
+        let unleased = RetirementJournal::validate_admission(&runtime, &identity)?;
+        let host = lillux_sqlite::test_host::TestNativeHost::acquire();
+        let lease_root = std::sync::Arc::new(
+            lillux::PinnedDirectory::open(directory.path())?.context("lease root absent")?,
+        );
+        std::fs::File::create(directory.path().join("projection.lease"))?;
+        let metadata = lease_root
+            .open_mount_entry(OsStr::new("projection.lease"))?
+            .context("lease metadata absent")?;
+        let authority: std::sync::Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
+            std::sync::Arc::new(HeldProjectionLease);
+        // SAFETY: test-only lease under the host's own funded factory; the
+        // metadata inode is a fresh regular file no SQLite role uses.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalProjectionLeaseInputs::issued(
+                lease_root,
+                metadata,
+                lillux_sqlite::OriginalProjectionLeaseMode::Exclusive,
+                authority,
+            )
+        };
+        let lease = match host.factory().acquire_projection_lease(inputs) {
+            Ok(lease) => lease,
+            Err(failure) => panic!("test lease refused: {failure}"),
+        };
+        let unscoped = RetirementJournal::validate_admission(&runtime, &identity)
+            .map_err(|error| format!("{error:#}"));
+        let scoped = crate::validate_retirement_startup(host.factory(), &runtime, &identity)
+            .map_err(|error| format!("{error:#}"));
+        match lease.close() {
+            Ok(lillux_sqlite::OriginalProjectionLeaseDisposition::Closed(closed)) => {
+                host.retain_lease(closed)
+            }
+            Ok(_) => panic!("held lease closed as never acquired"),
+            Err(failure) => panic!("test lease close retained: {failure}"),
+        }
+        let refused = unscoped.expect_err("unscoped admission must refuse under a held lease");
+        assert!(refused.contains("read guarded scheduler retirement record"), "{refused}");
+        let admitted = scoped.expect("scoped startup admission accepts the completed journal");
+        assert_eq!(admitted, unleased);
+        Ok(())
     }
 
     #[test]
