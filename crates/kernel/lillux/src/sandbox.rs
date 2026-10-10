@@ -748,23 +748,39 @@ fn validate_private_source_selections(
     let mut children = BTreeSet::new();
     let mut destinations: Vec<&Path> = Vec::with_capacity(selections.len());
     for selection in selections {
-        let child = selection.child.to_str().ok_or("private source child is not UTF-8")?;
-        if child.is_empty() || child.len() > 255 || child == "." || child == ".."
-            || child.contains('/') || child.chars().any(char::is_control)
+        let child = selection
+            .child
+            .to_str()
+            .ok_or("private source child is not UTF-8")?;
+        if child.is_empty()
+            || child.len() > 255
+            || child == "."
+            || child == ".."
+            || child.contains('/')
+            || child.chars().any(char::is_control)
         {
             return Err("private source child is not an exact immediate name".into());
         }
-        let destination = selection.destination.to_str()
+        let destination = selection
+            .destination
+            .to_str()
             .ok_or("private source destination is not UTF-8")?;
-        if !destination.starts_with('/') || destination.len() > 4096
-            || destination[1..].split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        if !destination.starts_with('/')
+            || destination.len() > 4096
+            || destination[1..]
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
             || destination.chars().any(char::is_control)
         {
-            return Err("private source destination is not a canonical strict absolute path".into());
+            return Err(
+                "private source destination is not a canonical strict absolute path".into(),
+            );
         }
-        if !children.insert(selection.child) || destinations.iter().any(|prior| {
-            prior.starts_with(selection.destination) || selection.destination.starts_with(prior)
-        }) {
+        if !children.insert(selection.child)
+            || destinations.iter().any(|prior| {
+                prior.starts_with(selection.destination) || selection.destination.starts_with(prior)
+            })
+        {
             return Err("private source selections duplicate or overlap".into());
         }
         destinations.push(selection.destination);
@@ -780,9 +796,13 @@ fn validate_private_source_mount_topology(
     request: &LinuxSandboxRequest,
 ) -> Result<(), String> {
     for selection in selections {
-        if request.mounts.iter().filter(|mount| {
-            mount.destination.as_path() == selection.destination
-        }).count() != 1 {
+        if request
+            .mounts
+            .iter()
+            .filter(|mount| mount.destination.as_path() == selection.destination)
+            .count()
+            != 1
+        {
             return Err("private source destination lacks one exact request mount".into());
         }
         if request.mounts.iter().any(|mount| {
@@ -791,9 +811,11 @@ fn validate_private_source_mount_topology(
         }) {
             return Err("another mount replaces a selected private source descendant".into());
         }
-        if request.fixed_parent_views.iter().any(|view| {
-            view.destination.starts_with(selection.destination)
-        }) {
+        if request
+            .fixed_parent_views
+            .iter()
+            .any(|view| view.destination.starts_with(selection.destination))
+        {
             return Err("fixed-parent view replaces a selected private source subtree".into());
         }
     }
@@ -821,11 +843,15 @@ impl PrivateSourceLinuxSandboxProcess {
         self.process.mount_preparation_receipt()
     }
 
-    pub fn try_observe_applied_launch(&mut self) -> Result<Option<LinuxSandboxAppliedLaunchReceipt>, String> {
+    pub fn try_observe_applied_launch(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxAppliedLaunchReceipt>, String> {
         self.process.try_observe_applied_launch()
     }
 
-    pub fn try_observe_native_terminal(&mut self) -> Result<Option<LinuxSandboxNativeTerminalObservation>, String> {
+    pub fn try_observe_native_terminal(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxNativeTerminalObservation>, String> {
         self.process.try_observe_native_terminal()
     }
 }
@@ -877,7 +903,11 @@ impl LinuxSandboxPipes {
 // Piped launches exclusively own stdin/stdout/stderr. The common native
 // validator still enforces sorted unique channels and all source-role aliases.
 fn require_piped_target_channels(request: &LinuxSandboxRequest) -> Result<(), String> {
-    if request.target_channels.iter().any(|(_, target)| *target < 3) {
+    if request
+        .target_channels
+        .iter()
+        .any(|(_, target)| *target < 3)
+    {
         return Err("piped sandbox target channels cannot replace stdin/stdout/stderr".into());
     }
     Ok(())
@@ -909,7 +939,9 @@ fn prepare_linux_sandbox_piped_linux(
         reserved.insert(i32::try_from(*source).map_err(|error| error.to_string())?);
         reserved.insert(i32::try_from(*target).map_err(|error| error.to_string())?);
     }
-    fn pipe(reserved: &std::collections::BTreeSet<i32>) -> Result<(std::fs::File, std::fs::File), String> {
+    fn pipe(
+        reserved: &std::collections::BTreeSet<i32>,
+    ) -> Result<(std::fs::File, std::fs::File), String> {
         let mut fds = [-1; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(format!(
@@ -917,11 +949,9 @@ fn prepare_linux_sandbox_piped_linux(
                 std::io::Error::last_os_error()
             ));
         }
-        if let Err(error) = imp::relocate_internal_descriptors(
-            &mut fds,
-            reserved,
-            "candidate protocol pipe",
-        ) {
+        if let Err(error) =
+            imp::relocate_internal_descriptors(&mut fds, reserved, "candidate protocol pipe")
+        {
             unsafe {
                 libc::close(fds[0]);
                 libc::close(fds[1]);
@@ -1886,12 +1916,16 @@ pub fn launch_linux_sandbox_from_sealed_sources_with_original_namespace_occupanc
         .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
     imp::validate_terminal_writer_request(&request, writer, original_deadline)
         .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
-    let mut pending = crate::exec::PendingNamespaceWatchdog::prepare(
-        limit, cleanup_allowance, original_deadline,
-    ).unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    let mut pending =
+        crate::exec::PendingNamespaceWatchdog::prepare(limit, cleanup_allowance, original_deadline)
+            .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
     let mut process = imp::launch_with_private_sources_namespace_watchdog_and_terminal_writer(
-        request, &source, &mut pending, writer,
-    ).unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+        request,
+        &source,
+        &mut pending,
+        writer,
+    )
+    .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
     match pending.finish() {
         Ok(watchdog) => process.namespace_occupancy_watchdog = Some(watchdog),
         Err(error) => {
@@ -1902,7 +1936,10 @@ pub fn launch_linux_sandbox_from_sealed_sources_with_original_namespace_occupanc
             imp::fatal_private_source_transition(&error);
         }
     }
-    Ok(PrivateSourceLinuxSandboxProcess { process, _source: source })
+    Ok(PrivateSourceLinuxSandboxProcess {
+        process,
+        _source: source,
+    })
 }
 
 /// Launch a held isolated target with one exact namespace-local listener.
@@ -2399,8 +2436,15 @@ mod imp {
         occupancy: &mut crate::exec::PendingNamespaceWatchdog,
         writer: &crate::InheritedDescriptorAuthority,
     ) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio_and_loopback(request, None, None, Some(source), Some(occupancy), Some(writer))
-            .map(|(process, _)| process)
+        launch_with_stdio_and_loopback(
+            request,
+            None,
+            None,
+            Some(source),
+            Some(occupancy),
+            Some(writer),
+        )
+        .map(|(process, _)| process)
     }
 
     fn launch_with_stdio_and_loopback(
@@ -2945,16 +2989,21 @@ mod imp {
         // Reuse the existing exact common ancestor/view restrictions; do not
         // invent a second mount-order policy or reject legitimate early parents.
         fixed_parents::validate(request)?;
-        let root = source.root.try_clone_descriptor()
+        let root = source
+            .root
+            .try_clone_descriptor()
             .map_err(|error| format!("inspect sealed source descriptor: {error}"))?;
         let root_stat = mount_source_stat(root.as_raw_fd())?;
         let expected_mount = mount_source_id(root.as_raw_fd())?;
         let mut expected = Vec::with_capacity(selections.len());
         for selection in selections {
-            let child = source.root.open_child_directory(selection.child)
+            let child = source
+                .root
+                .open_child_directory(selection.child)
                 .map_err(|error| format!("resolve exact sealed source child: {error}"))?
                 .ok_or("exact sealed source child is absent")?;
-            let descriptor = child.try_clone_descriptor()
+            let descriptor = child
+                .try_clone_descriptor()
                 .map_err(|error| format!("inspect exact sealed source child: {error}"))?;
             let stat = mount_source_stat(descriptor.as_raw_fd())?;
             if stat.st_dev != root_stat.st_dev
@@ -2977,9 +3026,12 @@ mod imp {
             {
                 return Err("private source mount is writable or crosses the sealed mount".into());
             }
-            let index = expected.iter().position(|(_, inode, destination)| {
-                *inode == observed.st_ino && mount.destination.as_path() == *destination
-            }).ok_or("private source mount is not an exact selected child and destination")?;
+            let index = expected
+                .iter()
+                .position(|(_, inode, destination)| {
+                    *inode == observed.st_ino && mount.destination.as_path() == *destination
+                })
+                .ok_or("private source mount is not an exact selected child and destination")?;
             if observed_selection[index] {
                 return Err("private source mount duplicates a selected child".into());
             }
@@ -3387,6 +3439,7 @@ mod imp {
             if !self
                 .root
                 .remove_empty_child_if_same(name, &self.mountpoint)
+                .map(|receipt| receipt.is_some())
                 .map_err(|error| format!("remove detached sealed mountpoint: {error:#}"))?
             {
                 return Err("detached sealed mountpoint is not empty".to_string());
@@ -4634,7 +4687,7 @@ mod imp {
         let mut preserved = request.target_channels.iter().map(|(source, _)| raw_fd(*source))
             .chain(request.mounts.iter().map(|mount| raw_fd(mount.source_fd)))
             .collect::<Result<BTreeSet<_>, _>>()?;
-        if let Some(stdio) = stdio { preserved.extend(stdio.iter().map(AsRawFd::as_raw_fd)); }
+        if let Some(stdio) = stdio { preserved.extend(stdio.iter().map(std::os::fd::AsRawFd::as_raw_fd)); }
         if let LinuxSandboxLifecycle::AwaitRelease { release_fd, release_keepalive_fd } = request.lifecycle {
             preserved.insert(raw_fd(release_fd)?);
             preserved.insert(raw_fd(release_keepalive_fd)?);
@@ -5621,6 +5674,7 @@ mod imp {
                     })?;
                 if !state
                     .remove_empty_child_if_same(&entry.name, &child)
+                    .map(|receipt| receipt.is_some())
                     .map_err(|error| format!("remove overlay destruction child: {error:#}"))?
                 {
                     return Err("overlay destruction child remained non-empty".to_string());
@@ -6815,20 +6869,27 @@ mod imp {
             request.target_channels = vec![(a, 200), (b, 201)];
             super::super::require_piped_target_channels(&request).unwrap();
             validate_request(&request).unwrap();
-            for channels in [vec![(a, 200), (b, 200)], vec![(a, 201), (b, 200)],
-                             vec![(a, 200), (a, 201)], vec![(a, b), (b, 201)]] {
+            for channels in [
+                vec![(a, 200), (b, 200)],
+                vec![(a, 201), (b, 200)],
+                vec![(a, 200), (a, 201)],
+                vec![(a, b), (b, 201)],
+            ] {
                 request.target_channels = channels;
                 assert!(validate_request(&request).is_err());
             }
             request.target_channels = vec![(a, 200)];
             request.mounts.push(LinuxSandboxMount {
-                source_fd: a, destination: "/source".into(),
-                access: LinuxSandboxMountAccess::ReadOnly, layer: 0,
+                source_fd: a,
+                destination: "/source".into(),
+                access: LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
             });
             assert!(validate_request(&request).unwrap_err().contains("aliases"));
             request.mounts.clear();
             request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
-                release_fd: a, release_keepalive_fd: b,
+                release_fd: a,
+                release_keepalive_fd: b,
             };
             assert!(validate_request(&request).unwrap_err().contains("alias"));
         }
@@ -6838,7 +6899,10 @@ mod imp {
             use std::io::{Read as _, Write as _};
             use std::os::fd::{AsRawFd as _, FromRawFd as _};
             let mut descriptors = [-1; 2];
-            assert_eq!(unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            assert_eq!(
+                unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
             let reserved = BTreeSet::from([0, 1, 2, descriptors[0], descriptors[1]]);
             relocate_internal_descriptors(&mut descriptors, &reserved, "piped-test").unwrap();
             assert!(descriptors.iter().all(|fd| !reserved.contains(fd)));
@@ -6849,7 +6913,9 @@ mod imp {
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, b"exact-channel");
-            assert!(unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
+            assert!(
+                unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0
+            );
         }
 
         #[test]
@@ -6858,10 +6924,20 @@ mod imp {
             use std::io::{Read as _, Write as _};
             // Mechanical shell fixture only, not admitted Python/Tool evidence.
             let channel = crate::sealed_memfd(c"piped-extra", b"extra-value\n").unwrap();
-            let sources = ["/bin", "/usr", "/lib", "/lib64"].into_iter()
+            let sources = ["/bin", "/usr", "/lib", "/lib64"]
+                .into_iter()
                 .filter(|path| Path::new(path).exists())
-                .map(|path| (PathBuf::from(path), crate::secure_fs::pin_canonical_mount_source(
-                    &std::fs::canonicalize(path).unwrap()).unwrap().duplicate_at_or_above(64).unwrap()))
+                .map(|path| {
+                    (
+                        PathBuf::from(path),
+                        crate::secure_fs::pin_canonical_mount_source(
+                            &std::fs::canonicalize(path).unwrap(),
+                        )
+                        .unwrap()
+                        .duplicate_at_or_above(64)
+                        .unwrap(),
+                    )
+                })
                 .collect::<Vec<_>>();
             let mut request = super::super::tests::minimal_request();
             request.executable = "/bin/sh".into();
@@ -6870,32 +6946,56 @@ mod imp {
             request.arguments = vec!["-c".into(),
                 "read extra <&8; read input; printf '%s:%s\\n' \"$extra\" \"$input\"; printf 'diagnostic\\n' >&2".into()];
             request.target_channels = vec![(channel.inherited_descriptor().unwrap(), 8)];
-            request.mounts = sources.iter().map(|(destination, source)| LinuxSandboxMount {
-                source_fd: source.inherited_descriptor().unwrap(), destination: destination.clone(),
-                access: LinuxSandboxMountAccess::ReadOnly, layer: 0,
-            }).collect();
-            let expected = LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
-                &request.mounts, &[]).unwrap();
+            request.mounts = sources
+                .iter()
+                .map(|(destination, source)| LinuxSandboxMount {
+                    source_fd: source.inherited_descriptor().unwrap(),
+                    destination: destination.clone(),
+                    access: LinuxSandboxMountAccess::ReadOnly,
+                    layer: 0,
+                })
+                .collect();
+            let expected =
+                LinuxSandboxMountPreparationCommitments::from_admitted_mounts(&request.mounts, &[])
+                    .unwrap();
             let deadline = crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(5));
             let (mut held, mut pipes) = super::super::prepare_linux_sandbox_piped(request).unwrap();
             let result = (|| -> Result<(), String> {
                 let observed = held.mount_preparation_receipt()?;
-                if observed.owned_child_pid != held.child_pid() || !observed.matches_commitments(&expected) {
+                if observed.owned_child_pid != held.child_pid()
+                    || !observed.matches_commitments(&expected)
+                {
                     return Err("piped-extra held mount identity changed".into());
                 }
                 held.release_once()?;
-                let mut streams = pipes.protocol_streams_until(deadline).map_err(|e| e.to_string())?;
-                streams.input.write_all(b"stdin-value\n").map_err(|e| e.to_string())?;
+                let mut streams = pipes
+                    .protocol_streams_until(deadline)
+                    .map_err(|e| e.to_string())?;
+                streams
+                    .input
+                    .write_all(b"stdin-value\n")
+                    .map_err(|e| e.to_string())?;
                 let mut output = Vec::new();
-                (&mut streams.output).take(257).read_to_end(&mut output).map_err(|e| e.to_string())?;
+                (&mut streams.output)
+                    .take(257)
+                    .read_to_end(&mut output)
+                    .map_err(|e| e.to_string())?;
                 let mut diagnostics = Vec::new();
-                (&mut streams.diagnostics).take(257).read_to_end(&mut diagnostics).map_err(|e| e.to_string())?;
+                (&mut streams.diagnostics)
+                    .take(257)
+                    .read_to_end(&mut diagnostics)
+                    .map_err(|e| e.to_string())?;
                 if output.len() > 256 || diagnostics.len() > 256 {
                     return Err("piped-extra output overflow".into());
                 }
                 let mut eof = [0; 1];
                 if streams.output.read(&mut eof).map_err(|e| e.to_string())? != 0
-                    || streams.diagnostics.read(&mut eof).map_err(|e| e.to_string())? != 0 {
+                    || streams
+                        .diagnostics
+                        .read(&mut eof)
+                        .map_err(|e| e.to_string())?
+                        != 0
+                {
                     return Err("piped-extra streams did not reach clean EOF".into());
                 }
                 if output != b"extra-value:stdin-value\n" || diagnostics != b"diagnostic\n" {
@@ -6903,19 +7003,24 @@ mod imp {
                 }
                 loop {
                     if let Some(exit) = held.try_observe_target_exit()? {
-                        if exit.exit() != LinuxSandboxExit::Code(0) || exit.launch_failure().is_some() {
+                        if exit.exit() != LinuxSandboxExit::Code(0)
+                            || exit.launch_failure().is_some()
+                        {
                             return Err("piped-extra target refused".into());
                         }
                         // PID-1 exit readiness is not merely a numeric exit:
                         // into_termination transfers the exact namespace-death
                         // witness after exclusive owned reap. EOF was separate.
                         let termination = exit.into_termination();
-                        if held.child_pid() != 0 || termination.exit() != LinuxSandboxExit::Code(0) {
+                        if held.child_pid() != 0 || termination.exit() != LinuxSandboxExit::Code(0)
+                        {
                             return Err("piped-extra namespace settlement missing".into());
                         }
                         break;
                     }
-                    if deadline.has_elapsed() { return Err("piped-extra original deadline expired".into()); }
+                    if deadline.has_elapsed() {
+                        return Err("piped-extra original deadline expired".into());
+                    }
                     std::thread::yield_now();
                 }
                 Ok(())
@@ -6929,7 +7034,9 @@ mod imp {
                 // Keep source/pipe owners alive through that actual Drop.
                 drop(held);
                 drop((pipes, sources, channel));
-                panic!("piped-extra component control failed: {error}; bounded cleanup: {cleanup:?}");
+                panic!(
+                    "piped-extra component control failed: {error}; bounded cleanup: {cleanup:?}"
+                );
             }
         }
 
@@ -9164,43 +9271,102 @@ mod tests {
     #[test]
     fn private_source_selections_require_bounded_request_cardinality() {
         let selection = LinuxPrivateSourceMount {
-            child: std::ffi::OsStr::new("worker"), destination: Path::new("/code/worker"),
+            child: std::ffi::OsStr::new("worker"),
+            destination: Path::new("/code/worker"),
         };
         assert!(validate_private_source_selections(&[], 1).is_err());
         assert!(validate_private_source_selections(std::slice::from_ref(&selection), 0).is_err());
         assert!(validate_private_source_selections(std::slice::from_ref(&selection), 1).is_ok());
-        let excessive: Vec<_> = (0..4097).map(|_| LinuxPrivateSourceMount {
-            child: selection.child, destination: selection.destination,
-        }).collect();
+        let excessive: Vec<_> = (0..4097)
+            .map(|_| LinuxPrivateSourceMount {
+                child: selection.child,
+                destination: selection.destination,
+            })
+            .collect();
         assert!(validate_private_source_selections(&excessive, 4097).is_err());
         let names: Vec<_> = (0..4096).map(|index| format!("child-{index}")).collect();
-        let paths: Vec<_> = (0..4096).map(|index| PathBuf::from(format!("/code/child-{index}"))).collect();
-        let maximum: Vec<_> = names.iter().zip(&paths).map(|(name, path)| LinuxPrivateSourceMount {
-            child: std::ffi::OsStr::new(name), destination: path,
-        }).collect();
+        let paths: Vec<_> = (0..4096)
+            .map(|index| PathBuf::from(format!("/code/child-{index}")))
+            .collect();
+        let maximum: Vec<_> = names
+            .iter()
+            .zip(&paths)
+            .map(|(name, path)| LinuxPrivateSourceMount {
+                child: std::ffi::OsStr::new(name),
+                destination: path,
+            })
+            .collect();
         assert!(validate_private_source_selections(&maximum, 4096).is_ok());
     }
 
     #[test]
     fn private_source_selections_refuse_non_immediate_names_and_noncanonical_destinations() {
-        for child in ["", ".", "..", "nested/child", "child/", "bad\nname", "bad\0name"] {
-            assert!(validate_private_source_selections(&[LinuxPrivateSourceMount {
-                child: std::ffi::OsStr::new(child), destination: Path::new("/code/worker"),
-            }], 1).is_err(), "{child:?}");
+        for child in [
+            "",
+            ".",
+            "..",
+            "nested/child",
+            "child/",
+            "bad\nname",
+            "bad\0name",
+        ] {
+            assert!(
+                validate_private_source_selections(
+                    &[LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new(child),
+                        destination: Path::new("/code/worker"),
+                    }],
+                    1
+                )
+                .is_err(),
+                "{child:?}"
+            );
         }
         let long_child = "x".repeat(256);
-        assert!(validate_private_source_selections(&[LinuxPrivateSourceMount {
-            child: std::ffi::OsStr::new(&long_child), destination: Path::new("/code/worker"),
-        }], 1).is_err());
-        for destination in ["", "/", "relative", "/code/", "/code//worker", "/code/./worker", "/code/../worker", "/bad\npath", "/bad\0path"] {
-            assert!(validate_private_source_selections(&[LinuxPrivateSourceMount {
-                child: std::ffi::OsStr::new("worker"), destination: Path::new(destination),
-            }], 1).is_err(), "{destination:?}");
+        assert!(
+            validate_private_source_selections(
+                &[LinuxPrivateSourceMount {
+                    child: std::ffi::OsStr::new(&long_child),
+                    destination: Path::new("/code/worker"),
+                }],
+                1
+            )
+            .is_err()
+        );
+        for destination in [
+            "",
+            "/",
+            "relative",
+            "/code/",
+            "/code//worker",
+            "/code/./worker",
+            "/code/../worker",
+            "/bad\npath",
+            "/bad\0path",
+        ] {
+            assert!(
+                validate_private_source_selections(
+                    &[LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new("worker"),
+                        destination: Path::new(destination),
+                    }],
+                    1
+                )
+                .is_err(),
+                "{destination:?}"
+            );
         }
         let long_destination = format!("/{}", "x".repeat(4096));
-        assert!(validate_private_source_selections(&[LinuxPrivateSourceMount {
-            child: std::ffi::OsStr::new("worker"), destination: Path::new(&long_destination),
-        }], 1).is_err());
+        assert!(
+            validate_private_source_selections(
+                &[LinuxPrivateSourceMount {
+                    child: std::ffi::OsStr::new("worker"),
+                    destination: Path::new(&long_destination),
+                }],
+                1
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -9211,35 +9377,73 @@ mod tests {
             ("worker", "gnu", "/code", "/code/gnu"),
             ("worker", "gnu", "/code/worker", "/code"),
         ] {
-            assert!(validate_private_source_selections(&[
-                LinuxPrivateSourceMount { child: std::ffi::OsStr::new(first), destination: Path::new(left) },
-                LinuxPrivateSourceMount { child: std::ffi::OsStr::new(second), destination: Path::new(right) },
-            ], 2).is_err());
+            assert!(
+                validate_private_source_selections(
+                    &[
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new(first),
+                            destination: Path::new(left)
+                        },
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new(second),
+                            destination: Path::new(right)
+                        },
+                    ],
+                    2
+                )
+                .is_err()
+            );
         }
-        assert!(validate_private_source_selections(&[
-            LinuxPrivateSourceMount { child: std::ffi::OsStr::new("worker"), destination: Path::new("/code/worker") },
-            LinuxPrivateSourceMount { child: std::ffi::OsStr::new("gnu"), destination: Path::new("/code/worker-sibling") },
-        ], 2).is_ok());
+        assert!(
+            validate_private_source_selections(
+                &[
+                    LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new("worker"),
+                        destination: Path::new("/code/worker")
+                    },
+                    LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new("gnu"),
+                        destination: Path::new("/code/worker-sibling")
+                    },
+                ],
+                2
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn private_source_topology_refuses_all_descendant_mounts_and_filtered_views() {
         let selected = [LinuxPrivateSourceMount {
-            child: std::ffi::OsStr::new("worker"), destination: Path::new("/code/worker"),
+            child: std::ffi::OsStr::new("worker"),
+            destination: Path::new("/code/worker"),
         }];
         // Structural coordinates only, no descriptor authority or sealed owner.
         let mut request = minimal_request();
         request.mounts.push(LinuxSandboxMount {
-            source_fd: 0, destination: "/code/worker".into(), access: LinuxSandboxMountAccess::ReadOnly, layer: 10,
+            source_fd: 0,
+            destination: "/code/worker".into(),
+            access: LinuxSandboxMountAccess::ReadOnly,
+            layer: 10,
         });
         validate_private_source_mount_topology(&selected, &request).unwrap();
-        for access in [LinuxSandboxMountAccess::ReadOnly, LinuxSandboxMountAccess::Writable] {
+        for access in [
+            LinuxSandboxMountAccess::ReadOnly,
+            LinuxSandboxMountAccess::Writable,
+        ] {
             for layer in [0, 10, 20] {
                 let mut injected = request.clone();
                 injected.mounts.push(LinuxSandboxMount {
-                    source_fd: 1, destination: "/code/worker/lib".into(), access, layer,
+                    source_fd: 1,
+                    destination: "/code/worker/lib".into(),
+                    access,
+                    layer,
                 });
-                assert!(validate_private_source_mount_topology(&selected, &injected).unwrap_err().contains("descendant"));
+                assert!(
+                    validate_private_source_mount_topology(&selected, &injected)
+                        .unwrap_err()
+                        .contains("descendant")
+                );
                 injected.mounts.reverse();
                 assert!(validate_private_source_mount_topology(&selected, &injected).is_err());
             }
@@ -9249,24 +9453,44 @@ mod tests {
         assert!(validate_private_source_mount_topology(&selected, &duplicate).is_err());
         for destination in ["/code/worker", "/code/worker/lib"] {
             let mut filtered = request.clone();
-            filtered.fixed_parent_views.push(LinuxSandboxFixedParentView {
-                destination: destination.into(), denied_paths: vec!["some/denied".into()], max_entries: 8, max_depth: 4,
-            });
-            assert!(validate_private_source_mount_topology(&selected, &filtered).unwrap_err().contains("fixed-parent view"));
+            filtered
+                .fixed_parent_views
+                .push(LinuxSandboxFixedParentView {
+                    destination: destination.into(),
+                    denied_paths: vec!["some/denied".into()],
+                    max_entries: 8,
+                    max_depth: 4,
+                });
+            assert!(
+                validate_private_source_mount_topology(&selected, &filtered)
+                    .unwrap_err()
+                    .contains("fixed-parent view")
+            );
         }
         let mut unrelated = request.clone();
         unrelated.mounts.push(LinuxSandboxMount {
-            source_fd: 1, destination: "/code/worker-sibling".into(), access: LinuxSandboxMountAccess::Writable, layer: 20,
+            source_fd: 1,
+            destination: "/code/worker-sibling".into(),
+            access: LinuxSandboxMountAccess::Writable,
+            layer: 20,
         });
         validate_private_source_mount_topology(&selected, &unrelated).unwrap();
         // Topology permits ancestor coordinates; existing descriptor-backed
         // fixed-parent validator separately enforces their kind/order/denials.
         unrelated.mounts.push(LinuxSandboxMount {
-            source_fd: 2, destination: "/code".into(), access: LinuxSandboxMountAccess::Writable, layer: 0,
+            source_fd: 2,
+            destination: "/code".into(),
+            access: LinuxSandboxMountAccess::Writable,
+            layer: 0,
         });
-        unrelated.fixed_parent_views.push(LinuxSandboxFixedParentView {
-            destination: "/code".into(), denied_paths: vec!["unrelated/denied".into()], max_entries: 8, max_depth: 4,
-        });
+        unrelated
+            .fixed_parent_views
+            .push(LinuxSandboxFixedParentView {
+                destination: "/code".into(),
+                denied_paths: vec!["unrelated/denied".into()],
+                max_entries: 8,
+                max_depth: 4,
+            });
         validate_private_source_mount_topology(&selected, &unrelated).unwrap();
     }
 
@@ -9276,39 +9500,114 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[ignore = "requires explicit allocation of the supported Linux private-source namespace floor"]
     fn private_multisource_actual_sealed_children_require_exact_mount_bijection() {
-        for case in ["positive", "missing", "unlisted", "duplicate", "writable", "root", "channel", "wrong-destination", "foreign-mount", "foreign-descendant-ro", "foreign-descendant-rw", "foreign-duplicate", "early-ancestor", "equal-layer-ancestor", "late-ancestor-ro", "late-ancestor-rw", "selected-fixed-view", "descendant-fixed-view", "early-ancestor-view"] {
+        for case in [
+            "positive",
+            "missing",
+            "unlisted",
+            "duplicate",
+            "writable",
+            "root",
+            "channel",
+            "wrong-destination",
+            "foreign-mount",
+            "foreign-descendant-ro",
+            "foreign-descendant-rw",
+            "foreign-duplicate",
+            "early-ancestor",
+            "equal-layer-ancestor",
+            "late-ancestor-ro",
+            "late-ancestor-rw",
+            "selected-fixed-view",
+            "descendant-fixed-view",
+            "early-ancestor-view",
+        ] {
             let pid = unsafe { libc::fork() };
             assert!(pid >= 0);
             if pid == 0 {
                 let result = std::panic::catch_unwind(|| {
-                    let former = crate::PinnedDirectory::open(Path::new("/tmp")).unwrap().unwrap();
+                    let former = crate::PinnedDirectory::open(Path::new("/tmp"))
+                        .unwrap()
+                        .unwrap();
                     let former_fd = former.inherited_descriptor_authority().unwrap();
                     let source = enter_linux_private_source_filesystem(LinuxPrivateSourceLimits {
-                        max_bytes: 1024 * 1024, max_inodes: 64,
-                    }).unwrap();
-                    let first = source.root().create_child(std::ffi::OsStr::new("first"), 0o700).unwrap();
-                    let second = source.root().create_child(std::ffi::OsStr::new("second"), 0o700).unwrap();
-                    let other = source.root().create_child(std::ffi::OsStr::new("other"), 0o700).unwrap();
-                    first.atomic_create_regular(std::ffi::OsStr::new("member"), b"actual private bytes", 0o600).unwrap().unwrap();
+                        max_bytes: 1024 * 1024,
+                        max_inodes: 64,
+                    })
+                    .unwrap();
+                    let first = source
+                        .root()
+                        .create_child(std::ffi::OsStr::new("first"), 0o700)
+                        .unwrap();
+                    let second = source
+                        .root()
+                        .create_child(std::ffi::OsStr::new("second"), 0o700)
+                        .unwrap();
+                    let other = source
+                        .root()
+                        .create_child(std::ffi::OsStr::new("other"), 0o700)
+                        .unwrap();
+                    first
+                        .atomic_create_regular(
+                            std::ffi::OsStr::new("member"),
+                            b"actual private bytes",
+                            0o600,
+                        )
+                        .unwrap()
+                        .unwrap();
                     if case == "foreign-mount" {
-                        let origin = std::ffi::CString::new(first.path().as_os_str().as_encoded_bytes()).unwrap();
-                        let alias = std::ffi::CString::new(other.path().as_os_str().as_encoded_bytes()).unwrap();
-                        assert_eq!(unsafe { libc::mount(origin.as_ptr(), alias.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) }, 0);
+                        let origin =
+                            std::ffi::CString::new(first.path().as_os_str().as_encoded_bytes())
+                                .unwrap();
+                        let alias =
+                            std::ffi::CString::new(other.path().as_os_str().as_encoded_bytes())
+                                .unwrap();
+                        assert_eq!(
+                            unsafe {
+                                libc::mount(
+                                    origin.as_ptr(),
+                                    alias.as_ptr(),
+                                    std::ptr::null(),
+                                    libc::MS_BIND,
+                                    std::ptr::null(),
+                                )
+                            },
+                            0
+                        );
                     }
                     let source = source.seal_read_only().unwrap();
                     let first_fd = first.inherited_descriptor_authority().unwrap();
                     let second_fd = second.inherited_descriptor_authority().unwrap();
-                    let other = source.root().open_child_directory(std::ffi::OsStr::new("other")).unwrap().unwrap();
+                    let other = source
+                        .root()
+                        .open_child_directory(std::ffi::OsStr::new("other"))
+                        .unwrap()
+                        .unwrap();
                     let other_fd = other.inherited_descriptor_authority().unwrap();
                     let root_fd = source.root().inherited_descriptor_authority().unwrap();
                     let mut request = minimal_request();
                     request.mounts = vec![
-                        LinuxSandboxMount { source_fd: first_fd.inherited_descriptor().unwrap(), destination: "/code/first".into(), access: LinuxSandboxMountAccess::ReadOnly, layer: 0 },
-                        LinuxSandboxMount { source_fd: second_fd.inherited_descriptor().unwrap(), destination: "/products/second".into(), access: LinuxSandboxMountAccess::ReadOnly, layer: 1 },
+                        LinuxSandboxMount {
+                            source_fd: first_fd.inherited_descriptor().unwrap(),
+                            destination: "/code/first".into(),
+                            access: LinuxSandboxMountAccess::ReadOnly,
+                            layer: 0,
+                        },
+                        LinuxSandboxMount {
+                            source_fd: second_fd.inherited_descriptor().unwrap(),
+                            destination: "/products/second".into(),
+                            access: LinuxSandboxMountAccess::ReadOnly,
+                            layer: 1,
+                        },
                     ];
                     let mut selections = vec![
-                        LinuxPrivateSourceMount { child: std::ffi::OsStr::new("first"), destination: Path::new("/code/first") },
-                        LinuxPrivateSourceMount { child: std::ffi::OsStr::new("second"), destination: Path::new("/products/second") },
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new("first"),
+                            destination: Path::new("/code/first"),
+                        },
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new("second"),
+                            destination: Path::new("/products/second"),
+                        },
                     ];
                     let expected = match case {
                         "positive" => None,
@@ -9316,56 +9615,113 @@ mod tests {
                             request.mounts.push(LinuxSandboxMount {
                                 source_fd: former_fd.inherited_descriptor().unwrap(),
                                 destination: "/code/first/injected".into(),
-                                access: if case.ends_with("rw") { LinuxSandboxMountAccess::Writable } else { LinuxSandboxMountAccess::ReadOnly },
+                                access: if case.ends_with("rw") {
+                                    LinuxSandboxMountAccess::Writable
+                                } else {
+                                    LinuxSandboxMountAccess::ReadOnly
+                                },
                                 layer: 2,
                             });
                             Some("replaces a selected private source descendant")
-                        },
+                        }
                         "foreign-duplicate" => {
                             request.mounts.push(LinuxSandboxMount {
                                 source_fd: former_fd.inherited_descriptor().unwrap(),
-                                destination: "/code/first".into(), access: LinuxSandboxMountAccess::ReadOnly, layer: 2,
+                                destination: "/code/first".into(),
+                                access: LinuxSandboxMountAccess::ReadOnly,
+                                layer: 2,
                             });
                             Some("lacks one exact request mount")
-                        },
-                        "early-ancestor" | "equal-layer-ancestor" | "late-ancestor-ro" | "late-ancestor-rw" | "early-ancestor-view" => {
+                        }
+                        "early-ancestor"
+                        | "equal-layer-ancestor"
+                        | "late-ancestor-ro"
+                        | "late-ancestor-rw"
+                        | "early-ancestor-view" => {
                             // Input order deliberately puts ancestor LAST. The
                             // actual common order is (layer,destination).
-                            request.mounts[0].layer = if case == "equal-layer-ancestor" { 0 } else { 1 };
+                            request.mounts[0].layer =
+                                if case == "equal-layer-ancestor" { 0 } else { 1 };
                             request.mounts.push(LinuxSandboxMount {
-                                source_fd: former_fd.inherited_descriptor().unwrap(), destination: "/code".into(),
-                                access: if case == "late-ancestor-ro" { LinuxSandboxMountAccess::ReadOnly } else { LinuxSandboxMountAccess::Writable },
+                                source_fd: former_fd.inherited_descriptor().unwrap(),
+                                destination: "/code".into(),
+                                access: if case == "late-ancestor-ro" {
+                                    LinuxSandboxMountAccess::ReadOnly
+                                } else {
+                                    LinuxSandboxMountAccess::Writable
+                                },
                                 layer: if case.starts_with("late") { 2 } else { 0 },
                             });
                             if case == "early-ancestor-view" {
-                                request.fixed_parent_views.push(LinuxSandboxFixedParentView {
-                                    destination: "/code".into(), denied_paths: vec!["unrelated/denied".into()], max_entries: 8, max_depth: 4,
-                                });
+                                request
+                                    .fixed_parent_views
+                                    .push(LinuxSandboxFixedParentView {
+                                        destination: "/code".into(),
+                                        denied_paths: vec!["unrelated/denied".into()],
+                                        max_entries: 8,
+                                        max_depth: 4,
+                                    });
                             }
-                            if case.starts_with("late") { Some("ancestor must be a directory installed before") } else { None }
-                        },
+                            if case.starts_with("late") {
+                                Some("ancestor must be a directory installed before")
+                            } else {
+                                None
+                            }
+                        }
                         "selected-fixed-view" | "descendant-fixed-view" => {
-                            request.fixed_parent_views.push(LinuxSandboxFixedParentView {
-                                destination: if case == "selected-fixed-view" { "/code/first".into() } else { "/code/first/subtree".into() },
-                                denied_paths: vec!["unrelated/denied".into()], max_entries: 8, max_depth: 4,
-                            });
+                            request
+                                .fixed_parent_views
+                                .push(LinuxSandboxFixedParentView {
+                                    destination: if case == "selected-fixed-view" {
+                                        "/code/first".into()
+                                    } else {
+                                        "/code/first/subtree".into()
+                                    },
+                                    denied_paths: vec!["unrelated/denied".into()],
+                                    max_entries: 8,
+                                    max_depth: 4,
+                                });
                             Some("fixed-parent view replaces a selected private source subtree")
-                        },
-                        "missing" => { request.mounts[1].source_fd = former_fd.inherited_descriptor().unwrap(); Some("did not select every") },
-                        "unlisted" => { request.mounts[1].source_fd = other_fd.inherited_descriptor().unwrap(); Some("not an exact selected") },
-                        "duplicate" => { request.mounts[1] = request.mounts[0].clone(); Some("lacks one exact request mount") },
-                        "writable" => { request.mounts[1].access = LinuxSandboxMountAccess::Writable; Some("writable or crosses") },
-                        "root" => { request.mounts[1].source_fd = root_fd.inherited_descriptor().unwrap(); Some("not an exact selected") },
-                        "channel" => { request.target_channels.push((first_fd.inherited_descriptor().unwrap(), 8)); Some("through a target channel") },
-                        "wrong-destination" => { request.mounts[1].destination = "/products/foreign".into(); Some("lacks one exact request mount") },
+                        }
+                        "missing" => {
+                            request.mounts[1].source_fd = former_fd.inherited_descriptor().unwrap();
+                            Some("did not select every")
+                        }
+                        "unlisted" => {
+                            request.mounts[1].source_fd = other_fd.inherited_descriptor().unwrap();
+                            Some("not an exact selected")
+                        }
+                        "duplicate" => {
+                            request.mounts[1] = request.mounts[0].clone();
+                            Some("lacks one exact request mount")
+                        }
+                        "writable" => {
+                            request.mounts[1].access = LinuxSandboxMountAccess::Writable;
+                            Some("writable or crosses")
+                        }
+                        "root" => {
+                            request.mounts[1].source_fd = root_fd.inherited_descriptor().unwrap();
+                            Some("not an exact selected")
+                        }
+                        "channel" => {
+                            request
+                                .target_channels
+                                .push((first_fd.inherited_descriptor().unwrap(), 8));
+                            Some("through a target channel")
+                        }
+                        "wrong-destination" => {
+                            request.mounts[1].destination = "/products/foreign".into();
+                            Some("lacks one exact request mount")
+                        }
                         "foreign-mount" => {
                             selections[1].child = std::ffi::OsStr::new("other");
                             request.mounts[1].source_fd = other_fd.inherited_descriptor().unwrap();
                             Some("crosses the sealed root mount")
-                        },
+                        }
                         _ => unreachable!(),
                     };
-                    let checked = imp::validate_private_sources_request(&source, &selections, &request);
+                    let checked =
+                        imp::validate_private_sources_request(&source, &selections, &request);
                     if let Some(message) = expected {
                         assert!(checked.unwrap_err().contains(message));
                     } else {
@@ -9373,7 +9729,13 @@ mod tests {
                         if case == "positive" {
                             // Existing single-child helper remains compatible.
                             request.mounts.truncate(1);
-                            imp::validate_private_source_request(&source, std::ffi::OsStr::new("first"), Path::new("/code/first"), &request).unwrap();
+                            imp::validate_private_source_request(
+                                &source,
+                                std::ffi::OsStr::new("first"),
+                                Path::new("/code/first"),
+                                &request,
+                            )
+                            .unwrap();
                         }
                     }
                 });
@@ -9382,11 +9744,19 @@ mod tests {
             let mut status = 0;
             loop {
                 let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-                if waited == pid { break; }
+                if waited == pid {
+                    break;
+                }
                 assert_eq!(waited, -1);
-                assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EINTR));
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EINTR)
+                );
             }
-            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "{case}: {status}");
+            assert!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "{case}: {status}"
+            );
         }
     }
 

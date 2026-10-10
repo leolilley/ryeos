@@ -211,6 +211,7 @@ pub struct SharedFileLock {
 /// used for long-lived operational exclusion files such as a node's
 /// `operator.lock`.
 pub struct ExactExclusiveFileLock {
+    process: u32,
     #[cfg(unix)]
     file: crate::exec::ForkChildCloseFile,
     #[cfg(not(unix))]
@@ -219,7 +220,41 @@ pub struct ExactExclusiveFileLock {
     target_name: CString,
 }
 
+/// Identities observed from the SAME retained target and parent descriptors.
+/// This copyable data supplies neither a lock grant nor a close receipt.
+#[derive(Clone, Copy, Debug)]
+pub struct ExactExclusiveFileLockObservation {
+    target: crate::OpenFileIdentity,
+    parent: crate::OpenFileIdentity,
+}
+impl ExactExclusiveFileLockObservation {
+    pub fn target(&self) -> crate::OpenFileIdentity { self.target }
+    pub fn parent(&self) -> crate::OpenFileIdentity { self.parent }
+}
+
 impl ExactExclusiveFileLock {
+    /// Reject copied process-local custody before touching retained descriptor
+    /// coordinates or the fork-child registration. This issues no lock grant.
+    pub fn require_original_process(&self) -> Result<()> {
+        anyhow::ensure!(self.process == std::process::id(),
+            "exact operational lock belongs to another process incarnation");
+        Ok(())
+    }
+    /// Observe the actual retained descriptors without reopening, duplicating
+    /// or exporting them. The original controller funds both observations
+    /// before this call. Returned identities are evidence only, never authority.
+    #[cfg(target_os = "linux")]
+    pub fn observe_retained_descriptors(&self) -> Result<ExactExclusiveFileLockObservation> {
+        self.require_original_process()?;
+        anyhow::ensure!(self.file.is_registered_live(), "operator target no longer live");
+        anyhow::ensure!(self.file.metadata()?.is_file() && self.parent.metadata()?.is_dir(),
+            "original operator descriptor roles changed");
+        Ok(ExactExclusiveFileLockObservation {
+            target: crate::observe_open_file_identity(&self.file)?,
+            parent: crate::observe_open_file_identity(&self.parent)?,
+        })
+    }
+
     /// Open or create `target`, acquire `LOCK_EX | LOCK_NB`, and publish the
     /// current PID as diagnostic content only after the lease is held.
     pub fn acquire(target: &Path) -> Result<Self> {
@@ -358,6 +393,7 @@ impl ExactExclusiveFileLock {
             let file = crate::exec::register_fork_child_close_file(file);
             drop(fork_sensitive_descriptors);
             Ok(Self {
+                process: std::process::id(),
                 file,
                 parent,
                 target_name,
@@ -365,9 +401,41 @@ impl ExactExclusiveFileLock {
         }
     }
 
+    /// Close the actual registered lock target once, under its original fork
+    /// barrier. A busy barrier or expired original deadline retains the file.
+    /// The caller must finish durable account work before releasing exclusion.
+    /// Success is physical close evidence only, including a late observation;
+    /// it grants no admission, settlement or renewed cleanup authority.
+    #[cfg(target_os = "linux")]
+    pub fn try_retire_registered_target(
+        &mut self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<bool> {
+        self.require_original_process()?;
+        self.file.try_retire_registered(original).map_err(anyhow::Error::msg)
+    }
+
+    /// Move the SAME retained parent after successful explicit target close.
+    /// A refusal returns the complete lock body, including failed-close facts.
+    /// The caller must still physically retire this parent under its original
+    /// funded controller; moving it does not produce a parent-close receipt.
+    #[cfg(target_os = "linux")]
+    pub fn into_retired_target_parent(self) -> std::result::Result<fs::File, (Self, anyhow::Error)> {
+        if let Err(error) = self.require_original_process() {
+            return Err((self, error));
+        }
+        if !self.file.explicitly_retired() {
+            return Err((self, anyhow::anyhow!("registered lock target has no successful close observation")));
+        }
+        Ok(self.parent)
+    }
+
     /// Prove `target` still resolves to the exact parent/name/inode held by
     /// this lease. No path component is followed.
     pub fn ensure_path_binding(&self, target: &Path) -> Result<()> {
+        self.require_original_process()?;
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(self.file.is_registered_live(), "operational lock target no longer live");
         #[cfg(not(unix))]
         {
             let _ = target;
@@ -898,6 +966,42 @@ pub(crate) fn linux_flock_holder_pid(_file: &fs::File) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Host close controls only: no native admission or account settlement proof.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_target_close_refusal_preserves_exclusion_then_releases_exact_target() {
+        use std::os::unix::fs::MetadataExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operator.lock");
+        let mut lock = ExactExclusiveFileLock::acquire(&path).unwrap();
+        let parent_identity = lock.parent.metadata().unwrap();
+        let original_observation = lock.observe_retained_descriptors().unwrap();
+        assert_eq!(original_observation.parent().inode(), parent_identity.ino());
+        assert_eq!(original_observation.target().inode(), lock.file.metadata().unwrap().ino());
+        assert!(!lock.try_retire_registered_target(
+            crate::time::MonotonicDeadline::after(std::time::Duration::ZERO),
+        ).unwrap());
+        lock.ensure_path_binding(&path).unwrap();
+        assert!(ExactExclusiveFileLock::acquire(&path).is_err());
+        assert!(lock.try_retire_registered_target(
+            crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(1)),
+        ).unwrap());
+        assert!(lock.ensure_path_binding(&path).is_err());
+        let replacement = ExactExclusiveFileLock::acquire(&path).unwrap();
+        // Cached physical success must not close the newly acquired descriptor.
+        assert!(lock.try_retire_registered_target(
+            crate::time::MonotonicDeadline::after(std::time::Duration::ZERO),
+        ).unwrap());
+        replacement.ensure_path_binding(&path).unwrap();
+        assert!(ExactExclusiveFileLock::acquire(&path).is_err());
+        let parent = match lock.into_retired_target_parent() {
+            Ok(parent) => parent,
+            Err(_) => panic!("successful registered close must retain its exact parent"),
+        };
+        let observed = parent.metadata().unwrap();
+        assert_eq!((observed.dev(), observed.ino()), (parent_identity.dev(), parent_identity.ino()));
+    }
 
     #[cfg(unix)]
     #[test]

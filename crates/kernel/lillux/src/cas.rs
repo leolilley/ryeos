@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -7,6 +7,9 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::atomic_fs::atomic_write_with_mode;
+
+mod record_canonical;
+pub use record_canonical::{CanonicalRecordStorageQuote, canonical_record_storage_quote, canonical_record_quote_work_bound, canonical_record_bytes};
 
 struct FixedJsonString {
     bytes: [u8; 64],
@@ -16,7 +19,11 @@ struct FixedJsonString {
 
 impl FixedJsonString {
     fn new() -> Self {
-        Self { bytes: [0; 64], len: 0, overflow: false }
+        Self {
+            bytes: [0; 64],
+            len: 0,
+            overflow: false,
+        }
     }
 
     fn push_ascii(&mut self, byte: u8) {
@@ -61,7 +68,9 @@ impl SnapshotFile {
             if fd < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
-            return Ok(Self { file: Some(unsafe { File::from_raw_fd(fd) }) });
+            return Ok(Self {
+                file: Some(unsafe { File::from_raw_fd(fd) }),
+            });
         }
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!("bounded CAS kind selection requires sealed Linux anonymous snapshots")
@@ -76,10 +85,8 @@ impl SnapshotFile {
         {
             use std::os::fd::AsRawFd as _;
             const F_ADD_SEALS: libc::c_int = 1033;
-            let seals = libc::F_SEAL_WRITE
-                | libc::F_SEAL_GROW
-                | libc::F_SEAL_SHRINK
-                | libc::F_SEAL_SEAL;
+            let seals =
+                libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
             let result = unsafe { libc::fcntl(self.file_mut().as_raw_fd(), F_ADD_SEALS, seals) };
             if result < 0 {
                 return Err(std::io::Error::last_os_error().into());
@@ -191,8 +198,9 @@ impl<R: Read> JsonDiscriminatorReader<R> {
                             if !(0xdc00..=0xdfff).contains(&second) {
                                 anyhow::bail!("malformed CAS object surrogate pair");
                             }
-                            0x10000 + (((u32::from(first) - 0xd800) << 10)
-                                | (u32::from(second) - 0xdc00))
+                            0x10000
+                                + (((u32::from(first) - 0xd800) << 10)
+                                    | (u32::from(second) - 0xdc00))
                         } else if (0xdc00..=0xdfff).contains(&first) {
                             anyhow::bail!("malformed CAS object surrogate pair");
                         } else {
@@ -219,7 +227,8 @@ impl<R: Read> JsonDiscriminatorReader<R> {
 
     fn parse_number(&mut self, first: u8) -> Result<()> {
         let integer_first = if first == b'-' {
-            self.next()?.ok_or_else(|| anyhow::anyhow!("truncated CAS object number"))?
+            self.next()?
+                .ok_or_else(|| anyhow::anyhow!("truncated CAS object number"))?
         } else {
             first
         };
@@ -230,7 +239,9 @@ impl<R: Read> JsonDiscriminatorReader<R> {
                 }
             }
             b'1'..=b'9' => {
-                while matches!(self.peek()?, Some(b'0'..=b'9')) { self.next()?; }
+                while matches!(self.peek()?, Some(b'0'..=b'9')) {
+                    self.next()?;
+                }
             }
             _ => anyhow::bail!("malformed CAS object number"),
         }
@@ -239,37 +250,53 @@ impl<R: Read> JsonDiscriminatorReader<R> {
             if !matches!(self.peek()?, Some(b'0'..=b'9')) {
                 anyhow::bail!("malformed CAS object fraction");
             }
-            while matches!(self.peek()?, Some(b'0'..=b'9')) { self.next()?; }
+            while matches!(self.peek()?, Some(b'0'..=b'9')) {
+                self.next()?;
+            }
         }
         if matches!(self.peek()?, Some(b'e' | b'E')) {
             self.next()?;
-            if matches!(self.peek()?, Some(b'+' | b'-')) { self.next()?; }
+            if matches!(self.peek()?, Some(b'+' | b'-')) {
+                self.next()?;
+            }
             if !matches!(self.peek()?, Some(b'0'..=b'9')) {
                 anyhow::bail!("malformed CAS object exponent");
             }
-            while matches!(self.peek()?, Some(b'0'..=b'9')) { self.next()?; }
+            while matches!(self.peek()?, Some(b'0'..=b'9')) {
+                self.next()?;
+            }
         }
         Ok(())
     }
 
     fn skip_value(&mut self, first: u8, depth: usize) -> Result<()> {
-        if depth > 128 { anyhow::bail!("CAS object nesting exceeds discriminator limit"); }
+        if depth > 128 {
+            anyhow::bail!("CAS object nesting exceeds discriminator limit");
+        }
         match first {
-            b'"' => { self.parse_string()?; }
+            b'"' => {
+                self.parse_string()?;
+            }
             b'{' => {
                 match self.non_whitespace()? {
                     Some(b'}') => return Ok(()),
-                    Some(b'"') => {},
+                    Some(b'"') => {}
                     _ => anyhow::bail!("malformed CAS object map"),
                 }
                 loop {
                     self.parse_string()?;
-                    if self.non_whitespace()? != Some(b':') { anyhow::bail!("malformed CAS object map"); }
-                    let value = self.non_whitespace()?.ok_or_else(|| anyhow::anyhow!("truncated CAS object map"))?;
+                    if self.non_whitespace()? != Some(b':') {
+                        anyhow::bail!("malformed CAS object map");
+                    }
+                    let value = self
+                        .non_whitespace()?
+                        .ok_or_else(|| anyhow::anyhow!("truncated CAS object map"))?;
                     self.skip_value(value, depth + 1)?;
                     match self.non_whitespace()? {
                         Some(b',') => {
-                            if self.non_whitespace()? != Some(b'"') { anyhow::bail!("malformed CAS object map"); }
+                            if self.non_whitespace()? != Some(b'"') {
+                                anyhow::bail!("malformed CAS object map");
+                            }
                         }
                         Some(b'}') => break,
                         _ => anyhow::bail!("malformed CAS object map"),
@@ -285,7 +312,9 @@ impl<R: Read> JsonDiscriminatorReader<R> {
                 loop {
                     match self.non_whitespace()? {
                         Some(b',') => {
-                            let value = self.non_whitespace()?.ok_or_else(|| anyhow::anyhow!("truncated CAS object array"))?;
+                            let value = self
+                                .non_whitespace()?
+                                .ok_or_else(|| anyhow::anyhow!("truncated CAS object array"))?;
                             self.skip_value(value, depth + 1)?;
                         }
                         Some(b']') => break,
@@ -293,9 +322,21 @@ impl<R: Read> JsonDiscriminatorReader<R> {
                     }
                 }
             }
-            b't' => { for byte in b"rue" { self.expect(*byte)?; } }
-            b'f' => { for byte in b"alse" { self.expect(*byte)?; } }
-            b'n' => { for byte in b"ull" { self.expect(*byte)?; } }
+            b't' => {
+                for byte in b"rue" {
+                    self.expect(*byte)?;
+                }
+            }
+            b'f' => {
+                for byte in b"alse" {
+                    self.expect(*byte)?;
+                }
+            }
+            b'n' => {
+                for byte in b"ull" {
+                    self.expect(*byte)?;
+                }
+            }
             b'-' | b'0'..=b'9' => self.parse_number(first)?,
             _ => anyhow::bail!("malformed CAS object value"),
         }
@@ -309,14 +350,18 @@ impl<R: Read> JsonDiscriminatorReader<R> {
         let mut capsule = false;
         let mut saw_kind = false;
         match self.non_whitespace()? {
-            Some(b'}') => {},
+            Some(b'}') => {}
             Some(b'"') => {
                 self.peeked = Some(b'"');
                 loop {
                     self.expect(b'"')?;
                     let key = self.parse_string()?;
-                    if self.non_whitespace()? != Some(b':') { anyhow::bail!("malformed CAS object map"); }
-                    let first = self.non_whitespace()?.ok_or_else(|| anyhow::anyhow!("truncated CAS object map"))?;
+                    if self.non_whitespace()? != Some(b':') {
+                        anyhow::bail!("malformed CAS object map");
+                    }
+                    let first = self
+                        .non_whitespace()?
+                        .ok_or_else(|| anyhow::anyhow!("truncated CAS object map"))?;
                     if key.equals(b"kind") {
                         if std::mem::replace(&mut saw_kind, true) {
                             anyhow::bail!("duplicate CAS object kind field");
@@ -334,7 +379,9 @@ impl<R: Read> JsonDiscriminatorReader<R> {
                     }
                     match self.non_whitespace()? {
                         Some(b',') => {
-                            if self.non_whitespace()? != Some(b'"') { anyhow::bail!("malformed CAS object map"); }
+                            if self.non_whitespace()? != Some(b'"') {
+                                anyhow::bail!("malformed CAS object map");
+                            }
                             self.peeked = Some(b'"');
                         }
                         Some(b'}') => break,
@@ -627,29 +674,61 @@ pub fn canonical_json(v: &serde_json::Value) -> Result<String, CanonicalJsonErro
     String::from_utf8(canonical_json_bounded(v, usize::MAX)?).map_err(|_| CanonicalJsonError)
 }
 
-fn append_canonical_bounded(out: &mut Vec<u8>, bytes: &[u8], maximum: usize) -> Result<(), CanonicalJsonError> {
-    if out.len().saturating_add(bytes.len()) > maximum { return Err(CanonicalJsonError); }
+fn append_canonical_bounded(
+    out: &mut Vec<u8>,
+    bytes: &[u8],
+    maximum: usize,
+) -> Result<(), CanonicalJsonError> {
+    if out.len().saturating_add(bytes.len()) > maximum {
+        return Err(CanonicalJsonError);
+    }
     out.extend_from_slice(bytes);
     Ok(())
 }
 
-fn write_string_bounded(value: &str, out: &mut Vec<u8>, maximum: usize) -> Result<(), CanonicalJsonError> {
+fn write_string_bounded(
+    value: &str,
+    out: &mut Vec<u8>,
+    maximum: usize,
+) -> Result<(), CanonicalJsonError> {
     append_canonical_bounded(out, b"\"", maximum)?;
     for ch in value.chars() {
         let escaped: Option<&[u8]> = match ch {
-            '"' => Some(b"\\\""), '\\' => Some(b"\\\\"),
-            '\x08' => Some(b"\\b"), '\x0c' => Some(b"\\f"),
-            '\n' => Some(b"\\n"), '\r' => Some(b"\\r"), '\t' => Some(b"\\t"),
+            '"' => Some(b"\\\""),
+            '\\' => Some(b"\\\\"),
+            '\x08' => Some(b"\\b"),
+            '\x0c' => Some(b"\\f"),
+            '\n' => Some(b"\\n"),
+            '\r' => Some(b"\\r"),
+            '\t' => Some(b"\\t"),
             c if (c as u32) < 0x20 => Some(match c {
-                '\0' => b"\\u0000", '\x01' => b"\\u0001", '\x02' => b"\\u0002",
-                '\x03' => b"\\u0003", '\x04' => b"\\u0004", '\x05' => b"\\u0005",
-                '\x06' => b"\\u0006", '\x07' => b"\\u0007", '\x0b' => b"\\u000b",
-                '\x0e' => b"\\u000e", '\x0f' => b"\\u000f", '\x10' => b"\\u0010",
-                '\x11' => b"\\u0011", '\x12' => b"\\u0012", '\x13' => b"\\u0013",
-                '\x14' => b"\\u0014", '\x15' => b"\\u0015", '\x16' => b"\\u0016",
-                '\x17' => b"\\u0017", '\x18' => b"\\u0018", '\x19' => b"\\u0019",
-                '\x1a' => b"\\u001a", '\x1b' => b"\\u001b", '\x1c' => b"\\u001c",
-                '\x1d' => b"\\u001d", '\x1e' => b"\\u001e", '\x1f' => b"\\u001f",
+                '\0' => b"\\u0000",
+                '\x01' => b"\\u0001",
+                '\x02' => b"\\u0002",
+                '\x03' => b"\\u0003",
+                '\x04' => b"\\u0004",
+                '\x05' => b"\\u0005",
+                '\x06' => b"\\u0006",
+                '\x07' => b"\\u0007",
+                '\x0b' => b"\\u000b",
+                '\x0e' => b"\\u000e",
+                '\x0f' => b"\\u000f",
+                '\x10' => b"\\u0010",
+                '\x11' => b"\\u0011",
+                '\x12' => b"\\u0012",
+                '\x13' => b"\\u0013",
+                '\x14' => b"\\u0014",
+                '\x15' => b"\\u0015",
+                '\x16' => b"\\u0016",
+                '\x17' => b"\\u0017",
+                '\x18' => b"\\u0018",
+                '\x19' => b"\\u0019",
+                '\x1a' => b"\\u001a",
+                '\x1b' => b"\\u001b",
+                '\x1c' => b"\\u001c",
+                '\x1d' => b"\\u001d",
+                '\x1e' => b"\\u001e",
+                '\x1f' => b"\\u001f",
                 _ => unreachable!(),
             }),
             c if c.is_ascii() => {
@@ -691,13 +770,20 @@ fn write_unicode_escape(value: u32, output: &mut [u8]) {
 }
 
 /// Canonicalize an already materialized JSON value under a byte ceiling.
-pub fn canonical_json_bounded(value: &serde_json::Value, maximum_bytes: usize) -> Result<Vec<u8>, CanonicalJsonError> {
+pub fn canonical_json_bounded(
+    value: &serde_json::Value,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, CanonicalJsonError> {
     let mut canonical = Vec::new();
     write_value_bounded(value, &mut canonical, maximum_bytes)?;
     Ok(canonical)
 }
 
-fn write_value_bounded(value: &serde_json::Value, out: &mut Vec<u8>, maximum: usize) -> Result<(), CanonicalJsonError> {
+fn write_value_bounded(
+    value: &serde_json::Value,
+    out: &mut Vec<u8>,
+    maximum: usize,
+) -> Result<(), CanonicalJsonError> {
     use serde_json::Value;
     match value {
         Value::Null => append_canonical_bounded(out, b"null", maximum),
@@ -711,14 +797,17 @@ fn write_value_bounded(value: &serde_json::Value, out: &mut Vec<u8>, maximum: us
                 return write_signed_decimal(value, out, maximum);
             }
             let rendered = number.to_string();
-            let normalized = serde_json::from_str::<serde_json::Number>(&rendered).map_err(|_| CanonicalJsonError)?;
+            let normalized = serde_json::from_str::<serde_json::Number>(&rendered)
+                .map_err(|_| CanonicalJsonError)?;
             append_canonical_bounded(out, normalized.to_string().as_bytes(), maximum)
         }
         Value::String(string) => write_string_bounded(string, out, maximum),
         Value::Array(values) => {
             append_canonical_bounded(out, b"[", maximum)?;
             for (index, item) in values.iter().enumerate() {
-                if index != 0 { append_canonical_bounded(out, b",", maximum)?; }
+                if index != 0 {
+                    append_canonical_bounded(out, b",", maximum)?;
+                }
                 write_value_bounded(item, out, maximum)?;
             }
             append_canonical_bounded(out, b"]", maximum)
@@ -728,7 +817,9 @@ fn write_value_bounded(value: &serde_json::Value, out: &mut Vec<u8>, maximum: us
             keys.sort();
             append_canonical_bounded(out, b"{", maximum)?;
             for (index, key) in keys.into_iter().enumerate() {
-                if index != 0 { append_canonical_bounded(out, b",", maximum)?; }
+                if index != 0 {
+                    append_canonical_bounded(out, b",", maximum)?;
+                }
                 write_string_bounded(key, out, maximum)?;
                 append_canonical_bounded(out, b":", maximum)?;
                 write_value_bounded(&map[key], out, maximum)?;
@@ -738,19 +829,29 @@ fn write_value_bounded(value: &serde_json::Value, out: &mut Vec<u8>, maximum: us
     }
 }
 
-fn write_unsigned_decimal(mut value: u64, out: &mut Vec<u8>, maximum: usize) -> Result<(), CanonicalJsonError> {
+fn write_unsigned_decimal(
+    mut value: u64,
+    out: &mut Vec<u8>,
+    maximum: usize,
+) -> Result<(), CanonicalJsonError> {
     let mut digits = [0_u8; 20];
     let mut start = digits.len();
     loop {
         start -= 1;
         digits[start] = b'0' + (value % 10) as u8;
         value /= 10;
-        if value == 0 { break; }
+        if value == 0 {
+            break;
+        }
     }
     append_canonical_bounded(out, &digits[start..], maximum)
 }
 
-fn write_signed_decimal(value: i64, out: &mut Vec<u8>, maximum: usize) -> Result<(), CanonicalJsonError> {
+fn write_signed_decimal(
+    value: i64,
+    out: &mut Vec<u8>,
+    maximum: usize,
+) -> Result<(), CanonicalJsonError> {
     if value >= 0 {
         return write_unsigned_decimal(value as u64, out, maximum);
     }
@@ -764,19 +865,33 @@ fn write_signed_decimal(value: i64, out: &mut Vec<u8>, maximum: usize) -> Result
 /// memory than `maximum_bytes`; this is an output-byte bound, not a total
 /// process-memory ceiling. The returned bytes are suitable for exact hashing
 /// and CAS persistence.
-pub fn canonical_json_bytes_bounded<T: serde::Serialize>(value: &T, maximum_bytes: usize) -> Result<Vec<u8>> {
-    struct CappedVec { bytes: Vec<u8>, maximum: usize }
+pub fn canonical_json_bytes_bounded<T: serde::Serialize>(
+    value: &T,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>> {
+    struct CappedVec {
+        bytes: Vec<u8>,
+        maximum: usize,
+    }
     impl std::io::Write for CappedVec {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self.bytes.len().saturating_add(bytes.len()) > self.maximum {
-                return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "serialized JSON exceeds byte ceiling"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "serialized JSON exceeds byte ceiling",
+                ));
             }
             self.bytes.extend_from_slice(bytes);
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    let mut raw = CappedVec { bytes: Vec::new(), maximum: maximum_bytes };
+    let mut raw = CappedVec {
+        bytes: Vec::new(),
+        maximum: maximum_bytes,
+    };
     serde_json::to_writer(&mut raw, value)?;
     let parsed: serde_json::Value = serde_json::from_slice(&raw.bytes)?;
     canonical_json_bounded(&parsed, maximum_bytes).map_err(anyhow::Error::from)
@@ -905,7 +1020,11 @@ impl CasStore {
             report.files += 1;
             report.bytes = report.bytes.saturating_add(size);
         }
-        if !dry_run && !blobs.remove_empty_child_if_same(staging_name, &staging)? {
+        if !dry_run
+            && !blobs
+                .remove_empty_child_if_same(staging_name, &staging)
+                .map(|receipt| receipt.is_some())?
+        {
             anyhow::bail!(
                 "CAS blob capture staging directory changed during cleanup: {}",
                 staging.path().display()
@@ -1084,7 +1203,11 @@ impl CasStore {
     /// Read exact canonical CAS bytes under a pre-parse byte ceiling. The
     /// hash and canonical encoding are checked before the caller can decode a
     /// typed object.
-    pub fn get_object_bytes_bounded(&self, hash: &str, maximum_bytes: u64) -> Result<Option<Vec<u8>>> {
+    pub fn get_object_bytes_bounded(
+        &self,
+        hash: &str,
+        maximum_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
         let Some(bytes) = self.get_object_raw_bytes_bounded(hash, maximum_bytes)? else {
             return Ok(None);
         };
@@ -1099,7 +1222,11 @@ impl CasStore {
     /// Read raw addressed object bytes under a pre-parse size ceiling. This
     /// deliberately leaves JSON interpretation to a caller that can inspect
     /// an object discriminator before materializing its full value.
-    pub fn get_object_raw_bytes_bounded(&self, hash: &str, maximum_bytes: u64) -> Result<Option<Vec<u8>>> {
+    pub fn get_object_raw_bytes_bounded(
+        &self,
+        hash: &str,
+        maximum_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
         let Some((file, size)) = self.open_object(hash)? else {
             return Ok(None);
         };
@@ -1167,8 +1294,8 @@ impl CasStore {
         }
         after_scan()?;
         snapshot.file_mut().seek(SeekFrom::Start(0))?;
-        let length = usize::try_from(size)
-            .context("bounded CAS object size exceeds this platform")?;
+        let length =
+            usize::try_from(size).context("bounded CAS object size exceeds this platform")?;
         let mut bytes = vec![0_u8; length];
         snapshot.file_mut().read_exact(&mut bytes)?;
         let mut trailing = [0_u8; 1];
@@ -1512,12 +1639,27 @@ impl CasStore {
 
     /// Persist exact canonical object bytes after enforcing the same cap used
     /// by the producer. No reserialization occurs between hashing and write.
-    pub fn store_canonical_object_bytes_bounded(&self, bytes: &[u8], maximum_bytes: usize) -> Result<String> {
-        if bytes.len() > maximum_bytes { anyhow::bail!("canonical CAS object exceeds {maximum_bytes} bytes"); }
+    pub fn store_canonical_object_bytes_bounded(
+        &self,
+        bytes: &[u8],
+        maximum_bytes: usize,
+    ) -> Result<String> {
+        if bytes.len() > maximum_bytes {
+            anyhow::bail!("canonical CAS object exceeds {maximum_bytes} bytes");
+        }
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
-        if canonical_json_bounded(&value, maximum_bytes)?.as_slice() != bytes { anyhow::bail!("CAS object bytes are not canonical JSON"); }
+        if canonical_json_bounded(&value, maximum_bytes)?.as_slice() != bytes {
+            anyhow::bail!("CAS object bytes are not canonical JSON");
+        }
         let hash = sha256_hex(bytes);
-        store_exact_entry(&self.root, self.pinned_root.as_ref(), "objects", &hash, ".json", bytes)?;
+        store_exact_entry(
+            &self.root,
+            self.pinned_root.as_ref(),
+            "objects",
+            &hash,
+            ".json",
+            bytes,
+        )?;
         Ok(hash)
     }
 }
@@ -1875,18 +2017,23 @@ mod bounded_cas_tests {
                 .unwrap(),
             Some(blob.clone())
         );
-        assert!(cas
-            .get_blob_bounded(&blob_hash, u64::try_from(blob.len() - 1).unwrap())
-            .is_err());
+        assert!(
+            cas.get_blob_bounded(&blob_hash, u64::try_from(blob.len() - 1).unwrap())
+                .is_err()
+        );
 
         let object = serde_json::json!({"kind":"bounded_fixture", "payload":"x".repeat(91)});
         let canonical = canonical_json(&object).unwrap();
         let object_hash = cas.store_object(&object).unwrap();
         let exact_limit = u64::try_from(canonical.len()).unwrap();
-        assert_eq!(cas.get_object_bounded(&object_hash, exact_limit).unwrap(), Some(object));
-        assert!(cas
-            .get_object_bounded(&object_hash, exact_limit - 1)
-            .is_err());
+        assert_eq!(
+            cas.get_object_bounded(&object_hash, exact_limit).unwrap(),
+            Some(object)
+        );
+        assert!(
+            cas.get_object_bounded(&object_hash, exact_limit - 1)
+                .is_err()
+        );
         assert_eq!(
             cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
                 &object_hash,
@@ -1896,13 +2043,14 @@ mod bounded_cas_tests {
             .unwrap(),
             Some(canonical.clone().into_bytes()),
         );
-        assert!(cas
-            .get_object_raw_bytes_bounded_with_capsule_ceiling(
+        assert!(
+            cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
                 &object_hash,
                 exact_limit,
                 exact_limit - 1,
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -1935,21 +2083,30 @@ mod bounded_cas_tests {
                 .unwrap(),
             Some(capsule_bytes),
         );
-        assert!(cas
-            .get_object_raw_bytes_bounded_with_capsule_ceiling(&capsule_hash, exact, exact - 1)
-            .is_err());
+        assert!(
+            cas.get_object_raw_bytes_bounded_with_capsule_ceiling(&capsule_hash, exact, exact - 1)
+                .is_err()
+        );
     }
 
     #[test]
     fn kind_scan_handles_escaped_and_duplicate_discriminators_without_string_allocation() {
-        let (capsule, _) = scan_kind(br#"{"a":{"large":[1,2,3]},"ki\u006ed":"persistent_session_capsule"}"#).unwrap();
+        let (capsule, _) =
+            scan_kind(br#"{"a":{"large":[1,2,3]},"ki\u006ed":"persistent_session_capsule"}"#)
+                .unwrap();
         assert!(capsule);
-        assert!(scan_kind(br#"{"kind":"ordinary_object","kind":"admitted_launch_capsule"}"#).is_err());
-        let (capsule, _) = scan_kind(format!(r#"{{"kind":"{}"}}"#, "k".repeat(80)).as_bytes()).unwrap();
+        assert!(
+            scan_kind(br#"{"kind":"ordinary_object","kind":"admitted_launch_capsule"}"#).is_err()
+        );
+        let (capsule, _) =
+            scan_kind(format!(r#"{{"kind":"{}"}}"#, "k".repeat(80)).as_bytes()).unwrap();
         assert!(!capsule);
         let non_ascii_kind = r#"{"kind":"ordinary_世界"}"#;
         assert!(!scan_kind(non_ascii_kind.as_bytes()).unwrap().0);
-        let oversized_key = format!(r#"{{"{}":{{"nested":true}},"kind":"ordinary_object"}}"#, "x".repeat(4096));
+        let oversized_key = format!(
+            r#"{{"{}":{{"nested":true}},"kind":"ordinary_object"}}"#,
+            "x".repeat(4096)
+        );
         let (capsule, _) = scan_kind(oversized_key.as_bytes()).unwrap();
         assert!(!capsule);
     }
@@ -1989,21 +2146,26 @@ mod bounded_cas_tests {
         let generic_hash = cas.store_object(&generic).unwrap();
         let generic_path = shard_path(cas.root(), "objects", &generic_hash, ".json");
 
-        let snapshot = cas.get_object_raw_bytes_bounded_with_capsule_ceiling_after_scan(
-            &generic_hash,
-            u64::try_from(capsule_bytes.len()).unwrap(),
-            16 * 1024 * 1024,
-            || {
-                // This changes the addressed path after the complete scan but
-                // before the output Vec is allocated. The loader must use the
-                // exact same staged snapshot for classification and bytes.
-                let mut stored = std::fs::OpenOptions::new().write(true).open(&generic_path)?;
-                stored.write_all(&capsule_bytes)?;
-                stored.set_len(u64::try_from(capsule_bytes.len()).unwrap())?;
-                stored.sync_all()?;
-                Ok(())
-            },
-        ).unwrap().unwrap();
+        let snapshot = cas
+            .get_object_raw_bytes_bounded_with_capsule_ceiling_after_scan(
+                &generic_hash,
+                u64::try_from(capsule_bytes.len()).unwrap(),
+                16 * 1024 * 1024,
+                || {
+                    // This changes the addressed path after the complete scan but
+                    // before the output Vec is allocated. The loader must use the
+                    // exact same staged snapshot for classification and bytes.
+                    let mut stored = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&generic_path)?;
+                    stored.write_all(&capsule_bytes)?;
+                    stored.set_len(u64::try_from(capsule_bytes.len()).unwrap())?;
+                    stored.sync_all()?;
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(snapshot, generic_bytes);
         assert_eq!(sha256_hex(&snapshot), generic_hash);
     }

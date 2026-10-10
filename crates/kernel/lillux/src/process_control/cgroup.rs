@@ -25,6 +25,7 @@ const HOST_SERVICE_DELEGATIONS: &str = "lillux-host-services";
 // Bounded kernel interface records, not workload output or acquisition policy.
 const MAX_CONTROL_RECORD_BYTES: usize = 4096;
 const OCI_CONTROLLER_ROOT: &str = "ryeos-controller-root";
+const OCI_INIT_LEAF: &str = "ryeos-init";
 const MAX_OCI_RETIREMENT_ENTRIES: usize = 16_384;
 const MAX_OCI_RETIREMENT_DEPTH: usize = 64;
 
@@ -32,10 +33,13 @@ pub(crate) struct PreparedOciCgroup {
     pub(crate) init_process: super::ExactProcessIdentity,
     pub(crate) lifecycle_scope: PinnedDirectoryIdentity,
     pub(crate) controller_scope: PinnedDirectoryIdentity,
+    pub(crate) init_scope: PinnedDirectoryIdentity,
+    pub(crate) node_resources: super::scope::ProcessScopeResourceLimits,
     pub(crate) lifecycle_path: std::path::PathBuf,
     pub(crate) controller_path: std::path::PathBuf,
     lifecycle: PinnedDirectory,
     controller: PinnedDirectory,
+    init_leaf: PinnedDirectory,
 }
 
 pub(crate) fn observe_oci_lifetime(
@@ -74,6 +78,7 @@ pub(crate) fn observe_oci_lifetime(
     if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
         return Err("OCI lifecycle cgroup is not administrator-owned and protected".to_owned());
     }
+    require_protected_ancestor_placement(&lifecycle_fd)?;
     let placement = open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?;
     let members = read_control(&placement)?;
     let members: Vec<_> = members.lines().collect();
@@ -101,18 +106,33 @@ pub(crate) fn open_oci_membership(init_pid: u32) -> Result<File, String> {
         .map_err(|error| format!("open OCI init cgroup membership: {error}"))
 }
 
+fn observed_oci_membership(membership: &File) -> Result<std::path::PathBuf, String> {
+    let relative = unified_cgroup_from_file(membership)?;
+    Ok(Path::new("/sys/fs/cgroup").join(
+        relative.strip_prefix("/")
+            .map_err(|_| "OCI cgroup membership is not root-relative")?,
+    ))
+}
+
 pub(crate) fn require_oci_membership_file(
     membership: &File,
     lifecycle_path: &Path,
 ) -> Result<(), String> {
-    let relative = unified_cgroup_from_file(membership)?;
-    let observed = Path::new("/sys/fs/cgroup").join(
-        relative
-            .strip_prefix("/")
-            .map_err(|_| "OCI cgroup membership is not root-relative")?,
-    );
-    if observed != lifecycle_path {
-        return Err("OCI init moved out of its observed lifecycle cgroup".to_owned());
+    let observed = observed_oci_membership(membership)?;
+    // Preparation/recovery can observe the original C placement or the
+    // persisted move into its retained init leaf. This is not final evidence.
+    if observed != lifecycle_path && observed != lifecycle_path.join(OCI_INIT_LEAF) {
+        return Err("OCI init moved out of its exact lifecycle/init placement".to_owned());
+    }
+    Ok(())
+}
+
+fn require_prepared_oci_init_membership_file(
+    membership: &File,
+    lifecycle_path: &Path,
+) -> Result<(), String> {
+    if observed_oci_membership(membership)? != lifecycle_path.join(OCI_INIT_LEAF) {
+        return Err("prepared OCI init is not in its exact retained init leaf".to_owned());
     }
     Ok(())
 }
@@ -125,6 +145,8 @@ pub(crate) fn prepare_oci_controller_root(
     intent: &super::OciLifecycleIntent,
     controller_uid: u32,
     controller_gid: u32,
+    requested_resources: super::scope::ProcessScopeResourceLimits,
+    observer: &mut impl FnMut(&super::OciPreparationProgress) -> Result<(), String>,
 ) -> Result<PreparedOciCgroup, String> {
     if unsafe { libc::geteuid() } != 0 {
         return Err("OCI lifecycle preparation requires administrator authority".to_owned());
@@ -146,12 +168,29 @@ pub(crate) fn prepare_oci_controller_root(
     if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
         return Err("OCI lifecycle cgroup is not administrator-owned and protected".to_owned());
     }
+    require_protected_ancestor_placement(&lifecycle_fd)?;
     let placement = open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?;
     let members = read_control(&placement)?;
     let expected_member = init_pid.to_string();
     if members.lines().any(|member| member != expected_member) || members.lines().count() != 1 {
         return Err("OCI init process is not a direct member of its observed lifetime".to_owned());
     }
+    // The original held init is the sole direct member. Refuse unknown child
+    // lifetimes before creating either selected leaf or changing limits.
+    if lifecycle.entries_no_follow_bounded(256).map_err(display)?.iter()
+        .any(|entry| entry.entry_type == crate::PinnedEntryType::Directory) {
+        return Err("OCI lifetime has unowned pre-existing descendant scopes".to_owned());
+    }
+    let node_resources = effective_oci_node_limits(&lifecycle_fd, requested_resources)?;
+    let mut progress = super::OciPreparationProgress::original(intent, node_resources)?;
+    observer(&progress)?;
+    macro_rules! progress {
+        ($phase:ident, $controller:expr, $init:expr) => {{
+            progress.advance(super::OciPreparationPhase::$phase, $controller, $init);
+            observer(&progress)?;
+        }};
+    }
+    progress!(ControllerCreating, None, None);
     let name = child_name(OCI_CONTROLLER_ROOT)?;
     if unsafe { libc::mkdirat(lifecycle_fd.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
         return Err(format!(
@@ -164,7 +203,50 @@ pub(crate) fn prepare_oci_controller_root(
         .map_err(display)?
         .ok_or("OCI controller root disappeared after creation")?;
     let controller_fd = controller.try_clone_descriptor().map_err(display)?;
+    let controller_identity = controller.identity().map_err(display)?;
+    progress!(ControllerCreated, Some(controller_identity), None);
+    progress!(InitCreating, None, None);
+    let init_name = child_name(OCI_INIT_LEAF)?;
+    if unsafe { libc::mkdirat(lifecycle_fd.as_raw_fd(), init_name.as_ptr(), 0o700) } != 0 {
+        return Err(format!("create exact OCI init leaf: {}", io::Error::last_os_error()));
+    }
+    let init_leaf = lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?
+        .ok_or("created OCI init leaf disappeared")?;
+    let init_fd = init_leaf.try_clone_descriptor().map_err(display)?;
+    let init_identity = init_leaf.identity().map_err(display)?;
+    progress!(InitCreated, None, Some(init_identity));
+    let init_metadata = init_fd.metadata().map_err(display)?;
+    if init_metadata.uid() != 0 || init_metadata.mode() & 0o077 != 0 {
+        return Err("OCI init leaf is not privately administrator-owned".to_owned());
+    }
+    let init_placement = open_control(&init_fd, c"cgroup.procs", libc::O_WRONLY)?;
+    if super::capture_exact_process_identity(init_pid, None)? != init_process {
+        return Err("OCI init changed before original placement".to_owned());
+    }
+    require_oci_membership(init_pid, &lifecycle_path)?;
+    progress!(InitMoving, None, None);
+    write_control(&init_placement, init_pid.to_string().as_bytes())?;
+    if !read_control(&open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?)?.trim().is_empty()
+        || read_control(&open_control(&init_fd, c"cgroup.procs", libc::O_RDONLY)?)?.trim() != expected_member {
+        return Err("OCI init placement did not establish exact empty-direct lifecycle".to_owned());
+    }
+    if super::capture_exact_process_identity(init_pid, None)? != init_process {
+        return Err("OCI init changed after original placement".to_owned());
+    }
+    progress!(InitMoved, None, None);
+    progress!(LimitsApplying, None, None);
+    install_held_oci_node_limits(&lifecycle_fd, node_resources)?;
+    progress!(LimitsApplied, None, None);
+    progress!(ControllersEnabling, None, None);
+    enable_node_resource_controllers(&lifecycle_fd, false)?;
+    // C now dominates init, R and every worker; R receives the same or a
+    // stricter subordinate ceiling and propagates memory/pids to workers.
+    install_empty_scope_resource_limits(&controller_fd, node_resources)?;
+    require_protected_node_limit_controls(&controller_fd)?;
+    enable_node_resource_controllers(&controller_fd, false)?;
+    progress!(ControllersEnabled, None, None);
     let placement = open_control(&controller_fd, c"cgroup.procs", libc::O_RDWR)?;
+    progress!(Delegating, None, None);
     for delegated in [&controller_fd, &placement] {
         if unsafe { libc::fchown(delegated.as_raw_fd(), controller_uid, controller_gid) } != 0 {
             return Err(format!(
@@ -173,14 +255,18 @@ pub(crate) fn prepare_oci_controller_root(
             ));
         }
     }
+    progress!(Delegated, None, None);
     let prepared = PreparedOciCgroup {
         init_process,
         lifecycle_scope: lifecycle.identity().map_err(display)?,
         controller_scope: controller.identity().map_err(display)?,
+        init_scope: init_leaf.identity().map_err(display)?,
+        node_resources,
         lifecycle_path: lifecycle_path.clone(),
         controller_path: lifecycle_path.join(OCI_CONTROLLER_ROOT),
         lifecycle,
         controller,
+        init_leaf,
     };
     let validation = (|| {
         let controller_fd = prepared
@@ -209,10 +295,7 @@ pub(crate) fn prepare_oci_controller_root(
         Ok(())
     })();
     if let Err(error) = validation {
-        let rollback = rollback_empty_oci_controller(&prepared);
-        return Err(format!(
-            "{error}; OCI controller-root rollback: {rollback:?}"
-        ));
+        return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
     }
     Ok(prepared)
 }
@@ -249,40 +332,22 @@ fn reconcile_unidentified_oci_controller_absence(
     let name = controller_path
         .file_name()
         .ok_or("OCI controller path has no child name")?;
-    let Some(_controller) = lifecycle.open_child_directory(name).map_err(display)? else {
+    if lifecycle.open_child_directory(name).map_err(display)?.is_none()
+        && lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?.is_none() {
         return Ok(());
-    };
+    }
     Err(
         "interrupted OCI controller root has no durable identity; refusing to retire a same-named incarnation"
             .to_owned(),
     )
 }
 
-pub(crate) fn rollback_empty_oci_controller(prepared: &PreparedOciCgroup) -> Result<(), String> {
-    let controller_fd = prepared
-        .controller
-        .try_clone_descriptor()
-        .map_err(display)?;
-    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
-    if parse_events(&read_control(&events)?)?.populated {
-        return Err("cannot roll back a populated OCI controller root".to_owned());
-    }
-    let lifecycle_fd = prepared.lifecycle.try_clone_descriptor().map_err(display)?;
-    let name = child_name(OCI_CONTROLLER_ROOT)?;
-    if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-        return Err(format!(
-            "roll back OCI controller root: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn retire_ended_oci_controller(
+pub(crate) fn retire_ended_oci_scopes(
     lifecycle_path: &Path,
     lifecycle_identity: PinnedDirectoryIdentity,
     controller_path: &Path,
-    controller_identity: PinnedDirectoryIdentity,
+    controller_identity: Option<PinnedDirectoryIdentity>,
+    init_identity: Option<PinnedDirectoryIdentity>,
 ) -> Result<(), String> {
     let Some(lifecycle) = PinnedDirectory::open(lifecycle_path).map_err(display)? else {
         return Ok(());
@@ -299,13 +364,19 @@ pub(crate) fn retire_ended_oci_controller(
     let name = controller_path
         .file_name()
         .ok_or("OCI controller path has no child name")?;
-    let Some(controller) = lifecycle.open_child_directory(name).map_err(display)? else {
-        return Ok(());
-    };
-    if controller.identity().map_err(display)? != controller_identity {
+    let init_leaf = lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?;
+    if let Some(init_leaf) = &init_leaf {
+        if Some(init_leaf.identity().map_err(display)?) != init_identity {
+            return Err("OCI init leaf was replaced before retirement".to_owned());
+        }
+        retire_empty_oci_descendants(init_leaf)?;
+    }
+    let controller = lifecycle.open_child_directory(name).map_err(display)?;
+    if let Some(controller) = &controller {
+    if Some(controller.identity().map_err(display)?) != controller_identity {
         return Err("OCI controller path was replaced before retirement".to_owned());
     }
-    retire_empty_oci_descendants(&controller)?;
+    retire_empty_oci_descendants(controller)?;
     let name = child_name(
         name.to_str()
             .ok_or("OCI controller child name is not UTF-8")?,
@@ -315,6 +386,17 @@ pub(crate) fn retire_ended_oci_controller(
             "retire ended OCI controller root: {}",
             io::Error::last_os_error()
         ));
+    }
+    }
+    if init_leaf.is_some() {
+        let current = lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?
+            .ok_or("OCI init leaf disappeared before removal")?;
+        if Some(current.identity().map_err(display)?) != init_identity {
+            return Err("OCI init leaf changed before exact removal".to_owned());
+        }
+        if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), c"ryeos-init".as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(format!("retire ended OCI init leaf: {}", io::Error::last_os_error()));
+        }
     }
     Ok(())
 }
@@ -469,7 +551,7 @@ pub(crate) fn install_oci_controller_mount(
         .try_clone_descriptor()
         .map_err(display)?;
     process_root.require_live()?;
-    require_oci_membership_file(&membership, &prepared.lifecycle_path)?;
+    require_prepared_oci_init_membership_file(&membership, &prepared.lifecycle_path)?;
     const OPEN_TREE_CLONE: libc::c_uint = 1;
     const AT_EMPTY_PATH: libc::c_uint = 0x1000;
     const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
@@ -514,7 +596,7 @@ pub(crate) fn install_oci_controller_mount(
             if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
                 return Err(io::Error::last_os_error());
             }
-            require_oci_membership_file(&membership, &prepared.lifecycle_path)
+            require_prepared_oci_init_membership_file(&membership, &prepared.lifecycle_path)
                 .map_err(|_| io::Error::from_raw_os_error(libc::ESTALE))?;
             if unsafe {
                 libc::syscall(
@@ -620,6 +702,9 @@ pub(crate) fn provision_host_delegation(service_label: &str) -> Result<std::path
         .ok_or("cgroup-v2 root is absent")?;
     let root_fd = root.try_clone_descriptor().map_err(display)?;
     require_cgroup2(&root_fd)?;
+    // The actual cgroup root is exempt from the domain no-internal-process
+    // rule; enable only the controllers this admitted node envelope needs.
+    enable_node_resource_controllers(&root_fd, true)?;
     let parent = open_or_create_host_delegation_parent(&root)?;
     parent.require_owner(0).map_err(display)?;
     let metadata = parent
@@ -632,6 +717,7 @@ pub(crate) fn provision_host_delegation(service_label: &str) -> Result<std::path
     }
     let parent_fd = parent.try_clone_descriptor().map_err(display)?;
     require_cgroup2(&parent_fd)?;
+    enable_node_resource_controllers(&parent_fd, false)?;
     Ok(parent.path().join(service_label))
 }
 
@@ -726,6 +812,7 @@ pub(crate) fn provision_controller(
             "host cgroup parent must be administrator-owned without shared write".to_owned(),
         );
     }
+    require_protected_ancestor_placement(&enclosing_fd)?;
     if unsafe { libc::mkdirat(enclosing_fd.as_raw_fd(), name_c.as_ptr(), 0o700) } != 0
         && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
     {
@@ -797,6 +884,7 @@ pub(crate) fn provision_controller(
     }
     Ok(ControllerBootstrap {
         parent,
+        controller,
         placement,
         uid,
         gid,
@@ -906,6 +994,7 @@ pub(crate) fn adopt_prepared_oci_controller(
     }
     Ok(ControllerBootstrap {
         parent,
+        controller,
         placement,
         uid,
         gid,
@@ -914,12 +1003,37 @@ pub(crate) fn adopt_prepared_oci_controller(
 
 pub(crate) struct ControllerBootstrap {
     parent: PinnedDirectory,
+    controller: PinnedDirectory,
     placement: File,
     uid: u32,
     gid: u32,
 }
 
 impl ControllerBootstrap {
+    pub(crate) fn install_resource_limits(
+        &self, limits: super::scope::ProcessScopeResourceLimits,
+    ) -> Result<(), String> {
+        // The enclosing delegation, not its controller leaf, dominates every
+        // placement the controller may perform for itself and worker scopes.
+        self.parent.ensure_path_binding_fixed().map_err(display)?;
+        let directory = self.parent.try_clone_descriptor().map_err(display)?;
+        require_cgroup2(&directory)?;
+        require_domain(&directory)?;
+        require_protected_node_limit_controls(&directory)?;
+        let events = open_control(&directory, c"cgroup.events", libc::O_RDONLY)?;
+        if parse_events(&read_control(&events)?)?.populated {
+            // Cold recovery may need the retained worker tree. It may enter
+            // only under the exact same finite enclosing ceilings, never
+            // mutate the predecessor's limits to make launch convenient.
+            require_scope_resource_limits(&directory, limits)?;
+        } else {
+            install_empty_scope_resource_limits(&directory, limits)?;
+        }
+        enable_node_resource_controllers(&directory, false)?;
+        self.parent.ensure_path_binding_fixed().map_err(display)?;
+        self.controller.ensure_path_binding_fixed().map_err(display)
+    }
+
     pub(crate) fn configure_command(
         &self,
         command: &mut std::process::Command,
@@ -1591,36 +1705,8 @@ impl ProcessCgroup {
         &self,
         limits: super::scope::ProcessScopeResourceLimits,
     ) -> Result<(), String> {
-        limits.validate()?;
-        if self.events()?.populated {
-            return Err("cannot change resource limits on a populated process scope".to_owned());
-        }
         let directory = self.directory.try_clone_descriptor().map_err(display)?;
-        // Open every required controller before the first mutation. A host
-        // that did not delegate memory and pids cannot silently downgrade the
-        // admitted product to rlimits or an unbounded cgroup.
-        let memory = open_control(&directory, c"memory.max", libc::O_RDWR)?;
-        let swap = open_control(&directory, c"memory.swap.max", libc::O_RDWR)?;
-        let processes = open_control(&directory, c"pids.max", libc::O_RDWR)?;
-        for (control, name, value) in [
-            (
-                &memory,
-                "memory.max",
-                limits.maximum_memory_bytes.to_string(),
-            ),
-            // The memory ceiling includes no separately available swap budget.
-            (&swap, "memory.swap.max", "0".to_owned()),
-            (&processes, "pids.max", limits.maximum_processes.to_string()),
-        ] {
-            write_control(control, value.as_bytes())?;
-            if read_control(control)?.trim() != value {
-                return Err(format!("{name} did not retain the exact resource ceiling"));
-            }
-        }
-        if self.events()?.populated {
-            return Err("process scope became populated during resource configuration".to_owned());
-        }
-        Ok(())
+        install_empty_scope_resource_limits(&directory, limits)
     }
 
     pub(crate) fn clone_kill_descriptor(&self) -> Result<File, String> {
@@ -2372,6 +2458,23 @@ fn display(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_mount_refuses_parent_and_controller_membership() {
+        // Only parsing and selected phase checks against a retained fixture;
+        // this supplies no actual cgroup placement or admission evidence.
+        let lifecycle = Path::new("/sys/fs/cgroup/container");
+        for (relative, expected) in [
+            ("/container".to_owned(), false),
+            (format!("/container/{OCI_CONTROLLER_ROOT}"), false),
+            (format!("/container/{OCI_INIT_LEAF}"), true),
+        ] {
+            let mut fixture = tempfile::NamedTempFile::new().unwrap();
+            std::io::Write::write_all(fixture.as_file_mut(), format!("0::{relative}\n").as_bytes()).unwrap();
+            assert_eq!(require_prepared_oci_init_membership_file(fixture.as_file(), lifecycle).is_ok(), expected);
+        }
+    }
+
 
     // Test-only injection entry. Uses the SAME production stage sequence and
     // actual temporary directory/File owners, without cgroup/native positives.
@@ -3235,4 +3338,154 @@ pub(super) mod tests {
         assert!(removed, "successful qualification left unexpected cgroups");
         true
     }
+}
+
+// One physical limit installer shared by execution and controller leaves.
+// The caller supplies the exact retained leaf and its admission authority.
+fn install_empty_scope_resource_limits(
+    directory: &File, limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+        limits.validate()?;
+        let events = open_control(directory, c"cgroup.events", libc::O_RDONLY)?;
+        if parse_events(&read_control(&events)?)?.populated {
+            return Err("cannot change resource limits on a populated process scope".to_owned());
+        }
+        // Open every required controller before the first mutation. A host
+        // that did not delegate memory and pids cannot silently downgrade the
+        // admitted product to rlimits or an unbounded cgroup.
+        let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
+        let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
+        let processes = open_control(directory, c"pids.max", libc::O_RDWR)?;
+        for (control, name, value) in [
+            (
+                &memory,
+                "memory.max",
+                limits.maximum_memory_bytes.to_string(),
+            ),
+            // The memory ceiling includes no separately available swap budget.
+            (&swap, "memory.swap.max", "0".to_owned()),
+            (&processes, "pids.max", limits.maximum_processes.to_string()),
+        ] {
+            write_control(control, value.as_bytes())?;
+            if read_control(control)?.trim() != value {
+                return Err(format!("{name} did not retain the exact resource ceiling"));
+            }
+        }
+        if parse_events(&read_control(&events)?)?.populated {
+            return Err("process scope became populated during resource configuration".to_owned());
+        }
+        Ok(())
+}
+
+fn require_protected_ancestor_placement(directory: &File) -> Result<(), String> {
+    let metadata = directory.metadata().map_err(display)?;
+    let placement = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
+    let control = placement.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0
+        || control.uid() != 0 || control.mode() & 0o022 != 0 {
+        return Err("outside node ancestor placement must remain administrator-only".to_owned());
+    }
+    Ok(())
+}
+
+fn require_protected_node_limit_controls(directory: &File) -> Result<(), String> {
+    for name in [c"memory.max", c"memory.swap.max", c"pids.max"] {
+        let control = open_control(directory, name, libc::O_RDONLY)?;
+        let metadata = control.metadata().map_err(display)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err("enclosing node resource controls must remain administrator-owned".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn require_scope_resource_limits(
+    directory: &File, limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+    limits.validate()?;
+    for (name, expected) in [
+        (c"memory.max", limits.maximum_memory_bytes.to_string()),
+        (c"memory.swap.max", "0".to_owned()),
+        (c"pids.max", limits.maximum_processes.to_string()),
+    ] {
+        let control = open_control(directory, name, libc::O_RDONLY)?;
+        if read_control(&control)?.trim() != expected {
+            return Err("existing enclosing node limits differ from admitted envelope".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn enable_node_resource_controllers(directory: &File, actual_cgroup_root: bool) -> Result<(), String> {
+    let available = open_control(directory, c"cgroup.controllers", libc::O_RDONLY)?;
+    let subtree = open_control(directory, c"cgroup.subtree_control", libc::O_RDWR)?;
+    let metadata = subtree.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err("node subtree controller selection must remain administrator-owned".to_owned());
+    }
+    let available = read_control(&available)?;
+    if !["memory", "pids"].iter().all(|required| available.split_ascii_whitespace().any(|name| name == *required)) {
+        return Err("node enclosing resource controllers are not available".to_owned());
+    }
+    let enabled = read_control(&subtree)?;
+    if ["memory", "pids"].iter().all(|required| enabled.split_ascii_whitespace().any(|name| name == *required)) {
+        return Ok(());
+    }
+    if !actual_cgroup_root {
+        let members = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
+        if !read_control(&members)?.trim().is_empty() {
+            return Err("cannot enable domain controllers around direct node members".to_owned());
+        }
+    }
+    write_control(&subtree, b"+memory +pids")?;
+    let enabled = read_control(&subtree)?;
+    if !["memory", "pids"].iter().all(|required| enabled.split_ascii_whitespace().any(|name| name == *required)) {
+        return Err("node memory/process controllers were not retained".to_owned());
+    }
+    Ok(())
+}
+
+fn effective_oci_node_limits(
+    directory: &File, requested: super::scope::ProcessScopeResourceLimits,
+) -> Result<super::scope::ProcessScopeResourceLimits, String> {
+    requested.validate()?;
+    require_protected_node_limit_controls(directory)?;
+    let finite_min = |name: &CStr, requested: u64| -> Result<u64, String> {
+        let control = open_control(directory, name, libc::O_RDONLY)?;
+        let current = read_control(&control)?;
+        if current.trim() == "max" { return Ok(requested); }
+        let current: u64 = current.trim().parse().map_err(|_| "invalid existing OCI resource ceiling")?;
+        if current == 0 { return Err("existing OCI resource ceiling is zero".to_owned()); }
+        Ok(current.min(requested))
+    };
+    let limits = super::scope::ProcessScopeResourceLimits {
+        maximum_memory_bytes: finite_min(c"memory.max", requested.maximum_memory_bytes)?,
+        maximum_processes: u32::try_from(finite_min(c"pids.max", u64::from(requested.maximum_processes))?)
+            .map_err(|_| "effective OCI process ceiling overflow")?,
+    };
+    for (name, maximum) in [(c"memory.current", limits.maximum_memory_bytes),
+        (c"pids.current", u64::from(limits.maximum_processes)), (c"memory.swap.current", 0)] {
+        let usage: u64 = read_control(&open_control(directory, name, libc::O_RDONLY)?)?.trim()
+            .parse().map_err(|_| "invalid OCI resource usage")?;
+        if usage > maximum { return Err("held OCI usage exceeds effective node envelope".to_owned()); }
+    }
+    Ok(limits)
+}
+
+fn install_held_oci_node_limits(
+    directory: &File, limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+    // Only the original held-init prestart path uses this populated-subtree
+    // installer, after proving its exact init leaf and no foreign descendants.
+    let effective = effective_oci_node_limits(directory, limits)?;
+    if effective != limits { return Err("OCI resource ceiling changed during preparation".to_owned()); }
+    let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
+    let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
+    let pids = open_control(directory, c"pids.max", libc::O_RDWR)?;
+    for (control, value) in [(&memory, limits.maximum_memory_bytes.to_string()),
+        (&swap, "0".to_owned()), (&pids, limits.maximum_processes.to_string())] {
+        write_control(control, value.as_bytes())?;
+        if read_control(control)?.trim() != value { return Err("OCI effective ceiling was not retained".to_owned()); }
+    }
+    require_scope_resource_limits(directory, limits)
 }

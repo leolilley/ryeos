@@ -61,7 +61,8 @@ pub use atomic_fs::{
 };
 pub use cas::{
     CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
-    atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path, valid_hash,
+    atomic_write_batch_in_pinned_root, canonical_json, canonical_json_bounded,
+    canonical_json_bytes_bounded, sha256_hex, shard_path, valid_hash,
 };
 pub use guest_account::GuestRuntimeAccount;
 pub use host_service::{
@@ -75,10 +76,10 @@ pub use local_ipc::{
     authenticated_unix_peer_from_stream,
 };
 pub use locks::{
-    ExactExclusiveFileLock, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
+    ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
 };
 pub use process_control::{
-    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent,
+    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress,
     ProcessHostLifetime, ProcessScope, ProcessScopeAllocation, ProcessScopeCapability,
     ProcessScopeConfiguration, ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery,
     ProcessScopeResourceLimits, QuiescedProcessScope, ResourceLimitedProcessScope,
@@ -93,10 +94,9 @@ pub use process_control::{
 pub use secure_fs::{EmptyMountTargetReservation, EphemeralDescriptorFileLink};
 pub use subordinate_process::{
     PinnedSubordinateProcessRequest, RootTerminalSubordinateFailure, SubordinateDiagnosticDrain,
-    SubordinateDiagnosticDrainEnd,
-    SubordinateProcess, SubordinateProcessDiagnostics, SubordinateProcessError,
-    SubordinateProcessExit, SubordinateProcessInput, SubordinateProcessOutput,
-    SubordinateProcessRequest,
+    SubordinateDiagnosticDrainEnd, SubordinateProcess, SubordinateProcessDiagnostics,
+    SubordinateProcessError, SubordinateProcessExit, SubordinateProcessInput,
+    SubordinateProcessOutput, SubordinateProcessRequest,
 };
 
 #[cfg(target_os = "linux")]
@@ -107,9 +107,10 @@ pub use exec::{
     take_inherited_descriptor_transfer_sender,
 };
 pub use secure_fs::{
-    CapturedRegularFile, DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree,
-    OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation, PinnedDirectory,
-    PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
+    AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
+    ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,
+    NoFollowDirectoryTree, OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation,
+    PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
     PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile, PinnedRegularFileIdentity,
     ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader, canonicalize_existing_path,
     collect_directory_tree_no_follow, collect_pinned_regular_files_no_follow_bounded,

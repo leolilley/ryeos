@@ -501,7 +501,8 @@ pub enum ProcessScopeCapability {
 /// Kernel-enforced ceilings for every task in one exact execution scope.
 /// These are scope-wide limits, unlike per-process rlimits or account-wide
 /// process limits. A backend without equivalent enforcement must refuse them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessScopeResourceLimits {
     pub maximum_memory_bytes: u64,
     pub maximum_processes: u32,
@@ -806,6 +807,8 @@ impl ProcessScopeConfiguration {
         account: &ControllerAccount,
         intent: &super::OciLifecycleIntent,
         process_root: &super::ExactProcessRoot,
+        node_resources: ProcessScopeResourceLimits,
+        mut observer: impl FnMut(&super::OciPreparationProgress) -> Result<(), String>,
     ) -> Result<(Self, super::OciLifecycleGeneration), String> {
         state.validate_prestart()?;
         super::require_administrator().map_err(|error| error.to_string())?;
@@ -820,7 +823,7 @@ impl ProcessScopeConfiguration {
                 return Err("OCI process-root authority differs from lifecycle intent".to_owned());
             }
             let AccountBackend::Unix { uid, gid } = account.0;
-            let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid)?;
+            let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid, node_resources, &mut observer)?;
             let lifecycle = (|| {
                 let host_lifetime = intent.host_lifetime().clone();
                 let generation_payload = serde_json::json!({
@@ -829,6 +832,8 @@ impl ProcessScopeConfiguration {
                     "init_process": &prepared.init_process,
                     "lifecycle_scope": &prepared.lifecycle_scope,
                     "controller_scope": &prepared.controller_scope,
+                    "init_scope": &prepared.init_scope,
+                    "node_resources": &prepared.node_resources,
                     "nonce": intent.nonce(),
                 });
                 let generation = format!(
@@ -845,6 +850,8 @@ impl ProcessScopeConfiguration {
                     prepared.init_process.clone(),
                     prepared.lifecycle_scope,
                     prepared.controller_scope,
+                    prepared.init_scope,
+                    prepared.node_resources,
                     prepared.lifecycle_path.clone(),
                     prepared.controller_path.clone(),
                     generation,
@@ -853,10 +860,7 @@ impl ProcessScopeConfiguration {
             let lifecycle = match lifecycle {
                 Ok(lifecycle) => lifecycle,
                 Err(error) => {
-                    let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
-                    return Err(format!(
-                        "{error}; OCI controller-root rollback: {rollback:?}"
-                    ));
+                    return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
                 }
             };
             let configuration = Self {
@@ -866,17 +870,11 @@ impl ProcessScopeConfiguration {
                 },
             };
             if let Err(error) = configuration.validate() {
-                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
-                return Err(format!(
-                    "{error}; OCI controller-root rollback: {rollback:?}"
-                ));
+                return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
             }
             if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, process_root)
             {
-                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
-                return Err(format!(
-                    "{error}; OCI controller-root rollback: {rollback:?}"
-                ));
+                return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
             }
             Ok((configuration, lifecycle))
         }
@@ -986,12 +984,13 @@ impl ProcessScopeConfiguration {
     pub fn exec_controller(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
         cwd: &crate::PinnedDirectory,
         environment: &[(String, String)],
     ) -> Result<std::convert::Infallible, String> {
-        self.exec_controller_inner(account, executable, arguments, cwd, environment, None, None)
+        self.exec_controller_inner(account, node_resources, executable, arguments, cwd, environment, None, None)
     }
 
     /// External-supervisor entry using one exact administrator-owned launch
@@ -1000,6 +999,7 @@ impl ProcessScopeConfiguration {
     pub fn exec_controller_with_inherited_document(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
         cwd: &crate::PinnedDirectory,
@@ -1009,6 +1009,7 @@ impl ProcessScopeConfiguration {
     ) -> Result<std::convert::Infallible, String> {
         self.exec_controller_inner(
             account,
+            node_resources,
             executable,
             arguments,
             cwd,
@@ -1024,6 +1025,7 @@ impl ProcessScopeConfiguration {
     pub fn exec_prepared_oci_controller_with_inherited_document(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         lifecycle: &super::OciLifecycleGeneration,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
@@ -1034,6 +1036,7 @@ impl ProcessScopeConfiguration {
     ) -> Result<std::convert::Infallible, String> {
         self.exec_controller_inner(
             account,
+            node_resources,
             executable,
             arguments,
             cwd,
@@ -1046,6 +1049,7 @@ impl ProcessScopeConfiguration {
     fn exec_controller_inner(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
         cwd: &crate::PinnedDirectory,
@@ -1055,6 +1059,7 @@ impl ProcessScopeConfiguration {
     ) -> Result<std::convert::Infallible, String> {
         self.validate()?;
         account.validate()?;
+        node_resources.validate()?;
         if !executable.path().is_absolute() || !cwd.path().is_absolute() {
             return Err("controller executable and cwd must be explicit absolute paths".to_owned());
         }
@@ -1111,6 +1116,10 @@ impl ProcessScopeConfiguration {
                 }
                 None => super::cgroup::provision_controller(parent, uid, gid)?,
             };
+            // Enclosing node ceilings dominate controller and worker scopes,
+            // including authorized intra-node placement changes. Install them
+            // before controller placement, privilege drop and daemon exec.
+            bootstrap.install_resource_limits(node_resources)?;
             command
                 .args(arguments)
                 .env_clear()
@@ -2289,6 +2298,7 @@ mod tests {
             configuration
                 .exec_controller(
                     &ControllerAccount::unix(1000, 1000),
+                    ProcessScopeResourceLimits { maximum_memory_bytes: 268435456, maximum_processes: 64 },
                     &image,
                     &[],
                     &cwd,
@@ -2303,7 +2313,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert!(
             configuration
-                .exec_controller(&ControllerAccount::unix(0, 0), &image, &[], &cwd, &[])
+                .exec_controller(&ControllerAccount::unix(0, 0), ProcessScopeResourceLimits { maximum_memory_bytes: 268435456, maximum_processes: 64 }, &image, &[], &cwd, &[])
                 .unwrap_err()
                 .contains("non-root account")
         );

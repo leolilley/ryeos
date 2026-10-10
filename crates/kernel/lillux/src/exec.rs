@@ -19,6 +19,8 @@ pub use duplex_deadline::{DeadlineDuplexStream, DeadlinePipeStream, DuplexReadin
 #[cfg(target_os = "linux")]
 mod descriptor_transfer;
 #[cfg(target_os = "linux")]
+pub(crate) mod registered_pair;
+#[cfg(target_os = "linux")]
 pub use descriptor_transfer::{
     DescriptorTransferBounds, InheritedDescriptorTransferChildAuthority,
     InheritedDescriptorTransferReceiver, InheritedDescriptorTransferSender,
@@ -4981,6 +4983,9 @@ pub(crate) struct ForkChildCloseFile {
     generation: u64,
     fd: i32,
     file: Option<std::fs::File>,
+    // An explicit close is attempted once. A failed close is not retried by FD
+    // number: Linux may already have released that coordinate on error.
+    explicit_close: Option<Result<(), i32>>,
 }
 
 #[cfg(unix)]
@@ -5001,11 +5006,96 @@ impl std::os::fd::AsRawFd for ForkChildCloseFile {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl ForkChildCloseFile {
+    /// Actual physical observation only. The caller retains its original
+    /// cleanup funding and deadline; success supplies no renewed authority.
+    /// Busy/quiesced/expired refusal leaves the exact registered file intact.
+    pub(crate) fn try_retire_registered(
+        &mut self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<bool, String> {
+        // Never touch a copied barrier, or a copied numeric descriptor, first.
+        if self.parent_pid != std::process::id() {
+            return Err("registered close belongs to another process".into());
+        }
+        let barrier = direct_attachment_fork_barrier();
+        if self.barrier_identity != barrier as *const DescriptorForkBarrier as usize {
+            return Err("registered close barrier identity changed".into());
+        }
+        if let Some(result) = self.explicit_close {
+            return result.map(|()| true).map_err(|errno| {
+                format!("original registered close failed with errno {errno}; no FD retry")
+            });
+        }
+        if original.has_elapsed() {
+            return Ok(false);
+        }
+        let mut state = match barrier.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("registered close barrier poisoned".into());
+            }
+        };
+        if state.fork_quiesced || original.has_elapsed() {
+            return Ok(false);
+        }
+        if state.owned_registration_generations.get(&self.fd) != Some(&self.generation)
+            || !state.fork_child_close_fds.contains(&self.fd)
+        {
+            return Err("original registered close generation missing".into());
+        }
+        if self.file.is_none() { return Err("registered close file already absent".into()); }
+        // The exact registration remains protected until the single syscall
+        // finishes. No fork can snapshot this FD between close and removal.
+        let result = self.close_registered_locked(&mut state);
+        barrier.changed.notify_all();
+        // An observed late close is a physical fact, never a timely grant.
+        result.map(|()| true).map_err(|errno| {
+            format!("original registered close failed with errno {errno}; no FD retry")
+        })
+    }
+
+    /// Caller holds the actual barrier and has checked the original process,
+    /// exact live registration and sole owner. One syscall consumes the file;
+    /// errno is cached because its numeric FD may already have been released.
+    fn close_registered_locked(&mut self, state: &mut DescriptorForkBarrierState) -> Result<(), i32> {
+        self.close_registered_locked_with(state, |fd| {
+            if unsafe { libc::close(fd) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+            }
+        })
+    }
+
+    fn close_registered_locked_with(&mut self, state: &mut DescriptorForkBarrierState,
+        close: impl FnOnce(i32) -> Result<(), i32>) -> Result<(), i32> {
+        use std::os::fd::IntoRawFd as _;
+        let file = self.file.take().expect("validated original registered file");
+        let result = close(file.into_raw_fd());
+        self.explicit_close = Some(result);
+        state.owned_registration_generations.remove(&self.fd);
+        state.fork_child_close_fds.remove(&self.fd);
+        result
+    }
+
+    pub(crate) fn is_registered_live(&self) -> bool {
+        self.parent_pid == std::process::id() && self.file.is_some() && self.explicit_close.is_none()
+    }
+
+    pub(crate) fn explicitly_retired(&self) -> bool {
+        self.parent_pid == std::process::id() && self.explicit_close == Some(Ok(()))
+    }
+}
+
 #[cfg(unix)]
 impl Drop for ForkChildCloseFile {
     fn drop(&mut self) {
         if self.file.is_none() {
-            // Selected bounded close already removed the exact registration.
+            // Selected close or the explicit one-attempt close already removed
+            // the exact registration. A cached errno is NOT success evidence.
             return;
         }
         if self.parent_pid != std::process::id()
@@ -5153,6 +5243,7 @@ pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCl
         generation,
         fd,
         file: Some(file),
+        explicit_close: None,
     }
 }
 
@@ -15219,6 +15310,8 @@ pub enum ExecAction {
         #[arg(long)]
         configuration: String,
         #[arg(long)]
+        node_resources: String,
+        #[arg(long)]
         uid: u32,
         #[arg(long)]
         gid: u32,
@@ -15348,6 +15441,7 @@ pub fn run(action: ExecAction) -> serde_json::Value {
     match action {
         ExecAction::ScopeController {
             configuration,
+            node_resources,
             uid,
             gid,
             cmd,
@@ -15358,6 +15452,8 @@ pub fn run(action: ExecAction) -> serde_json::Value {
             let outcome = (|| -> Result<std::convert::Infallible, String> {
                 let configuration: crate::ProcessScopeConfiguration =
                     serde_json::from_str(&configuration).map_err(|error| error.to_string())?;
+                let node_resources: crate::ProcessScopeResourceLimits =
+                    serde_json::from_str(&node_resources).map_err(|error| error.to_string())?;
                 let environment: Vec<(String, String)> = envs
                     .iter()
                     .map(|entry| {
@@ -15390,6 +15486,7 @@ pub fn run(action: ExecAction) -> serde_json::Value {
                     .ok_or("controller executable is absent")?;
                 configuration.exec_controller(
                     &crate::ControllerAccount::unix(uid, gid),
+                    node_resources,
                     &executable,
                     &args,
                     &cwd,

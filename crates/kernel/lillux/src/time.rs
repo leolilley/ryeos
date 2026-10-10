@@ -1,3 +1,6 @@
+mod retained_occupancy;
+pub use retained_occupancy::{RetainedClockCloseFailure, RetainedOccupancyClock, RetiredOccupancyClock};
+
 use std::thread;
 pub use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -492,26 +495,7 @@ fn occupancy_contract_digest(contract: &OccupancyClockContract) -> Result<String
 #[cfg(target_os = "linux")]
 fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
     let contract = OccupancyClockContract::current()?;
-    let mut value = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `value` points to a valid writable timespec for the duration of
-    // the call. The chosen clock and its semantics remain private to Lillux.
-    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) } != 0 {
-        return Err(format!(
-            "sample durable occupancy clock: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let seconds = u64::try_from(value.tv_sec)
-        .map_err(|_| "occupancy clock returned a negative second coordinate".to_string())?;
-    let nanoseconds = u64::try_from(value.tv_nsec)
-        .map_err(|_| "occupancy clock returned a negative nanosecond coordinate".to_string())?;
-    let tick_ns = seconds
-        .checked_mul(1_000_000_000)
-        .and_then(|total| total.checked_add(nanoseconds))
-        .ok_or_else(|| "occupancy clock coordinate overflow".to_string())?;
+    let tick_ns = occupancy_tick_ns()?;
     let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
     let incarnation = incarnation.trim();
@@ -523,6 +507,26 @@ fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
         incarnation_digest: crate::sha256_hex(incarnation.as_bytes()),
         tick_ns,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn occupancy_tick_ns() -> Result<u64, String> {
+    occupancy_tick_ns_fixed().map_err(str::to_owned)
+}
+
+#[cfg(target_os = "linux")]
+fn occupancy_tick_ns_fixed() -> Result<u64, &'static str> {
+    let mut value = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) } != 0 {
+        return Err("sample durable occupancy clock refused");
+    }
+    let seconds = u64::try_from(value.tv_sec)
+        .map_err(|_| "occupancy clock returned a negative second coordinate")?;
+    let nanoseconds = u64::try_from(value.tv_nsec)
+        .map_err(|_| "occupancy clock returned a negative nanosecond coordinate")?;
+    if nanoseconds >= 1_000_000_000 { return Err("occupancy clock returned invalid nanoseconds"); }
+    seconds.checked_mul(1_000_000_000).and_then(|total| total.checked_add(nanoseconds))
+        .ok_or("occupancy clock coordinate overflow")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -649,13 +653,25 @@ pub fn iso8601_now() -> String {
 /// Format an absolute Unix timestamp (seconds) as ISO-8601 UTC — same
 /// encoding `iso8601_now` emits, for computing comparable cutoffs.
 pub fn iso8601_from_unix_secs(secs: u64) -> String {
+    let mut output = String::new();
+    write_iso8601_from_unix_secs(secs, &mut output).expect("String timestamp formatting cannot fail");
+    output
+}
+
+/// The SAME production clock/format, written into caller-owned fixed storage.
+/// This is a timestamp observation, never an occupancy or execution allowance.
+pub(crate) fn iso8601_now_into(output: &mut dyn std::fmt::Write) -> std::fmt::Result {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    write_iso8601_from_unix_secs(now.as_secs(), output)
+}
+fn write_iso8601_from_unix_secs(secs: u64, output: &mut dyn std::fmt::Write) -> std::fmt::Result {
     let days = secs / 86400;
     let day_secs = secs % 86400;
     let hours = day_secs / 3600;
     let minutes = (day_secs % 3600) / 60;
     let seconds = day_secs % 60;
     let (year, month, day) = civil_from_days(days as i64);
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+    std::fmt::write(output, format_args!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"))
 }
 
 /// Current wall-clock time as milliseconds since Unix epoch.
