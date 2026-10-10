@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-30T10:59:04Z:85999fd19f119eadc706b227920de2f671941782d7897741b0466e5a926139d4:S59tedmd0PdJVm27MQ46Vy3JW2zu9dzLPT0pOGqbyKcgulA4uD9HagEnNb2ONxF4Cjjq3+q2oZ3MIkGnWSYdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-10T21:07:25Z:28e298d17d3aa7401f1d0984728cdd0284dd2ccafdbfec5fcfde8ef04b9a61ca:JSKTdmOds6BqffGzFn5Ek/jUn6lhOSQ3ILntfjDqXu/avyZpLMcR4ZyDgjDUEDJn9EcITfgaouF/EMZeA1maBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -174,8 +174,8 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 14 for the schema-34
-contract. Capsule 34 binds retained remote-verifier sources and complete
+Dispatch-effect replay moves to operational epoch 15 for the schema-36
+contract. Capsule 34 first bound retained remote-verifier sources and complete
 production consumer inputs into the launch authority. Exact source retention
 and protected contact joins remain separate admission requirements. The
 supported explicit reset retires

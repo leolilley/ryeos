@@ -40,20 +40,28 @@ const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
 pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 4;
 /// One main Operational source plus its four fixed schema-reference sources.
 pub const MAX_LIVE_OPERATIONAL_PACKET_SOURCES: usize = MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1;
-// Dispatch-effect records retain complete launch and caller authority. Epoch 14
-// is the clean-cut activation for launch-capsule schema 34, including retained
-// remote-verifier sources and complete production consumer inputs. Predecessor
-// dispatch rows cannot prove that authority and must be retired under the
-// supported explicit replay-index reset.
+// Dispatch-effect records retain complete launch and caller authority, so each
+// launch-capsule schema change needs its own replay-index epoch. Epoch 15 is the
+// clean-cut activation for launch-capsule schema 36. Predecessor dispatch rows
+// were sealed under an earlier capsule contract, cannot prove current authority
+// and must be retired under the supported explicit replay-index reset.
 // Provider-call records do not carry that dependency and remain current.
-const REPLAY_INDEX_EPOCH: i32 = 14;
+//
+// The epoch literal lives only in this macro so the fresh-schema marker in
+// `SCHEMA_SQL` and the Rust constant cannot drift apart.
+macro_rules! replay_index_epoch_literal {
+    () => {
+        15
+    };
+}
+const REPLAY_INDEX_EPOCH: i32 = replay_index_epoch_literal!();
 #[cfg(test)]
-const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 34;
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 pub const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 
-const SCHEMA_SQL: &str = r#"
+const SCHEMA_SQL: &str = concat!(r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA user_version=6;
@@ -157,7 +165,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 14);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, "#, replay_index_epoch_literal!(), r#");
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -179,7 +187,7 @@ CREATE TABLE credential_profiles (
 
 CREATE INDEX idx_credential_profiles_owner_state
     ON credential_profiles(owner_principal, state);
-"#;
+"#);
 
 /// Schema-v5 addition: credential-profile lifecycle authority is stable node
 /// state, not disposable execution history. RuntimeDb retains only the live
@@ -318,9 +326,9 @@ CREATE TABLE replay_index_epoch (
 INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
 "#;
 
-/// Exact immediate-predecessor cut. Dispatch effects from epoch 13 predate the
-/// schema-34 consumer-input and verifier source authority; provider-call
-/// evidence is independent of that launch authority and remains current.
+/// Exact immediate-predecessor cut. Dispatch effects from the prior epoch were
+/// sealed under a predecessor launch-capsule contract; provider-call evidence
+/// is independent of that launch authority and remains current.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
 DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
 "#;
@@ -4887,17 +4895,18 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 14)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 13)"));
+        let marker = format!("INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, {REPLAY_INDEX_EPOCH});");
+        assert_eq!(SCHEMA_SQL.matches(&marker).count(), 1);
+        assert_eq!(SCHEMA_SQL.matches("INSERT INTO replay_index_epoch").count(), 1);
     }
 
     #[test]
     fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
-        assert_eq!(REPLAY_INDEX_EPOCH, 14);
-        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 34);
+        // Reviewed fence pair. Changing the launch-capsule schema fails here
+        // until the replay-index epoch is bumped and this pair re-reviewed.
         assert_eq!(
-            DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
-            crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            (REPLAY_INDEX_EPOCH, DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA),
+            (15, 36),
             "a launch-capsule schema change requires an explicit replay-index epoch decision",
         );
     }
