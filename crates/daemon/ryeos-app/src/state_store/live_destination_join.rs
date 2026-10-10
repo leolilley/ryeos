@@ -135,7 +135,8 @@ impl LiveStoreDestinationJoin {
             .require_original(factory, false)?;
         ensure!(parts.signer.is_some() && parts.trust.is_some()
             && parts.runtime_path.is_some() && parts.deadline.is_some()
-            && parts.process_identity.is_some() && parts.scheduler_admission_phase.is_some(),
+            && parts.process_identity.is_some() && parts.scheduler_admission_phase.is_some()
+            && parts.accounting_admission_phase.is_some(),
             "Store finalization metadata authority was not retained as a complete frame");
         ensure!(std::ptr::eq(parts.join.as_ref(), self),
             "Store finalization parts belong to a different receiver");

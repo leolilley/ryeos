@@ -133,6 +133,7 @@ pub enum OriginalNativeDomain {
     NodeOperationalSchemaReference,
     NodeProjectionSchemaReference,
     NodeSchedulerSchemaReference,
+    NodeAccountingSchemaReference,
     NodeOperational,
     NodeProjection,
     NodeScheduler,
@@ -1228,6 +1229,10 @@ impl OriginalNativeTransientInputs {
     /// or service namespace exclusion, same initialized paid factory, original
     /// funding and node/process/clock custody. It may build only the declared
     /// scheduler schema; it grants no scheduler rows or retirement authority.
+    /// NodeAccountingSchemaReference must retain the genuine live State
+    /// namespace owner, same initialized paid factory, original funding and
+    /// node/process/clock custody. It may build only the declared ledger
+    /// schema; it grants no ledger rows or admission authority.
     /// No domain enum or path DTO may substitute for these genuine owners.
     pub unsafe fn issued(
         domain: OriginalNativeDomain,
@@ -1244,6 +1249,7 @@ impl OriginalNativeTransientInputs {
                     | OriginalNativeDomain::NodeOperationalSchemaReference
                     | OriginalNativeDomain::NodeProjectionSchemaReference
                     | OriginalNativeDomain::NodeSchedulerSchemaReference
+                    | OriginalNativeDomain::NodeAccountingSchemaReference
             ),
             "invalid transient native domain"
         );
@@ -1395,6 +1401,7 @@ impl OriginalNativeBoundInputs {
                         | Domain::NodeOperationalSchemaReference
                         | Domain::NodeProjectionSchemaReference
                         | Domain::NodeSchedulerSchemaReference
+                        | Domain::NodeAccountingSchemaReference
                 ),
                 "transient domain cannot acquire a bound store"
             );
@@ -1928,6 +1935,7 @@ impl OriginalNativeFactory {
                             | OriginalNativeDomain::NodeOperationalSchemaReference
                             | OriginalNativeDomain::NodeProjectionSchemaReference
                     | OriginalNativeDomain::NodeSchedulerSchemaReference
+                    | OriginalNativeDomain::NodeAccountingSchemaReference
                     ),
                 "only admitted State domain may open transient SQLite"
             );
@@ -2852,6 +2860,80 @@ impl OriginalNativeConnection {
             };
             let result = match result {
                 Ok(value) if effective.has_elapsed() => {
+                    drop(value);
+                    Err(anyhow::anyhow!(
+                        "original native operation completed after expiry; commit outcome may be uncertain"
+                    ))
+                }
+                other => other,
+            };
+            let restored = scope.restore();
+            match (result, restored) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(original), Ok(())) => Err(original),
+                (Ok(_), Err(restore)) => Err(restore),
+                (Err(original), Err(restore)) => Err(original.context(restore)),
+            }
+        })
+    }
+    /// Per-operation absolute deadline for the live accounting ledger owner.
+    /// The deadline check is installed together with this connection's VM-step
+    /// debit, and the debit-only hook is restored afterwards. Unlike
+    /// `with_sql_deadline`, the deadline is not retained as a connection-wide
+    /// anchor: each ledger operation carries its own original funding deadline.
+    pub fn with_sql_until<T>(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+        operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
+    ) -> Result<T> {
+        require_current_native_process()?;
+        ensure!(
+            self.domain == OriginalNativeDomain::NodeAccounting,
+            "original per-operation deadline requires the live NodeAccounting owner"
+        );
+        ensure!(
+            !self.deadline_active.get(),
+            "original native deadline cannot nest"
+        );
+        self.require_sql_owner()?;
+        ensure!(
+            !deadline.has_elapsed(),
+            "original native deadline expired before scope"
+        );
+        self.with_sql(|connection| {
+            let prior: i64 = connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            let prior_busy = std::time::Duration::from_millis(
+                u64::try_from(prior).context("original native busy timeout negative")?,
+            );
+            ensure!(
+                !deadline.has_elapsed(),
+                "original native deadline expired before hook installation"
+            );
+            connection.busy_timeout(std::time::Duration::ZERO)?;
+            self.deadline_active.set(true);
+            let mut scope = NativeOriginalDeadlineScope {
+                owner: self,
+                connection,
+                prior_busy,
+                installed: true,
+            };
+            // Same unwind-boundary hook as acquisition; see the enrollment path.
+            let authority = std::panic::AssertUnwindSafe(self.factory.authority.clone());
+            connection.progress_handler(
+                1,
+                Some(move || {
+                    require_current_native_process().is_err()
+                        || deadline.has_elapsed()
+                        || authority.debit_sql_vm_steps(1).is_err()
+                }),
+            );
+            let result = if deadline.has_elapsed() {
+                Err(anyhow::anyhow!("original native deadline expired before operation"))
+            } else {
+                operation(connection)
+            };
+            let result = match result {
+                Ok(value) if deadline.has_elapsed() => {
                     drop(value);
                     Err(anyhow::anyhow!(
                         "original native operation completed after expiry; commit outcome may be uncertain"

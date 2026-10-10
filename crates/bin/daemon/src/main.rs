@@ -184,6 +184,7 @@ struct UnresolvedNativeCustody {
     app_state_retained: bool,
     live_store_retained: bool,
     scheduler_retained: bool,
+    accounting_retained: bool,
     native_failure_retained: bool,
     inputs_retained: bool,
     reservation_retained: bool,
@@ -201,13 +202,14 @@ struct UnresolvedNativeCustody {
 impl std::fmt::Display for UnresolvedNativeCustody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f,
-            "attempts_used={} services_drained={} persistent_pool_retained={} app_state_retained={} live_store_retained={} scheduler_retained={} native_failure_retained={} inputs_retained={} reservation_retained={} factory_retained={} prepared_registry_retained={} store_close_retained={} store_outside_retained={} settled_account_retained={} native_terminal_retained={} startup_recovery_retained={} selected_root_unresolved={} operator_lock_retained={}",
+            "attempts_used={} services_drained={} persistent_pool_retained={} app_state_retained={} live_store_retained={} scheduler_retained={} accounting_retained={} native_failure_retained={} inputs_retained={} reservation_retained={} factory_retained={} prepared_registry_retained={} store_close_retained={} store_outside_retained={} settled_account_retained={} native_terminal_retained={} startup_recovery_retained={} selected_root_unresolved={} operator_lock_retained={}",
             self.attempts_used,
             self.services_drained,
             self.persistent_pool_retained,
             self.app_state_retained,
             self.live_store_retained,
             self.scheduler_retained,
+            self.accounting_retained,
             self.native_failure_retained,
             self.inputs_retained,
             self.reservation_retained,
@@ -336,6 +338,17 @@ struct DaemonSelectedComposition {
     native_control_observation: std::sync::Mutex<Option<
         std::result::Result<ryeos_node::native_capacity::LiveProducerControlCensus, anyhow::Error>,
     >>,
+    // Live accounting ledger native owner, retained from its first open
+    // attempt (successful or refused) until its acknowledged outside sources
+    // are cached below; then the cached sources join the Store graph.
+    accounting_native: Option<Arc<ryeos_app::accounting_db::AccountingNativeLedger>>,
+    accounting_native_connection_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    accounting_native_reference_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    accounting_native_unused_reference: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    // The audit outbox publisher holds Store and ledger aliases. Its handle
+    // is filled from inside the startup future and ended before native
+    // shutdown, so the consuming Store close sees no service owner.
+    accounting_publisher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     #[cfg(feature = "scheduling")]
     scheduler_db_custody: Option<Arc<scheduler::db::SchedulerDb>>,
     #[cfg(feature = "scheduling")]
@@ -406,6 +419,11 @@ impl DaemonSelectedComposition {
             native_finalizer_attempts: NativeFinalizerAttempts::default(),
             native_admission_fence: Arc::default(),
             native_control_observation: std::sync::Mutex::new(None),
+            accounting_native: None,
+            accounting_native_connection_parts: None,
+            accounting_native_reference_parts: None,
+            accounting_native_unused_reference: None,
+            accounting_publisher: Arc::default(),
             #[cfg(feature = "scheduling")]
             scheduler_db_custody: None,
             #[cfg(feature = "scheduling")]
@@ -687,6 +705,75 @@ impl DaemonSelectedComposition {
     #[cfg(not(feature = "scheduling"))]
     fn has_scheduler_custody(&self) -> bool {
         false
+    }
+
+    /// End the audit outbox publisher before native shutdown. Its claims are
+    /// lease-bound and its acknowledgements identity-checked, so an abort is
+    /// equivalent to a crash that the next publisher recovers.
+    async fn stop_accounting_publisher(&mut self) {
+        let publisher = self.accounting_publisher.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(publisher) = publisher {
+            publisher.abort();
+            let _ = publisher.await;
+        }
+    }
+
+    fn has_accounting_custody(&self) -> bool {
+        self.accounting_native.is_some() || self.accounting_native_connection_parts.is_some()
+            || self.accounting_native_reference_parts.is_some()
+            || self.accounting_native_unused_reference.is_some()
+    }
+
+    /// After the aggregate ACK, move the ledger's acknowledged terminals into
+    /// cached outside sources. A refusal keeps them inside the same owner.
+    fn take_accounting_outside_sources(
+        &mut self,
+        terminal: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> Result<()> {
+        let Some(ledger) = self.accounting_native.as_ref() else { return Ok(()) };
+        anyhow::ensure!(self.accounting_native_connection_parts.is_none()
+            && self.accounting_native_reference_parts.is_none()
+            && self.accounting_native_unused_reference.is_none(),
+            "accounting outside sources compete with already cached sources");
+        let sources = ledger.take_outside_sources(terminal)
+            .context("take accounting ledger outside sources")?;
+        let ryeos_app::accounting_db::AccountingNativeOutsideSources {
+            connection, reference, unused_reference,
+        } = sources;
+        self.accounting_native_connection_parts = connection;
+        self.accounting_native_reference_parts = reference;
+        self.accounting_native_unused_reference = unused_reference;
+        // The emptied owner holds no native object; remaining AccountingDb
+        // aliases already refuse SQL.
+        self.accounting_native = None;
+        Ok(())
+    }
+
+    /// Join the cached ledger sources to the Store's direct auxiliary packet
+    /// collection. Each call also resumes any join already cached in the
+    /// Store after an earlier refusal.
+    fn advance_accounting_sources_in_store(
+        &mut self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        producer: &ryeos_node::native_capacity::LiveNativeFactory,
+        terminal: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> Result<()> {
+        anyhow::ensure!(self.accounting_native.is_none(),
+            "accounting ledger owner has not released its outside sources");
+        let outside = self.native_outside_store.as_mut()
+            .context("accounting ledger sources lack the retained Store graph")?;
+        let prepay = |bytes, steps| producer.prepay_outside_control(terminal, bytes, steps);
+        outside.advance_accounting_packet_parts(&mut self.accounting_native_connection_parts,
+            factory, terminal, &prepay).context("Store pre-seal accounting ledger packet")?;
+        outside.advance_accounting_packet_parts(&mut self.accounting_native_reference_parts,
+            factory, terminal, &prepay).context("Store pre-seal accounting reference packet")?;
+        outside.advance_unopened_accounting_transient(&mut self.accounting_native_unused_reference,
+            factory, terminal, &prepay).context("Store pre-seal unused accounting reference")?;
+        anyhow::ensure!(!self.has_accounting_custody(),
+            "accounting ledger sources remain outside the Store inventory");
+        Ok(())
     }
 
     #[cfg(feature = "scheduling")]
@@ -1019,6 +1106,9 @@ impl DaemonSelectedComposition {
             .context("actual Store outside graph disappeared during Scheduler handoff")?;
         outside.prepare_destination_join(&factory, terminal, &|bytes, steps|
             producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal destination join")?;
+        self.advance_accounting_sources_in_store(&factory, producer, terminal)?;
+        let outside = self.native_outside_store.as_mut()
+            .context("actual Store outside graph disappeared during accounting handoff")?;
         outside.advance_state_projection_sources(&factory, terminal, &|bytes, steps|
             producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal State projection sources")?;
         outside.advance_runtime_physical_sources(&factory, terminal, &|bytes, steps|
@@ -1101,6 +1191,7 @@ impl DaemonSelectedComposition {
         if self.native_factory.is_some() || self.native_terminal.is_some() {
             anyhow::ensure!(self.app_state_custody.is_none() && self.live_state_store_custody.is_none()
                 && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.has_accounting_custody()
                 && !self.root.has_unresolved_owners() && self.native_failure.is_none()
                 && self.native_closed_store.is_none() && self.native_store_close_failure.is_none()
                 && self.native_startup_recovery_failure.is_none()
@@ -1391,6 +1482,11 @@ impl DaemonSelectedComposition {
                 drop(app);
             }
             let native = factory.retained_factory_for_cleanup()?;
+            // Close the ledger in place before its Store authority closes;
+            // every later ledger alias refuses SQL. Refusal keeps the owner.
+            if let Some(ledger) = &self.accounting_native {
+                ledger.close().context("close live accounting ledger")?;
+            }
             if self.native_closed_store.is_none() {
                 let result = if let Some(failure) = self.native_store_close_failure.take() {
                     failure.retry()
@@ -1415,8 +1511,20 @@ impl DaemonSelectedComposition {
             if let Some(released) = &self.scheduler_recovered_schema {
                 if let Some(terminal) = released.terminal(&native)? { terminals.push(terminal.clone()); }
             }
+            if let Some(ledger) = &self.accounting_native {
+                terminals.extend(ledger.native_terminals(&native)?);
+            }
             let leases = self.native_closed_store.as_ref().context("actual live Store terminal owner absent")?
                 .generation_lease_terminals(&native)?;
+            if let Ok(snapshot) = native.budget_snapshot() {
+                tracing::info!(
+                    connections_issued = snapshot.connections_issued,
+                    allocator_steps = snapshot.allocator_steps,
+                    cleanup_steps = snapshot.cleanup_steps,
+                    terminals = terminals.len(),
+                    "native budget census before aggregate shutdown"
+                );
+            }
             self.native_terminal = Some(factory.finish_live_native(&terminals, &leases)?);
             // These borrowed census packets have served the genuine aggregate
             // ACK. Release their aliases before consuming Scheduler terminals
@@ -1428,6 +1536,11 @@ impl DaemonSelectedComposition {
         }
         // Every native terminal is already acknowledged by the real backend.
         // Retire their Rust handles before the zero-loan resident seal.
+        if self.accounting_native.is_some() {
+            let aggregate = Arc::clone(self.native_terminal.as_ref()
+                .context("actual native terminal absent for accounting retirement")?);
+            self.take_accounting_outside_sources(&aggregate)?;
+        }
         let terminal = self.native_terminal.as_ref().context("actual native terminal absent for Store retirement")?;
         #[cfg(feature = "scheduling")]
         if self.scheduler_native_outside_sources.is_none()
@@ -1451,6 +1564,8 @@ impl DaemonSelectedComposition {
         // Without a Store graph there is no receiver for Scheduler owners.
         anyhow::ensure!(!self.has_scheduler_custody(),
             "Scheduler owners remain without a Store outside handoff");
+        anyhow::ensure!(!self.has_accounting_custody(),
+            "accounting ledger owners remain without a Store outside handoff");
         self.native_terminal.take();
         self.native_factory.take();
         if let Some(failure) = self.native_reservation_close_failure.take() {
@@ -1478,6 +1593,7 @@ impl DaemonSelectedComposition {
             || self.live_state_store_custody.is_some()
             || self.root.has_unresolved_owners()
             || self.has_scheduler_custody()
+            || self.has_accounting_custody()
             || self.native_reservation.is_some()
             || self.native_factory.is_some()
             || self.native_failure.is_some()
@@ -1500,6 +1616,7 @@ impl DaemonSelectedComposition {
             app_state_retained: self.app_state_custody.is_some(),
             live_store_retained: self.live_state_store_custody.is_some(),
             scheduler_retained: self.has_scheduler_custody(),
+            accounting_retained: self.has_accounting_custody(),
             native_failure_retained: self.native_failure.is_some(),
             inputs_retained: self.native_inputs.is_some(),
             reservation_retained: self.native_reservation.is_some()
@@ -3044,37 +3161,58 @@ async fn run(
 
             let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
-            // Financial accounting ledger. Failure to open or verify does not
-            // stop the node — it disables every hard-budget admission
-            // (fail-closed) while unrelated non-hard work continues.
-            let accounting = {
-                let accounting_dir = config.runtime_state_dir();
-                match tokio::task::spawn_blocking(move || {
-                    ryeos_app::accounting_db::AccountingDb::open_default(&accounting_dir)
-                })
-                .await
-                .context("accounting ledger open task")?
-                {
-                    Ok(ledger) => match ledger.startup_verify() {
-                        Ok(report) => {
-                            tracing::info!(?report, "accounting ledger verified");
-                            Some(Arc::new(ledger))
-                        }
+            // Financial accounting ledger, on the same live native factory as
+            // State/Runtime. Failure to open or verify does not stop the node:
+            // it disables every hard-budget admission (fail-closed) while
+            // unrelated non-hard work continues. The native owner is retained
+            // in composition custody whether or not the open succeeds.
+            let accounting = match state_store.live_accounting_native_admission() {
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "accounting ledger admission refused; hard-budget admission is disabled"
+                    );
+                    None
+                }
+                Ok(admission) => {
+                    let (ledger, opened) = tokio::task::spawn_blocking(move || {
+                        ryeos_app::accounting_db::AccountingDb::open_live_native(admission)
+                    })
+                    .await
+                    .context("accounting ledger open task")?;
+                    composition.accounting_native = Some(ledger);
+                    if let Some(factory) = composition.native_factory.as_ref()
+                        .and_then(|producer| producer.ready_factory().ok())
+                        && let Ok(snapshot) = factory.budget_snapshot()
+                    {
+                        tracing::info!(
+                            connections_issued = snapshot.connections_issued,
+                            allocator_steps = snapshot.allocator_steps,
+                            "native budget census after accounting ledger open"
+                        );
+                    }
+                    match opened {
+                        Ok(ledger) => match ledger.startup_verify() {
+                            Ok(report) => {
+                                tracing::info!(?report, "accounting ledger verified");
+                                Some(Arc::new(ledger))
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    %error,
+                                    "accounting ledger failed startup verification; hard-budget \
+                                     admission is disabled"
+                                );
+                                None
+                            }
+                        },
                         Err(error) => {
                             tracing::error!(
-                                %error,
-                                "accounting ledger failed startup verification; hard-budget \
-                                 admission is disabled"
+                                error = format!("{error:#}"),
+                                "accounting ledger unavailable; hard-budget admission is disabled"
                             );
                             None
                         }
-                    },
-                    Err(error) => {
-                        tracing::error!(
-                            %error,
-                            "accounting ledger unavailable; hard-budget admission is disabled"
-                        );
-                        None
                     }
                 }
             };
@@ -3242,6 +3380,7 @@ async fn run(
             composition
                 .arm_retained_app_generation()
                 .context("register actual App generation in empty selected composition")?;
+            let accounting_publisher_slot = Arc::clone(&composition.accounting_publisher);
             let app_state = composition
                 .app_state_mut()
                 .context("actual AppState custody disappeared after generation arm")?;
@@ -3291,9 +3430,11 @@ async fn run(
             // reservation.
             if let Some(ledger) = app_state.accounting.clone() {
                 let outbox_store = app_state.state_store.clone();
-                tokio::spawn(async move {
+                let publisher = tokio::spawn(async move {
                     ryeosd::accounting_outbox::run_publisher(ledger, outbox_store).await;
                 });
+                *accounting_publisher_slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(publisher);
             }
             // A durable Remove journal record may survive after its signed head was
             // already unlinked. Finish its runtime/projection cleanup before any
@@ -3854,6 +3995,7 @@ async fn run(
     // marker is later replaced, by compare-and-write, with the proved reason.
     composition.staged_exit_record = Some((exit_reason(&daemon_result),
         daemon_result.as_ref().err().map(|error| format!("{error:#}"))));
+    composition.stop_accounting_publisher().await;
     let native_result = composition.advance_native_shutdown();
     if composition.has_unresolved_custody() {
         // The custody exit below does not return, so name both causes first.
@@ -6219,6 +6361,11 @@ mod selected_composition_tests {
                 native_finalizer_attempts: NativeFinalizerAttempts::default(),
                 native_admission_fence: Arc::default(),
                 native_control_observation: std::sync::Mutex::new(None),
+                accounting_native: None,
+                accounting_native_connection_parts: None,
+                accounting_native_reference_parts: None,
+                accounting_native_unused_reference: None,
+                accounting_publisher: Arc::default(),
                 #[cfg(feature = "scheduling")]
                 scheduler_db_custody: None,
                 #[cfg(feature = "scheduling")]

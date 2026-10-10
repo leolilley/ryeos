@@ -18,8 +18,14 @@ const RETIRED_PACKET_SOURCE_PARTS_STEPS: u64 = 24;
 const MAX_RUNTIME_PACKET_SOURCES: usize = crate::runtime_db::MAX_LIVE_RUNTIME_NATIVE_PACKET_SOURCES;
 const MAX_OPERATIONAL_PACKET_SOURCES: usize = ryeos_state::operational::MAX_LIVE_OPERATIONAL_PACKET_SOURCES;
 pub const MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES: usize = 2;
+/// The accounting ledger's bound connection and its schema reference.
+pub const MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES: usize = 2;
+/// The Store's direct auxiliary packet collection carries both the Scheduler
+/// and the accounting ledger node databases.
+pub const MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES: usize =
+    MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES + MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES;
 pub const MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES: usize = MAX_RUNTIME_PACKET_SOURCES
-    + MAX_OPERATIONAL_PACKET_SOURCES + MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES;
+    + MAX_OPERATIONAL_PACKET_SOURCES + MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES;
 const MAX_SELECTED_PACKET_SOURCES: usize = MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES;
 const MAX_SELECTED_PACKET_COLLECTIONS: usize = 3;
 
@@ -34,7 +40,7 @@ impl OriginalPacketSourceKind {
         match self {
             Self::Runtime => MAX_RUNTIME_PACKET_SOURCES,
             Self::Operational => MAX_OPERATIONAL_PACKET_SOURCES,
-            Self::Scheduler => MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES,
+            Self::Scheduler => MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES,
         }
     }
 }
@@ -1435,13 +1441,13 @@ pub(super) fn prepare_scheduler_packet_parts(
     factory.require_original_process()?;
     aggregate.require_original(factory)?;
     if source.is_some() && destination.is_none() {
-        let quote = quote_packet_parts(MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, 1)?;
+        let quote = quote_packet_parts(MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES, 1)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         let mut packets = Vec::new();
-        packets.try_reserve_exact(MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES)?;
+        packets.try_reserve_exact(MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES)?;
         *destination = Some(ManuallyDrop::new(packets));
     }
     if source.is_some() {
@@ -2234,6 +2240,51 @@ impl LiveStateStoreOutsideCustody {
         })
     }
 
+    /// Join the accounting ledger's acknowledged connection or schema
+    /// reference packet to the Store's direct auxiliary collection. Source
+    /// movement is cached before any fallible lower transition.
+    pub fn advance_accounting_packet_parts(
+        &mut self,
+        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
+        self.require_original_process()?;
+        let domain = source.as_ref().map(|parts| parts.domain);
+        ensure!(domain.is_none_or(|domain| matches!(domain,
+                Some(lillux_sqlite::OriginalNativeDomain::NodeAccounting
+                    | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference))),
+            "accounting packet selects another native role");
+        self.advance_scheduler_packet_parts_with_handoff(source, factory, aggregate, prepay, None)
+    }
+
+    /// Consume the ledger's unused one-shot schema input only after its exact
+    /// authority has joined this Store source graph. The ledger opens only
+    /// after the live Store opened, so a failed-startup Store has none.
+    pub fn advance_unopened_accounting_transient(
+        &mut self,
+        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
+        self.require_original_process()?;
+        let store_source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(source);
+        lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+            match &mut **store_source.borrow_mut() {
+                LiveStateStoreOutsideSource::Closed(store) =>
+                    store.advance_unopened_accounting_transient(&mut **source.borrow_mut(), factory, aggregate, prepay),
+                LiveStateStoreOutsideSource::FailedStartup(_) => {
+                    ensure!(source.borrow().is_none(),
+                        "accounting ledger input cannot precede the live Store it was issued from");
+                    Ok(())
+                }
+            }
+        })
+    }
+
     /// Consume an unused one-shot Scheduler schema input only after its exact
     /// authority has joined this Store source graph.
     pub fn advance_unopened_scheduler_transient(
@@ -2917,6 +2968,7 @@ mod destination_retry_tests {
         quote_packet_metadata_pin_retirements, quote_retired_packet_metadata_pin_receipts,
         register_bound_root_source, require_packet_count_within_source_bound, OriginalPacketSourceKind,
         PACKET_OPTIONAL_SOURCE_CENSUS_STEPS,
+        MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES,
         MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
         MAX_OPERATIONAL_PACKET_SOURCES, MAX_RUNTIME_PACKET_SOURCES, MAX_SELECTED_PACKET_SOURCES,
         OutsideWork, quote_retired_packet_bound_roots, quote_retired_packet_source_parts,
@@ -2954,12 +3006,16 @@ mod destination_retry_tests {
         assert_eq!(MAX_RUNTIME_PACKET_SOURCES, 2);
         assert_eq!(MAX_OPERATIONAL_PACKET_SOURCES, 5);
         assert_eq!(MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, 2);
+        assert_eq!(MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES, 2);
         assert_eq!(
             MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
             MAX_RUNTIME_PACKET_SOURCES
                 + MAX_OPERATIONAL_PACKET_SOURCES
                 + MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES
+                + MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES
         );
+        assert!(require_packet_count_within_source_bound(4, OriginalPacketSourceKind::Scheduler).is_ok());
+        assert!(require_packet_count_within_source_bound(5, OriginalPacketSourceKind::Scheduler).is_err());
         assert!(require_packet_count_within_source_bound(2, OriginalPacketSourceKind::Runtime).is_ok());
         assert!(require_packet_count_within_source_bound(3, OriginalPacketSourceKind::Runtime).is_err());
         assert!(require_packet_count_within_source_bound(5, OriginalPacketSourceKind::Operational).is_ok());

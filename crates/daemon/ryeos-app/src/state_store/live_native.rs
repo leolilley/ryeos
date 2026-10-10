@@ -21,6 +21,7 @@ pub(super) struct LiveStateOpen {
     deadline: lillux::time::MonotonicDeadline,
     process: lillux::process_control::ExactProcessIdentity,
     scheduler_admission_phase: std::sync::atomic::AtomicU8,
+    accounting_admission_phase: std::sync::atomic::AtomicU8,
 }
 
 /// Actual Store descriptors plus all remaining original host obligations.
@@ -46,6 +47,7 @@ struct LiveStorePhysicalHost {
     _deadline: lillux::time::MonotonicDeadline,
     _process: lillux::process_control::ExactProcessIdentity,
     _scheduler_admission_phase: std::sync::atomic::AtomicU8,
+    _accounting_admission_phase: std::sync::atomic::AtomicU8,
 }
 
 /// Store-side owners that must survive disposal of the live Store body.
@@ -68,6 +70,7 @@ pub(super) struct LiveStoreParentFinalizationParts {
     pub(super) deadline: Option<lillux::time::MonotonicDeadline>,
     pub(super) process_identity: Option<lillux::process_control::ExactProcessIdentity>,
     pub(super) scheduler_admission_phase: Option<std::sync::atomic::AtomicU8>,
+    pub(super) accounting_admission_phase: Option<std::sync::atomic::AtomicU8>,
     pub(super) native_authorities_retired: bool,
 }
 
@@ -263,6 +266,7 @@ impl LiveStorePhysicalParent {
             exclusion_identity, factory: native_factory, _lease_authority: lease_authority,
             _signer: signer, _trust: trust, _runtime_path: runtime_path, _deadline: deadline,
             _process: process_identity, _scheduler_admission_phase: scheduler_admission_phase,
+            _accounting_admission_phase: accounting_admission_phase,
         } = std::mem::ManuallyDrop::into_inner(host);
         // Keep every actual host authority in the retained finalization frame;
         // later stages consume it only after the native/descriptor joins.
@@ -288,6 +292,7 @@ impl LiveStorePhysicalParent {
             deadline: Some(deadline),
             process_identity: Some(process_identity),
             scheduler_admission_phase: Some(scheduler_admission_phase),
+            accounting_admission_phase: Some(accounting_admission_phase),
             native_authorities_retired: false,
         })
     }
@@ -339,7 +344,8 @@ impl LiveStorePhysicalParent {
     }
     fn from_original(original: LiveStateOpen) -> Self {
         let LiveStateOpen { outside_join, app_root, runtime, namespace, exclusion, factory,
-            lease_authority, signer, trust, runtime_path, deadline, process, scheduler_admission_phase } = original;
+            lease_authority, signer, trust, runtime_path, deadline, process, scheduler_admission_phase,
+            accounting_admission_phase } = original;
         Self {
             process: std::process::id(), directories: [Some(Arc::new(app_root)), Some(runtime)],
             namespace: Some(namespace), registrations: std::array::from_fn(|_| None),
@@ -348,6 +354,7 @@ impl LiveStorePhysicalParent {
                 exclusion_owner: None, exclusion_registration: None, exclusion_identity: None, factory, _lease_authority: lease_authority,
                 _signer: signer, _trust: trust, _runtime_path: runtime_path, _deadline: deadline,
                 _process: process, _scheduler_admission_phase: scheduler_admission_phase,
+                _accounting_admission_phase: accounting_admission_phase,
             }),
         }
     }
@@ -544,7 +551,8 @@ impl LiveStoreParentFinalizationParts {
             "retired Store finalization parts retain an operator allocation alias");
         anyhow::ensure!(self.signer.is_some() && self.trust.is_some()
             && self.runtime_path.is_some() && self.deadline.is_some()
-            && self.process_identity.is_some() && self.scheduler_admission_phase.is_some(),
+            && self.process_identity.is_some() && self.scheduler_admission_phase.is_some()
+            && self.accounting_admission_phase.is_some(),
             "retired Store finalization metadata frame is incomplete");
         self.join.require_parent_completed_in_retired_registry(registry)?;
         for (slot, registration) in self.roots.iter().enumerate() {
@@ -705,6 +713,7 @@ impl LiveStateOpen {
             deadline,
             process,
             scheduler_admission_phase: std::sync::atomic::AtomicU8::new(0),
+            accounting_admission_phase: std::sync::atomic::AtomicU8::new(0),
         });
         original.require_original(&original.factory)?;
         Ok(original)
@@ -763,6 +772,47 @@ impl LiveStateOpen {
         // Monotonic local denial only, no clock/native/namespace effect or ACK.
         // A racing pre-close claim retains its attempt; later claims refuse.
         self.scheduler_admission_phase.store(2, Ordering::Release);
+    }
+
+    /// One-use issuance of the node accounting ledger inputs from this actual
+    /// Store opening owner: the fixed bound database and its schema
+    /// reference, both under the same namespace, factory and authority as
+    /// Runtime. An established ledger (initialization marker present) opens
+    /// `Existing` only, so a lost financial database is never recreated.
+    /// A refused claim is never reset; the ledger then stays fail-closed.
+    pub(super) fn accounting_admission(self: &Arc<Self>) -> Result<LiveAccountingNativeAdmission> {
+        self.require_original(&self.factory)?;
+        self.factory.require_ready()?;
+        self.factory.require_runtime_binding(&self.runtime)?;
+        anyhow::ensure!(!self.deadline.has_elapsed(), "original accounting admission expired");
+        self.accounting_admission_phase.compare_exchange(0, 1,
+            Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| anyhow::anyhow!("original accounting admission already issued"))?;
+        let established = crate::accounting_db::ledger_established(&self.runtime)?;
+        let mode = if established {
+            OriginalNativeBoundMode::Existing
+        } else {
+            OriginalNativeBoundMode::OpenOrCreate
+        };
+        let directory = self.runtime.try_clone()?;
+        let authority: Arc<dyn OriginalNativeDestinationAuthority> = self.clone();
+        // SAFETY: same actual StateStore namespace, process, trusted node
+        // and paid factory as Runtime; only the fixed ledger role is issued.
+        // The ledger owner retains the inputs through open, close and the
+        // Store's outside join.
+        let inputs = unsafe { OriginalNativeBoundInputs::issued(
+            Arc::clone(&self.runtime),
+            std::ffi::OsStr::new(crate::accounting_db::ACCOUNTING_DB_FILENAME),
+            mode, OriginalNativeDomain::NodeAccounting, Arc::clone(&authority), None,
+        ) }?;
+        // SAFETY: the same genuine namespace owner and prepaid factory; the
+        // reference may build only the declared ledger schema.
+        let reference = unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
+            OriginalNativeDomain::NodeAccountingSchemaReference, authority,
+        ) }?;
+        Ok(LiveAccountingNativeAdmission {
+            factory: Arc::clone(&self.factory), directory, established, inputs, reference,
+        })
     }
 
     pub(super) fn require_close_factory(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
@@ -971,6 +1021,27 @@ impl LiveSchedulerNativeAdmission {
         Arc<OriginalNativeFactory>, OriginalNativeBoundInputs,
         lillux_sqlite::OriginalNativeTransientInputs,
     ) { (self.factory, self.inputs, self.reference) }
+}
+
+/// Fixed-role accounting ledger inputs issued once by the live Store owner.
+/// This is neither an opened ledger nor a schema receipt.
+pub struct LiveAccountingNativeAdmission {
+    factory: Arc<OriginalNativeFactory>,
+    directory: lillux::PinnedDirectory,
+    established: bool,
+    inputs: OriginalNativeBoundInputs,
+    reference: lillux_sqlite::OriginalNativeTransientInputs,
+}
+impl LiveAccountingNativeAdmission {
+    pub fn require_factory(&self, expected: &Arc<OriginalNativeFactory>) -> Result<()> {
+        anyhow::ensure!(Arc::ptr_eq(&self.factory, expected),
+            "accounting admission selects another native factory");
+        Ok(())
+    }
+    pub(crate) fn into_parts(self) -> (
+        Arc<OriginalNativeFactory>, lillux::PinnedDirectory, bool, OriginalNativeBoundInputs,
+        lillux_sqlite::OriginalNativeTransientInputs,
+    ) { (self.factory, self.directory, self.established, self.inputs, self.reference) }
 }
 
 struct LiveSchedulerAdmissionAttempt {

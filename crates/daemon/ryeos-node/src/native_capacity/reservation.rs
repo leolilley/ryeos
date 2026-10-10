@@ -15,6 +15,10 @@ use lillux_sqlite::original_host_owner::{
 
 use super::{LiveNativeCapacityInputs, account::RetainedCapacityAccount, late::LateNativeControl};
 
+/// Upper bound on waiting for a concurrent account check; see
+/// `LiveNativeCapacityReservation::account_for_check`.
+const ACCOUNT_CHECK_CONTENTION_WAIT: lillux::time::Duration = lillux::time::Duration::from_millis(250);
+
 // Fixed source maxima below mirror the selected normal/failed-start finalizer
 // owner graph. Dynamic State maxima and Runtime/Operational/Scheduler packet
 // maxima come from their owning crates; destination and inspection root counts
@@ -121,7 +125,8 @@ fn live_physical_registration_bounds(tickets: u32) -> Result<LivePhysicalRegistr
 
     let runtime_packets = ryeos_app::runtime_db::MAX_LIVE_RUNTIME_NATIVE_PACKET_SOURCES;
     let operational_packets = ryeos_state::operational::MAX_LIVE_OPERATIONAL_PACKET_SOURCES;
-    let scheduler_packets = ryeos_app::state_store::MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES;
+    // The Store's direct auxiliary collection: Scheduler and accounting ledger.
+    let scheduler_packets = ryeos_app::state_store::MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES;
     let packet_roots_per_source = 1usize.checked_add(
         lillux_sqlite::MAX_ORIGINAL_DESTINATION_PHYSICAL_SOURCES,
     ).context("per-packet physical root bound overflow")?;
@@ -2301,12 +2306,33 @@ impl LiveNativeCapacityReservation {
 
     pub(crate) fn require_original(&self, cleanup: bool) -> Result<()> {
         self.inputs.require_original(cleanup)?;
-        self.account
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("original capacity account busy"))?
+        self.account_for_check()?
             .as_mut()
             .context("original capacity account owner absent")?
             .require_original_debit(&self.inputs, cleanup)
+    }
+
+    /// Native SQL on several threads checks this same account on every VM
+    /// step, each check holding the lock across short durable-account reads.
+    /// A bounded wait absorbs that ordinary cross-thread contention. A holder
+    /// that stays busy past the bound, including same-thread re-entrancy,
+    /// still refuses as before.
+    fn account_for_check(&self) -> Result<std::sync::MutexGuard<'_, Option<RetainedCapacityAccount>>> {
+        let mut deadline = None;
+        loop {
+            match self.account.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let deadline = *deadline.get_or_insert_with(||
+                        lillux::time::MonotonicDeadline::after(ACCOUNT_CHECK_CONTENTION_WAIT));
+                    ensure!(!deadline.has_elapsed(), "original capacity account busy");
+                    std::thread::yield_now();
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("original capacity account busy")
+                }
+            }
+        }
     }
 
     pub(crate) fn budget(self: &Arc<Self>) -> Result<Arc<OriginalNativeBudgetOwner>> {
@@ -2594,27 +2620,27 @@ mod tests {
     #[test]
     fn provisional_registry_floor_includes_capacity_and_metadata_sources() {
         let (maximum, floor) = minimum_registry_cleanup(64).unwrap();
-        assert_eq!(maximum, 426);
-        assert_eq!(maximum_physical_registration_attempts(64).unwrap(), 426);
+        assert_eq!(maximum, 454);
+        assert_eq!(maximum_physical_registration_attempts(64).unwrap(), 454);
         let registration =
             lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::registration_quote(
-                426, 1_704,
+                454, 1_816,
             )
             .unwrap();
         let allocation =
-            lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::storage_quote(426)
+            lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::storage_quote(454)
                 .unwrap();
-        let late_owner = LateNativeControl::maximum_storage_quote(426).unwrap();
-        let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(426, 64).unwrap();
+        let late_owner = LateNativeControl::maximum_storage_quote(454).unwrap();
+        let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(454, 64).unwrap();
         let packet_pins = LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap();
         let state_pins = LateNativeControl::maximum_state_metadata_pin_retirement_quote(64).unwrap();
         assert!(state_pins.steps > 0 && state_pins.bytes > 0
             && retirement_inputs.steps >= state_pins.steps + packet_pins.steps);
-        assert_eq!(registration.bytes, 872_448);
-        assert_eq!(registration.steps, 739_536);
+        assert_eq!(registration.bytes, 929_792);
+        assert_eq!(registration.steps, 838_992);
         assert_eq!(floor, allocation.checked_add(registration).unwrap());
-        assert_eq!(floor.steps, 742_944);
-        assert_eq!(late_owner.steps, 427);
+        assert_eq!(floor.steps, 842_624);
+        assert_eq!(late_owner.steps, 455);
         assert!(packet_pins.steps > 0 && packet_pins.bytes > 0);
         assert!(retirement_inputs.steps > 47_600);
         assert_eq!(
@@ -2624,7 +2650,7 @@ mod tests {
                 .checked_add(retirement_inputs)
                 .unwrap()
                 .steps,
-            742_944 + 427 + retirement_inputs.steps
+            842_624 + 455 + retirement_inputs.steps
         );
         assert_eq!(
             quote_prepared_physical_registry_handoff(),
@@ -2641,7 +2667,7 @@ mod tests {
         assert_eq!(quote_finalization_store_exhaustion().unwrap(),
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 16 });
         let (maximum, required) = required_outside_cleanup(64).unwrap();
-        assert_eq!(maximum, 426);
+        assert_eq!(maximum, 454);
         assert!(required.steps > floor.steps + late_owner.steps + retirement_inputs.steps);
     }
 

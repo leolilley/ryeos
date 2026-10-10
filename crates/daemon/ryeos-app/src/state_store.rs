@@ -106,6 +106,7 @@ pub use live_destination_join::{quote_store_leaf_transfers, quote_store_parent_t
     quote_store_receiver};
 mod live_outside;
 pub use live_outside::{LiveStateStoreOutsideCustody, LiveStateStoreOutsideSource, StoreExhausted,
+    MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES, MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES,
     MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
     quote_destination_retries, quote_packet_parts, quote_packet_metadata_pin_retirements,
     quote_retired_packet_metadata_pin_receipts, quote_retired_packet_source_parts};
@@ -114,6 +115,7 @@ pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure};
 mod live_native;
 pub use live_native::{
     LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure,
+    LiveAccountingNativeAdmission,
     LiveSchedulerNativeAdmission, LiveSchedulerNativeAdmissionFailure,
     LiveSchedulerNativeAdmissionOutsideSources,
     ReleasedLiveStateStoreStartup, quote_store_child_parent_alias_retirement,
@@ -5157,6 +5159,15 @@ impl StateStore {
             "StateStore startup/service admission is closed");
         self.live_native_open.as_ref().context("live StateStore admission owner absent")?
             .scheduler_admission()
+    }
+
+    /// Issue the fixed accounting ledger role once from the same live
+    /// namespace and factory used for State/Runtime.
+    pub fn live_accounting_native_admission(&self) -> Result<LiveAccountingNativeAdmission> {
+        anyhow::ensure!(self.process_attachment_admission_is_open(),
+            "StateStore startup/service admission is closed");
+        self.live_native_open.as_ref().context("live StateStore admission owner absent")?
+            .accounting_admission()
     }
 
     /// Monotonic local denial for composition shutdown, without Store locks

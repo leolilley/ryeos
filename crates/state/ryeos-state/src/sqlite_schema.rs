@@ -680,7 +680,8 @@ pub fn prepare_native_schema_sql_reference(
             lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference
             | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference
             | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference
-            | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference),
+            | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference
+            | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference),
             "requested purpose is not a live schema reference");
         anyhow::ensure!(inputs.as_ref().expect("retained reference inputs").domain() == expected,
             "schema reference input selects another purpose");
@@ -697,7 +698,7 @@ pub fn prepare_native_schema_sql_reference(
         };
         *custody = NativeSchemaReferenceCustody::Live(owner);
         let NativeSchemaReferenceCustody::Live(owner) = &*custody else { unreachable!() };
-        anyhow::ensure!(matches!(owner.domain(), lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference),
+        anyhow::ensure!(matches!(owner.domain(), lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference),
             "native schema reference has the wrong actual purpose");
         definition = Some(owner.with_sql(|connection| {
             connection.execute_batch(ddl).context("build admitted reference SQLite schema")?;

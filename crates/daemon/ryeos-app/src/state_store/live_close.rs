@@ -261,6 +261,7 @@ struct StoreCloseProgress {
     scheduler_packet_parts: Option<std::mem::ManuallyDrop<Vec<super::live_outside::OriginalPacketPartsProgress>>>,
     scheduler_unopened_database: Option<super::live_outside::UnopenedSchedulerDatabaseProgress>,
     scheduler_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
+    accounting_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
     scheduler_admission_sources: Option<super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
     operational_sql_custody: Option<std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
     runtime_sql_custody: Option<std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
@@ -351,8 +352,10 @@ impl ClosedLiveStateStore {
             && p.scheduler_unopened_schema_reference.as_ref()
                 .is_none_or(super::live_outside::UnopenedNativeTransientProgress::is_joined)
             && p.scheduler_admission_sources.as_ref()
-                .is_none_or(super::live_native::LiveSchedulerNativeAdmissionOutsideSources::is_joined),
-            "closed Store Scheduler unopened, reference or admission source is not joined before the region seal");
+                .is_none_or(super::live_native::LiveSchedulerNativeAdmissionOutsideSources::is_joined)
+            && p.accounting_unopened_schema_reference.as_ref()
+                .is_none_or(super::live_outside::UnopenedNativeTransientProgress::is_joined),
+            "closed Store Scheduler or accounting unopened, reference or admission source is not joined before the region seal");
         self.require_state_native_sources_retired()
     }
 
@@ -503,6 +506,9 @@ impl ClosedLiveStateStore {
         if let Some(admission) = p.scheduler_admission_sources.as_ref() {
             admission.require_exhausted()?;
         }
+        if let Some(reference) = p.accounting_unopened_schema_reference.as_ref() {
+            reference.require_exhausted()?;
+        }
         ryeos_state::state_db::require_exhausted_refusals(self.prior_refusal.iter())
     }
 
@@ -522,7 +528,7 @@ impl ClosedLiveStateStore {
         let StoreCloseProgress { store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
-            scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
+            accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
             physical_registry, auxiliary_physical_sources, metadata, runtime, runtime_failure,
             runtime_closed, runtime_outside, state, state_failure, state_closed, state_physical }
             = std::mem::ManuallyDrop::into_inner(progress);
@@ -541,6 +547,9 @@ impl ClosedLiveStateStore {
         }
         if let Some(admission) = scheduler_admission_sources {
             admission.exhaust();
+        }
+        if let Some(reference) = accounting_unopened_schema_reference {
+            reference.exhaust();
         }
         super::live_outside::exhaust_sql_custody(operational_sql_custody);
         super::live_outside::exhaust_sql_custody(runtime_sql_custody);
@@ -641,6 +650,9 @@ impl ClosedLiveStateStore {
         anyhow::ensure!(p.scheduler_admission_sources.as_ref()
             .is_none_or(super::live_native::LiveSchedulerNativeAdmissionOutsideSources::is_joined),
             "failed Scheduler admission is not joined to the Store inventory");
+        anyhow::ensure!(p.accounting_unopened_schema_reference.as_ref()
+            .is_none_or(super::live_outside::UnopenedNativeTransientProgress::is_joined),
+            "unused accounting schema input is not joined to the Store authority");
         let join = p.store_destination_join.get().context("actual Store receiver absent")?;
         join.require_original_origin(factory, aggregate)?;
         if let Some(original) = p.metadata.original.as_ref() {
@@ -709,6 +721,21 @@ impl ClosedLiveStateStore {
         let expected = p.metadata.original.as_ref();
         super::live_outside::advance_unopened_scheduler_transient(source,
             &mut p.scheduler_unopened_schema_reference, expected, factory, aggregate, prepay)
+    }
+
+    pub(super) fn advance_unopened_accounting_transient(
+        &mut self,
+        source: &mut Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> Result<()>,
+    ) -> Result<()> {
+        let p = &mut *self.progress;
+        let expected = p.metadata.original.as_ref();
+        super::live_outside::advance_unopened_native_transient(source,
+            &mut p.accounting_unopened_schema_reference,
+            lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference,
+            expected, factory, aggregate, prepay)
     }
 
     pub(super) fn advance_scheduler_admission_sources(
@@ -1209,6 +1236,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
                 runtime_packet_parts: None, operational_packet_parts: None,
                 scheduler_packet_parts: None, scheduler_unopened_database: None,
                 scheduler_unopened_schema_reference: None,
+                accounting_unopened_schema_reference: None,
                 scheduler_admission_sources: None,
                 operational_sql_custody: None,
                 runtime_sql_custody: None,

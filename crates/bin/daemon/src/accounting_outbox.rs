@@ -25,6 +25,12 @@ fn now_ms() -> i64 {
 
 pub async fn run_publisher(ledger: Arc<AccountingDb>, store: Arc<StateStore>) {
     loop {
+        // Native shutdown closes the ledger in place; its SQL admission never
+        // reopens, so this publisher ends instead of retrying a closed owner.
+        if ledger.is_closed() || crate::shutdown_requested() {
+            tracing::info!("audit outbox publisher stopped for ledger close or daemon shutdown");
+            return;
+        }
         let claimed = {
             let ledger = ledger.clone();
             tokio::task::spawn_blocking(move || {

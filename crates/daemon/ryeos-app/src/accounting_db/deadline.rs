@@ -67,12 +67,16 @@ impl Drop for DeadlineScope<'_> {
 }
 
 impl AccountingDb {
-    fn lock_conn_until(&self, deadline: MonotonicDeadline) -> Result<MutexGuard<'_, Connection>> {
+    fn lock_conn_until<'c>(
+        &self,
+        conn: &'c Mutex<Connection>,
+        deadline: MonotonicDeadline,
+    ) -> Result<MutexGuard<'c, Connection>> {
         loop {
             if deadline.has_elapsed() {
                 bail!("original funding deadline expired waiting for ledger");
             }
-            match self.conn.try_lock() {
+            match conn.try_lock() {
                 Ok(conn) => {
                     if deadline.has_elapsed() {
                         bail!("original funding deadline expired at ledger acquisition");
@@ -92,7 +96,26 @@ impl AccountingDb {
         deadline: MonotonicDeadline,
         operation: impl FnOnce(&Connection) -> Result<T>,
     ) -> Result<T> {
-        let conn = self.lock_conn_until(deadline)?;
+        let conn = match &self.sql {
+            LedgerSql::Stock(conn) => conn,
+            LedgerSql::Native(ledger) => {
+                // The native owner installs the deadline beside its VM-step
+                // debit and restores the debit-only hook afterwards. A failed
+                // restoration refuses every later SQL call on that owner.
+                return ledger.with_sql_until(deadline, |conn| {
+                    operation(conn).and_then(|value| {
+                        if deadline.has_elapsed() {
+                            // The operation may have COMMITTED. This never
+                            // refunds or repeats it; its original owner must
+                            // retain uncertainty.
+                            bail!("original funding deadline expired after ledger operation; reconcile SAME owner");
+                        }
+                        Ok(value)
+                    })
+                });
+            }
+        };
+        let conn = self.lock_conn_until(conn, deadline)?;
         let mut scope = DeadlineScope::install(self, &conn, deadline)?;
         let result = if deadline.has_elapsed() {
             Err(anyhow::anyhow!(

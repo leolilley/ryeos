@@ -461,6 +461,8 @@ PRAGMA user_version=7;
 "#;
 
 mod deadline;
+mod native;
+pub use native::{AccountingNativeLedger, AccountingNativeOutsideSources};
 pub(crate) mod precontact;
 
 const SCHEMA_V8_SQL: &str = r#"
@@ -2954,19 +2956,38 @@ fn resource_attribution_interval_overlaps(
 /// transitions additionally advance the external financial anchor after
 /// commit and before success is returned.
 pub struct AccountingDb {
-    conn: Mutex<Connection>,
+    sql: LedgerSql,
     path: PathBuf,
     site_id: String,
     epoch: u64,
     anchor: Arc<AccountingAnchor>,
     hard_admission: AtomicBool,
     credential_binding_key: [u8; CREDENTIAL_BINDING_KEY_LEN],
-    _runtime_directory: lillux::PinnedDirectory,
-    _directory_lock: DirectoryGuard,
-    _database_file: File,
-    _wal_file: Option<File>,
-    _shm_file: Option<File>,
-    _initialization_marker: Option<File>,
+    holders: LedgerHolders,
+}
+
+/// The ledger's SQL owner: the live native owner issued from the daemon's
+/// original factory, or a stock connection for the pre-gate test fixtures.
+enum LedgerSql {
+    Stock(Mutex<Connection>),
+    Native(Arc<AccountingNativeLedger>),
+}
+
+/// Descriptors held beside the SQL owner. The bound native VFS owns the
+/// database, WAL and directory binding itself, so the native ledger keeps
+/// only its initialization marker.
+enum LedgerHolders {
+    Stock {
+        runtime_directory: lillux::PinnedDirectory,
+        _directory_lock: DirectoryGuard,
+        database_file: File,
+        wal_file: Option<File>,
+        shm_file: Option<File>,
+        initialization_marker: Option<File>,
+    },
+    Native {
+        _initialization_marker: File,
+    },
 }
 
 /// Exclusive-ownership proof for the ledger's directory, held for the
@@ -2991,42 +3012,43 @@ struct RawAccountingDb {
 
 impl AccountingDb {
     pub fn open_resource_owner_recoveries(&self) -> Result<Vec<OpenResourceOwnerRecovery>> {
-        let conn = self.lock_conn()?;
-        let mut statement = conn.prepare(
-            "SELECT owner_gate_id, owner_incarnation, owner_recovery_json
+        self.with_conn(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT owner_gate_id, owner_incarnation, owner_recovery_json
                FROM resource_owner_accounting_gate
               WHERE state='open'
               ORDER BY owner_gate_id",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
-            .map(|(owner_gate_id, owner_incarnation, encoded)| {
-                let encoded =
-                    encoded.context("open resource owner gate lacks recovery identity")?;
-                let process_identity: crate::process::ExecutionProcessIdentity =
-                    serde_json::from_str(&encoded)
-                        .context("decode resource owner gate recovery identity")?;
-                crate::process::validate_execution_process_identity_shape(&process_identity)?;
-                if process_identity.owner_incarnation_digest()? != owner_incarnation
-                    || !process_identity.resource_selections.is_empty()
-                {
-                    bail!("resource owner gate recovery identity is contradictory");
-                }
-                Ok(OpenResourceOwnerRecovery {
-                    owner_gate_id,
-                    owner_incarnation,
-                    process_identity,
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .map(|(owner_gate_id, owner_incarnation, encoded)| {
+                    let encoded =
+                        encoded.context("open resource owner gate lacks recovery identity")?;
+                    let process_identity: crate::process::ExecutionProcessIdentity =
+                        serde_json::from_str(&encoded)
+                            .context("decode resource owner gate recovery identity")?;
+                    crate::process::validate_execution_process_identity_shape(&process_identity)?;
+                    if process_identity.owner_incarnation_digest()? != owner_incarnation
+                        || !process_identity.resource_selections.is_empty()
+                    {
+                        bail!("resource owner gate recovery identity is contradictory");
+                    }
+                    Ok(OpenResourceOwnerRecovery {
+                        owner_gate_id,
+                        owner_incarnation,
+                        process_identity,
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })
     }
 
     pub fn release_unattached_resource_owner_gate(
@@ -3037,64 +3059,65 @@ impl AccountingDb {
     ) -> Result<()> {
         HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
         HexDigest::new(owner_incarnation.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "release unattached resource owner", || {
-            let gate = self
-                .load_resource_owner_gate(&conn, owner_gate_id)?
-                .context("resource owner accounting gate is absent")?;
-            if gate.owner_incarnation != owner_incarnation {
-                bail!("resource owner recovery names another incarnation");
-            }
-            if gate.state == "fenced" {
-                return Ok(());
-            }
-            if gate.active_request_count != 0 {
-                bail!("unattached resource owner retains active request leases");
-            }
-            let mut statement = conn.prepare(
-                "SELECT operation_id, request_digest, state
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "release unattached resource owner", || {
+                let gate = self
+                    .load_resource_owner_gate(&conn, owner_gate_id)?
+                    .context("resource owner accounting gate is absent")?;
+                if gate.owner_incarnation != owner_incarnation {
+                    bail!("resource owner recovery names another incarnation");
+                }
+                if gate.state == "fenced" {
+                    return Ok(());
+                }
+                if gate.active_request_count != 0 {
+                    bail!("unattached resource owner retains active request leases");
+                }
+                let mut statement = conn.prepare(
+                    "SELECT operation_id, request_digest, state
                    FROM resource_financial_operation
                   WHERE owner_gate_id=?1 ORDER BY operation_id",
-            )?;
-            let operations = statement
-                .query_map(rusqlite::params![owner_gate_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(statement);
-            for (operation_id, request_digest, state) in operations {
-                let state = ResourceBudgetState::parse(&state)
-                    .context("unattached resource operation has invalid state")?;
-                match state {
-                    ResourceBudgetState::Reserved | ResourceBudgetState::AdvisoryPending => {
-                        self.release_unissued_resource_operation_in_transaction(
-                            &conn,
-                            &operation_id,
-                            &request_digest,
-                            now_ms,
-                        )?;
+                )?;
+                let operations = statement
+                    .query_map(rusqlite::params![owner_gate_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(statement);
+                for (operation_id, request_digest, state) in operations {
+                    let state = ResourceBudgetState::parse(&state)
+                        .context("unattached resource operation has invalid state")?;
+                    match state {
+                        ResourceBudgetState::Reserved | ResourceBudgetState::AdvisoryPending => {
+                            self.release_unissued_resource_operation_in_transaction(
+                                &conn,
+                                &operation_id,
+                                &request_digest,
+                                now_ms,
+                            )?;
+                        }
+                        ResourceBudgetState::ReleasedUnissued
+                        | ResourceBudgetState::AdvisoryReleasedUnissued
+                        | ResourceBudgetState::ReservationDenied => {}
+                        _ => bail!("unattached resource owner has crossed its issue boundary"),
                     }
-                    ResourceBudgetState::ReleasedUnissued
-                    | ResourceBudgetState::AdvisoryReleasedUnissued
-                    | ResourceBudgetState::ReservationDenied => {}
-                    _ => bail!("unattached resource owner has crossed its issue boundary"),
                 }
-            }
-            let changed = conn.execute(
-                "UPDATE resource_owner_accounting_gate
+                let changed = conn.execute(
+                    "UPDATE resource_owner_accounting_gate
                     SET state='fenced', fenced_reason='unattached_owner_cleanup_proved',
                         updated_at_ms=?2
                   WHERE owner_gate_id=?1 AND state!='fenced' AND active_request_count=0",
-                rusqlite::params![owner_gate_id, now_ms],
-            )?;
-            if changed != 1 {
-                bail!("unattached resource owner gate lost its release CAS");
-            }
-            Ok(())
+                    rusqlite::params![owner_gate_id, now_ms],
+                )?;
+                if changed != 1 {
+                    bail!("unattached resource owner gate lost its release CAS");
+                }
+                Ok(())
+            })
         })
     }
 
@@ -3129,16 +3152,17 @@ impl AccountingDb {
 
     pub fn resource_operation_state(&self, operation_id: &str) -> Result<ResourceBudgetState> {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        let state: String = conn
-            .query_row(
-                "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
-                rusqlite::params![operation_id],
-                |row| row.get(0),
-            )
-            .context("load resource operation state")?;
-        ResourceBudgetState::parse(&state)
-            .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))
+        self.with_conn(|conn| {
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                    rusqlite::params![operation_id],
+                    |row| row.get(0),
+                )
+                .context("load resource operation state")?;
+            ResourceBudgetState::parse(&state)
+                .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))
+        })
     }
 
     /// Retain one request interval inside an already-issued resident resource
@@ -3151,62 +3175,63 @@ impl AccountingDb {
     ) -> Result<bool> {
         attribution.validate().map_err(anyhow::Error::msg)?;
         let encoded = canonical_json_string(&serde_json::to_value(attribution)?)?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "resource request attribution", || {
-            let state: String = conn
-                .query_row(
-                    "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
-                    rusqlite::params![attribution.operation_id.as_str()],
-                    |row| row.get(0),
-                )
-                .context("load resource operation for request attribution")?;
-            let state = ResourceBudgetState::parse(&state)
-                .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
-            if !matches!(
-                state,
-                ResourceBudgetState::Issued | ResourceBudgetState::AdvisoryIssued
-            ) {
-                bail!("resource request attribution requires an issued live operation");
-            }
-            let retained: Option<String> = conn
-                .query_row(
-                    "SELECT attribution_json FROM resource_request_attribution
-                      WHERE attribution_id=?1",
-                    rusqlite::params![attribution.attribution_id.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(retained) = retained {
-                if retained != encoded {
-                    bail!("resource request-attribution replay contradicts retained evidence");
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "resource request attribution", || {
+                let state: String = conn
+                    .query_row(
+                        "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                        rusqlite::params![attribution.operation_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .context("load resource operation for request attribution")?;
+                let state = ResourceBudgetState::parse(&state)
+                    .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
+                if !matches!(
+                    state,
+                    ResourceBudgetState::Issued | ResourceBudgetState::AdvisoryIssued
+                ) {
+                    bail!("resource request attribution requires an issued live operation");
                 }
-                return Ok(false);
-            }
-            if resource_attribution_interval_overlaps(
-                &conn,
-                attribution.operation_id.as_str(),
-                attribution.interval.start_tick_ns,
-                attribution.interval.end_tick_ns,
-            )? {
-                bail!("resource request attributions overlap");
-            }
-            conn.execute(
-                "INSERT INTO resource_request_attribution (
+                let retained: Option<String> = conn
+                    .query_row(
+                        "SELECT attribution_json FROM resource_request_attribution
+                      WHERE attribution_id=?1",
+                        rusqlite::params![attribution.attribution_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(retained) = retained {
+                    if retained != encoded {
+                        bail!("resource request-attribution replay contradicts retained evidence");
+                    }
+                    return Ok(false);
+                }
+                if resource_attribution_interval_overlaps(
+                    &conn,
+                    attribution.operation_id.as_str(),
+                    attribution.interval.start_tick_ns,
+                    attribution.interval.end_tick_ns,
+                )? {
+                    bail!("resource request attributions overlap");
+                }
+                conn.execute(
+                    "INSERT INTO resource_request_attribution (
                     attribution_id, operation_id, thread_id, request_digest,
                     attribution_json, created_at_ms, start_tick_key, end_tick_key
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    attribution.attribution_id.as_str(),
-                    attribution.operation_id.as_str(),
-                    attribution.thread_id,
-                    attribution.request_digest.as_str(),
-                    encoded,
-                    now_ms,
-                    format!("{:020}", attribution.interval.start_tick_ns),
-                    format!("{:020}", attribution.interval.end_tick_ns),
-                ],
-            )?;
-            Ok(true)
+                    rusqlite::params![
+                        attribution.attribution_id.as_str(),
+                        attribution.operation_id.as_str(),
+                        attribution.thread_id,
+                        attribution.request_digest.as_str(),
+                        encoded,
+                        now_ms,
+                        format!("{:020}", attribution.interval.start_tick_ns),
+                        format!("{:020}", attribution.interval.end_tick_ns),
+                    ],
+                )?;
+                Ok(true)
+            })
         })
     }
 
@@ -3229,89 +3254,93 @@ impl AccountingDb {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "resource request attribution batch", || {
-            let mut new = Vec::new();
-            for (attribution, encoded) in &prepared {
-                let retained: Option<String> = conn
-                    .query_row(
-                        "SELECT attribution_json FROM resource_request_attribution
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "resource request attribution batch", || {
+                let mut new = Vec::new();
+                for (attribution, encoded) in &prepared {
+                    let retained: Option<String> = conn
+                        .query_row(
+                            "SELECT attribution_json FROM resource_request_attribution
                           WHERE attribution_id=?1",
-                        rusqlite::params![attribution.attribution_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                match retained {
-                    Some(retained) if retained != *encoded => {
-                        bail!("resource request-attribution replay contradicts retained evidence")
+                            rusqlite::params![attribution.attribution_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    match retained {
+                        Some(retained) if retained != *encoded => {
+                            bail!(
+                                "resource request-attribution replay contradicts retained evidence"
+                            )
+                        }
+                        Some(_) => {}
+                        None => new.push((*attribution, encoded)),
                     }
-                    Some(_) => {}
-                    None => new.push((*attribution, encoded)),
                 }
-            }
-            let mut pending_by_operation: std::collections::BTreeMap<
-                &str,
-                Vec<&ResourceRequestAttribution>,
-            > = std::collections::BTreeMap::new();
-            for (attribution, _) in &new {
-                pending_by_operation
-                    .entry(attribution.operation_id.as_str())
-                    .or_default()
-                    .push(attribution);
-            }
-            for (operation_id, pending) in &pending_by_operation {
-                let state: String = conn.query_row(
-                    "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
-                    rusqlite::params![operation_id],
-                    |row| row.get(0),
-                )?;
-                if !matches!(
-                    ResourceBudgetState::parse(&state),
-                    Some(ResourceBudgetState::Issued | ResourceBudgetState::AdvisoryIssued)
-                ) {
-                    bail!("resource request attribution requires an issued live operation");
+                let mut pending_by_operation: std::collections::BTreeMap<
+                    &str,
+                    Vec<&ResourceRequestAttribution>,
+                > = std::collections::BTreeMap::new();
+                for (attribution, _) in &new {
+                    pending_by_operation
+                        .entry(attribution.operation_id.as_str())
+                        .or_default()
+                        .push(attribution);
                 }
-                let mut intervals = pending
-                    .iter()
-                    .map(|item| item.interval.clone())
-                    .collect::<Vec<_>>();
-                intervals.sort_by_key(|interval| (interval.start_tick_ns, interval.end_tick_ns));
-                if intervals
-                    .windows(2)
-                    .any(|pair| pair[1].start_tick_ns < pair[0].end_tick_ns)
-                {
-                    bail!("resource request attributions overlap");
-                }
-                for incoming in &intervals {
-                    if resource_attribution_interval_overlaps(
-                        &conn,
-                        operation_id,
-                        incoming.start_tick_ns,
-                        incoming.end_tick_ns,
-                    )? {
+                for (operation_id, pending) in &pending_by_operation {
+                    let state: String = conn.query_row(
+                        "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                        rusqlite::params![operation_id],
+                        |row| row.get(0),
+                    )?;
+                    if !matches!(
+                        ResourceBudgetState::parse(&state),
+                        Some(ResourceBudgetState::Issued | ResourceBudgetState::AdvisoryIssued)
+                    ) {
+                        bail!("resource request attribution requires an issued live operation");
+                    }
+                    let mut intervals = pending
+                        .iter()
+                        .map(|item| item.interval.clone())
+                        .collect::<Vec<_>>();
+                    intervals
+                        .sort_by_key(|interval| (interval.start_tick_ns, interval.end_tick_ns));
+                    if intervals
+                        .windows(2)
+                        .any(|pair| pair[1].start_tick_ns < pair[0].end_tick_ns)
+                    {
                         bail!("resource request attributions overlap");
                     }
+                    for incoming in &intervals {
+                        if resource_attribution_interval_overlaps(
+                            &conn,
+                            operation_id,
+                            incoming.start_tick_ns,
+                            incoming.end_tick_ns,
+                        )? {
+                            bail!("resource request attributions overlap");
+                        }
+                    }
                 }
-            }
-            for (attribution, encoded) in new {
-                conn.execute(
-                    "INSERT INTO resource_request_attribution (
+                for (attribution, encoded) in new {
+                    conn.execute(
+                        "INSERT INTO resource_request_attribution (
                         attribution_id, operation_id, thread_id, request_digest,
                         attribution_json, created_at_ms, start_tick_key, end_tick_key
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![
-                        attribution.attribution_id.as_str(),
-                        attribution.operation_id.as_str(),
-                        attribution.thread_id,
-                        attribution.request_digest.as_str(),
-                        encoded,
-                        now_ms,
-                        format!("{:020}", attribution.interval.start_tick_ns),
-                        format!("{:020}", attribution.interval.end_tick_ns),
-                    ],
-                )?;
-            }
-            Ok(())
+                        rusqlite::params![
+                            attribution.attribution_id.as_str(),
+                            attribution.operation_id.as_str(),
+                            attribution.thread_id,
+                            attribution.request_digest.as_str(),
+                            encoded,
+                            now_ms,
+                            format!("{:020}", attribution.interval.start_tick_ns),
+                            format!("{:020}", attribution.interval.end_tick_ns),
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
         })
     }
 
@@ -3320,22 +3349,23 @@ impl AccountingDb {
         operation_id: &str,
     ) -> Result<Option<ResourceUsagePartition>> {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        let encoded: Option<String> = conn
-            .query_row(
-                "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
-                rusqlite::params![operation_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        encoded
-            .map(|encoded| {
-                if serde_json::from_str::<serde_json::Value>(&encoded)?["version"] != 1 {
-                    bail!("paged resource partition requires the header/page reader");
-                }
-                serde_json::from_str(&encoded).map_err(anyhow::Error::from)
-            })
-            .transpose()
+        self.with_conn(|conn| {
+            let encoded: Option<String> = conn
+                .query_row(
+                    "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+                    rusqlite::params![operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            encoded
+                .map(|encoded| {
+                    if serde_json::from_str::<serde_json::Value>(&encoded)?["version"] != 1 {
+                        bail!("paged resource partition requires the header/page reader");
+                    }
+                    serde_json::from_str(&encoded).map_err(anyhow::Error::from)
+                })
+                .transpose()
+        })
     }
 
     /// Bounded v2 readers; the legacy v1 getter never silently materializes a
@@ -3345,17 +3375,18 @@ impl AccountingDb {
         operation_id: &str,
     ) -> Result<Option<PagedResourceUsagePartition>> {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        let encoded: Option<String> = conn
-            .query_row(
-                "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
-                [operation_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        encoded
-            .map(|encoded| verify_paged_partition_read(&conn, operation_id, &encoded))
-            .transpose()
+        self.with_conn(|conn| {
+            let encoded: Option<String> = conn
+                .query_row(
+                    "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+                    [operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            encoded
+                .map(|encoded| verify_paged_partition_read(&conn, operation_id, &encoded))
+                .transpose()
+        })
     }
 
     pub fn resource_usage_partition_page(
@@ -3364,7 +3395,7 @@ impl AccountingDb {
         page_index: u64,
     ) -> Result<Option<Vec<ryeos_accounting::ResourceAttributedShare>>> {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         let header: Option<String> = conn
             .query_row(
                 "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
@@ -3396,6 +3427,7 @@ impl AccountingDb {
                 Ok(shares)
             })
             .transpose()
+        })
     }
 
     pub fn thread_resource_cost_sample(&self, thread_id: &str) -> Result<ThreadResourceCostSample> {
@@ -3410,9 +3442,9 @@ impl AccountingDb {
         thread_id: &str,
         after_operation_id: Option<&str>,
     ) -> Result<ThreadResourceCostSample> {
-        let conn = self.lock_conn()?;
-        let mut statement = conn.prepare(
-            "SELECT operation.operation_id, operation.thread_id, operation.state,
+        self.with_conn(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation.operation_id, operation.thread_id, operation.state,
                     operation.budget_charge_usd_nanos, partition.partition_json,
                     operation.owner_gate_id, operation.authority_digest,
                     operation.stable_resource_id, operation.authority_json,
@@ -3425,67 +3457,111 @@ impl AccountingDb {
                      WHERE attribution.operation_id=operation.operation_id
                        AND attribution.thread_id=?1)
               ORDER BY operation.operation_id",
-        )?;
-        let rows = statement.query_map([thread_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-            ))
-        })?;
-        let mut sample = ThreadResourceCostSample::default();
-        let mut retained_operations = 0;
-        let mut last_retained = None;
-        for row in rows {
-            let (
-                operation_id,
-                owner_thread_id,
-                state,
-                budget_charge,
-                partition,
-                owner_gate_id,
-                authority_digest,
-                stable_resource_id,
-                authority_json,
-                usage_json,
-                rated_charge_json,
-            ) = row?;
-            let after_cursor =
-                after_operation_id.is_none_or(|cursor| operation_id.as_str() > cursor);
-            let retain_components =
-                after_cursor && retained_operations < RESOURCE_COST_COMPONENT_PAGE_OPERATIONS;
-            if retain_components {
-                retained_operations += 1;
-                last_retained = Some(operation_id.clone());
-            } else if after_cursor && sample.components_next_operation_id.is_none() {
-                sample.components_next_operation_id = last_retained.clone();
-            }
-            sample.operation_count = sample
-                .operation_count
-                .checked_add(1)
-                .context("resource operation count overflow")?;
-            let state = ResourceBudgetState::parse(&state)
-                .with_context(|| format!("resource operation {operation_id} has unknown state"))?;
-            let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
-            let owner_gate_id = owner_gate_id
-                .ok_or_else(|| anyhow::anyhow!("resource cost component lacks owner gate"))?;
-            let unresolved = matches!(
-                state,
-                ResourceBudgetState::Reserved
-                    | ResourceBudgetState::Issued
-                    | ResourceBudgetState::ChargedReservedMaximum
-                    | ResourceBudgetState::AdvisoryPending
-                    | ResourceBudgetState::AdvisoryIssued
-            );
-            if unresolved {
+            )?;
+            let rows = statement.query_map([thread_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            })?;
+            let mut sample = ThreadResourceCostSample::default();
+            let mut retained_operations = 0;
+            let mut last_retained = None;
+            for row in rows {
+                let (
+                    operation_id,
+                    owner_thread_id,
+                    state,
+                    budget_charge,
+                    partition,
+                    owner_gate_id,
+                    authority_digest,
+                    stable_resource_id,
+                    authority_json,
+                    usage_json,
+                    rated_charge_json,
+                ) = row?;
+                let after_cursor =
+                    after_operation_id.is_none_or(|cursor| operation_id.as_str() > cursor);
+                let retain_components =
+                    after_cursor && retained_operations < RESOURCE_COST_COMPONENT_PAGE_OPERATIONS;
+                if retain_components {
+                    retained_operations += 1;
+                    last_retained = Some(operation_id.clone());
+                } else if after_cursor && sample.components_next_operation_id.is_none() {
+                    sample.components_next_operation_id = last_retained.clone();
+                }
+                sample.operation_count = sample
+                    .operation_count
+                    .checked_add(1)
+                    .context("resource operation count overflow")?;
+                let state = ResourceBudgetState::parse(&state).with_context(|| {
+                    format!("resource operation {operation_id} has unknown state")
+                })?;
+                let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
+                let owner_gate_id = owner_gate_id
+                    .ok_or_else(|| anyhow::anyhow!("resource cost component lacks owner gate"))?;
+                let unresolved = matches!(
+                    state,
+                    ResourceBudgetState::Reserved
+                        | ResourceBudgetState::Issued
+                        | ResourceBudgetState::ChargedReservedMaximum
+                        | ResourceBudgetState::AdvisoryPending
+                        | ResourceBudgetState::AdvisoryIssued
+                );
+                if unresolved {
+                    let coverage = usage_json
+                        .as_deref()
+                        .map(serde_json::from_str::<ResourceUsageObservation>)
+                        .transpose()?
+                        .map(|usage| usage.coverage);
+                    let rated_spend = rated_charge_json
+                        .as_deref()
+                        .map(serde_json::from_str::<ResourceRatedCharge>)
+                        .transpose()?
+                        .map(|charge| charge.amount.to_canonical_string());
+                    let committed_spend = budget_charge
+                        .map(UsdNanos::from_nanos)
+                        .transpose()?
+                        .map(|charge| charge.to_canonical_string());
+                    sample.pending_operation_count = sample
+                        .pending_operation_count
+                        .checked_add(1)
+                        .context("pending resource operation count overflow")?;
+                    push_resource_cost_component(
+                        &mut sample,
+                        retain_components,
+                        ThreadResourceCostComponent {
+                            operation_id,
+                            owner_gate_id,
+                            authority_digest,
+                            stable_resource_id,
+                            charge_class: authority.tariff.charge_class,
+                            state,
+                            coverage,
+                            rated_spend,
+                            committed_spend,
+                            allocation: if owner_thread_id == thread_id {
+                                ResourceCostAllocation::OwnerOverhead
+                            } else {
+                                ResourceCostAllocation::RequestAttribution
+                            },
+                            allocated_spend: "0".to_owned(),
+                            partition_digest: None,
+                            provenance: "daemon_accounting_ledger",
+                        },
+                    );
+                    continue;
+                }
                 let coverage = usage_json
                     .as_deref()
                     .map(serde_json::from_str::<ResourceUsageObservation>)
@@ -3500,103 +3576,94 @@ impl AccountingDb {
                     .map(UsdNanos::from_nanos)
                     .transpose()?
                     .map(|charge| charge.to_canonical_string());
-                sample.pending_operation_count = sample
-                    .pending_operation_count
-                    .checked_add(1)
-                    .context("pending resource operation count overflow")?;
-                push_resource_cost_component(
-                    &mut sample,
-                    retain_components,
-                    ThreadResourceCostComponent {
-                        operation_id,
-                        owner_gate_id,
-                        authority_digest,
-                        stable_resource_id,
-                        charge_class: authority.tariff.charge_class,
-                        state,
-                        coverage,
-                        rated_spend,
-                        committed_spend,
-                        allocation: if owner_thread_id == thread_id {
-                            ResourceCostAllocation::OwnerOverhead
-                        } else {
-                            ResourceCostAllocation::RequestAttribution
+                if let Some(partition) = partition {
+                    let partition_digest =
+                        HexDigest::of_canonical_json(&serde_json::from_str::<serde_json::Value>(
+                            &partition,
+                        )?)
+                        .map_err(anyhow::Error::msg)?;
+                    let mut attributed = 0_u64;
+                    let mut has_attribution = false;
+                    let partition = visit_resource_partition_shares(
+                        &conn,
+                        &operation_id,
+                        &partition,
+                        |share| {
+                            if share.thread_id != thread_id {
+                                return Ok(());
+                            }
+                            sample.attributed_usd_nanos = sample
+                                .attributed_usd_nanos
+                                .checked_add(share.allocated_usd_nanos)
+                                .context("attributed resource cost overflow")?;
+                            attributed = attributed
+                                .checked_add(share.allocated_usd_nanos)
+                                .context("operation attribution overflow")?;
+                            has_attribution = true;
+                            Ok(())
                         },
-                        allocated_spend: "0".to_owned(),
-                        partition_digest: None,
-                        provenance: "daemon_accounting_ledger",
-                    },
-                );
-                continue;
-            }
-            let coverage = usage_json
-                .as_deref()
-                .map(serde_json::from_str::<ResourceUsageObservation>)
-                .transpose()?
-                .map(|usage| usage.coverage);
-            let rated_spend = rated_charge_json
-                .as_deref()
-                .map(serde_json::from_str::<ResourceRatedCharge>)
-                .transpose()?
-                .map(|charge| charge.amount.to_canonical_string());
-            let committed_spend = budget_charge
-                .map(UsdNanos::from_nanos)
-                .transpose()?
-                .map(|charge| charge.to_canonical_string());
-            if let Some(partition) = partition {
-                let partition_digest = HexDigest::of_canonical_json(&serde_json::from_str::<
-                    serde_json::Value,
-                >(&partition)?)
-                .map_err(anyhow::Error::msg)?;
-                let mut attributed = 0_u64;
-                let mut has_attribution = false;
-                let partition =
-                    visit_resource_partition_shares(&conn, &operation_id, &partition, |share| {
-                        if share.thread_id != thread_id {
-                            return Ok(());
-                        }
-                        sample.attributed_usd_nanos = sample
-                            .attributed_usd_nanos
-                            .checked_add(share.allocated_usd_nanos)
-                            .context("attributed resource cost overflow")?;
-                        attributed = attributed
-                            .checked_add(share.allocated_usd_nanos)
-                            .context("operation attribution overflow")?;
-                        has_attribution = true;
-                        Ok(())
-                    })?;
-                if has_attribution {
-                    push_resource_cost_component(
-                        &mut sample,
-                        retain_components,
-                        ThreadResourceCostComponent {
-                            operation_id: operation_id.clone(),
-                            owner_gate_id: owner_gate_id.clone(),
-                            authority_digest: authority_digest.clone(),
-                            stable_resource_id: stable_resource_id.clone(),
-                            charge_class: authority.tariff.charge_class,
-                            state,
-                            coverage,
-                            rated_spend: rated_spend.clone(),
-                            committed_spend: committed_spend.clone(),
-                            allocation: ResourceCostAllocation::RequestAttribution,
-                            allocated_spend: UsdNanos::from_nanos(i64::try_from(attributed)?)?
+                    )?;
+                    if has_attribution {
+                        push_resource_cost_component(
+                            &mut sample,
+                            retain_components,
+                            ThreadResourceCostComponent {
+                                operation_id: operation_id.clone(),
+                                owner_gate_id: owner_gate_id.clone(),
+                                authority_digest: authority_digest.clone(),
+                                stable_resource_id: stable_resource_id.clone(),
+                                charge_class: authority.tariff.charge_class,
+                                state,
+                                coverage,
+                                rated_spend: rated_spend.clone(),
+                                committed_spend: committed_spend.clone(),
+                                allocation: ResourceCostAllocation::RequestAttribution,
+                                allocated_spend: UsdNanos::from_nanos(i64::try_from(attributed)?)?
+                                    .to_canonical_string(),
+                                partition_digest: Some(partition_digest.as_str().to_owned()),
+                                provenance: "daemon_accounting_ledger",
+                            },
+                        );
+                    }
+                    if owner_thread_id == thread_id {
+                        sample.owned_overhead_usd_nanos = sample
+                            .owned_overhead_usd_nanos
+                            .checked_add(partition.overhead_usd_nanos)
+                            .context("resource overhead cost overflow")?;
+                        push_resource_cost_component(
+                            &mut sample,
+                            retain_components,
+                            ThreadResourceCostComponent {
+                                operation_id: operation_id.clone(),
+                                owner_gate_id,
+                                authority_digest,
+                                stable_resource_id,
+                                charge_class: authority.tariff.charge_class,
+                                state,
+                                coverage,
+                                rated_spend,
+                                committed_spend,
+                                allocation: ResourceCostAllocation::OwnerOverhead,
+                                allocated_spend: UsdNanos::from_nanos(i64::try_from(
+                                    partition.overhead_usd_nanos,
+                                )?)?
                                 .to_canonical_string(),
-                            partition_digest: Some(partition_digest.as_str().to_owned()),
-                            provenance: "daemon_accounting_ledger",
-                        },
-                    );
-                }
-                if owner_thread_id == thread_id {
+                                partition_digest: Some(partition_digest.as_str().to_owned()),
+                                provenance: "daemon_accounting_ledger",
+                            },
+                        );
+                    }
+                } else if owner_thread_id == thread_id {
+                    let charge = budget_charge.unwrap_or(0);
                     sample.owned_overhead_usd_nanos = sample
                         .owned_overhead_usd_nanos
-                        .checked_add(partition.overhead_usd_nanos)
+                        .checked_add(u64::try_from(charge).context("resource charge is negative")?)
                         .context("resource overhead cost overflow")?;
                     push_resource_cost_component(
                         &mut sample,
                         retain_components,
                         ThreadResourceCostComponent {
-                            operation_id: operation_id.clone(),
+                            operation_id,
                             owner_gate_id,
                             authority_digest,
                             stable_resource_id,
@@ -3606,43 +3673,15 @@ impl AccountingDb {
                             rated_spend,
                             committed_spend,
                             allocation: ResourceCostAllocation::OwnerOverhead,
-                            allocated_spend: UsdNanos::from_nanos(i64::try_from(
-                                partition.overhead_usd_nanos,
-                            )?)?
-                            .to_canonical_string(),
-                            partition_digest: Some(partition_digest.as_str().to_owned()),
+                            allocated_spend: UsdNanos::from_nanos(charge)?.to_canonical_string(),
+                            partition_digest: None,
                             provenance: "daemon_accounting_ledger",
                         },
                     );
                 }
-            } else if owner_thread_id == thread_id {
-                let charge = budget_charge.unwrap_or(0);
-                sample.owned_overhead_usd_nanos = sample
-                    .owned_overhead_usd_nanos
-                    .checked_add(u64::try_from(charge).context("resource charge is negative")?)
-                    .context("resource overhead cost overflow")?;
-                push_resource_cost_component(
-                    &mut sample,
-                    retain_components,
-                    ThreadResourceCostComponent {
-                        operation_id,
-                        owner_gate_id,
-                        authority_digest,
-                        stable_resource_id,
-                        charge_class: authority.tariff.charge_class,
-                        state,
-                        coverage,
-                        rated_spend,
-                        committed_spend,
-                        allocation: ResourceCostAllocation::OwnerOverhead,
-                        allocated_spend: UsdNanos::from_nanos(charge)?.to_canonical_string(),
-                        partition_digest: None,
-                        provenance: "daemon_accounting_ledger",
-                    },
-                );
             }
-        }
-        Ok(sample)
+            Ok(sample)
+        })
     }
 
     /// Open the ledger at a runtime-state directory path with its own
@@ -3680,6 +3719,108 @@ impl AccountingDb {
             .ensure_protects(runtime_directory)
             .context("verify accounting runtime-state directory lock")?;
         Self::open_with_guard(runtime_directory, DirectoryGuard::Namespace(directory_lock))
+    }
+
+    /// Open the ledger on the daemon's live native factory from the fixed
+    /// inputs the live Store owner issued. The returned native owner holds
+    /// every ticket-bearing owner whether or not the open succeeds, and must
+    /// stay in node-finalizer custody until its outside sources join the
+    /// Store graph. A refused open leaves hard admission fail-closed.
+    pub fn open_live_native(
+        admission: crate::state_store::LiveAccountingNativeAdmission,
+    ) -> (Arc<AccountingNativeLedger>, Result<Self>) {
+        let (factory, runtime_directory, established, inputs, reference) = admission.into_parts();
+        Self::open_native(factory, runtime_directory, established, inputs, reference)
+    }
+
+    fn open_native(
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        runtime_directory: lillux::PinnedDirectory,
+        established: bool,
+        inputs: lillux_sqlite::OriginalNativeBoundInputs,
+        reference: lillux_sqlite::OriginalNativeTransientInputs,
+    ) -> (Arc<AccountingNativeLedger>, Result<Self>) {
+        let (ledger, opened) = AccountingNativeLedger::open(factory, inputs, reference);
+        let result =
+            opened.and_then(|()| Self::open_native_body(&ledger, &runtime_directory, established));
+        (ledger, result)
+    }
+
+    fn open_native_body(
+        ledger: &Arc<AccountingNativeLedger>,
+        runtime_directory: &lillux::PinnedDirectory,
+        established_at_admission: bool,
+    ) -> Result<Self> {
+        ensure_directory_path_still_pinned(runtime_directory)?;
+        let marker = inspect_initialized_marker(runtime_directory)?;
+        let established_epoch = marker.is_some();
+        anyhow::ensure!(
+            established_epoch == established_at_admission,
+            "accounting initialization marker changed between admission and open"
+        );
+        let path = runtime_directory.path().join(ACCOUNTING_DB_FILENAME);
+        let (site_id, epoch) = ledger.with_sql_against_reference(|conn, definition| {
+            configure_connection(conn)?;
+            if established_epoch {
+                // Established source-of-truth state never takes the fresh
+                // initialization branch, even if truncated to empty.
+                assert_integrity(conn, &path)?;
+            } else {
+                let spec = accounting_schema_spec();
+                if sqlite_schema::is_empty_or_owned(conn, spec.application_id)? {
+                    let schema_sql = current_schema_sql();
+                    sqlite_schema::init_owned(conn, &spec, &schema_sql, &path)?;
+                }
+            }
+            refuse_native_predecessor_migration(conn, &path)?;
+            assert_current_against(conn, &path, definition)?;
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .context("read accounting journal mode")?;
+            if journal_mode != "wal" {
+                bail!(
+                    "accounting database journal mode mismatch in {}: stored={journal_mode}, expected=wal",
+                    path.display()
+                );
+            }
+            if !established_epoch {
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .context("checkpoint initialized accounting database")?;
+            }
+            establish_site_identity(conn, &path)
+        })?;
+        if !established_epoch {
+            runtime_directory
+                .sync()
+                .with_context(|| format!("sync accounting database parent {}", path.display()))?;
+        }
+        // Same anchor and marker order as the stock open: only the first
+        // initialization that will publish the marker may create the anchor.
+        let anchor = Arc::new(if established_epoch {
+            AccountingAnchor::open_requiring_existing(runtime_directory.path(), &site_id, epoch)?
+        } else {
+            AccountingAnchor::open_or_init(runtime_directory.path(), &site_id, epoch)?
+        });
+        let marker_file = match marker {
+            Some(marker) => marker,
+            None => write_initialized_marker(runtime_directory)?,
+        };
+        let credential_binding_key =
+            load_or_create_credential_binding_key(runtime_directory, established_epoch)?;
+        let db = AccountingDb {
+            sql: LedgerSql::Native(Arc::clone(ledger)),
+            path,
+            site_id,
+            epoch,
+            anchor,
+            hard_admission: AtomicBool::new(true),
+            credential_binding_key,
+            holders: LedgerHolders::Native {
+                _initialization_marker: marker_file,
+            },
+        };
+        ensure_accounting_bindings(&db)?;
+        Ok(db)
     }
 
     fn open_with_guard(
@@ -3762,19 +3903,21 @@ impl AccountingDb {
         let credential_binding_key =
             load_or_create_credential_binding_key(&raw.runtime_directory, established_epoch)?;
         let db = AccountingDb {
-            conn: Mutex::new(raw.conn),
+            sql: LedgerSql::Stock(Mutex::new(raw.conn)),
             path: raw.path,
             site_id,
             epoch,
             anchor,
             hard_admission: AtomicBool::new(true),
             credential_binding_key,
-            _runtime_directory: raw.runtime_directory,
-            _directory_lock: raw.directory_lock,
-            _database_file: raw.database_file,
-            _wal_file: raw.wal_file,
-            _shm_file: raw.shm_file,
-            _initialization_marker: Some(marker_file),
+            holders: LedgerHolders::Stock {
+                runtime_directory: raw.runtime_directory,
+                _directory_lock: raw.directory_lock,
+                database_file: raw.database_file,
+                wal_file: raw.wal_file,
+                shm_file: raw.shm_file,
+                initialization_marker: Some(marker_file),
+            },
         };
         ensure_accounting_bindings(&db)?;
         Ok(db)
@@ -3817,10 +3960,39 @@ impl AccountingDb {
         self.epoch as i64
     }
 
+    /// Run ledger SQL on the ledger's own serialized owner. The native owner
+    /// enters its native scope for exactly this operation.
+    fn with_conn<T>(
+        &self,
+        operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
+    ) -> Result<T> {
+        match &self.sql {
+            LedgerSql::Stock(conn) => {
+                let conn = conn
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("accounting connection mutex poisoned"))?;
+                operation(&conn)
+            }
+            LedgerSql::Native(ledger) => ledger.with_sql(operation),
+        }
+    }
+
+    /// Stock-fixture connection guard for tests and test-support fixtures.
+    #[cfg(any(test, feature = "test-support"))]
     fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
+        let LedgerSql::Stock(conn) = &self.sql else {
+            bail!("native accounting ledger has no stock connection guard");
+        };
+        conn.lock()
             .map_err(|_| anyhow::anyhow!("accounting connection mutex poisoned"))
+    }
+
+    /// Whether this ledger's SQL admission has ended (native owner closed).
+    pub fn is_closed(&self) -> bool {
+        match &self.sql {
+            LedgerSql::Stock(_) => false,
+            LedgerSql::Native(ledger) => ledger.is_closed(),
+        }
     }
 
     /// Resolve one committed transaction's anchor obligation. Failure here
@@ -3936,18 +4108,19 @@ impl AccountingDb {
         root_chain_id: &str,
         limit: Option<UsdNanos>,
     ) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now_ms = wall_clock_ms();
-        immediate_transaction(&conn, "accounting execution account birth", || {
-            self.create_account_prepared_in_tx(
-                &conn,
-                execution_budget_id,
-                "execution",
-                execution_budget_id,
-                root_chain_id,
-                limit,
-                now_ms,
-            )
+        self.with_conn(|conn| {
+            let now_ms = wall_clock_ms();
+            immediate_transaction(&conn, "accounting execution account birth", || {
+                self.create_account_prepared_in_tx(
+                    &conn,
+                    execution_budget_id,
+                    "execution",
+                    execution_budget_id,
+                    root_chain_id,
+                    limit,
+                    now_ms,
+                )
+            })
         })
     }
 
@@ -3965,7 +4138,7 @@ impl AccountingDb {
             serde_json::to_value(limits).context("serialize aggregate execution limits")?;
         let limits_json = canonical_json_string(&limits_value)?;
         let limits_digest = lillux::cas::sha256_hex(limits_json.as_bytes());
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         immediate_transaction(&conn, "aggregate execution budget birth", || {
             if let Some(existing) = load_execution_resource_budget(
                 &conn,
@@ -4040,6 +4213,7 @@ impl AccountingDb {
                 )
             })
         })
+        })
     }
 
     /// Read the durable execution-tree resource ledger. This projection is
@@ -4049,8 +4223,9 @@ impl AccountingDb {
         &self,
         execution_budget_id: &str,
     ) -> Result<Option<ExecutionResourceBudgetSnapshot>> {
-        let conn = self.lock_conn()?;
-        load_execution_resource_budget(&conn, execution_budget_id, &self.site_id, self.epoch)
+        self.with_conn(|conn| {
+            load_execution_resource_budget(&conn, execution_budget_id, &self.site_id, self.epoch)
+        })
     }
 
     /// Read one exact retained claim decision without creating or advancing a
@@ -4067,25 +4242,26 @@ impl AccountingDb {
         HexDigest::new(request_digest.to_owned())
             .map_err(anyhow::Error::msg)
             .context("aggregate resource claim request digest is not canonical sha256")?;
-        let conn = self.lock_conn()?;
-        let recorded: Option<(String, String, Option<String>)> = conn
-            .query_row(
-                "SELECT request_digest, outcome, denial_reason
+        self.with_conn(|conn| {
+            let recorded: Option<(String, String, Option<String>)> = conn
+                .query_row(
+                    "SELECT request_digest, outcome, denial_reason
                  FROM execution_resource_claim
                  WHERE execution_budget_id = ?1 AND dimension = ?2 AND coordinate = ?3",
-                rusqlite::params![execution_budget_id, dimension.as_str(), coordinate],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .context("load aggregate resource claim")?;
-        recorded
-            .map(|(stored_digest, outcome, reason)| {
-                if stored_digest != request_digest {
-                    bail!("aggregate resource claim contradicts its request digest");
-                }
-                decode_resource_claim_outcome(&outcome, reason, true)
-            })
-            .transpose()
+                    rusqlite::params![execution_budget_id, dimension.as_str(), coordinate],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .context("load aggregate resource claim")?;
+            recorded
+                .map(|(stored_digest, outcome, reason)| {
+                    if stored_digest != request_digest {
+                        bail!("aggregate resource claim contradicts its request digest");
+                    }
+                    decode_resource_claim_outcome(&outcome, reason, true)
+                })
+                .transpose()
+        })
     }
 
     /// Conservatively reserve one exact logical worker or one exact external
@@ -4107,125 +4283,126 @@ impl AccountingDb {
         HexDigest::new(request_digest.to_string())
             .map_err(anyhow::Error::msg)
             .context("aggregate resource claim request digest is not canonical sha256")?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "aggregate execution resource claim", || {
-            let recorded: Option<(String, String, Option<String>)> = conn
-                .query_row(
-                    "SELECT request_digest, outcome, denial_reason
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "aggregate execution resource claim", || {
+                let recorded: Option<(String, String, Option<String>)> = conn
+                    .query_row(
+                        "SELECT request_digest, outcome, denial_reason
                      FROM execution_resource_claim
                      WHERE execution_budget_id = ?1 AND dimension = ?2 AND coordinate = ?3",
-                    rusqlite::params![execution_budget_id, dimension.as_str(), coordinate],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()
-                .context("load aggregate resource claim replay")?;
-            if let Some((stored_digest, outcome, reason)) = recorded {
-                if stored_digest != request_digest {
-                    bail!(
-                        "aggregate resource coordinate {}/{}/{} was reused with a different \
+                        rusqlite::params![execution_budget_id, dimension.as_str(), coordinate],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .context("load aggregate resource claim replay")?;
+                if let Some((stored_digest, outcome, reason)) = recorded {
+                    if stored_digest != request_digest {
+                        bail!(
+                            "aggregate resource coordinate {}/{}/{} was reused with a different \
                          request digest",
-                        execution_budget_id,
-                        dimension.as_str(),
-                        coordinate
-                    );
+                            execution_budget_id,
+                            dimension.as_str(),
+                            coordinate
+                        );
+                    }
+                    return decode_resource_claim_outcome(&outcome, reason, true);
                 }
-                return decode_resource_claim_outcome(&outcome, reason, true);
-            }
 
-            let budget = load_execution_resource_budget(
-                &conn,
-                execution_budget_id,
-                &self.site_id,
-                self.epoch,
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "aggregate execution budget {execution_budget_id} is absent; resource \
+                let budget = load_execution_resource_budget(
+                    &conn,
+                    execution_budget_id,
+                    &self.site_id,
+                    self.epoch,
+                )?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "aggregate execution budget {execution_budget_id} is absent; resource \
                          admission fails closed"
-                )
-            })?;
-            let budget_created_at_ms: i64 = conn.query_row(
-                "SELECT created_at_ms FROM execution_resource_budget
+                    )
+                })?;
+                let budget_created_at_ms: i64 = conn.query_row(
+                    "SELECT created_at_ms FROM execution_resource_budget
                  WHERE execution_budget_id=?1",
-                rusqlite::params![execution_budget_id],
-                |row| row.get(0),
-            )?;
-            if now_ms < budget_created_at_ms {
-                bail!("aggregate resource claim time predates its execution budget");
-            }
-            let (maximum, used, exhausted_reason, used_column) = match dimension {
-                ExecutionResourceDimension::WorkerExecution => (
-                    budget.max_worker_executions,
-                    budget.used_worker_executions,
-                    "aggregate_worker_executions_exhausted",
-                    "used_worker_executions",
-                ),
-                ExecutionResourceDimension::ProviderContact => (
-                    budget.max_provider_contacts,
-                    budget.used_provider_contacts,
-                    "aggregate_provider_contacts_exhausted",
-                    "used_provider_contacts",
-                ),
-            };
-            // Do not grow the claim ledger for an actually-unbounded
-            // dimension. With no shared deadline and no counter there is no
-            // aggregate authority to consume or replay.
-            if budget.deadline_at_ms.is_none() && maximum.is_none() {
-                return Ok(ExecutionResourceClaimOutcome::Admitted { replayed: false });
-            }
-            let denial_reason = if budget
-                .deadline_at_ms
-                .is_some_and(|deadline| now_ms >= deadline)
-            {
-                Some("aggregate_duration_exhausted")
-            } else if maximum.is_some_and(|maximum| used >= maximum) {
-                Some(exhausted_reason)
-            } else {
-                None
-            };
-            let outcome = if denial_reason.is_some() {
-                "denied"
-            } else {
-                "admitted"
-            };
-            conn.execute(
-                "INSERT INTO execution_resource_claim (
+                    rusqlite::params![execution_budget_id],
+                    |row| row.get(0),
+                )?;
+                if now_ms < budget_created_at_ms {
+                    bail!("aggregate resource claim time predates its execution budget");
+                }
+                let (maximum, used, exhausted_reason, used_column) = match dimension {
+                    ExecutionResourceDimension::WorkerExecution => (
+                        budget.max_worker_executions,
+                        budget.used_worker_executions,
+                        "aggregate_worker_executions_exhausted",
+                        "used_worker_executions",
+                    ),
+                    ExecutionResourceDimension::ProviderContact => (
+                        budget.max_provider_contacts,
+                        budget.used_provider_contacts,
+                        "aggregate_provider_contacts_exhausted",
+                        "used_provider_contacts",
+                    ),
+                };
+                // Do not grow the claim ledger for an actually-unbounded
+                // dimension. With no shared deadline and no counter there is no
+                // aggregate authority to consume or replay.
+                if budget.deadline_at_ms.is_none() && maximum.is_none() {
+                    return Ok(ExecutionResourceClaimOutcome::Admitted { replayed: false });
+                }
+                let denial_reason = if budget
+                    .deadline_at_ms
+                    .is_some_and(|deadline| now_ms >= deadline)
+                {
+                    Some("aggregate_duration_exhausted")
+                } else if maximum.is_some_and(|maximum| used >= maximum) {
+                    Some(exhausted_reason)
+                } else {
+                    None
+                };
+                let outcome = if denial_reason.is_some() {
+                    "denied"
+                } else {
+                    "admitted"
+                };
+                conn.execute(
+                    "INSERT INTO execution_resource_claim (
                     execution_budget_id, dimension, coordinate, request_digest,
                     outcome, denial_reason, created_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    execution_budget_id,
-                    dimension.as_str(),
-                    coordinate,
-                    request_digest,
-                    outcome,
-                    denial_reason,
-                    now_ms,
-                ],
-            )
-            .context("record aggregate execution resource claim")?;
-            if denial_reason.is_none() {
-                let statement = format!(
-                    "UPDATE execution_resource_budget SET {used_column} = {used_column} + 1, \
+                    rusqlite::params![
+                        execution_budget_id,
+                        dimension.as_str(),
+                        coordinate,
+                        request_digest,
+                        outcome,
+                        denial_reason,
+                        now_ms,
+                    ],
+                )
+                .context("record aggregate execution resource claim")?;
+                if denial_reason.is_none() {
+                    let statement = format!(
+                        "UPDATE execution_resource_budget SET {used_column} = {used_column} + 1, \
                      updated_at_ms = ?1 WHERE execution_budget_id = ?2"
-                );
-                let updated = conn
-                    .execute(&statement, rusqlite::params![now_ms, execution_budget_id])
-                    .context("advance aggregate execution resource counter")?;
-                if updated != 1 {
-                    bail!(
-                        "aggregate execution budget {execution_budget_id} disappeared while \
-                         admitting a resource claim"
                     );
+                    let updated = conn
+                        .execute(&statement, rusqlite::params![now_ms, execution_budget_id])
+                        .context("advance aggregate execution resource counter")?;
+                    if updated != 1 {
+                        bail!(
+                            "aggregate execution budget {execution_budget_id} disappeared while \
+                         admitting a resource claim"
+                        );
+                    }
                 }
-            }
-            match denial_reason {
-                Some(reason) => Ok(ExecutionResourceClaimOutcome::Denied {
-                    reason: reason.to_string(),
-                    replayed: false,
-                }),
-                None => Ok(ExecutionResourceClaimOutcome::Admitted { replayed: false }),
-            }
+                match denial_reason {
+                    Some(reason) => Ok(ExecutionResourceClaimOutcome::Denied {
+                        reason: reason.to_string(),
+                        replayed: false,
+                    }),
+                    None => Ok(ExecutionResourceClaimOutcome::Admitted { replayed: false }),
+                }
+            })
         })
     }
 
@@ -4243,50 +4420,51 @@ impl AccountingDb {
         HexDigest::new(request_digest.to_string())
             .map_err(anyhow::Error::msg)
             .context("aggregate resource release request digest is not canonical sha256")?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "aggregate provider-contact release", || {
-            let recorded: Option<(String, String)> = conn
-                .query_row(
-                    "SELECT request_digest, outcome FROM execution_resource_claim
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "aggregate provider-contact release", || {
+                let recorded: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT request_digest, outcome FROM execution_resource_claim
                      WHERE execution_budget_id = ?1 AND dimension = 'provider_contact'
                        AND coordinate = ?2",
-                    rusqlite::params![execution_budget_id, coordinate],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .context("load aggregate provider-contact claim for release")?;
-            let Some((stored_digest, outcome)) = recorded else {
-                // An unbounded contact dimension intentionally records no
-                // claim; there is then nothing to release.
-                return Ok(false);
-            };
-            if stored_digest != request_digest {
-                bail!("aggregate provider-contact release contradicts its request digest");
-            }
-            match outcome.as_str() {
-                "released_uncontacted" => return Ok(true),
-                "denied" => {
-                    bail!("a denied aggregate provider-contact claim cannot be released")
+                        rusqlite::params![execution_budget_id, coordinate],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .context("load aggregate provider-contact claim for release")?;
+                let Some((stored_digest, outcome)) = recorded else {
+                    // An unbounded contact dimension intentionally records no
+                    // claim; there is then nothing to release.
+                    return Ok(false);
+                };
+                if stored_digest != request_digest {
+                    bail!("aggregate provider-contact release contradicts its request digest");
                 }
-                "admitted" => {}
-                _ => bail!("stored aggregate provider-contact claim has invalid state"),
-            }
-            let changed = conn.execute(
-                "UPDATE execution_resource_claim SET outcome='released_uncontacted'
+                match outcome.as_str() {
+                    "released_uncontacted" => return Ok(true),
+                    "denied" => {
+                        bail!("a denied aggregate provider-contact claim cannot be released")
+                    }
+                    "admitted" => {}
+                    _ => bail!("stored aggregate provider-contact claim has invalid state"),
+                }
+                let changed = conn.execute(
+                    "UPDATE execution_resource_claim SET outcome='released_uncontacted'
                  WHERE execution_budget_id = ?1 AND dimension = 'provider_contact'
                    AND coordinate = ?2 AND request_digest = ?3 AND outcome='admitted'",
-                rusqlite::params![execution_budget_id, coordinate, request_digest],
-            )?;
-            let budget_changed = conn.execute(
-                "UPDATE execution_resource_budget
+                    rusqlite::params![execution_budget_id, coordinate, request_digest],
+                )?;
+                let budget_changed = conn.execute(
+                    "UPDATE execution_resource_budget
                     SET used_provider_contacts = used_provider_contacts - 1, updated_at_ms = ?2
                   WHERE execution_budget_id = ?1 AND used_provider_contacts > 0",
-                rusqlite::params![execution_budget_id, now_ms],
-            )?;
-            if changed != 1 || budget_changed != 1 {
-                bail!("aggregate provider-contact release lost its claim/budget CAS");
-            }
-            Ok(false)
+                    rusqlite::params![execution_budget_id, now_ms],
+                )?;
+                if changed != 1 || budget_changed != 1 {
+                    bail!("aggregate provider-contact release lost its claim/budget CAS");
+                }
+                Ok(false)
+            })
         })
     }
 
@@ -4322,72 +4500,75 @@ impl AccountingDb {
             "owner_incarnation": owner_incarnation,
         }))
         .map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "open resource owner accounting gate", || {
-            let execution = self.require_active_account(&conn, "execution", execution_budget_id)?;
-            if execution.root_chain_id != root_chain_id {
-                bail!("resource owner gate root chain contradicts its execution account");
-            }
-            if let Some(directive_budget_id) = directive_budget_id {
-                let directive =
-                    self.require_active_account(&conn, "directive_item", directive_budget_id)?;
-                if directive.execution_budget_id != execution_budget_id
-                    || directive.root_chain_id != root_chain_id
-                {
-                    bail!("resource owner gate directive account has different authority");
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "open resource owner accounting gate", || {
+                let execution =
+                    self.require_active_account(&conn, "execution", execution_budget_id)?;
+                if execution.root_chain_id != root_chain_id {
+                    bail!("resource owner gate root chain contradicts its execution account");
                 }
-            }
-            let existing = self.load_resource_owner_gate(&conn, owner_gate_id.as_str())?;
-            if let Some(existing) = existing {
-                if existing.owner_incarnation != owner_incarnation
-                    || existing.execution_budget_id != execution_budget_id
-                    || existing.directive_budget_id.as_deref() != directive_budget_id
-                    || existing.root_chain_id != root_chain_id
-                    || existing.audit_chain_root_id != audit_chain_root_id
-                    || existing.owner_recovery_json.as_deref() != Some(owner_recovery_json.as_str())
-                {
-                    bail!("resource owner gate identity was reused with different authority");
+                if let Some(directive_budget_id) = directive_budget_id {
+                    let directive =
+                        self.require_active_account(&conn, "directive_item", directive_budget_id)?;
+                    if directive.execution_budget_id != execution_budget_id
+                        || directive.root_chain_id != root_chain_id
+                    {
+                        bail!("resource owner gate directive account has different authority");
+                    }
                 }
-                if existing.state != "open" {
-                    bail!("resource owner accounting gate is fenced");
+                let existing = self.load_resource_owner_gate(&conn, owner_gate_id.as_str())?;
+                if let Some(existing) = existing {
+                    if existing.owner_incarnation != owner_incarnation
+                        || existing.execution_budget_id != execution_budget_id
+                        || existing.directive_budget_id.as_deref() != directive_budget_id
+                        || existing.root_chain_id != root_chain_id
+                        || existing.audit_chain_root_id != audit_chain_root_id
+                        || existing.owner_recovery_json.as_deref()
+                            != Some(owner_recovery_json.as_str())
+                    {
+                        bail!("resource owner gate identity was reused with different authority");
+                    }
+                    if existing.state != "open" {
+                        bail!("resource owner accounting gate is fenced");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            let conflicting: Option<String> = conn
-                .query_row(
-                    "SELECT owner_gate_id FROM resource_owner_accounting_gate
+                let conflicting: Option<String> = conn
+                    .query_row(
+                        "SELECT owner_gate_id FROM resource_owner_accounting_gate
                      WHERE owner_incarnation=?1",
-                    rusqlite::params![owner_incarnation],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if conflicting.is_some() {
-                bail!("resource owner occurrence is already bound to another accounting gate");
-            }
-            conn.execute(
-                "INSERT INTO resource_owner_accounting_gate (
+                        rusqlite::params![owner_incarnation],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if conflicting.is_some() {
+                    bail!("resource owner occurrence is already bound to another accounting gate");
+                }
+                conn.execute(
+                    "INSERT INTO resource_owner_accounting_gate (
                     owner_gate_id, owner_incarnation, budget_authority_site_id,
                     ledger_epoch, execution_budget_id, directive_budget_id,
                     root_chain_id, audit_chain_root_id, owner_recovery_json,
                     state, active_request_count, fenced_reason,
                     created_at_ms, updated_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'open', 0, NULL, ?10, ?10)",
-                rusqlite::params![
-                    owner_gate_id.as_str(),
-                    owner_incarnation,
-                    self.site_id,
-                    self.epoch_i64(),
-                    execution_budget_id,
-                    directive_budget_id,
-                    root_chain_id,
-                    audit_chain_root_id,
-                    owner_recovery_json,
-                    now_ms,
-                ],
-            )?;
-            Ok(())
-        })?;
-        Ok(owner_gate_id)
+                    rusqlite::params![
+                        owner_gate_id.as_str(),
+                        owner_incarnation,
+                        self.site_id,
+                        self.epoch_i64(),
+                        execution_budget_id,
+                        directive_budget_id,
+                        root_chain_id,
+                        audit_chain_root_id,
+                        owner_recovery_json,
+                        now_ms,
+                    ],
+                )?;
+                Ok(())
+            })?;
+            Ok(owner_gate_id)
+        })
     }
 
     pub fn resource_owner_gate_eligible(
@@ -4397,41 +4578,42 @@ impl AccountingDb {
         now_ms: i64,
     ) -> Result<bool> {
         HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        let Some(gate) = self.load_resource_owner_gate(&conn, owner_gate_id)? else {
-            return Ok(false);
-        };
-        if gate.owner_incarnation != owner_incarnation || gate.state != "open" {
-            return Ok(false);
-        }
-        if self
-            .require_active_account(&conn, "execution", &gate.execution_budget_id)
-            .is_err()
-        {
-            return Ok(false);
-        }
-        if let Some(directive) = gate.directive_budget_id.as_deref()
-            && self
-                .require_active_account(&conn, "directive_item", directive)
+        self.with_conn(|conn| {
+            let Some(gate) = self.load_resource_owner_gate(&conn, owner_gate_id)? else {
+                return Ok(false);
+            };
+            if gate.owner_incarnation != owner_incarnation || gate.state != "open" {
+                return Ok(false);
+            }
+            if self
+                .require_active_account(&conn, "execution", &gate.execution_budget_id)
                 .is_err()
-        {
-            return Ok(false);
-        }
-        let deadline: Option<Option<i64>> = conn
-            .query_row(
-                "SELECT deadline_at_ms FROM execution_resource_budget
+            {
+                return Ok(false);
+            }
+            if let Some(directive) = gate.directive_budget_id.as_deref()
+                && self
+                    .require_active_account(&conn, "directive_item", directive)
+                    .is_err()
+            {
+                return Ok(false);
+            }
+            let deadline: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT deadline_at_ms FROM execution_resource_budget
                   WHERE execution_budget_id=?1",
-                rusqlite::params![gate.execution_budget_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if deadline
-            .flatten()
-            .is_some_and(|deadline| deadline <= now_ms)
-        {
-            return Ok(false);
-        }
-        Ok(true)
+                    rusqlite::params![gate.execution_budget_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if deadline
+                .flatten()
+                .is_some_and(|deadline| deadline <= now_ms)
+            {
+                return Ok(false);
+            }
+            Ok(true)
+        })
     }
 
     /// Prove that an exact resource-owner occurrence is still financially
@@ -4447,8 +4629,9 @@ impl AccountingDb {
         bindings
             .first()
             .context("resource-owner release requires at least one operation")?;
-        let conn = self.lock_conn()?;
-        self.authorize_resource_owner_release_in_connection(&conn, bindings, now_ms)
+        self.with_conn(|conn| {
+            self.authorize_resource_owner_release_in_connection(&conn, bindings, now_ms)
+        })
     }
 
     pub fn authorize_resource_owner_release_until(
@@ -4576,42 +4759,43 @@ impl AccountingDb {
         now_ms: i64,
     ) -> Result<()> {
         HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "begin resident resource request", || {
-            let gate = self
-                .load_resource_owner_gate(&conn, owner_gate_id)?
-                .context("resource owner accounting gate is absent")?;
-            if gate.state != "open" || gate.owner_incarnation != owner_incarnation {
-                bail!("resident resource owner accounting gate is not eligible");
-            }
-            self.require_active_account(&conn, "execution", &gate.execution_budget_id)?;
-            if let Some(directive) = gate.directive_budget_id.as_deref() {
-                self.require_active_account(&conn, "directive_item", directive)?;
-            }
-            let deadline: Option<Option<i64>> = conn
-                .query_row(
-                    "SELECT deadline_at_ms FROM execution_resource_budget
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "begin resident resource request", || {
+                let gate = self
+                    .load_resource_owner_gate(&conn, owner_gate_id)?
+                    .context("resource owner accounting gate is absent")?;
+                if gate.state != "open" || gate.owner_incarnation != owner_incarnation {
+                    bail!("resident resource owner accounting gate is not eligible");
+                }
+                self.require_active_account(&conn, "execution", &gate.execution_budget_id)?;
+                if let Some(directive) = gate.directive_budget_id.as_deref() {
+                    self.require_active_account(&conn, "directive_item", directive)?;
+                }
+                let deadline: Option<Option<i64>> = conn
+                    .query_row(
+                        "SELECT deadline_at_ms FROM execution_resource_budget
                       WHERE execution_budget_id=?1",
-                    rusqlite::params![gate.execution_budget_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if deadline
-                .flatten()
-                .is_some_and(|deadline| deadline <= now_ms)
-            {
-                bail!("resident resource execution scope has expired");
-            }
-            let changed = conn.execute(
-                "UPDATE resource_owner_accounting_gate
+                        rusqlite::params![gate.execution_budget_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if deadline
+                    .flatten()
+                    .is_some_and(|deadline| deadline <= now_ms)
+                {
+                    bail!("resident resource execution scope has expired");
+                }
+                let changed = conn.execute(
+                    "UPDATE resource_owner_accounting_gate
                     SET active_request_count=active_request_count+1, updated_at_ms=?3
                   WHERE owner_gate_id=?1 AND owner_incarnation=?2 AND state='open'",
-                rusqlite::params![owner_gate_id, owner_incarnation, now_ms],
-            )?;
-            if changed != 1 {
-                bail!("resident resource request lost its owner gate CAS");
-            }
-            Ok(())
+                    rusqlite::params![owner_gate_id, owner_incarnation, now_ms],
+                )?;
+                if changed != 1 {
+                    bail!("resident resource request lost its owner gate CAS");
+                }
+                Ok(())
+            })
         })
     }
 
@@ -4622,18 +4806,19 @@ impl AccountingDb {
         now_ms: i64,
     ) -> Result<()> {
         HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        let changed = conn.execute(
-            "UPDATE resource_owner_accounting_gate
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE resource_owner_accounting_gate
                 SET active_request_count=active_request_count-1, updated_at_ms=?3
               WHERE owner_gate_id=?1 AND owner_incarnation=?2
                 AND active_request_count>0",
-            rusqlite::params![owner_gate_id, owner_incarnation, now_ms],
-        )?;
-        if changed != 1 {
-            bail!("resident resource request lease is absent or contradictory");
-        }
-        Ok(())
+                rusqlite::params![owner_gate_id, owner_incarnation, now_ms],
+            )?;
+            if changed != 1 {
+                bail!("resident resource request lease is absent or contradictory");
+            }
+            Ok(())
+        })
     }
 
     pub fn fence_resource_owner_accounting_gate(
@@ -4646,24 +4831,25 @@ impl AccountingDb {
         if reason.is_empty() {
             bail!("resource owner gate fence reason is empty");
         }
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "fence resource owner accounting gate", || {
-            let Some(gate) = self.load_resource_owner_gate(&conn, owner_gate_id)? else {
-                bail!("resource owner accounting gate is absent");
-            };
-            if gate.state == "fenced" {
-                return Ok(());
-            }
-            if gate.active_request_count != 0 {
-                bail!("resource owner accounting gate retains active requests");
-            }
-            conn.execute(
-                "UPDATE resource_owner_accounting_gate
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "fence resource owner accounting gate", || {
+                let Some(gate) = self.load_resource_owner_gate(&conn, owner_gate_id)? else {
+                    bail!("resource owner accounting gate is absent");
+                };
+                if gate.state == "fenced" {
+                    return Ok(());
+                }
+                if gate.active_request_count != 0 {
+                    bail!("resource owner accounting gate retains active requests");
+                }
+                conn.execute(
+                    "UPDATE resource_owner_accounting_gate
                  SET state='fenced', fenced_reason=?2, updated_at_ms=?3
                  WHERE owner_gate_id=?1 AND state!='fenced'",
-                rusqlite::params![owner_gate_id, reason, now_ms],
-            )?;
-            Ok(())
+                    rusqlite::params![owner_gate_id, reason, now_ms],
+                )?;
+                Ok(())
+            })
         })
     }
 
@@ -4691,26 +4877,27 @@ impl AccountingDb {
             .map_err(anyhow::Error::msg)
             .context("resource accounting authority is invalid")?;
 
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "resource financial reservation", || {
-            self.reserve_resource_operation_in_transaction(
-                &conn,
-                ResourceReservationArgs {
-                    owner_gate_id: args.owner_gate_id,
-                    operation_id: args.operation_id,
-                    request_digest: args.request_digest,
-                    execution_budget_id: args.execution_budget_id,
-                    directive_budget_id: args.directive_budget_id,
-                    root_chain_id: args.root_chain_id,
-                    audit_chain_root_id: args.audit_chain_root_id,
-                    thread_id: args.thread_id,
-                    launch_generation: args.launch_generation,
-                    owner_incarnation: Some(args.owner_incarnation),
-                    authority: args.authority,
-                    now_ms: args.now_ms,
-                    precontact: None,
-                },
-            )
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "resource financial reservation", || {
+                self.reserve_resource_operation_in_transaction(
+                    &conn,
+                    ResourceReservationArgs {
+                        owner_gate_id: args.owner_gate_id,
+                        operation_id: args.operation_id,
+                        request_digest: args.request_digest,
+                        execution_budget_id: args.execution_budget_id,
+                        directive_budget_id: args.directive_budget_id,
+                        root_chain_id: args.root_chain_id,
+                        audit_chain_root_id: args.audit_chain_root_id,
+                        thread_id: args.thread_id,
+                        launch_generation: args.launch_generation,
+                        owner_incarnation: Some(args.owner_incarnation),
+                        authority: args.authority,
+                        now_ms: args.now_ms,
+                        precontact: None,
+                    },
+                )
+            })
         })
     }
 
@@ -4987,14 +5174,15 @@ impl AccountingDb {
     ) -> Result<bool> {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
         HexDigest::new(request_digest.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "release unissued resource operation", || {
-            self.release_unissued_resource_operation_in_transaction(
-                &conn,
-                operation_id,
-                request_digest,
-                now_ms,
-            )
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "release unissued resource operation", || {
+                self.release_unissued_resource_operation_in_transaction(
+                    &conn,
+                    operation_id,
+                    request_digest,
+                    now_ms,
+                )
+            })
         })
     }
 
@@ -5120,24 +5308,25 @@ impl AccountingDb {
     ) -> Result<()> {
         HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
         HexDigest::new(owner_incarnation.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        let changed = conn.execute(
-            "UPDATE resource_owner_accounting_gate
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE resource_owner_accounting_gate
                 SET active_request_count=0,
                     state=CASE WHEN ?3 THEN 'cleanup_proved' ELSE 'liability_pending' END,
                     updated_at_ms=?4
               WHERE owner_gate_id=?1 AND owner_incarnation=?2 AND state!='fenced'",
-            rusqlite::params![owner_gate_id, owner_incarnation, release_capacity, now_ms],
-        )?;
-        if changed != 1 {
-            let gate = self
-                .load_resource_owner_gate(&conn, owner_gate_id)?
-                .context("resource owner accounting gate is absent")?;
-            if gate.owner_incarnation != owner_incarnation || gate.state != "fenced" {
-                bail!("cleaned resource owner lost its cleanup-proof CAS");
+                rusqlite::params![owner_gate_id, owner_incarnation, release_capacity, now_ms],
+            )?;
+            if changed != 1 {
+                let gate = self
+                    .load_resource_owner_gate(&conn, owner_gate_id)?
+                    .context("resource owner accounting gate is absent")?;
+                if gate.owner_incarnation != owner_incarnation || gate.state != "fenced" {
+                    bail!("cleaned resource owner lost its cleanup-proof CAS");
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Commit issue for the exact retained owner before its billable release.
@@ -5151,8 +5340,9 @@ impl AccountingDb {
     ) -> Result<ResourceOperationIssueOutcome> {
         HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
         HexDigest::new(request_digest.to_owned()).map_err(anyhow::Error::msg)?;
-        let conn = self.lock_conn()?;
-        self.issue_resource_operation_in_connection(&conn, operation_id, request_digest, now_ms)
+        self.with_conn(|conn| {
+            self.issue_resource_operation_in_connection(&conn, operation_id, request_digest, now_ms)
+        })
     }
 
     /// Issue the original operation using its existing deadline/connection.
@@ -5362,7 +5552,7 @@ impl AccountingDb {
         if usage.operation_id != operation_id {
             bail!("resource usage belongs to another financial operation");
         }
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         let (outcome, action) = immediate_transaction(
             &conn,
             "resource financial settlement",
@@ -5778,6 +5968,7 @@ impl AccountingDb {
         )?;
         self.resolve_anchor_action(&conn, action)?;
         Ok(outcome)
+        })
     }
 
     /// Journaled birth of a directive-item account under an existing
@@ -5789,27 +5980,28 @@ impl AccountingDb {
         directive_budget_id: &str,
         limit: Option<UsdNanos>,
     ) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now_ms = wall_clock_ms();
-        immediate_transaction(&conn, "accounting directive account birth", || {
-            let execution = self
-                .load_account(&conn, "execution", execution_budget_id)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "execution budget account {execution_budget_id} is absent; a directive \
+        self.with_conn(|conn| {
+            let now_ms = wall_clock_ms();
+            immediate_transaction(&conn, "accounting directive account birth", || {
+                let execution = self
+                    .load_account(&conn, "execution", execution_budget_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "execution budget account {execution_budget_id} is absent; a directive \
                          account cannot be born under a missing execution account"
-                    )
-                })?;
-            let root_chain_id = execution.root_chain_id.clone();
-            self.create_account_prepared_in_tx(
-                &conn,
-                execution_budget_id,
-                "directive_item",
-                directive_budget_id,
-                &root_chain_id,
-                limit,
-                now_ms,
-            )
+                        )
+                    })?;
+                let root_chain_id = execution.root_chain_id.clone();
+                self.create_account_prepared_in_tx(
+                    &conn,
+                    execution_budget_id,
+                    "directive_item",
+                    directive_budget_id,
+                    &root_chain_id,
+                    limit,
+                    now_ms,
+                )
+            })
         })
     }
 
@@ -5877,45 +6069,46 @@ impl AccountingDb {
         if account_kind != "execution" && account_kind != "directive_item" {
             bail!("unknown budget account kind {account_kind:?}");
         }
-        let conn = self.lock_conn()?;
-        let now_ms = wall_clock_ms();
-        immediate_transaction(&conn, "accounting account activation", || {
-            let account = self
-                .load_account(&conn, account_kind, scope_id)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "budget account {account_kind}/{scope_id} is absent; activation fails \
+        self.with_conn(|conn| {
+            let now_ms = wall_clock_ms();
+            immediate_transaction(&conn, "accounting account activation", || {
+                let account = self
+                    .load_account(&conn, account_kind, scope_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "budget account {account_kind}/{scope_id} is absent; activation fails \
                          closed and allowance is never re-minted"
+                        )
+                    })?;
+                let bound_execution: String = conn
+                    .query_row(
+                        "SELECT execution_budget_id FROM budget_account WHERE account_id = ?1",
+                        rusqlite::params![account.account_id],
+                        |row| row.get(0),
                     )
-                })?;
-            let bound_execution: String = conn
-                .query_row(
-                    "SELECT execution_budget_id FROM budget_account WHERE account_id = ?1",
-                    rusqlite::params![account.account_id],
-                    |row| row.get(0),
-                )
-                .context("load account execution binding")?;
-            if bound_execution != execution_budget_id {
-                bail!(
-                    "budget account {account_kind}/{scope_id} belongs to execution \
+                    .context("load account execution binding")?;
+                if bound_execution != execution_budget_id {
+                    bail!(
+                        "budget account {account_kind}/{scope_id} belongs to execution \
                      {bound_execution}, not {execution_budget_id}"
-                );
-            }
-            match account.state.as_str() {
-                "active" => Ok(()),
-                "prepared" => {
-                    conn.execute(
-                        "UPDATE budget_account SET state = 'active', updated_at_ms = ?1
-                         WHERE account_id = ?2",
-                        rusqlite::params![now_ms, account.account_id],
-                    )
-                    .context("activate budget account")?;
-                    Ok(())
+                    );
                 }
-                other => bail!(
-                    "budget account {account_kind}/{scope_id} is {other}; refusing activation"
-                ),
-            }
+                match account.state.as_str() {
+                    "active" => Ok(()),
+                    "prepared" => {
+                        conn.execute(
+                            "UPDATE budget_account SET state = 'active', updated_at_ms = ?1
+                         WHERE account_id = ?2",
+                            rusqlite::params![now_ms, account.account_id],
+                        )
+                        .context("activate budget account")?;
+                        Ok(())
+                    }
+                    other => bail!(
+                        "budget account {account_kind}/{scope_id} is {other}; refusing activation"
+                    ),
+                }
+            })
         })
     }
 
@@ -5947,7 +6140,7 @@ impl AccountingDb {
         audit_chain_root_id: &str,
         credential_binding_digest: Option<&str>,
     ) -> Result<()> {
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         let now_ms = wall_clock_ms();
         immediate_transaction(&conn, "accounting gate open", || {
             if let Some(gate) = self.load_gate(&conn, thread_id, launch_generation)? {
@@ -6086,6 +6279,7 @@ impl AccountingDb {
             .context("bind launch accounting gate to its directive scope")?;
             Ok(())
         })
+        })
     }
 
     /// Fence one launch generation and close every nonterminal attempt it
@@ -6099,9 +6293,10 @@ impl AccountingDb {
         reason: ReconciliationReason,
         now_ms: i64,
     ) -> Result<FenceOutcome> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "accounting gate fence", || {
-            self.fence_generation_in_tx(&conn, thread_id, launch_generation, reason, now_ms)
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "accounting gate fence", || {
+                self.fence_generation_in_tx(&conn, thread_id, launch_generation, reason, now_ms)
+            })
         })
     }
 
@@ -6266,58 +6461,60 @@ impl AccountingDb {
         thread_id: &str,
         launch_generation: &str,
     ) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now_ms = wall_clock_ms();
-        immediate_transaction(&conn, "accounting publication confirmation", || {
-            // No gate means the thread never carried financial authority:
-            // there is no publication marker to clear.
-            let Some(gate) = self.load_gate(&conn, thread_id, launch_generation)? else {
-                return Ok(());
-            };
-            if gate.state != "fenced" {
-                bail!(
-                    "launch accounting gate {thread_id}/{launch_generation} is not fenced; \
+        self.with_conn(|conn| {
+            let now_ms = wall_clock_ms();
+            immediate_transaction(&conn, "accounting publication confirmation", || {
+                // No gate means the thread never carried financial authority:
+                // there is no publication marker to clear.
+                let Some(gate) = self.load_gate(&conn, thread_id, launch_generation)? else {
+                    return Ok(());
+                };
+                if gate.state != "fenced" {
+                    bail!(
+                        "launch accounting gate {thread_id}/{launch_generation} is not fenced; \
                      terminal publication cannot be confirmed"
-                );
-            }
-            conn.execute(
-                "UPDATE launch_accounting_gate
+                    );
+                }
+                conn.execute(
+                    "UPDATE launch_accounting_gate
                  SET terminal_publication_due = 0, updated_at_ms = ?1
                  WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3
                    AND thread_id = ?4 AND launch_generation = ?5",
-                rusqlite::params![
-                    now_ms,
-                    self.site_id,
-                    self.epoch_i64(),
-                    thread_id,
-                    launch_generation
-                ],
-            )
-            .context("clear terminal publication marker")?;
-            Ok(())
+                    rusqlite::params![
+                        now_ms,
+                        self.site_id,
+                        self.epoch_i64(),
+                        thread_id,
+                        launch_generation
+                    ],
+                )
+                .context("clear terminal publication marker")?;
+                Ok(())
+            })
         })
     }
 
     /// Fenced gates whose terminal publication is still due, as
     /// `(thread_id, launch_generation)`.
     pub fn gates_with_publication_due(&self) -> Result<Vec<(String, String)>> {
-        let conn = self.lock_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT thread_id, launch_generation FROM launch_accounting_gate
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT thread_id, launch_generation FROM launch_accounting_gate
                  WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                    AND state = 'fenced' AND terminal_publication_due = 1
                  ORDER BY thread_id, launch_generation",
-            )
-            .context("prepare publication-due scan")?;
-        let rows = stmt
-            .query_map(rusqlite::params![self.site_id, self.epoch_i64()], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .context("scan publication-due gates")?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("collect publication-due gates")?;
-        Ok(rows)
+                )
+                .context("prepare publication-due scan")?;
+            let rows = stmt
+                .query_map(rusqlite::params![self.site_id, self.epoch_i64()], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .context("scan publication-due gates")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect publication-due gates")?;
+            Ok(rows)
+        })
     }
 
     /// Whether an exact account row exists (any state).
@@ -6327,23 +6524,24 @@ impl AccountingDb {
         account_kind: &str,
         scope_id: &str,
     ) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        let exists: i64 = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM budget_account
+        self.with_conn(|conn| {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM budget_account
                  WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                    AND execution_budget_id = ?3 AND account_kind = ?4 AND scope_id = ?5)",
-                rusqlite::params![
-                    self.site_id,
-                    self.epoch_i64(),
-                    execution_budget_id,
-                    account_kind,
-                    scope_id
-                ],
-                |row| row.get(0),
-            )
-            .context("check account existence")?;
-        Ok(exists != 0)
+                    rusqlite::params![
+                        self.site_id,
+                        self.epoch_i64(),
+                        execution_budget_id,
+                        account_kind,
+                        scope_id
+                    ],
+                    |row| row.get(0),
+                )
+                .context("check account existence")?;
+            Ok(exists != 0)
+        })
     }
 
     /// Whether the ledger holds ANY durable history for an execution budget
@@ -6353,10 +6551,10 @@ impl AccountingDb {
     /// lose, whereas an identity WITH history and a missing account is an
     /// integrity failure that must never be re-minted from configured limits.
     pub fn execution_budget_has_history(&self, execution_budget_id: &str) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        let exists: i64 = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM budget_account
+        self.with_conn(|conn| {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM budget_account
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND execution_budget_id = ?3)
                  OR EXISTS(SELECT 1 FROM provider_attempt_reservation
@@ -6367,19 +6565,20 @@ impl AccountingDb {
                        AND execution_budget_id = ?3)
                  OR EXISTS(SELECT 1 FROM accounting_operational_fact
                      WHERE execution_budget_id = ?3)",
-                rusqlite::params![self.site_id, self.epoch_i64(), execution_budget_id],
-                |row| row.get(0),
-            )
-            .context("check execution budget history")?;
-        Ok(exists != 0)
+                    rusqlite::params![self.site_id, self.epoch_i64(), execution_budget_id],
+                    |row| row.get(0),
+                )
+                .context("check execution budget history")?;
+            Ok(exists != 0)
+        })
     }
 
     /// Whether any attempt or fact references a directive budget identity.
     pub fn directive_budget_has_history(&self, directive_budget_id: &str) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        let exists: i64 = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM budget_account
+        self.with_conn(|conn| {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM budget_account
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND account_kind = 'directive_item' AND scope_id = ?3)
                  OR EXISTS(SELECT 1 FROM provider_attempt_reservation
@@ -6388,11 +6587,12 @@ impl AccountingDb {
                  OR EXISTS(SELECT 1 FROM resource_financial_operation
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND directive_budget_id = ?3)",
-                rusqlite::params![self.site_id, self.epoch_i64(), directive_budget_id],
-                |row| row.get(0),
-            )
-            .context("check directive budget history")?;
-        Ok(exists != 0)
+                    rusqlite::params![self.site_id, self.epoch_i64(), directive_budget_id],
+                    |row| row.get(0),
+                )
+                .context("check directive budget history")?;
+            Ok(exists != 0)
+        })
     }
 
     /// Launch generations whose accounting gate is still OPEN for one thread.
@@ -6400,24 +6600,25 @@ impl AccountingDb {
     /// with no reservation yet is still an open admission surface a racing
     /// reserve callback could use.
     pub fn open_gates_for_thread(&self, thread_id: &str) -> Result<Vec<String>> {
-        let conn = self.lock_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT launch_generation FROM launch_accounting_gate
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT launch_generation FROM launch_accounting_gate
                  WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                    AND thread_id = ?3 AND state = 'open'
                  ORDER BY launch_generation",
-            )
-            .context("prepare open-gate scan")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![self.site_id, self.epoch_i64(), thread_id],
-                |row| row.get(0),
-            )
-            .context("scan open gates")?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("collect open gates")?;
-        Ok(rows)
+                )
+                .context("prepare open-gate scan")?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![self.site_id, self.epoch_i64(), thread_id],
+                    |row| row.get(0),
+                )
+                .context("scan open gates")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect open gates")?;
+            Ok(rows)
+        })
     }
 }
 
@@ -6431,9 +6632,10 @@ impl AccountingDb {
     /// the same attempt coordinate is an integrity conflict, never a second
     /// attempt. Insufficient balance records a durable denial with no debit.
     pub fn reserve_provider_attempt(&self, args: ReserveArgs<'_>) -> Result<ReserveOutcome> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "accounting reserve", || {
-            self.reserve_in_tx(&conn, &args)
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "accounting reserve", || {
+                self.reserve_in_tx(&conn, &args)
+            })
         })
     }
 
@@ -7053,76 +7255,80 @@ impl AccountingDb {
         now_ms: i64,
         acceptance_window_ms: i64,
     ) -> Result<IssueOutcome> {
-        let conn = self.lock_conn()?;
-        let (outcome, action) = immediate_transaction(&conn, "accounting issue", || {
-            let row = self
-                .load_reservation_by_id(&conn, attempt_id)?
-                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
-            if row.thread_id != thread_id {
-                bail!("attempt {attempt_id} belongs to thread {}", row.thread_id);
-            }
-            // §7.8 ordering: exact recorded operation wins over stale state.
-            if let Some((digest, response)) = self.load_operation(&conn, attempt_id, "issue", 2)? {
-                if digest == request_hash {
-                    let stored: StoredIssueResponse = serde_json::from_str(&response)
-                        .context("decode recorded issue response")?;
-                    self.bump_recovery_count(&conn, attempt_id, "issue", 2)?;
-                    let action = stored
-                        .financial_sequence
-                        .map(|sequence| AnchorAction::Cover { sequence })
-                        .unwrap_or(AnchorAction::None);
-                    let outcome = if stored.issued {
-                        IssueOutcome::Issued { replayed: true }
-                    } else {
-                        IssueOutcome::ReleasedBeforeIssue {
-                            reason: stored
-                                .reason
-                                .as_deref()
-                                .and_then(ReconciliationReason::parse)
-                                .unwrap_or(ReconciliationReason::AuthorityExpiredBeforeIssue),
-                            replayed: true,
-                        }
-                    };
-                    return Ok((outcome, action));
+        self.with_conn(|conn| {
+            let (outcome, action) = immediate_transaction(&conn, "accounting issue", || {
+                let row = self
+                    .load_reservation_by_id(&conn, attempt_id)?
+                    .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+                if row.thread_id != thread_id {
+                    bail!("attempt {attempt_id} belongs to thread {}", row.thread_id);
                 }
-                bail!(
-                    "attempt {attempt_id} issue operation exists with a different request \
+                // §7.8 ordering: exact recorded operation wins over stale state.
+                if let Some((digest, response)) =
+                    self.load_operation(&conn, attempt_id, "issue", 2)?
+                {
+                    if digest == request_hash {
+                        let stored: StoredIssueResponse = serde_json::from_str(&response)
+                            .context("decode recorded issue response")?;
+                        self.bump_recovery_count(&conn, attempt_id, "issue", 2)?;
+                        let action = stored
+                            .financial_sequence
+                            .map(|sequence| AnchorAction::Cover { sequence })
+                            .unwrap_or(AnchorAction::None);
+                        let outcome = if stored.issued {
+                            IssueOutcome::Issued { replayed: true }
+                        } else {
+                            IssueOutcome::ReleasedBeforeIssue {
+                                reason: stored
+                                    .reason
+                                    .as_deref()
+                                    .and_then(ReconciliationReason::parse)
+                                    .unwrap_or(ReconciliationReason::AuthorityExpiredBeforeIssue),
+                                replayed: true,
+                            }
+                        };
+                        return Ok((outcome, action));
+                    }
+                    bail!(
+                        "attempt {attempt_id} issue operation exists with a different request \
                      hash; integrity conflict"
-                );
-            }
-            if row.request_hash != request_hash {
-                bail!("attempt {attempt_id} request hash mismatch; integrity conflict");
-            }
-            if row.launch_generation != launch_generation {
-                bail!(
-                    "attempt {attempt_id} belongs to launch generation {}; caller generation \
+                    );
+                }
+                if row.request_hash != request_hash {
+                    bail!("attempt {attempt_id} request hash mismatch; integrity conflict");
+                }
+                if row.launch_generation != launch_generation {
+                    bail!(
+                        "attempt {attempt_id} belongs to launch generation {}; caller generation \
                      {launch_generation} is fenced",
-                    row.launch_generation
-                );
-            }
-            let gate = self
-                .load_gate(&conn, thread_id, launch_generation)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "launch accounting gate {thread_id}/{launch_generation} is absent"
-                    )
-                })?;
-            if gate.state != "open" {
-                bail!(
-                    "launch accounting gate {thread_id}/{launch_generation} is fenced; issue \
+                        row.launch_generation
+                    );
+                }
+                let gate = self
+                    .load_gate(&conn, thread_id, launch_generation)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "launch accounting gate {thread_id}/{launch_generation} is absent"
+                        )
+                    })?;
+                if gate.state != "open" {
+                    bail!(
+                        "launch accounting gate {thread_id}/{launch_generation} is fenced; issue \
                      rejects"
-                );
-            }
-            if row.state != AttemptBudgetState::Reserved {
-                bail!(
-                    "attempt {attempt_id} is {}; only a reserved attempt can be issued",
-                    row.state.as_str()
-                );
-            }
-            let authority: ProviderAccountingAuthority = serde_json::from_str(&row.authority_json)
-                .context("decode stored accounting authority")?;
-            let release_reason =
-                if gate.credential_binding_digest.as_deref() != current_credential_binding_digest {
+                    );
+                }
+                if row.state != AttemptBudgetState::Reserved {
+                    bail!(
+                        "attempt {attempt_id} is {}; only a reserved attempt can be issued",
+                        row.state.as_str()
+                    );
+                }
+                let authority: ProviderAccountingAuthority =
+                    serde_json::from_str(&row.authority_json)
+                        .context("decode stored accounting authority")?;
+                let release_reason = if gate.credential_binding_digest.as_deref()
+                    != current_credential_binding_digest
+                {
                     Some(ReconciliationReason::CredentialUnavailableBeforeIssue)
                 } else if certificate_expiry_ms(&authority).is_some_and(|expires_at_ms| {
                     expires_at_ms <= now_ms.saturating_add(acceptance_window_ms)
@@ -7131,30 +7337,81 @@ impl AccountingDb {
                 } else {
                     None
                 };
-            if let Some(reason) = release_reason {
-                self.release_attempt_holds(&conn, attempt_id, now_ms)?;
-                conn.execute(
-                    "UPDATE provider_attempt_reservation
+                if let Some(reason) = release_reason {
+                    self.release_attempt_holds(&conn, attempt_id, now_ms)?;
+                    conn.execute(
+                        "UPDATE provider_attempt_reservation
                          SET state = 'released_unissued', reconciliation_reason = ?1,
                              settled_at_ms = ?2
                          WHERE attempt_id = ?3",
-                    rusqlite::params![reason.as_str(), now_ms, attempt_id],
+                        rusqlite::params![reason.as_str(), now_ms, attempt_id],
+                    )
+                    .context("release invalid reservation before issue")?;
+                    self.enqueue_transition(
+                        &conn,
+                        &row,
+                        &TransitionExtras {
+                            sequence: 2,
+                            state: AttemptBudgetState::ReleasedUnissued,
+                            observation: false,
+                            budget_charge_nanos: None,
+                            provider_actual_nanos: None,
+                            released_nanos: Some(row.reserved_nanos),
+                            charge_basis: None,
+                            reason: Some(reason),
+                            occurred_at_ms: now_ms,
+                        },
+                    )?;
+                    self.insert_operation(
+                        &conn,
+                        attempt_id,
+                        "issue",
+                        2,
+                        request_hash,
+                        &serde_json::to_string(&StoredIssueResponse {
+                            issued: false,
+                            reason: Some(reason.as_str().to_string()),
+                            financial_sequence: None,
+                        })
+                        .context("encode released issue response")?,
+                    )?;
+                    return Ok((
+                        IssueOutcome::ReleasedBeforeIssue {
+                            reason,
+                            replayed: false,
+                        },
+                        AnchorAction::None,
+                    ));
+                }
+                conn.execute(
+                    "UPDATE provider_attempt_reservation
+                 SET state = 'issued', issued_at_ms = ?1
+                 WHERE attempt_id = ?2",
+                    rusqlite::params![now_ms, attempt_id],
                 )
-                .context("release invalid reservation before issue")?;
-                self.enqueue_transition(
+                .context("mark attempt issued")?;
+                let (_, fingerprint) = self.enqueue_transition(
                     &conn,
                     &row,
                     &TransitionExtras {
                         sequence: 2,
-                        state: AttemptBudgetState::ReleasedUnissued,
+                        state: AttemptBudgetState::Issued,
                         observation: false,
                         budget_charge_nanos: None,
                         provider_actual_nanos: None,
-                        released_nanos: Some(row.reserved_nanos),
+                        released_nanos: None,
                         charge_basis: None,
-                        reason: Some(reason),
+                        reason: None,
                         occurred_at_ms: now_ms,
                     },
+                )?;
+                let (sequence, digest) = self.commit_financial_transition(
+                    &conn,
+                    "issued",
+                    Some(attempt_id),
+                    Some(&row.authority_digest),
+                    &fingerprint,
+                    now_ms,
                 )?;
                 self.insert_operation(
                     &conn,
@@ -7163,70 +7420,20 @@ impl AccountingDb {
                     2,
                     request_hash,
                     &serde_json::to_string(&StoredIssueResponse {
-                        issued: false,
-                        reason: Some(reason.as_str().to_string()),
-                        financial_sequence: None,
+                        issued: true,
+                        reason: None,
+                        financial_sequence: Some(sequence),
                     })
-                    .context("encode released issue response")?,
+                    .context("encode issue response")?,
                 )?;
-                return Ok((
-                    IssueOutcome::ReleasedBeforeIssue {
-                        reason,
-                        replayed: false,
-                    },
-                    AnchorAction::None,
-                ));
-            }
-            conn.execute(
-                "UPDATE provider_attempt_reservation
-                 SET state = 'issued', issued_at_ms = ?1
-                 WHERE attempt_id = ?2",
-                rusqlite::params![now_ms, attempt_id],
-            )
-            .context("mark attempt issued")?;
-            let (_, fingerprint) = self.enqueue_transition(
-                &conn,
-                &row,
-                &TransitionExtras {
-                    sequence: 2,
-                    state: AttemptBudgetState::Issued,
-                    observation: false,
-                    budget_charge_nanos: None,
-                    provider_actual_nanos: None,
-                    released_nanos: None,
-                    charge_basis: None,
-                    reason: None,
-                    occurred_at_ms: now_ms,
-                },
-            )?;
-            let (sequence, digest) = self.commit_financial_transition(
-                &conn,
-                "issued",
-                Some(attempt_id),
-                Some(&row.authority_digest),
-                &fingerprint,
-                now_ms,
-            )?;
-            self.insert_operation(
-                &conn,
-                attempt_id,
-                "issue",
-                2,
-                request_hash,
-                &serde_json::to_string(&StoredIssueResponse {
-                    issued: true,
-                    reason: None,
-                    financial_sequence: Some(sequence),
-                })
-                .context("encode issue response")?,
-            )?;
-            Ok((
-                IssueOutcome::Issued { replayed: false },
-                AnchorAction::Advance { sequence, digest },
-            ))
-        })?;
-        self.resolve_anchor_action(&conn, action)?;
-        Ok(outcome)
+                Ok((
+                    IssueOutcome::Issued { replayed: false },
+                    AnchorAction::Advance { sequence, digest },
+                ))
+            })?;
+            self.resolve_anchor_action(&conn, action)?;
+            Ok(outcome)
+        })
     }
 }
 
@@ -7430,28 +7637,29 @@ impl AccountingDb {
         authority_digest: &str,
         now_ms: i64,
     ) -> Result<SettleOutcome> {
-        let conn = self.lock_conn()?;
-        let (outcome, action, disable_admission) =
-            immediate_transaction(&conn, "accounting settle", || {
-                self.settle_in_tx(
-                    &conn,
-                    thread_id,
-                    launch_generation,
-                    attempt_id,
-                    request_hash,
-                    provider_coordinate_key,
-                    spend,
-                    tokens,
-                    retry,
-                    authority_digest,
-                    now_ms,
-                )
-            })?;
-        if disable_admission {
-            self.disable_hard_admission();
-        }
-        self.resolve_anchor_action(&conn, action)?;
-        Ok(outcome)
+        self.with_conn(|conn| {
+            let (outcome, action, disable_admission) =
+                immediate_transaction(&conn, "accounting settle", || {
+                    self.settle_in_tx(
+                        &conn,
+                        thread_id,
+                        launch_generation,
+                        attempt_id,
+                        request_hash,
+                        provider_coordinate_key,
+                        spend,
+                        tokens,
+                        retry,
+                        authority_digest,
+                        now_ms,
+                    )
+                })?;
+            if disable_admission {
+                self.disable_hard_admission();
+            }
+            self.resolve_anchor_action(&conn, action)?;
+            Ok(outcome)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8116,86 +8324,87 @@ impl AccountingDb {
         reason: ReconciliationReason,
         now_ms: i64,
     ) -> Result<(AttemptBudgetState, bool)> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "accounting release", || {
-            let row = self
-                .load_reservation_by_id(&conn, attempt_id)?
-                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
-            if row.thread_id != thread_id {
-                bail!("attempt {attempt_id} belongs to thread {}", row.thread_id);
-            }
-            let request_digest = canonical_fingerprint(&serde_json::json!({
-                "request_hash": request_hash,
-                "reason": reason.as_str(),
-            }))?;
-            if let Some((digest, response)) =
-                self.load_operation(&conn, attempt_id, "release", 2)?
-            {
-                if digest == request_digest {
-                    let stored: StoredReleaseResponse = serde_json::from_str(&response)
-                        .context("decode recorded release response")?;
-                    self.bump_recovery_count(&conn, attempt_id, "release", 2)?;
-                    let state = AttemptBudgetState::parse(&stored.state)
-                        .ok_or_else(|| anyhow::anyhow!("recorded release state is unknown"))?;
-                    return Ok((state, true));
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "accounting release", || {
+                let row = self
+                    .load_reservation_by_id(&conn, attempt_id)?
+                    .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+                if row.thread_id != thread_id {
+                    bail!("attempt {attempt_id} belongs to thread {}", row.thread_id);
                 }
-                bail!(
-                    "attempt {attempt_id} release operation exists with a different request \
+                let request_digest = canonical_fingerprint(&serde_json::json!({
+                    "request_hash": request_hash,
+                    "reason": reason.as_str(),
+                }))?;
+                if let Some((digest, response)) =
+                    self.load_operation(&conn, attempt_id, "release", 2)?
+                {
+                    if digest == request_digest {
+                        let stored: StoredReleaseResponse = serde_json::from_str(&response)
+                            .context("decode recorded release response")?;
+                        self.bump_recovery_count(&conn, attempt_id, "release", 2)?;
+                        let state = AttemptBudgetState::parse(&stored.state)
+                            .ok_or_else(|| anyhow::anyhow!("recorded release state is unknown"))?;
+                        return Ok((state, true));
+                    }
+                    bail!(
+                        "attempt {attempt_id} release operation exists with a different request \
                      digest; integrity conflict"
-                );
-            }
-            if row.request_hash != request_hash {
-                bail!("attempt {attempt_id} request hash mismatch; integrity conflict");
-            }
-            if row.launch_generation != launch_generation {
-                bail!(
-                    "attempt {attempt_id} belongs to launch generation {}; caller generation \
+                    );
+                }
+                if row.request_hash != request_hash {
+                    bail!("attempt {attempt_id} request hash mismatch; integrity conflict");
+                }
+                if row.launch_generation != launch_generation {
+                    bail!(
+                        "attempt {attempt_id} belongs to launch generation {}; caller generation \
                      {launch_generation} is fenced",
-                    row.launch_generation
-                );
-            }
-            if row.state != AttemptBudgetState::Reserved {
-                bail!(
-                    "attempt {attempt_id} is {}; only a reserved attempt releases unissued",
-                    row.state.as_str()
-                );
-            }
-            self.release_attempt_holds(&conn, attempt_id, now_ms)?;
-            conn.execute(
-                "UPDATE provider_attempt_reservation
+                        row.launch_generation
+                    );
+                }
+                if row.state != AttemptBudgetState::Reserved {
+                    bail!(
+                        "attempt {attempt_id} is {}; only a reserved attempt releases unissued",
+                        row.state.as_str()
+                    );
+                }
+                self.release_attempt_holds(&conn, attempt_id, now_ms)?;
+                conn.execute(
+                    "UPDATE provider_attempt_reservation
                  SET state = 'released_unissued', reconciliation_reason = ?1,
                      settled_at_ms = ?2
                  WHERE attempt_id = ?3",
-                rusqlite::params![reason.as_str(), now_ms, attempt_id],
-            )
-            .context("release unissued reservation")?;
-            self.enqueue_transition(
-                &conn,
-                &row,
-                &TransitionExtras {
-                    sequence: 2,
-                    state: AttemptBudgetState::ReleasedUnissued,
-                    observation: false,
-                    budget_charge_nanos: None,
-                    provider_actual_nanos: None,
-                    released_nanos: Some(row.reserved_nanos),
-                    charge_basis: None,
-                    reason: Some(reason),
-                    occurred_at_ms: now_ms,
-                },
-            )?;
-            self.insert_operation(
-                &conn,
-                attempt_id,
-                "release",
-                2,
-                &request_digest,
-                &serde_json::to_string(&StoredReleaseResponse {
-                    state: AttemptBudgetState::ReleasedUnissued.as_str().to_string(),
-                })
-                .context("encode release response")?,
-            )?;
-            Ok((AttemptBudgetState::ReleasedUnissued, false))
+                    rusqlite::params![reason.as_str(), now_ms, attempt_id],
+                )
+                .context("release unissued reservation")?;
+                self.enqueue_transition(
+                    &conn,
+                    &row,
+                    &TransitionExtras {
+                        sequence: 2,
+                        state: AttemptBudgetState::ReleasedUnissued,
+                        observation: false,
+                        budget_charge_nanos: None,
+                        provider_actual_nanos: None,
+                        released_nanos: Some(row.reserved_nanos),
+                        charge_basis: None,
+                        reason: Some(reason),
+                        occurred_at_ms: now_ms,
+                    },
+                )?;
+                self.insert_operation(
+                    &conn,
+                    attempt_id,
+                    "release",
+                    2,
+                    &request_digest,
+                    &serde_json::to_string(&StoredReleaseResponse {
+                        state: AttemptBudgetState::ReleasedUnissued.as_str().to_string(),
+                    })
+                    .context("encode release response")?,
+                )?;
+                Ok((AttemptBudgetState::ReleasedUnissued, false))
+            })
         })
     }
 
@@ -8218,44 +8427,45 @@ impl AccountingDb {
                  covers them"
             );
         }
-        let conn = self.lock_conn()?;
-        let Some(row) = self.load_reservation_by_id(&conn, attempt_id)? else {
-            return Ok(None);
-        };
-        if row.thread_id != thread_id {
-            return Ok(None);
-        }
-        let publication_proof = self
-            .load_operation(&conn, attempt_id, "provider_call_publication", 1)?
-            .map(|(_, response)| {
-                serde_json::from_str(&response)
-                    .context("decode provider-call publication proof on attempt read")
-            })
-            .transpose()?;
-        let retry_advance = self.load_retry_advance(&conn, &row)?;
-        Ok(Some(ProviderAttemptBudgetRecord {
-            attempt_id: row.attempt_id,
-            turn: row.turn,
-            attempt_number: row.attempt_number,
-            state: row.state,
-            request_hash: row.request_hash,
-            authority_digest: HexDigest::new(row.authority_digest)
-                .map_err(|error| anyhow::anyhow!("stored authority digest: {error}"))?,
-            reserved: UsdNanos::from_nanos(row.reserved_nanos)
-                .map_err(|error| anyhow::anyhow!("stored reservation: {error}"))?,
-            budget_charge: row
-                .budget_charge_nanos
-                .map(UsdNanos::from_nanos)
-                .transpose()
-                .map_err(|error| anyhow::anyhow!("stored charge: {error}"))?,
-            charge_basis: row.charge_basis.as_deref().and_then(ChargeBasis::parse),
-            reason: row
-                .reconciliation_reason
-                .as_deref()
-                .and_then(ReconciliationReason::parse),
-            publication_proof,
-            retry_advance,
-        }))
+        self.with_conn(|conn| {
+            let Some(row) = self.load_reservation_by_id(&conn, attempt_id)? else {
+                return Ok(None);
+            };
+            if row.thread_id != thread_id {
+                return Ok(None);
+            }
+            let publication_proof = self
+                .load_operation(&conn, attempt_id, "provider_call_publication", 1)?
+                .map(|(_, response)| {
+                    serde_json::from_str(&response)
+                        .context("decode provider-call publication proof on attempt read")
+                })
+                .transpose()?;
+            let retry_advance = self.load_retry_advance(&conn, &row)?;
+            Ok(Some(ProviderAttemptBudgetRecord {
+                attempt_id: row.attempt_id,
+                turn: row.turn,
+                attempt_number: row.attempt_number,
+                state: row.state,
+                request_hash: row.request_hash,
+                authority_digest: HexDigest::new(row.authority_digest)
+                    .map_err(|error| anyhow::anyhow!("stored authority digest: {error}"))?,
+                reserved: UsdNanos::from_nanos(row.reserved_nanos)
+                    .map_err(|error| anyhow::anyhow!("stored reservation: {error}"))?,
+                budget_charge: row
+                    .budget_charge_nanos
+                    .map(UsdNanos::from_nanos)
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!("stored charge: {error}"))?,
+                charge_basis: row.charge_basis.as_deref().and_then(ChargeBasis::parse),
+                reason: row
+                    .reconciliation_reason
+                    .as_deref()
+                    .and_then(ReconciliationReason::parse),
+                publication_proof,
+                retry_advance,
+            }))
+        })
     }
 }
 
@@ -8276,11 +8486,11 @@ impl AccountingDb {
     /// unpublished transition sequence per typed operation is claimable, and a live
     /// lease excludes concurrent claimants.
     pub fn claim_next_unpublished(&self, now_ms: i64, lease_ms: i64) -> Result<Option<OutboxRow>> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "accounting outbox claim", || {
-            let claimed = conn
-                .query_row(
-                    "SELECT o.outbox_seq, o.operation_id, o.audit_chain_root_id,
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "accounting outbox claim", || {
+                let claimed = conn
+                    .query_row(
+                        "SELECT o.outbox_seq, o.operation_id, o.audit_chain_root_id,
                             o.transition_sequence, o.transition_id, o.event_type,
                             o.payload, o.payload_fingerprint
                      FROM accounting_audit_outbox o
@@ -8293,53 +8503,55 @@ impl AccountingDb {
                              AND i.published_chain_seq IS NULL)
                      ORDER BY o.outbox_seq
                      LIMIT 1",
-                    rusqlite::params![now_ms],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, String>(5)?,
-                            row.get::<_, String>(6)?,
-                            row.get::<_, String>(7)?,
-                        ))
-                    },
-                )
-                .optional()
-                .context("select claimable outbox row")?;
-            let Some((
-                outbox_seq,
-                operation_id,
-                audit_chain_root_id,
-                transition_sequence,
-                transition_id,
-                event_type,
-                payload,
-                payload_fingerprint,
-            )) = claimed
-            else {
-                return Ok(None);
-            };
-            let lease_expires_at_ms = now_ms.saturating_add(lease_ms.max(0));
-            conn.execute(
-                "UPDATE accounting_audit_outbox SET lease_expires_at_ms = ?1
+                        rusqlite::params![now_ms],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
+                                row.get::<_, String>(6)?,
+                                row.get::<_, String>(7)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .context("select claimable outbox row")?;
+                let Some((
+                    outbox_seq,
+                    operation_id,
+                    audit_chain_root_id,
+                    transition_sequence,
+                    transition_id,
+                    event_type,
+                    payload,
+                    payload_fingerprint,
+                )) = claimed
+                else {
+                    return Ok(None);
+                };
+                let lease_expires_at_ms = now_ms.saturating_add(lease_ms.max(0));
+                conn.execute(
+                    "UPDATE accounting_audit_outbox SET lease_expires_at_ms = ?1
                  WHERE outbox_seq = ?2",
-                rusqlite::params![lease_expires_at_ms, outbox_seq],
-            )
-            .context("lease outbox row")?;
-            Ok(Some(OutboxRow {
-                outbox_seq,
-                operation_id,
-                audit_chain_root_id,
-                transition_sequence: u32::try_from(transition_sequence)
-                    .context("stored transition sequence is not a valid u32")?,
-                transition_id,
-                event_type,
-                payload: serde_json::from_str(&payload).context("decode stored outbox payload")?,
-                payload_fingerprint,
-            }))
+                    rusqlite::params![lease_expires_at_ms, outbox_seq],
+                )
+                .context("lease outbox row")?;
+                Ok(Some(OutboxRow {
+                    outbox_seq,
+                    operation_id,
+                    audit_chain_root_id,
+                    transition_sequence: u32::try_from(transition_sequence)
+                        .context("stored transition sequence is not a valid u32")?,
+                    transition_id,
+                    event_type,
+                    payload: serde_json::from_str(&payload)
+                        .context("decode stored outbox payload")?,
+                    payload_fingerprint,
+                }))
+            })
         })
     }
 
@@ -8347,61 +8559,63 @@ impl AccountingDb {
     /// outbox row. Idempotent for the same sequence; a different sequence
     /// for an already-published row is an integrity conflict.
     pub fn mark_outbox_published(&self, outbox_seq: i64, chain_seq: i64) -> Result<()> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "accounting outbox publish", || {
-            let existing: Option<Option<i64>> = conn
-                .query_row(
-                    "SELECT published_chain_seq FROM accounting_audit_outbox
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "accounting outbox publish", || {
+                let existing: Option<Option<i64>> = conn
+                    .query_row(
+                        "SELECT published_chain_seq FROM accounting_audit_outbox
                      WHERE outbox_seq = ?1",
-                    rusqlite::params![outbox_seq],
-                    |row| row.get(0),
-                )
-                .optional()
-                .context("load outbox publication state")?;
-            match existing {
-                None => bail!("outbox row {outbox_seq} is absent"),
-                Some(Some(recorded)) if recorded == chain_seq => Ok(()),
-                Some(Some(recorded)) => bail!(
-                    "outbox row {outbox_seq} was already published at chain sequence \
+                        rusqlite::params![outbox_seq],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .context("load outbox publication state")?;
+                match existing {
+                    None => bail!("outbox row {outbox_seq} is absent"),
+                    Some(Some(recorded)) if recorded == chain_seq => Ok(()),
+                    Some(Some(recorded)) => bail!(
+                        "outbox row {outbox_seq} was already published at chain sequence \
                      {recorded}, not {chain_seq}; integrity conflict"
-                ),
-                Some(None) => {
-                    conn.execute(
-                        "UPDATE accounting_audit_outbox
+                    ),
+                    Some(None) => {
+                        conn.execute(
+                            "UPDATE accounting_audit_outbox
                          SET published_chain_seq = ?1, lease_expires_at_ms = NULL
                          WHERE outbox_seq = ?2",
-                        rusqlite::params![chain_seq, outbox_seq],
-                    )
-                    .context("mark outbox row published")?;
-                    Ok(())
+                            rusqlite::params![chain_seq, outbox_seq],
+                        )
+                        .context("mark outbox row published")?;
+                        Ok(())
+                    }
                 }
-            }
+            })
         })
     }
 
     /// `(unpublished_count, oldest_unpublished_created_at_ms)` for outbox
     /// backlog health gating.
     pub fn unpublished_outbox_stats(&self) -> Result<(u64, Option<i64>)> {
-        let conn = self.lock_conn()?;
-        let (count, oldest): (i64, Option<i64>) = conn
-            .query_row(
-                "SELECT COUNT(*), MIN(created_at_ms) FROM accounting_audit_outbox
+        self.with_conn(|conn| {
+            let (count, oldest): (i64, Option<i64>) = conn
+                .query_row(
+                    "SELECT COUNT(*), MIN(created_at_ms) FROM accounting_audit_outbox
                  WHERE published_chain_seq IS NULL",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .context("read unpublished outbox stats")?;
-        Ok((count as u64, oldest))
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .context("read unpublished outbox stats")?;
+            Ok((count as u64, oldest))
+        })
     }
 
     /// Unpublished provider or resource testimony owned by one placement.
     /// Checkpointing uses this exact fence instead of blocking on unrelated
     /// node-wide accounting activity.
     pub fn unpublished_outbox_for_thread(&self, thread_id: &str) -> Result<u64> {
-        let conn = self.lock_conn()?;
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM accounting_audit_outbox AS outbox
+        self.with_conn(|conn| {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM accounting_audit_outbox AS outbox
                   WHERE outbox.published_chain_seq IS NULL
                     AND (
                         EXISTS(SELECT 1 FROM provider_attempt_reservation AS attempt
@@ -8411,21 +8625,22 @@ impl AccountingDb {
                                 WHERE resource.operation_id=outbox.operation_id
                                   AND resource.thread_id=?1)
                     )",
-                [thread_id],
-                |row| row.get(0),
-            )
-            .context("read placement accounting outbox state")?;
-        u64::try_from(count).context("placement accounting outbox count is negative")
+                    [thread_id],
+                    |row| row.get(0),
+                )
+                .context("read placement accounting outbox state")?;
+            u64::try_from(count).context("placement accounting outbox count is negative")
+        })
     }
 
     /// Live unresolved count and logical held amount from the authoritative
     /// ledger. This intentionally does not sum execution + directive debit
     /// rows, which would double-count the same reservation.
     pub fn active_reservation_stats(&self) -> Result<ActiveReservationStats> {
-        let conn = self.lock_conn()?;
-        let (count, held, oldest): (i64, i64, Option<i64>) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(reserved_usd_nanos), 0), MIN(created_at_ms)
+        self.with_conn(|conn| {
+            let (count, held, oldest): (i64, i64, Option<i64>) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(reserved_usd_nanos), 0), MIN(created_at_ms)
                    FROM (
                      SELECT reserved_usd_nanos, created_at_ms
                        FROM provider_attempt_reservation
@@ -8435,17 +8650,18 @@ impl AccountingDb {
                        FROM resource_financial_operation
                       WHERE state IN ('reserved', 'issued')
                    )",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .context("read active reservation stats")?;
-        if count < 0 || held < 0 {
-            bail!("active reservation aggregate is negative; ledger integrity failure");
-        }
-        Ok(ActiveReservationStats {
-            unresolved_count: count as u64,
-            held_usd_nanos: held,
-            oldest_created_at_ms: oldest,
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .context("read active reservation stats")?;
+            if count < 0 || held < 0 {
+                bail!("active reservation aggregate is negative; ledger integrity failure");
+            }
+            Ok(ActiveReservationStats {
+                unresolved_count: count as u64,
+                held_usd_nanos: held,
+                oldest_created_at_ms: oldest,
+            })
         })
     }
 }
@@ -8460,93 +8676,104 @@ impl AccountingDb {
     pub fn nonterminal_reservations(
         &self,
     ) -> Result<Vec<(String, String, String, AttemptBudgetState)>> {
-        let conn = self.lock_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT attempt_id, thread_id, launch_generation, state
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT attempt_id, thread_id, launch_generation, state
                  FROM provider_attempt_reservation
                  WHERE state IN ('reserved', 'issued')
                  ORDER BY created_at_ms, attempt_id",
-            )
-            .context("prepare nonterminal reservation scan")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .context("scan nonterminal reservations")?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("collect nonterminal reservations")?;
-        rows.into_iter()
-            .map(|(attempt_id, thread_id, generation, state)| {
-                let state = AttemptBudgetState::parse(&state)
-                    .ok_or_else(|| anyhow::anyhow!("unknown attempt state {state:?}"))?;
-                Ok((attempt_id, thread_id, generation, state))
-            })
-            .collect()
-    }
-
-    /// Snapshot of every account under one execution budget.
-    pub fn account_snapshot(&self, execution_budget_id: &str) -> Result<Vec<AccountRow>> {
-        let conn = self.lock_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT account_id, account_kind, scope_id, state, limit_usd_nanos,
-                        committed_usd_nanos, held_usd_nanos, health
-                 FROM budget_account
-                 WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
-                   AND execution_budget_id = ?3
-                 ORDER BY account_kind, scope_id",
-            )
-            .context("prepare account snapshot")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![self.site_id, self.epoch_i64(), execution_budget_id],
-                |row| {
+                )
+                .context("prepare nonterminal reservation scan")?;
+            let rows = stmt
+                .query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, String>(7)?,
                     ))
-                },
-            )
-            .context("scan account snapshot")?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("collect account snapshot")?;
-        rows.into_iter()
-            .map(
-                |(account_id, account_kind, scope_id, state, limit, committed, held, health)| {
-                    Ok(AccountRow {
+                })
+                .context("scan nonterminal reservations")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect nonterminal reservations")?;
+            rows.into_iter()
+                .map(|(attempt_id, thread_id, generation, state)| {
+                    let state = AttemptBudgetState::parse(&state)
+                        .ok_or_else(|| anyhow::anyhow!("unknown attempt state {state:?}"))?;
+                    Ok((attempt_id, thread_id, generation, state))
+                })
+                .collect()
+        })
+    }
+
+    /// Snapshot of every account under one execution budget.
+    pub fn account_snapshot(&self, execution_budget_id: &str) -> Result<Vec<AccountRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT account_id, account_kind, scope_id, state, limit_usd_nanos,
+                        committed_usd_nanos, held_usd_nanos, health
+                 FROM budget_account
+                 WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                   AND execution_budget_id = ?3
+                 ORDER BY account_kind, scope_id",
+                )
+                .context("prepare account snapshot")?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![self.site_id, self.epoch_i64(), execution_budget_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    },
+                )
+                .context("scan account snapshot")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect account snapshot")?;
+            rows.into_iter()
+                .map(
+                    |(
                         account_id,
                         account_kind,
                         scope_id,
                         state,
-                        limit: limit
-                            .map(UsdNanos::from_nanos)
-                            .transpose()
-                            .map_err(|error| anyhow::anyhow!("stored limit: {error}"))?,
-                        committed: UsdNanos::from_nanos(committed)
-                            .map_err(|error| anyhow::anyhow!("stored committed: {error}"))?,
-                        held: UsdNanos::from_nanos(held)
-                            .map_err(|error| anyhow::anyhow!("stored held: {error}"))?,
-                        health: match health.as_str() {
-                            "healthy" => AuthorityAccountHealth::Healthy,
-                            "violated" => AuthorityAccountHealth::Violated,
-                            other => bail!("unknown account health {other:?}"),
-                        },
-                    })
-                },
-            )
-            .collect()
+                        limit,
+                        committed,
+                        held,
+                        health,
+                    )| {
+                        Ok(AccountRow {
+                            account_id,
+                            account_kind,
+                            scope_id,
+                            state,
+                            limit: limit
+                                .map(UsdNanos::from_nanos)
+                                .transpose()
+                                .map_err(|error| anyhow::anyhow!("stored limit: {error}"))?,
+                            committed: UsdNanos::from_nanos(committed)
+                                .map_err(|error| anyhow::anyhow!("stored committed: {error}"))?,
+                            held: UsdNanos::from_nanos(held)
+                                .map_err(|error| anyhow::anyhow!("stored held: {error}"))?,
+                            health: match health.as_str() {
+                                "healthy" => AuthorityAccountHealth::Healthy,
+                                "violated" => AuthorityAccountHealth::Violated,
+                                other => bail!("unknown account health {other:?}"),
+                            },
+                        })
+                    },
+                )
+                .collect()
+        })
     }
 
     /// Return the exact, non-authorizing allowance proposal for a target
@@ -8561,74 +8788,77 @@ impl AccountingDb {
         scope: &ryeos_state::objects::AdmittedAccountingScope,
     ) -> Result<AccountingHandoffFrontier> {
         scope.validate()?;
-        let conn = self.lock_conn()?;
-        if let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? {
-            if transfer.source_placement_thread_id != placement_thread_id
-                || transfer.source_chain_root_id != chain_root_id
-                || transfer.source_scope != *scope
-            {
-                bail!("retained accounting export belongs to another handoff source");
+        self.with_conn(|conn| {
+            if let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? {
+                if transfer.source_placement_thread_id != placement_thread_id
+                    || transfer.source_chain_root_id != chain_root_id
+                    || transfer.source_scope != *scope
+                {
+                    bail!("retained accounting export belongs to another handoff source");
+                }
+                self.resolve_anchor_action(
+                    &conn,
+                    AnchorAction::Cover {
+                        sequence: transfer.source_financial_sequence,
+                    },
+                )?;
+                return Ok(frontier_from_transfer(&transfer));
             }
-            self.resolve_anchor_action(
+            let resources = load_execution_resource_budget(
                 &conn,
-                AnchorAction::Cover {
-                    sequence: transfer.source_financial_sequence,
-                },
-            )?;
-            return Ok(frontier_from_transfer(&transfer));
-        }
-        let resources = load_execution_resource_budget(
-            &conn,
-            &scope.execution_budget_id,
-            &self.site_id,
-            self.epoch,
-        )?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "handoff execution accounting scope has no aggregate resource authority"
-            )
-        })?;
-        if resources.deadline_at_ms.is_some()
-            || resources.max_worker_executions.is_some()
-            || resources.max_provider_contacts.is_some()
-            || resources.used_worker_executions != 0
-            || resources.used_provider_contacts != 0
-        {
-            // The existing cross-site accounting transfer conserves monetary
-            // allowance, but it has no distributed operational-counter
-            // transfer. Minting the target budget from its local account birth
-            // would restart the deadline and counters. Refuse before fencing
-            // the source launch until that same anchored handoff protocol owns
-            // an aggregate-resource frontier too.
-            bail!("finite or consumed aggregate execution resources cannot cross a worker handoff");
-        }
-        immediate_transaction(&conn, "source handoff admission fence", || {
-            let open_generations = {
-                let mut stmt = conn.prepare(
-                    "SELECT launch_generation FROM launch_accounting_gate
+                &scope.execution_budget_id,
+                &self.site_id,
+                self.epoch,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "handoff execution accounting scope has no aggregate resource authority"
+                )
+            })?;
+            if resources.deadline_at_ms.is_some()
+                || resources.max_worker_executions.is_some()
+                || resources.max_provider_contacts.is_some()
+                || resources.used_worker_executions != 0
+                || resources.used_provider_contacts != 0
+            {
+                // The existing cross-site accounting transfer conserves monetary
+                // allowance, but it has no distributed operational-counter
+                // transfer. Minting the target budget from its local account birth
+                // would restart the deadline and counters. Refuse before fencing
+                // the source launch until that same anchored handoff protocol owns
+                // an aggregate-resource frontier too.
+                bail!(
+                    "finite or consumed aggregate execution resources cannot cross a worker handoff"
+                );
+            }
+            immediate_transaction(&conn, "source handoff admission fence", || {
+                let open_generations = {
+                    let mut stmt = conn.prepare(
+                        "SELECT launch_generation FROM launch_accounting_gate
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND thread_id = ?3 AND state = 'open'
                      ORDER BY launch_generation",
-                )?;
-                let generations = stmt
-                    .query_map(
-                        rusqlite::params![self.site_id, self.epoch_i64(), placement_thread_id],
-                        |row| row.get::<_, String>(0),
-                    )?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                generations
-            };
-            let now_ms = wall_clock_ms();
-            for generation in open_generations {
-                self.fence_generation_in_tx(
-                    &conn,
-                    placement_thread_id,
-                    &generation,
-                    ReconciliationReason::OwnerGenerationFenced,
-                    now_ms,
-                )?;
-            }
-            self.handoff_frontier_in_tx(&conn, placement_thread_id, chain_root_id, scope)
+                    )?;
+                    let generations = stmt
+                        .query_map(
+                            rusqlite::params![self.site_id, self.epoch_i64(), placement_thread_id],
+                            |row| row.get::<_, String>(0),
+                        )?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    generations
+                };
+                let now_ms = wall_clock_ms();
+                for generation in open_generations {
+                    self.fence_generation_in_tx(
+                        &conn,
+                        placement_thread_id,
+                        &generation,
+                        ReconciliationReason::OwnerGenerationFenced,
+                        now_ms,
+                    )?;
+                }
+                self.handoff_frontier_in_tx(&conn, placement_thread_id, chain_root_id, scope)
+            })
         })
     }
 
@@ -8637,18 +8867,19 @@ impl AccountingDb {
     /// handoff frontier. A crash before this acknowledgement is repaired by
     /// startup reconciliation from the already-terminal source thread.
     pub fn confirm_handoff_source_publication(&self, placement_thread_id: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now_ms = wall_clock_ms();
-        immediate_transaction(&conn, "source handoff publication confirmation", || {
-            conn.execute(
-                "UPDATE launch_accounting_gate
+        self.with_conn(|conn| {
+            let now_ms = wall_clock_ms();
+            immediate_transaction(&conn, "source handoff publication confirmation", || {
+                conn.execute(
+                    "UPDATE launch_accounting_gate
                  SET terminal_publication_due = 0, updated_at_ms = ?1
                  WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3
                    AND thread_id = ?4 AND state = 'fenced'
                    AND terminal_publication_due = 1",
-                rusqlite::params![now_ms, self.site_id, self.epoch_i64(), placement_thread_id,],
-            )?;
-            Ok(())
+                    rusqlite::params![now_ms, self.site_id, self.epoch_i64(), placement_thread_id,],
+                )?;
+                Ok(())
+            })
         })
     }
 
@@ -8973,34 +9204,36 @@ impl AccountingDb {
     }
 
     pub fn handoff_allowance_exported(&self, operation_id: &str) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? else {
-            return Ok(false);
-        };
-        self.resolve_anchor_action(
-            &conn,
-            AnchorAction::Cover {
-                sequence: transfer.source_financial_sequence,
-            },
-        )?;
-        Ok(true)
-    }
-
-    pub fn handoff_allowance_transfer(
-        &self,
-        operation_id: &str,
-    ) -> Result<Option<ryeos_state::objects::AccountingAllowanceTransfer>> {
-        let conn = self.lock_conn()?;
-        let transfer = self.load_handoff_transfer(&conn, operation_id)?;
-        if let Some(transfer) = &transfer {
+        self.with_conn(|conn| {
+            let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? else {
+                return Ok(false);
+            };
             self.resolve_anchor_action(
                 &conn,
                 AnchorAction::Cover {
                     sequence: transfer.source_financial_sequence,
                 },
             )?;
-        }
-        Ok(transfer)
+            Ok(true)
+        })
+    }
+
+    pub fn handoff_allowance_transfer(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<ryeos_state::objects::AccountingAllowanceTransfer>> {
+        self.with_conn(|conn| {
+            let transfer = self.load_handoff_transfer(&conn, operation_id)?;
+            if let Some(transfer) = &transfer {
+                self.resolve_anchor_action(
+                    &conn,
+                    AnchorAction::Cover {
+                        sequence: transfer.source_financial_sequence,
+                    },
+                )?;
+            }
+            Ok(transfer)
+        })
     }
 
     /// Irreversibly debit and anchor the exact target-attested allowance.
@@ -9024,7 +9257,7 @@ impl AccountingDb {
             "source_frontier":expected,
             "target_scope":target_scope,
         }))?;
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         let (transfer, action) = immediate_transaction(
             &conn,
             "source handoff allowance export",
@@ -9204,6 +9437,7 @@ impl AccountingDb {
         )?;
         self.resolve_anchor_action(&conn, action)?;
         Ok(transfer)
+        })
     }
 
     /// Journal the target allowance as prepared but not spendable.
@@ -9244,7 +9478,7 @@ impl AccountingDb {
         let directive_cap = optional_usd_nanos(directive_cap_usd_nanos)?;
         let source_scope_json = canonical_json_string(&serde_json::to_value(source_scope)?)?;
         let target_scope_json = canonical_json_string(&serde_json::to_value(scope)?)?;
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         immediate_transaction(&conn, "target handoff allowance preparation", || {
             if let Some((digest, state)) = conn
                 .query_row(
@@ -9329,6 +9563,7 @@ impl AccountingDb {
             )?;
             Ok(())
         })
+        })
     }
 
     /// Activate a prepared target scope only after the imported signed
@@ -9342,130 +9577,132 @@ impl AccountingDb {
         if transfer.content_hash()? != transfer_hash {
             bail!("accounting handoff transfer hash changed");
         }
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "target handoff allowance activation", || {
-            let retained = conn
-                .query_row(
-                    "SELECT source_scope_json, target_scope_json,
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "target handoff allowance activation", || {
+                let retained = conn
+                    .query_row(
+                        "SELECT source_scope_json, target_scope_json,
                             target_cap_usd_nanos, target_directive_cap_usd_nanos,
                             source_transfer_hash, state
                      FROM accounting_handoff_import WHERE operation_id = ?1",
-                    rusqlite::params![transfer.operation_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, Option<i64>>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                            row.get::<_, String>(5)?,
-                        ))
-                    },
-                )
-                .optional()?
-                .ok_or_else(|| anyhow::anyhow!("target handoff allowance was not prepared"))?;
-            let source_scope: ryeos_state::objects::AdmittedAccountingScope =
-                serde_json::from_str(&retained.0)?;
-            let target_scope: ryeos_state::objects::AdmittedAccountingScope =
-                serde_json::from_str(&retained.1)?;
-            if source_scope != transfer.source_scope
-                || target_scope != transfer.target_scope
-                || retained.2.map(u64::try_from).transpose()? != transfer.target_cap_usd_nanos
-                || retained.3.map(u64::try_from).transpose()?
-                    != transfer.target_directive_cap_usd_nanos
-            {
-                bail!("source accounting transfer differs from target preparation");
-            }
-            match retained.5.as_str() {
-                "active" if retained.4.as_deref() == Some(transfer_hash) => return Ok(()),
-                "active" => bail!("active target allowance names another source transfer"),
-                "prepared" if retained.4.is_none() => {}
-                "prepared" => bail!("prepared target allowance already names a transfer"),
-                "aborted" => bail!("aborted target allowance cannot be activated"),
-                other => bail!("target handoff allowance is {other}; activation refused"),
-            }
-            let now_ms = wall_clock_ms();
-            for (kind, scope_id) in
-                std::iter::once(("execution", target_scope.execution_budget_id.as_str())).chain(
-                    target_scope
-                        .directive_budget_id
-                        .as_deref()
-                        .map(|id| ("directive_item", id)),
-                )
-            {
-                let changed = conn.execute(
-                    "UPDATE budget_account SET state = 'active', updated_at_ms = ?1
+                        rusqlite::params![transfer.operation_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                                row.get::<_, Option<String>>(4)?,
+                                row.get::<_, String>(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .ok_or_else(|| anyhow::anyhow!("target handoff allowance was not prepared"))?;
+                let source_scope: ryeos_state::objects::AdmittedAccountingScope =
+                    serde_json::from_str(&retained.0)?;
+                let target_scope: ryeos_state::objects::AdmittedAccountingScope =
+                    serde_json::from_str(&retained.1)?;
+                if source_scope != transfer.source_scope
+                    || target_scope != transfer.target_scope
+                    || retained.2.map(u64::try_from).transpose()? != transfer.target_cap_usd_nanos
+                    || retained.3.map(u64::try_from).transpose()?
+                        != transfer.target_directive_cap_usd_nanos
+                {
+                    bail!("source accounting transfer differs from target preparation");
+                }
+                match retained.5.as_str() {
+                    "active" if retained.4.as_deref() == Some(transfer_hash) => return Ok(()),
+                    "active" => bail!("active target allowance names another source transfer"),
+                    "prepared" if retained.4.is_none() => {}
+                    "prepared" => bail!("prepared target allowance already names a transfer"),
+                    "aborted" => bail!("aborted target allowance cannot be activated"),
+                    other => bail!("target handoff allowance is {other}; activation refused"),
+                }
+                let now_ms = wall_clock_ms();
+                for (kind, scope_id) in
+                    std::iter::once(("execution", target_scope.execution_budget_id.as_str())).chain(
+                        target_scope
+                            .directive_budget_id
+                            .as_deref()
+                            .map(|id| ("directive_item", id)),
+                    )
+                {
+                    let changed = conn.execute(
+                        "UPDATE budget_account SET state = 'active', updated_at_ms = ?1
                      WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3
                        AND execution_budget_id = ?4 AND account_kind = ?5
                        AND scope_id = ?6 AND state = 'prepared'
                        AND committed_usd_nanos = 0 AND held_usd_nanos = 0
                        AND health = 'healthy'",
-                    rusqlite::params![
-                        now_ms,
-                        self.site_id,
-                        self.epoch_i64(),
-                        target_scope.execution_budget_id,
-                        kind,
-                        scope_id,
-                    ],
-                )?;
-                if changed != 1 {
-                    bail!("target accounting account is not exact, prepared, and unused");
+                        rusqlite::params![
+                            now_ms,
+                            self.site_id,
+                            self.epoch_i64(),
+                            target_scope.execution_budget_id,
+                            kind,
+                            scope_id,
+                        ],
+                    )?;
+                    if changed != 1 {
+                        bail!("target accounting account is not exact, prepared, and unused");
+                    }
                 }
-            }
-            conn.execute(
-                "UPDATE accounting_handoff_import
+                conn.execute(
+                    "UPDATE accounting_handoff_import
                  SET source_transfer_hash = ?1, state = 'active', updated_at_ms = ?2
                  WHERE operation_id = ?3 AND state = 'prepared'",
-                rusqlite::params![transfer_hash, now_ms, transfer.operation_id],
-            )?;
-            Ok(())
+                    rusqlite::params![transfer_hash, now_ms, transfer.operation_id],
+                )?;
+                Ok(())
+            })
         })
     }
 
     /// Close an unactivated target preparation after signed pre-export abort.
     pub fn abort_handoff_target_scope(&self, operation_id: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "target handoff allowance abort", || {
-            let Some((execution_id, directive_id, state)) = conn
-                .query_row(
-                    "SELECT target_execution_budget_id, target_directive_budget_id, state
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "target handoff allowance abort", || {
+                let Some((execution_id, directive_id, state)) = conn
+                    .query_row(
+                        "SELECT target_execution_budget_id, target_directive_budget_id, state
                      FROM accounting_handoff_import WHERE operation_id = ?1",
-                    rusqlite::params![operation_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()?
-            else {
-                return Ok(());
-            };
-            match state.as_str() {
-                "aborted" => return Ok(()),
-                "prepared" => {}
-                _ => bail!("source allowance was already committed; target abort is forbidden"),
-            }
-            let now_ms = wall_clock_ms();
-            let changed = conn.execute(
-                "UPDATE budget_account SET state = 'closed', updated_at_ms = ?1
+                        rusqlite::params![operation_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                else {
+                    return Ok(());
+                };
+                match state.as_str() {
+                    "aborted" => return Ok(()),
+                    "prepared" => {}
+                    _ => bail!("source allowance was already committed; target abort is forbidden"),
+                }
+                let now_ms = wall_clock_ms();
+                let changed = conn.execute(
+                    "UPDATE budget_account SET state = 'closed', updated_at_ms = ?1
                  WHERE execution_budget_id = ?2 AND state = 'prepared'
                    AND committed_usd_nanos = 0 AND held_usd_nanos = 0",
-                rusqlite::params![now_ms, execution_id],
-            )?;
-            let expected = usize::from(directive_id.is_some()) + 1;
-            if changed != expected {
-                bail!("target prepared allowance accounts are not exact and unused");
-            }
-            conn.execute(
-                "UPDATE accounting_handoff_import SET state = 'aborted', updated_at_ms = ?1
+                    rusqlite::params![now_ms, execution_id],
+                )?;
+                let expected = usize::from(directive_id.is_some()) + 1;
+                if changed != expected {
+                    bail!("target prepared allowance accounts are not exact and unused");
+                }
+                conn.execute(
+                    "UPDATE accounting_handoff_import SET state = 'aborted', updated_at_ms = ?1
                  WHERE operation_id = ?2 AND state = 'prepared'",
-                rusqlite::params![now_ms, operation_id],
-            )?;
-            Ok(())
+                    rusqlite::params![now_ms, operation_id],
+                )?;
+                Ok(())
+            })
         })
     }
 
@@ -9565,60 +9802,61 @@ impl AccountingDb {
         scope.validate()?;
         let execution_cap = optional_usd_nanos(execution_cap_usd_nanos)?;
         let directive_cap = optional_usd_nanos(directive_cap_usd_nanos)?;
-        let conn = self.lock_conn()?;
-        let retained = conn
-            .query_row(
-                "SELECT target_scope_json, target_cap_usd_nanos,
+        self.with_conn(|conn| {
+            let retained = conn
+                .query_row(
+                    "SELECT target_scope_json, target_cap_usd_nanos,
                         target_directive_cap_usd_nanos, source_transfer_hash, state
                  FROM accounting_handoff_import WHERE operation_id = ?1",
-                rusqlite::params![operation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("accepted target handoff allowance is absent"))?;
-        let retained_scope: ryeos_state::objects::AdmittedAccountingScope =
-            serde_json::from_str(&retained.0)?;
-        if retained_scope != *scope
-            || retained.1 != execution_cap.map(UsdNanos::as_nanos)
-            || retained.2 != directive_cap.map(UsdNanos::as_nanos)
-            || retained.3.is_none()
-            || retained.4 != "active"
-        {
-            bail!("accepted target handoff allowance differs from retained import authority");
-        }
-        let expected_account = |kind: &str, id: &str, cap: Option<UsdNanos>| -> Result<()> {
-            let account = self
-                .load_account(&conn, kind, id)?
-                .ok_or_else(|| anyhow::anyhow!("accepted target accounting account is absent"))?;
-            let valid_state = if require_spendable {
-                account.state == "active" && account.transferred_out_nanos == 0
-            } else {
-                matches!(account.state.as_str(), "active" | "closed")
-            };
-            if account.execution_budget_id != scope.execution_budget_id
-                || account.root_chain_id != root_chain_id
-                || account.limit_nanos != cap.map(UsdNanos::as_nanos)
-                || account.health != "healthy"
-                || !valid_state
+                    rusqlite::params![operation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| anyhow::anyhow!("accepted target handoff allowance is absent"))?;
+            let retained_scope: ryeos_state::objects::AdmittedAccountingScope =
+                serde_json::from_str(&retained.0)?;
+            if retained_scope != *scope
+                || retained.1 != execution_cap.map(UsdNanos::as_nanos)
+                || retained.2 != directive_cap.map(UsdNanos::as_nanos)
+                || retained.3.is_none()
+                || retained.4 != "active"
             {
-                bail!("accepted target accounting account differs from imported authority");
+                bail!("accepted target handoff allowance differs from retained import authority");
             }
-            Ok(())
-        };
-        expected_account("execution", &scope.execution_budget_id, execution_cap)?;
-        match scope.directive_budget_id.as_deref() {
-            Some(id) => expected_account("directive_item", id, directive_cap),
-            None if directive_cap.is_none() => Ok(()),
-            None => bail!("accepted target scope omits its admitted directive account"),
-        }
+            let expected_account = |kind: &str, id: &str, cap: Option<UsdNanos>| -> Result<()> {
+                let account = self.load_account(&conn, kind, id)?.ok_or_else(|| {
+                    anyhow::anyhow!("accepted target accounting account is absent")
+                })?;
+                let valid_state = if require_spendable {
+                    account.state == "active" && account.transferred_out_nanos == 0
+                } else {
+                    matches!(account.state.as_str(), "active" | "closed")
+                };
+                if account.execution_budget_id != scope.execution_budget_id
+                    || account.root_chain_id != root_chain_id
+                    || account.limit_nanos != cap.map(UsdNanos::as_nanos)
+                    || account.health != "healthy"
+                    || !valid_state
+                {
+                    bail!("accepted target accounting account differs from imported authority");
+                }
+                Ok(())
+            };
+            expected_account("execution", &scope.execution_budget_id, execution_cap)?;
+            match scope.directive_budget_id.as_deref() {
+                Some(id) => expected_account("directive_item", id, directive_cap),
+                None if directive_cap.is_none() => Ok(()),
+                None => bail!("accepted target scope omits its admitted directive account"),
+            }
+        })
     }
 
     /// Verify SQLite integrity, per-account debit aggregates, the financial
@@ -9627,7 +9865,7 @@ impl AccountingDb {
     /// advancing the anchor from the immutable database chain; every other
     /// disagreement fails closed.
     pub fn startup_verify(&self) -> Result<StartupReport> {
-        let conn = self.lock_conn()?;
+        self.with_conn(|conn| {
         let mut reasons: Vec<String> = Vec::new();
 
         let integrity: String = conn
@@ -10069,6 +10307,7 @@ impl AccountingDb {
             unpublished_outbox: unpublished_outbox as u64,
             oldest_unpublished_created_at_ms,
         })
+        })
     }
 }
 
@@ -10337,16 +10576,17 @@ impl AccountingDb {
         &self,
         attempt_id: &str,
     ) -> Result<Option<ReservationPublicationBinding>> {
-        let conn = self.lock_conn()?;
-        Ok(self.load_reservation_by_id(&conn, attempt_id)?.map(|row| {
-            ReservationPublicationBinding {
-                thread_id: row.thread_id,
-                state: row.state,
-                request_hash: row.request_hash,
-                turn: row.turn,
-                attempt_number: row.attempt_number,
-            }
-        }))
+        self.with_conn(|conn| {
+            Ok(self.load_reservation_by_id(&conn, attempt_id)?.map(|row| {
+                ReservationPublicationBinding {
+                    thread_id: row.thread_id,
+                    state: row.state,
+                    request_hash: row.request_hash,
+                    turn: row.turn,
+                    attempt_number: row.attempt_number,
+                }
+            }))
+        })
     }
 
     /// Claim the one permitted admitted-local-worker contact for an issued
@@ -10360,52 +10600,53 @@ impl AccountingDb {
         coordinate_key: &str,
         daemon_generation_id: &str,
     ) -> Result<ExactAccountingOperation<ProviderLocalWorkerStartClaim>> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "claim provider local-worker contact", || {
-            let row = self
-                .load_reservation_by_id(&conn, attempt_id)?
-                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
-            if row.request_hash != request_hash {
-                bail!("local-worker start request contradicts its reservation");
-            }
-            let request_digest = canonical_fingerprint(&serde_json::json!({
-                "request_hash": request_hash,
-                "coordinate_key": coordinate_key,
-            }))?;
-            if let Some((stored_digest, response)) =
-                self.load_operation(&conn, attempt_id, "local_worker_start", 1)?
-            {
-                if stored_digest != request_digest {
-                    bail!("local-worker start claim exists with divergent authority");
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "claim provider local-worker contact", || {
+                let row = self
+                    .load_reservation_by_id(&conn, attempt_id)?
+                    .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+                if row.request_hash != request_hash {
+                    bail!("local-worker start request contradicts its reservation");
                 }
-                let value: ProviderLocalWorkerStartClaim =
-                    serde_json::from_str(&response).context("decode local-worker start claim")?;
-                self.bump_recovery_count(&conn, attempt_id, "local_worker_start", 1)?;
-                return Ok(ExactAccountingOperation {
+                let request_digest = canonical_fingerprint(&serde_json::json!({
+                    "request_hash": request_hash,
+                    "coordinate_key": coordinate_key,
+                }))?;
+                if let Some((stored_digest, response)) =
+                    self.load_operation(&conn, attempt_id, "local_worker_start", 1)?
+                {
+                    if stored_digest != request_digest {
+                        bail!("local-worker start claim exists with divergent authority");
+                    }
+                    let value: ProviderLocalWorkerStartClaim = serde_json::from_str(&response)
+                        .context("decode local-worker start claim")?;
+                    self.bump_recovery_count(&conn, attempt_id, "local_worker_start", 1)?;
+                    return Ok(ExactAccountingOperation {
+                        value,
+                        replayed: true,
+                    });
+                }
+                if row.state != AttemptBudgetState::Issued {
+                    bail!("only an issued attempt may claim local-worker contact");
+                }
+                if daemon_generation_id.is_empty() || daemon_generation_id.len() > 256 {
+                    bail!("daemon generation id is not canonical and bounded");
+                }
+                let value = ProviderLocalWorkerStartClaim {
+                    daemon_generation_id: daemon_generation_id.to_owned(),
+                };
+                self.insert_operation(
+                    &conn,
+                    attempt_id,
+                    "local_worker_start",
+                    1,
+                    &request_digest,
+                    &serde_json::to_string(&value)?,
+                )?;
+                Ok(ExactAccountingOperation {
                     value,
-                    replayed: true,
-                });
-            }
-            if row.state != AttemptBudgetState::Issued {
-                bail!("only an issued attempt may claim local-worker contact");
-            }
-            if daemon_generation_id.is_empty() || daemon_generation_id.len() > 256 {
-                bail!("daemon generation id is not canonical and bounded");
-            }
-            let value = ProviderLocalWorkerStartClaim {
-                daemon_generation_id: daemon_generation_id.to_owned(),
-            };
-            self.insert_operation(
-                &conn,
-                attempt_id,
-                "local_worker_start",
-                1,
-                &request_digest,
-                &serde_json::to_string(&value)?,
-            )?;
-            Ok(ExactAccountingOperation {
-                value,
-                replayed: false,
+                    replayed: false,
+                })
             })
         })
     }
@@ -10418,58 +10659,59 @@ impl AccountingDb {
         attempt_id: &str,
         reference: &ProviderLocalWorkerObservationReference,
     ) -> Result<ExactAccountingOperation<ProviderLocalWorkerObservationReference>> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "confirm provider local-worker observation", || {
-            let row = self
-                .load_reservation_by_id(&conn, attempt_id)?
-                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
-            if row.request_hash != reference.request_hash {
-                bail!("local-worker observation contradicts its reservation");
-            }
-            for (field, digest) in [
-                ("local-worker coordinate key", &reference.coordinate_key),
-                ("local-worker observation key", &reference.observation_key),
-                ("local-worker observation hash", &reference.observation_hash),
-                ("local-worker terminal digest", &reference.terminal_digest),
-                ("local-worker answer digest", &reference.answer_digest),
-            ] {
-                if !lillux::valid_hash(digest) {
-                    bail!("{field} is not a canonical digest");
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "confirm provider local-worker observation", || {
+                let row = self
+                    .load_reservation_by_id(&conn, attempt_id)?
+                    .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+                if row.request_hash != reference.request_hash {
+                    bail!("local-worker observation contradicts its reservation");
                 }
-            }
-            if self
-                .load_operation(&conn, attempt_id, "local_worker_start", 1)?
-                .is_none()
-            {
-                bail!("local-worker observation has no preceding contact claim");
-            }
-            let request_digest = canonical_fingerprint(&serde_json::to_value(reference)?)?;
-            if let Some((stored_digest, response)) =
-                self.load_operation(&conn, attempt_id, "local_worker_observation", 1)?
-            {
-                if stored_digest != request_digest {
-                    bail!("local-worker observation diverges from the first terminal");
+                for (field, digest) in [
+                    ("local-worker coordinate key", &reference.coordinate_key),
+                    ("local-worker observation key", &reference.observation_key),
+                    ("local-worker observation hash", &reference.observation_hash),
+                    ("local-worker terminal digest", &reference.terminal_digest),
+                    ("local-worker answer digest", &reference.answer_digest),
+                ] {
+                    if !lillux::valid_hash(digest) {
+                        bail!("{field} is not a canonical digest");
+                    }
                 }
-                let value: ProviderLocalWorkerObservationReference =
-                    serde_json::from_str(&response)
-                        .context("decode local-worker observation reference")?;
-                self.bump_recovery_count(&conn, attempt_id, "local_worker_observation", 1)?;
-                return Ok(ExactAccountingOperation {
-                    value,
-                    replayed: true,
-                });
-            }
-            self.insert_operation(
-                &conn,
-                attempt_id,
-                "local_worker_observation",
-                1,
-                &request_digest,
-                &serde_json::to_string(reference)?,
-            )?;
-            Ok(ExactAccountingOperation {
-                value: reference.clone(),
-                replayed: false,
+                if self
+                    .load_operation(&conn, attempt_id, "local_worker_start", 1)?
+                    .is_none()
+                {
+                    bail!("local-worker observation has no preceding contact claim");
+                }
+                let request_digest = canonical_fingerprint(&serde_json::to_value(reference)?)?;
+                if let Some((stored_digest, response)) =
+                    self.load_operation(&conn, attempt_id, "local_worker_observation", 1)?
+                {
+                    if stored_digest != request_digest {
+                        bail!("local-worker observation diverges from the first terminal");
+                    }
+                    let value: ProviderLocalWorkerObservationReference =
+                        serde_json::from_str(&response)
+                            .context("decode local-worker observation reference")?;
+                    self.bump_recovery_count(&conn, attempt_id, "local_worker_observation", 1)?;
+                    return Ok(ExactAccountingOperation {
+                        value,
+                        replayed: true,
+                    });
+                }
+                self.insert_operation(
+                    &conn,
+                    attempt_id,
+                    "local_worker_observation",
+                    1,
+                    &request_digest,
+                    &serde_json::to_string(reference)?,
+                )?;
+                Ok(ExactAccountingOperation {
+                    value: reference.clone(),
+                    replayed: false,
+                })
             })
         })
     }
@@ -10478,13 +10720,14 @@ impl AccountingDb {
         &self,
         attempt_id: &str,
     ) -> Result<Option<ProviderLocalWorkerObservationReference>> {
-        let conn = self.lock_conn()?;
-        self.load_operation(&conn, attempt_id, "local_worker_observation", 1)?
-            .map(|(_, response)| {
-                serde_json::from_str(&response)
-                    .context("decode retained local-worker observation reference")
-            })
-            .transpose()
+        self.with_conn(|conn| {
+            self.load_operation(&conn, attempt_id, "local_worker_observation", 1)?
+                .map(|(_, response)| {
+                    serde_json::from_str(&response)
+                        .context("decode retained local-worker observation reference")
+                })
+                .transpose()
+        })
     }
 
     /// Confirm that recorded provider finality crossed the CAS replay index.
@@ -10494,58 +10737,59 @@ impl AccountingDb {
         attempt_id: &str,
         proof: &ProviderCallPublicationProof,
     ) -> Result<ExactAccountingOperation<ProviderCallPublicationProof>> {
-        let conn = self.lock_conn()?;
-        immediate_transaction(&conn, "confirm provider-call publication", || {
-            let row = self
-                .load_reservation_by_id(&conn, attempt_id)?
-                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
-            if !row.state.is_terminal() {
-                bail!("provider-call publication requires terminal accounting state");
-            }
-            for (field, digest) in [
-                ("provider call cache key", &proof.cache_key),
-                ("provider call answer digest", &proof.answer_digest),
-                ("provider call record hash", &proof.record_hash),
-            ] {
-                if !lillux::valid_hash(digest) {
-                    bail!("{field} is not a canonical digest");
+        self.with_conn(|conn| {
+            immediate_transaction(&conn, "confirm provider-call publication", || {
+                let row = self
+                    .load_reservation_by_id(&conn, attempt_id)?
+                    .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+                if !row.state.is_terminal() {
+                    bail!("provider-call publication requires terminal accounting state");
                 }
-            }
-            let expected_request_hash = ryeos_accounting::rpc::provider_attempt_request_hash(
-                &row.thread_id,
-                row.turn,
-                row.attempt_number,
-                &proof.cache_key,
-            );
-            if expected_request_hash != row.request_hash {
-                bail!("provider publication proof contradicts its reservation coordinate");
-            }
-            let request_digest = canonical_fingerprint(&serde_json::to_value(proof)?)?;
-            if let Some((stored_digest, response)) =
-                self.load_operation(&conn, attempt_id, "provider_call_publication", 1)?
-            {
-                if stored_digest != request_digest {
-                    bail!("provider-call publication proof diverges from the first proof");
+                for (field, digest) in [
+                    ("provider call cache key", &proof.cache_key),
+                    ("provider call answer digest", &proof.answer_digest),
+                    ("provider call record hash", &proof.record_hash),
+                ] {
+                    if !lillux::valid_hash(digest) {
+                        bail!("{field} is not a canonical digest");
+                    }
                 }
-                let value: ProviderCallPublicationProof = serde_json::from_str(&response)
-                    .context("decode provider-call publication proof")?;
-                self.bump_recovery_count(&conn, attempt_id, "provider_call_publication", 1)?;
-                return Ok(ExactAccountingOperation {
-                    value,
-                    replayed: true,
-                });
-            }
-            self.insert_operation(
-                &conn,
-                attempt_id,
-                "provider_call_publication",
-                1,
-                &request_digest,
-                &serde_json::to_string(proof)?,
-            )?;
-            Ok(ExactAccountingOperation {
-                value: proof.clone(),
-                replayed: false,
+                let expected_request_hash = ryeos_accounting::rpc::provider_attempt_request_hash(
+                    &row.thread_id,
+                    row.turn,
+                    row.attempt_number,
+                    &proof.cache_key,
+                );
+                if expected_request_hash != row.request_hash {
+                    bail!("provider publication proof contradicts its reservation coordinate");
+                }
+                let request_digest = canonical_fingerprint(&serde_json::to_value(proof)?)?;
+                if let Some((stored_digest, response)) =
+                    self.load_operation(&conn, attempt_id, "provider_call_publication", 1)?
+                {
+                    if stored_digest != request_digest {
+                        bail!("provider-call publication proof diverges from the first proof");
+                    }
+                    let value: ProviderCallPublicationProof = serde_json::from_str(&response)
+                        .context("decode provider-call publication proof")?;
+                    self.bump_recovery_count(&conn, attempt_id, "provider_call_publication", 1)?;
+                    return Ok(ExactAccountingOperation {
+                        value,
+                        replayed: true,
+                    });
+                }
+                self.insert_operation(
+                    &conn,
+                    attempt_id,
+                    "provider_call_publication",
+                    1,
+                    &request_digest,
+                    &serde_json::to_string(proof)?,
+                )?;
+                Ok(ExactAccountingOperation {
+                    value: proof.clone(),
+                    replayed: false,
+                })
             })
         })
     }
@@ -10554,48 +10798,50 @@ impl AccountingDb {
         &self,
         attempt_id: &str,
     ) -> Result<Option<ProviderCallPublicationProof>> {
-        let conn = self.lock_conn()?;
-        self.load_operation(&conn, attempt_id, "provider_call_publication", 1)?
-            .map(|(_, response)| {
-                serde_json::from_str(&response)
-                    .context("decode retained provider-call publication proof")
-            })
-            .transpose()
+        self.with_conn(|conn| {
+            self.load_operation(&conn, attempt_id, "provider_call_publication", 1)?
+                .map(|(_, response)| {
+                    serde_json::from_str(&response)
+                        .context("decode retained provider-call publication proof")
+                })
+                .transpose()
+        })
     }
 
     /// CAS objects retained by immutable provider-attempt evidence rows.
     pub fn provider_evidence_object_roots(&self) -> Result<Vec<String>> {
-        let conn = self.lock_conn()?;
-        let mut statement = conn.prepare_cached(
-            "SELECT operation_kind, response_json FROM accounting_operation
+        self.with_conn(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT operation_kind, response_json FROM accounting_operation
              WHERE operation_kind IN ('local_worker_observation', 'provider_call_publication')
              ORDER BY attempt_id, operation_kind",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut roots = BTreeSet::new();
-        for row in rows {
-            let (kind, response) = row?;
-            let hash = match kind.as_str() {
-                "local_worker_observation" => {
-                    serde_json::from_str::<ProviderLocalWorkerObservationReference>(&response)
-                        .context("decode retained local-worker root")?
-                        .observation_hash
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut roots = BTreeSet::new();
+            for row in rows {
+                let (kind, response) = row?;
+                let hash = match kind.as_str() {
+                    "local_worker_observation" => {
+                        serde_json::from_str::<ProviderLocalWorkerObservationReference>(&response)
+                            .context("decode retained local-worker root")?
+                            .observation_hash
+                    }
+                    "provider_call_publication" => {
+                        serde_json::from_str::<ProviderCallPublicationProof>(&response)
+                            .context("decode retained provider-call root")?
+                            .record_hash
+                    }
+                    _ => unreachable!("query restricts operation kinds"),
+                };
+                if !lillux::valid_hash(&hash) {
+                    bail!("accounting evidence row carries a malformed CAS root");
                 }
-                "provider_call_publication" => {
-                    serde_json::from_str::<ProviderCallPublicationProof>(&response)
-                        .context("decode retained provider-call root")?
-                        .record_hash
-                }
-                _ => unreachable!("query restricts operation kinds"),
-            };
-            if !lillux::valid_hash(&hash) {
-                bail!("accounting evidence row carries a malformed CAS root");
+                roots.insert(hash);
             }
-            roots.insert(hash);
-        }
-        Ok(roots.into_iter().collect())
+            Ok(roots.into_iter().collect())
+        })
     }
 
     fn load_operation(
@@ -11356,6 +11602,12 @@ fn ensure_same_file(expected: &File, current: &File, label: &str, path: &Path) -
     Ok(())
 }
 
+/// Whether the ledger's independent initialization marker is present. An
+/// established ledger must open its existing database and never recreate it.
+pub(crate) fn ledger_established(directory: &lillux::PinnedDirectory) -> Result<bool> {
+    Ok(inspect_initialized_marker(directory)?.is_some())
+}
+
 fn inspect_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<Option<File>> {
     let Some(mut marker) = directory
         .open_regular(OsStr::new(ACCOUNTING_INITIALIZED_FILENAME), false)
@@ -11544,7 +11796,19 @@ fn ensure_sqlite_connection_uses_expected_file(
 }
 
 fn ensure_accounting_bindings(db: &AccountingDb) -> Result<()> {
-    ensure_directory_path_still_pinned(&db._runtime_directory)?;
+    let LedgerHolders::Stock {
+        runtime_directory,
+        _directory_lock: _,
+        database_file,
+        wal_file,
+        shm_file,
+        initialization_marker,
+    } = &db.holders
+    else {
+        // The bound native VFS proves the database and WAL binding itself.
+        return Ok(());
+    };
+    ensure_directory_path_still_pinned(runtime_directory)?;
     let name = db.path.file_name().ok_or_else(|| {
         anyhow::anyhow!(
             "accounting database path has no filename: {}",
@@ -11552,45 +11816,39 @@ fn ensure_accounting_bindings(db: &AccountingDb) -> Result<()> {
         )
     })?;
     ensure_file_binding(
-        &db._runtime_directory,
+        runtime_directory,
         name,
-        &db._database_file,
+        database_file,
         "accounting database",
     )?;
-    inspect_accounting_sidecars(&db._runtime_directory, name)?;
-    if let Some(wal_file) = db._wal_file.as_ref() {
+    inspect_accounting_sidecars(runtime_directory, name)?;
+    if let Some(wal_file) = wal_file.as_ref() {
         let wal_name = accounting_sidecar_name(name, "-wal");
-        ensure_file_binding(
-            &db._runtime_directory,
-            &wal_name,
-            wal_file,
-            "accounting WAL",
-        )?;
+        ensure_file_binding(runtime_directory, &wal_name, wal_file, "accounting WAL")?;
     }
-    if let Some(shm_file) = db._shm_file.as_ref() {
+    if let Some(shm_file) = shm_file.as_ref() {
         let shm_name = accounting_sidecar_name(name, "-shm");
         ensure_file_binding(
-            &db._runtime_directory,
+            runtime_directory,
             &shm_name,
             shm_file,
             "accounting shared memory",
         )?;
     }
-    if let Some(expected_marker) = db._initialization_marker.as_ref() {
-        let current_marker =
-            inspect_initialized_marker(&db._runtime_directory)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "accounting initialization marker disappeared: {}",
-                    db._runtime_directory
-                        .path()
-                        .join(ACCOUNTING_INITIALIZED_FILENAME)
-                        .display()
-                )
-            })?;
+    if let Some(expected_marker) = initialization_marker.as_ref() {
+        let current_marker = inspect_initialized_marker(runtime_directory)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "accounting initialization marker disappeared: {}",
+                runtime_directory
+                    .path()
+                    .join(ACCOUNTING_INITIALIZED_FILENAME)
+                    .display()
+            )
+        })?;
         if !files_are_same(expected_marker, &current_marker)? {
             bail!(
                 "accounting initialization marker changed while it was in use: {}",
-                db._runtime_directory
+                runtime_directory
                     .path()
                     .join(ACCOUNTING_INITIALIZED_FILENAME)
                     .display()
@@ -11616,6 +11874,45 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
 fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
     sqlite_schema::assert_owned(conn, &accounting_schema_spec(), path)?;
     sqlite_schema::assert_complete_schema_sql(conn, &current_schema_sql(), path)?;
+    assert_current_version(conn, path)
+}
+
+/// Native form of [`assert_current`]: the complete schema is compared with
+/// the definition captured from the closed native reference, never with a
+/// stock in-memory reference.
+fn assert_current_against(
+    conn: &Connection,
+    path: &Path,
+    definition: &sqlite_schema::SchemaSqlDefinition,
+) -> Result<()> {
+    sqlite_schema::assert_owned(conn, &accounting_schema_spec(), path)?;
+    definition.require_matches(conn, path)?;
+    assert_current_version(conn, path)
+}
+
+/// An exact predecessor migration compares the stored schema with every
+/// predecessor reference, which the live native ledger has no ticket for. It
+/// refuses instead, so the ledger stays fail-closed until a stopped-node
+/// migration owner runs.
+fn refuse_native_predecessor_migration(conn: &Connection, path: &Path) -> Result<()> {
+    let application_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read accounting application id")?;
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("read accounting schema version")?;
+    if application_id == ACCOUNTING_APP_ID && (1..ACCOUNTING_SCHEMA_VERSION).contains(&version) {
+        bail!(
+            "accounting schema v{version} in {} needs a predecessor migration, which the live \
+             native ledger refuses; hard admission stays fail-closed until a stopped-node \
+             migration runs",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn assert_current_version(conn: &Connection, path: &Path) -> Result<()> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read accounting schema version")?;
