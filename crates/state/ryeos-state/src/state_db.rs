@@ -52,7 +52,8 @@ pub use live_native::{LiveStateDatabaseOpenFailure, LiveStateStartupRecoveryFail
     quote_live_state_finalization_root_receipts,
     quote_live_state_recovery_registration, quote_live_state_registered_root_validation,
     quote_live_state_root_registration_handoff, quote_released_live_state_physical_custody,
-    quote_startup_closed_schema_sources, quote_startup_released_schema_source};
+    quote_startup_closed_schema_sources, quote_startup_released_schema_source,
+    quote_maximum_state_destination_input_transfer, quote_state_destination_input_transfer};
 mod live_close;
 pub use live_close::{ClosedLiveState, ClosedLiveStatePhysicalCustody, LiveStateCloseFailure,
     quote_closed_live_state_physical_custody, quote_live_projection_source_transfer,
@@ -2168,8 +2169,10 @@ impl PreparedOfflineProjection {
             )?
         };
         let projection = ProjectionDb::open_original_transient(Arc::clone(&factory), inputs)?;
+        let issued_destinations = OriginalProjectionBuildContext::issued_destination_slots(&factory)?;
         Ok(state_owner.into_state(projection, Some(OriginalProjectionBuildContext {
             factory, authority: OriginalProjectionStateOwner::Offline(native_owner), terminals: Vec::new(), durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()), generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+            issued_destinations,
         })))
     }
 
@@ -2264,8 +2267,78 @@ struct OriginalProjectionBuildContext {
     schema_references: Mutex<Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>>,
     generation_leases: Mutex<Vec<Arc<crate::projection::OriginalGenerationLease>>>,
     generation_lease_attempts: std::sync::atomic::AtomicU32,
+    // Concrete identities of every destination authority this context issued,
+    // so a taken `dyn` input can be routed to its typed State leaf.
+    issued_destinations: Mutex<Vec<StateIssuedDestination>>,
+}
+/// Non-owning record of one destination authority issued by a State context.
+enum StateIssuedDestination {
+    Generated(std::sync::Weak<OriginalGeneratedProjectionAuthority>),
+    Schema(std::sync::Weak<OriginalProjectionStateOwner>),
+}
+impl StateIssuedDestination {
+    fn is_live(&self) -> bool {
+        match self {
+            Self::Generated(weak) => weak.strong_count() > 0,
+            Self::Schema(weak) => weak.strong_count() > 0,
+        }
+    }
 }
 impl OriginalProjectionBuildContext {
+    /// One slot per destination leaf the original ticket bound admits.
+    fn issued_destination_slots(factory: &Arc<lillux_sqlite::OriginalNativeFactory>)
+        -> anyhow::Result<Mutex<Vec<StateIssuedDestination>>> {
+        let maximum = destination_join::maximum_state_destination_leaves(factory.maximum_resource_tickets()?)?;
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(maximum)?;
+        Ok(Mutex::new(slots))
+    }
+    /// Record an issued authority before any native effect. Dead entries are
+    /// pruned first; a full list refuses, since each input owns one ticket.
+    fn record_issued_destination(&self, issued: StateIssuedDestination) -> anyhow::Result<()> {
+        let maximum = destination_join::maximum_state_destination_leaves(self.factory.maximum_resource_tickets()?)?;
+        let mut slots = self.issued_destinations.try_lock()
+            .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?;
+        // Fund the prune scan (one step per record) and the push before
+        // touching the record.
+        let prune_steps = u64::try_from(slots.len())?.checked_add(1)
+            .context("State destination issuance prune work overflow")?;
+        self.factory.debit_issuance_steps(prune_steps)?;
+        slots.retain(StateIssuedDestination::is_live);
+        anyhow::ensure!(slots.len() < maximum && slots.len() < slots.capacity(),
+            "State destination issuance exceeds its original ticket bound");
+        slots.push(issued);
+        Ok(())
+    }
+    /// Concrete Generated authority issued here for this `dyn` allocation.
+    pub(super) fn issued_generated(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
+        -> anyhow::Result<Option<Arc<OriginalGeneratedProjectionAuthority>>> {
+        let address = Arc::as_ptr(authority).cast::<()>();
+        let slots = self.issued_destinations.try_lock()
+            .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?;
+        Ok(slots.iter().find_map(|issued| match issued {
+            StateIssuedDestination::Generated(weak) if std::ptr::eq(weak.as_ptr().cast::<()>(), address) =>
+                weak.upgrade(),
+            _ => None,
+        }))
+    }
+    /// Concrete schema-reference authority issued here for this allocation.
+    pub(super) fn issued_schema(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
+        -> anyhow::Result<Option<Arc<OriginalProjectionStateOwner>>> {
+        let address = Arc::as_ptr(authority).cast::<()>();
+        let slots = self.issued_destinations.try_lock()
+            .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?;
+        Ok(slots.iter().find_map(|issued| match issued {
+            StateIssuedDestination::Schema(weak) if std::ptr::eq(weak.as_ptr().cast::<()>(), address) =>
+                weak.upgrade(),
+            _ => None,
+        }))
+    }
+    /// Number of issuance records, bounding the identity scan of one take.
+    pub(super) fn issued_destination_count(&self) -> anyhow::Result<usize> {
+        Ok(self.issued_destinations.try_lock()
+            .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?.len())
+    }
     fn open(
         &self,
         directory: &lillux::PinnedDirectory,
@@ -2302,7 +2375,9 @@ impl OriginalProjectionBuildContext {
             #[cfg(not(unix))]
             anyhow::bail!("selected projection inode identity unavailable");
         } else { durable.map(|proof| proof.main_identity()) };
-        let schema_authority: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = Arc::new(self.authority.clone());
+        let schema_owner = Arc::new(self.authority.clone());
+        self.record_issued_destination(StateIssuedDestination::Schema(Arc::downgrade(&schema_owner)))?;
+        let schema_authority: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = schema_owner;
         // SAFETY: the actual prepared State owner retains all roots, recovery,
         // trust and namespace; this purpose admits only a transient reference.
         let schema_inputs = unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
@@ -2329,6 +2404,7 @@ impl OriginalProjectionBuildContext {
             name: name.to_os_string(), expected_identity,
         });
         destination.require_binding(&self.factory)?;
+        self.record_issued_destination(StateIssuedDestination::Generated(Arc::downgrade(&destination)))?;
         // SAFETY: this private State caller retains the actual original roots,
         // trust/recovery/namespace and same factory. Existing reopen also
         // retains the real durable source and checks its exact inode before
@@ -3213,6 +3289,11 @@ impl StateDb {
 
         // Operational rows are source-of-truth state and live in a fixed store
         // that is independent of replaceable projection generations.
+        // Reserve the issuance record before any native owner exists.
+        let mut issued_destinations = match native_host.as_ref() {
+            Some(host) => Some(OriginalProjectionBuildContext::issued_destination_slots(&host.factory)?),
+            None => None,
+        };
         let native_owner = match native_host {
             Some(host) => Some(live_native::LiveStateNativeOwner::capture(host, &runtime_state_directory,
                 runtime_state_lock.as_ref().context("live State requires original namespace exclusion")?,
@@ -3229,10 +3310,16 @@ impl StateDb {
             None => OperationalDb::open_at_pinned_runtime_state_dir(&runtime_state_directory),
         } }
         .context("open stable operational state")?;
-        let projection_context = native_owner.as_ref().map(|owner| OriginalProjectionBuildContext {
-            factory: Arc::clone(owner.factory()), authority: OriginalProjectionStateOwner::Live(Arc::clone(owner)),
-            terminals: Vec::new(), durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()), generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
-        });
+        let projection_context = match native_owner.as_ref() {
+            Some(owner) => Some(OriginalProjectionBuildContext {
+                factory: Arc::clone(owner.factory()), authority: OriginalProjectionStateOwner::Live(Arc::clone(owner)),
+                terminals: Vec::new(), durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()), generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+                // Reserved above whenever a live owner exists; an empty record
+                // has no capacity and refuses every issuance.
+                issued_destinations: issued_destinations.take().unwrap_or_default(),
+            }),
+            None => None,
+        };
         let mut custody = live_native::LiveStateOpenCustody {
             original: native_owner, operational: Some(operational), projection_context,
         };

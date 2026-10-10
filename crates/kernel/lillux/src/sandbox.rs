@@ -7219,7 +7219,7 @@ mod imp {
                 ("", DescriptorKind::Directory),
             ] {
                 prepare_descriptor_mount_target(
-                    &destination.join(relative),
+                    &if relative.is_empty() { destination.clone() } else { destination.join(relative) },
                     kind,
                     Some(&destination),
                     &[],

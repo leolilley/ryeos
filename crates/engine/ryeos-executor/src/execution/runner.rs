@@ -2126,12 +2126,24 @@ fn wait_launch_failure(guard: &mut ExecutionGuard, failure: DirectLaunchFailure)
 
 /// Detached owner: an unsettled failure durably requests a Kill so live
 /// reconcile kills the exact group, compare-clears and finalizes it.
-fn report_detached_launch_failure(state: &AppState, thread_id: &str, failure: DirectLaunchFailure) {
+/// The workspace is consumed here: an unsettled failure preserves it so the
+/// exact process is killed by reconcile before its directory is removed.
+fn report_detached_launch_failure(
+    state: &AppState,
+    thread_id: &str,
+    failure: DirectLaunchFailure,
+    workspace: Option<Arc<TempDirGuard>>,
+) {
     match failure {
         DirectLaunchFailure::Settled(failure) => {
             tracing::error!(thread_id, %failure, "pending launch refused");
+            drop(workspace);
         }
         DirectLaunchFailure::Unsettled(error) => {
+            if let Some(workspace) = &workspace {
+                workspace.preserve_for_explicit_cleanup();
+            }
+            drop(workspace);
             match state
                 .state_store
                 .request_thread_stop_if_admission_open(thread_id, StopIntent::Kill)
@@ -3480,8 +3492,7 @@ fn read_admitted_direct_secrets(
     if names.is_empty() {
         return Ok(ryeos_engine::contracts::DeliveredSecretEnv::empty());
     }
-    // Fresh verification is a no-op without an exact root admission, so a
-    // fresh launch with no admission has nothing that bound its subject.
+    // Second layer: fresh verification already refuses a missing admission.
     if admission == SecretReadAdmission::FreshRoot && params.resolved.root_admission.is_none() {
         return Err(ryeos_app::vault::VaultReadError::AuthorityViolation(
             "declared secrets require an exact admitted root execution".to_string(),
@@ -3495,12 +3506,15 @@ fn read_admitted_direct_secrets(
     )
 }
 
+fn require_fresh_root_admission<A>(admission: Option<&A>) -> Result<&A> {
+    admission.context("fresh direct launch has no exact admitted root")
+}
+
 fn verify_fresh_root_admission(params: &ExecutionParams) -> Result<()> {
-    let Some(admission) = params.resolved.root_admission.as_ref() else {
-        // Existing rows and continuation successors inherit the authoritative
-        // root policy; they never reinterpret mutable source content here.
-        return Ok(());
-    };
+    // Only fresh roots reach this check, and a fresh root without its exact
+    // admission has nothing that binds its subject: refuse before any CAS
+    // context or secret side effect.
+    let admission = require_fresh_root_admission(params.resolved.root_admission.as_ref())?;
     admission.ensure_matches_provenance(&params.provenance)?;
     let engine = admission.request_engine();
     admission.ensure_matches_request(&params.resolved)?;
@@ -5014,6 +5028,7 @@ pub async fn run_and_wait(
     let wait_launch_owner = launch_claim.canonical_owner()?;
     guard.track_launch_owner(wait_launch_owner.clone());
 
+    verify_fresh_root_admission(&params).context("revalidate exact admitted waiting root")?;
     // Prepare only the project facts selected at admission. Live authority
     // remains direct; pinned authority binds its admitted CAS generation.
     let PreparedCasContext {
@@ -5023,7 +5038,6 @@ pub async fn run_and_wait(
         resume_snapshot_hash,
         mut tree_publication,
     } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
-    verify_fresh_root_admission(&params).context("revalidate exact admitted waiting root")?;
     let secret_env =
         read_admitted_direct_secrets(&state, &params, SecretReadAdmission::FreshRoot)
             .context("authorize declared secrets for the admitted waiting root")?;
@@ -6137,6 +6151,7 @@ pub async fn run_detached(
     let detached_launch_owner = launch_claim.canonical_owner()?;
     guard.track_launch_owner(detached_launch_owner.clone());
 
+    verify_fresh_root_admission(&params).context("revalidate exact admitted detached root")?;
     let PreparedCasContext {
         mut effective_path,
         pre_tree_hash,
@@ -6144,7 +6159,6 @@ pub async fn run_detached(
         resume_snapshot_hash,
         tree_publication,
     } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
-    verify_fresh_root_admission(&params).context("revalidate exact admitted detached root")?;
     let bg_secret_env =
         read_admitted_direct_secrets(&state, &params, SecretReadAdmission::FreshRoot)
             .context("authorize declared secrets for the admitted detached root")?;
@@ -7075,8 +7089,8 @@ async fn dispatch_detached_bg_task(
                     "launch_metadata_conflict",
                     failure,
                 ),
+                bg_temp_dir.take(),
             );
-            drop(bg_temp_dir.take());
             return;
         }
     }
@@ -7112,8 +7126,8 @@ async fn dispatch_detached_bg_task(
                         "resume_project_authority_invalid",
                         failure,
                     ),
+                    bg_temp_dir.take(),
                 );
-                drop(bg_temp_dir.take());
                 return;
             }
         }
@@ -7144,8 +7158,8 @@ async fn dispatch_detached_bg_task(
                 &bg_state,
                 &bg_thread_id,
                 settle_direct_launch_failure(&bg_state, &bg_thread_id, &launch_owner, code, failure),
+                bg_temp_dir.take(),
             );
-            drop(bg_temp_dir.take());
             return;
         }
     };
@@ -7180,8 +7194,8 @@ async fn dispatch_detached_bg_task(
                 "recovery_mark_running_failed",
                 failure,
             ),
+            bg_temp_dir.take(),
         );
-        drop(bg_temp_dir.take());
         return;
     }
 
@@ -7206,8 +7220,8 @@ async fn dispatch_detached_bg_task(
                 &bg_state,
                 &bg_thread_id,
                 settle_direct_launch_failure(&bg_state, &bg_thread_id, &launch_owner, code, failure),
+                bg_temp_dir.take(),
             );
-            drop(bg_temp_dir.take());
             return;
         }
     };
@@ -7234,6 +7248,7 @@ async fn dispatch_detached_bg_task(
             &bg_state,
             &bg_thread_id,
             DirectLaunchFailure::Unsettled(anyhow::Error::new(failure)),
+            bg_temp_dir.take(),
         );
         return;
     }
@@ -9225,6 +9240,13 @@ mod tests {
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
 
     #[test]
+    fn fresh_root_without_exact_admission_is_refused() {
+        let error = require_fresh_root_admission::<()>(None).unwrap_err();
+        assert!(error.to_string().contains("no exact admitted root"));
+        assert!(require_fresh_root_admission(Some(&())).is_ok());
+    }
+
+    #[test]
     fn precontact_validation_error_and_unwind_keep_claim_through_guard_drop() {
         use std::cell::{Cell, RefCell};
         use std::rc::Rc;
@@ -9304,6 +9326,41 @@ mod tests {
             let _guard = ProtocolCredentialMintGuard { state: &state, callback: Some(callback.token.clone()), thread_auth: None };
         }
         assert!(state.callback_tokens.validate_token_and_thread(&callback.token, "T-first-mint").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_unsettled_failure_requests_kill_and_preserves_workspace() {
+        let (_temp, state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        let store = &state.state_store;
+        let child = "T-runtime-child";
+        let claim = store.get_launch_claim(child).unwrap().unwrap();
+        let workspace_root = tempfile::tempdir().unwrap();
+        let workspace_path = workspace_root.path().join("execution");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let workspace = Arc::new(TempDirGuard::new(workspace_path.clone()));
+        let failure = LaunchFailure {
+            error: anyhow::anyhow!("release cleanup is unproved"),
+            stage: LaunchStage::Release,
+            disposition: super::super::process_attachment::PhysicalDisposition::UnsettledCleanup(
+                super::super::process_attachment::UnsettledLaunchCleanup::for_test(
+                    LaunchOwnerCoordinate::thread(child, &claim.claimed_by),
+                ),
+            ),
+        };
+        let mapped = settle_direct_launch_failure(
+            &state,
+            child,
+            &claim.claimed_by,
+            "launch_release_after_attachment_failed",
+            failure,
+        );
+        report_detached_launch_failure(&state, child, mapped, Some(workspace));
+        assert!(store.thread_has_kill_command(child).unwrap(), "no durable Kill tombstone");
+        assert!(!is_terminal_status(&store.get_thread(child).unwrap().unwrap().status));
+        assert!(workspace_path.exists(), "workspace removed before reconcile killed the process");
     }
 
     #[cfg(target_os = "linux")]

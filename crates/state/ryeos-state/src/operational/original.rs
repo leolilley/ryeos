@@ -1567,14 +1567,14 @@ mod outside_quote_tests {
         quote_operational_initialization_retirement, quote_operational_marker_owner,
         quote_operational_marker_receipt,
         quote_operational_live_metadata_retirement, quote_operational_packet_sources,
-        quote_operational_schema_sources,
+        quote_operational_schema_sources, require_retired_operational_metadata_registry,
     };
     use lillux_sqlite::{
         OriginalNativeOutsideConnectionCustody, OriginalOutsideFinalizerFileRetirementAuthority,
         OriginalOutsideFinalizerFileRetirementInputs, RetainedOriginalFinalizerFile,
     };
     use lillux_sqlite::original_physical_custody::{
-        OriginalPhysicalRegistry, RetiredOriginalPhysicalRegistry,
+        OriginalPhysicalRegistry, OutsideWork, RetiredOriginalPhysicalRegistry,
     };
     use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 

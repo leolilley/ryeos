@@ -4223,7 +4223,7 @@ mod tests {
                 unsafe { libc::fcntl(probe.as_raw_fd(), libc::F_OFD_GETLK, &mut lock) },
                 0
             );
-            assert_eq!(lock.l_type, libc::F_WRLCK as _);
+            assert_eq!(lock.l_type, libc::F_WRLCK as libc::c_short);
         };
         assert_reserved();
         let operation = ThreadHistoryDiscardOperationRef {

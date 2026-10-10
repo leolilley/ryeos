@@ -40,6 +40,9 @@ impl Fixture {
     fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        // Production creates this directory owner-private; the temp default
+        // mode is not part of that contract.
+        directory.tighten_owner_private_directory().unwrap();
         let (policy, genesis, target) = redo::controls::fixture();
         let debit = genesis.successor(Operation::Debit, target, &policy).unwrap();
         let account = directory.atomic_create_pinned_regular(OsStr::new("account"),

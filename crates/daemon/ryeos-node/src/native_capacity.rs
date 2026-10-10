@@ -36,7 +36,7 @@ pub use account::NativeCapacityAccountBinding;
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use factory::{LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPublicationFailure, LiveNativeProducerPreparationFailure, LiveProducerControlCensus};
-pub use reservation::{FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure, SettledLiveNative};
+pub use reservation::{FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure, SettledLiveNative, quote_operator_lock_handoff};
 
 const MAX_COMPLETION_BYTES: u64 = 256 * 1024;
 

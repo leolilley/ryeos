@@ -2919,6 +2919,7 @@ mod destination_retry_tests {
         PACKET_OPTIONAL_SOURCE_CENSUS_STEPS,
         MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
         MAX_OPERATIONAL_PACKET_SOURCES, MAX_RUNTIME_PACKET_SOURCES, MAX_SELECTED_PACKET_SOURCES,
+        OutsideWork, quote_retired_packet_bound_roots, quote_retired_packet_source_parts,
     };
 
     #[test]

@@ -5676,7 +5676,9 @@ mod tests {
                 protocol_ref: "protocol:fixture/session".to_owned(),
                 protocol_content_hash: "c".repeat(64),
                 protocol_signer_fingerprint: "f".repeat(64),
-                execution_plan_hash: "d".repeat(64),
+                execution_plan_hash: lillux::sha256_hex(
+                    lillux::canonical_json(&json!({})).unwrap().as_bytes(),
+                ),
                 executable_identity: DirectExecutableIdentity::CapturedContent {
                     content_hash: executable_blob_hash.clone(),
                 },

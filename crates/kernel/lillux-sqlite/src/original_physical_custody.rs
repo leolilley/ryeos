@@ -1138,7 +1138,7 @@ mod tests {
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
         let membership = unsafe {
             registry.register_operator_lock(Arc::clone(&registered), &|_, _| Ok(()))
-        }.unwrap();
+        }.map_err(|(_, error)| error).unwrap();
         registry.require_operator_lock_alias(&membership, &registered).unwrap();
         assert!(registry.require_operator_lock_alias(&membership, &foreign).is_err());
     }
@@ -1239,7 +1239,7 @@ mod tests {
         let foreign_record = unsafe { RetainedOriginalFinalizerFile::issued(
             tempfile::tempfile().unwrap(), OriginalFinalizerFileKind::ControlRecord) };
         let mut foreign = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        unsafe { foreign.register_control_record(foreign_record, &|_, _| Ok(())) }.unwrap();
+        unsafe { foreign.register_control_record(foreign_record, &|_, _| Ok(())) }.map_err(|(_, error)| error).unwrap();
         unsafe { foreign.seal_inventory() }.unwrap();
         unsafe { foreign.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         unsafe {
@@ -1275,7 +1275,7 @@ mod tests {
         let record = unsafe { RetainedOriginalFinalizerFile::issued(
             tempfile::tempfile().unwrap(), OriginalFinalizerFileKind::ControlRecord) };
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
-        let member = unsafe { registry.register_control_record(record, &|_, _| Ok(())) }.unwrap();
+        let member = unsafe { registry.register_control_record(record, &|_, _| Ok(())) }.map_err(|(_, error)| error).unwrap();
         unsafe { registry.seal_inventory() }.unwrap();
         unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
         let issued = Arc::new(AtomicUsize::new(0));

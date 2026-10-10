@@ -10581,8 +10581,8 @@ mod tests {
                 unsafe { libc::fcntl(owner.as_raw_fd(), libc::F_OFD_GETLK, &mut query) },
                 0
             );
-            assert_eq!(query.l_type, libc::F_WRLCK as _);
-            assert_eq!(query.l_pid, std::process::id() as _);
+            assert_eq!(query.l_type, libc::F_WRLCK as libc::c_short);
+            assert_eq!(query.l_pid, std::process::id() as libc::pid_t);
         };
         check();
         assert!(

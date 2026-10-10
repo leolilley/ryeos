@@ -4471,6 +4471,38 @@ impl PersistentSessionPool {
     /// durable per-process row, so daemon shutdown must call this before it
     /// publishes its own exit. Exclusive workers are also reaped here; their
     /// durable worker epochs remain subject to the separate identity fence.
+    /// Best-effort kill of every retained pooled, exclusive and pooled-start
+    /// process group before the daemon exits without running destructors.
+    /// Locks are only tried, so a wedged owner cannot block the exit. Nothing
+    /// is reaped or settled and the result is never cleanup proof. Returns
+    /// the PIDs owning the signalled groups.
+    pub fn kill_retained_process_groups_before_exit(&self) -> Vec<u32> {
+        let mut killed = Vec::new();
+        let Ok(state) = self.inner.state.try_lock() else {
+            return killed;
+        };
+        let processes = state
+            .groups
+            .values()
+            .flat_map(|group| group.processes.iter())
+            .chain(state.exclusive.values().map(|entry| &entry.process));
+        for process in processes {
+            if let Ok(running) = process.running.try_lock()
+                && let Some(running) = running.as_ref()
+            {
+                killed.push(running.kill_retained_group_before_exit());
+            }
+        }
+        for start in state.groups.values().flat_map(|group| group.starts.iter()) {
+            if let Ok(retained) = start.retained.try_lock() {
+                for running in &retained.retained_running {
+                    killed.push(running.kill_retained_group_before_exit());
+                }
+            }
+        }
+        killed
+    }
+
     pub fn shutdown_and_reap_all(&self, timeout: Duration) -> Result<usize> {
         self.inner.shutdown.store(true, Ordering::Release);
         self.inner.changed.notify_all();

@@ -22,7 +22,7 @@
 //!
 //! These tests prove that chain end-to-end by capturing the headers
 //! the mock provider receives and asserting the value flows from
-//! vault → vault_bindings → spec.env → directive-runtime subprocess.
+//! vault → admitted secret delivery → spec.env → directive-runtime subprocess.
 //!
 //! Two scenarios:
 //! - `secret_injection_with_custom_header_and_prefix` —
@@ -191,9 +191,9 @@ model:
 /// Secrets MUST be declared in the directive's `required_secrets`
 /// AND present in the operator's sealed vault store at
 /// `<state>/.ai/state/secrets/store.enc`. The dispatcher reads the
-/// declared secrets out of the vault, threads them through
-/// `vault_bindings`, and the directive-runtime subprocess sees them
-/// as `std::env::var(env_var)`.
+/// declared secrets out of the vault after the launch's admission is
+/// verified, delivers them as named environment entries, and the
+/// directive-runtime subprocess sees them as `std::env::var(env_var)`.
 async fn run_directive_and_capture_first_request_headers(
     env_var: &str,
     secret_value: &str,
@@ -353,10 +353,9 @@ async fn secret_injection_with_default_authorization_bearer() {
 // All secret-injection tests in this file go through the sealed
 // vault. Operators put their API keys in the sealed-envelope store
 // at `<state>/.ai/state/secrets/store.enc`, the daemon's
-// `SealedEnvelopeVault` decrypts them at request-build time, and the
-// vault populates `vault_bindings`, which
-// `services::thread_lifecycle::spawn_item` merges into the spawned
-// subprocess's `spec.env`. After lillux's `env_clear()` contract
+// `SealedEnvelopeVault` decrypts them after the launch's admission is
+// verified, and the authorized declared secrets are delivered as named
+// entries of the spawned subprocess's `spec.env`. After lillux's `env_clear()` contract
 // change this is the only path that delivers a secret into the
 // directive runtime — the parent process's env is no longer
 // inherited.
@@ -474,7 +473,7 @@ async fn run_directive_with_vault_secret(
     let captured = mock.captured_headers().await;
     assert!(
         !captured.is_empty(),
-        "mock provider received zero requests; vault → vault_bindings → spec.env path \
+        "mock provider received zero requests; vault → secret delivery → spec.env path \
          is broken"
     );
 
@@ -492,8 +491,8 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
     // `<state>/.ai/state/secrets/store.enc`. Nothing on the daemon's
     // command line, nothing in `cmd.env()`. If the header arrives at
     // the mock provider with the expected value, the full pipe works:
-    //   store.enc → SealedEnvelopeVault::read_all → dispatch.rs →
-    //   ExecutionParams.vault_bindings → spawn_item spec.env →
+    //   store.enc → SealedEnvelopeVault → admitted secret delivery →
+    //   spawn_item spec.env →
     //   Command::env() → directive-runtime subprocess →
     //   std::env::var(provider.auth.env_var) → outbound auth header.
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
@@ -513,7 +512,7 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
         actual, &expected,
         "vault → subprocess env → auth header mismatch — sealed vault store at \
          `<state>/.ai/state/secrets/store.enc` must reach the provider HTTP \
-         request via the existing vault_bindings plumbing",
+         request via admitted secret delivery",
     );
 }
 
@@ -524,8 +523,8 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // step 7c overlay: dispatcher walks `[user_home, project_root]`
     // for `.env`, parses KEY=VALUE, layers it under the (empty)
     // vault, then projects to the directive's declared
-    // `required_secrets` and threads the result through
-    // `vault_bindings` → spec.env → directive-runtime subprocess →
+    // `required_secrets` and delivers the result through
+    // admitted secret delivery → spec.env → directive-runtime subprocess →
     // outbound auth header.
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
     let env_var = "OPENROUTER_API_KEY";
@@ -591,7 +590,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     let captured = mock.captured_headers().await;
     assert!(
         !captured.is_empty(),
-        ".env → vault_bindings → spec.env path is broken; mock got 0 requests"
+        ".env → secret delivery → spec.env path is broken; mock got 0 requests"
     );
     let headers = captured.into_iter().next().unwrap();
     let actual = headers.get("authorization").unwrap_or_else(|| {

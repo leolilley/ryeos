@@ -202,10 +202,8 @@ fn quote_prepared_physical_registry_handoff()
     lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 2 }
 }
 
-/// Provisional registry-only rejection floor. It prices the independently
-/// enumerated P/A registration bounds and inventory allocation, but omits the
-/// other cleanup owners. A complete `required_outside_cleanup` quote must
-/// replace this floor before any node profile admits a run.
+/// Registry part of `required_outside_cleanup`: the independently enumerated
+/// P/A registration bounds and the inventory allocation.
 fn minimum_registry_cleanup(
     tickets: u32,
 ) -> Result<(usize, lillux_sqlite::original_physical_custody::OutsideWork)> {
@@ -222,12 +220,120 @@ fn minimum_registry_cleanup(
     Ok((maximum, allocation.checked_add(registration)?))
 }
 
+/// Daemon handoff of the primary operator lock into outside custody.
+pub fn quote_operator_lock_handoff() -> lillux_sqlite::original_physical_custody::OutsideWork {
+    lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 2 }
+}
+
+/// Complete outside-cleanup floor checked by `reserve`: the registry floor,
+/// the retained late owner and its retirement inputs, every descriptor stage,
+/// and every per-pass finalizer and State pre-seal stage charge, each counted
+/// once per finalizer attempt. Returns the physical source maximum with it.
+fn required_outside_cleanup(
+    tickets: u32,
+) -> Result<(usize, lillux_sqlite::original_physical_custody::OutsideWork)> {
+    use lillux_sqlite::original_physical_custody::{OriginalPhysicalRegistry, OutsideWork};
+    let (physical_maximum, registry_floor) = minimum_registry_cleanup(tickets)?;
+    let attempts = u64::from(super::MAX_FINALIZATION_ATTEMPTS);
+    let fixed = |steps: u64| OutsideWork { bytes: 0, steps };
+    let membership = |queries: u64| OriginalPhysicalRegistry::membership_work_quote(physical_maximum, queries);
+    let late_owner = LateNativeControl::maximum_storage_quote(physical_maximum)?;
+    let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(physical_maximum, tickets)?;
+    // Settled finalizer stages: account/input transfer, registration,
+    // exclusion aliases, receipt joins and settlement, once per pass.
+    let finalizer = quote_finalization_control_source_receipt_join()?
+        .checked_add(quote_finalization_store_metadata_receipts()?)?
+        .checked_add(quote_finalization_store_parent_receipts()?)?
+        .checked_add(quote_finalization_store_scheduler_receipts()?)?
+        .checked_add(quote_finalization_store_exhaustion()?)?
+        .checked_add(quote_prepared_physical_registry_handoff())?
+        .checked_add(quote_operator_lock_handoff())?
+        .checked_add(membership(1)?.checked_add(fixed(8))?)?
+        .checked_add(membership(1)?.checked_add(fixed(8))?)?
+        .checked_add(membership(2)?.checked_add(fixed(8))?)?
+        .checked_add(super::account::quote_capacity_finalization_sources()?)?
+        .checked_add(super::account::quote_capacity_finalization_validation()?)?
+        .checked_add(super::account::quote_capacity_settlement_attempt()?)?
+        .checked_add(super::quote_native_capacity_input_finalization_sources()?)?;
+    // Descriptor retirement: one membership check per unretired slot, the
+    // operator target and parent, and the operator observations.
+    let descriptors = membership(1)?
+        .checked_mul(u64::try_from(physical_maximum)?)?
+        .checked_add(OriginalPhysicalRegistry::operator_target_retirement_quote(1)?)?
+        .checked_add(membership(1)?)?;
+    #[cfg(target_os = "linux")]
+    let descriptors = descriptors
+        .checked_add(OriginalPhysicalRegistry::operator_observation_quote(physical_maximum, 2)?)?;
+    // Each close owner is prepared once; a refused pass repeats at most one.
+    let descriptor_owners = OriginalPhysicalRegistry::descriptor_owner_quote(physical_maximum)?
+        .checked_add(OriginalPhysicalRegistry::descriptor_owner_quote(1)?
+            .checked_mul(attempts.saturating_sub(1))?)?;
+    // State pre-seal stages: join, destination-input transfer with one leaf
+    // admission per ticket, leaf coalescing, parent transfer and parts, and
+    // the host-alias retirement and live-parent completion checks.
+    let leaves = ryeos_state::state_db::maximum_state_destination_leaves(tickets)?;
+    let state = ryeos_state::state_db::quote_state_destination_join(leaves)?
+        .checked_add(ryeos_state::state_db::quote_maximum_state_destination_input_transfer(tickets)?)?
+        .checked_add(ryeos_state::state_db::quote_state_leaf_admission(tickets, tickets)?)?
+        .checked_add(ryeos_state::state_db::quote_state_source_coalescing(leaves)?)?
+        .checked_add(ryeos_state::state_db::quote_live_state_parent_transfer()?)?
+        .checked_add(ryeos_state::state_db::quote_live_state_physical_parent()?)?
+        .checked_add(membership(8)?.checked_add(fixed(8))?.checked_mul(2)?)?;
+    // Remaining State pre-seal charges: one continuation per leaf, the
+    // generated-root membership check, the destination join, the parent and
+    // registered-root validations, recovery registration, six root handoffs
+    // and the Operational physical parent.
+    let state_tail = ryeos_state::state_db::quote_state_leaf_continuations(leaves)?
+        .checked_add(ryeos_state::state_db::quote_generated_root_registration(physical_maximum, leaves)?)?
+        .checked_add(ryeos_state::state_db::quote_live_state_destination_join())?
+        .checked_add(membership(12)?.checked_mul(2)?)?
+        .checked_add(membership(8)?)?
+        .checked_add(membership(6)?)?
+        .checked_add(ryeos_state::state_db::quote_live_state_root_registration_handoff().checked_mul(6)?)?
+        .checked_add(ryeos_state::state_db::quote_live_state_physical_parent()?)?;
+    // Store pre-seal charges: join preparation and receiver, parent transfer
+    // and physical parent, one transfer per leaf, parent finalization parts,
+    // root and completion memberships, handoffs and alias retirements, the
+    // operator lock, packet-vector handoffs and destination retries.
+    let selected_packets = ryeos_app::state_store::MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES;
+    let store_tail = ryeos_app::state_store::quote_store_destination_join_preparation()
+        .checked_add(ryeos_app::state_store::quote_store_receiver()?)?
+        .checked_add(ryeos_app::state_store::quote_store_parent_transfer()?)?
+        .checked_add(ryeos_app::state_store::quote_store_physical_parent()?)?
+        .checked_add(ryeos_app::state_store::quote_store_leaf_transfers(leaves)?)?
+        .checked_add(ryeos_app::state_store::quote_store_parent_finalization_parts()?)?
+        .checked_add(membership(5)?.checked_add(fixed(8))?)?
+        .checked_add(membership(3)?.checked_add(fixed(8))?)?
+        .checked_add(membership(4)?.checked_add(fixed(16))?)?
+        .checked_add(membership(4)?.checked_add(fixed(8))?)?
+        .checked_add(ryeos_app::state_store::quote_store_root_registration_handoff().checked_mul(4)?)?
+        .checked_add(ryeos_app::state_store::quote_store_parent_authority_handoff())?
+        .checked_add(ryeos_app::state_store::quote_store_parent_alias_retirement())?
+        .checked_add(ryeos_app::state_store::quote_store_child_parent_alias_retirement())?
+        .checked_add(ryeos_app::state_store::quote_store_parent_facade_retirement())?
+        .checked_add(ryeos_app::state_store::quote_store_direct_operational_handoff())?
+        .checked_add(ryeos_app::state_store::quote_store_operator_lock_registration())?
+        .checked_add(membership(1)?)?
+        .checked_add(ryeos_app::state_store::quote_store_packet_vector_handoff()
+            .checked_mul(u64::try_from(selected_packets)?)?)?
+        .checked_add(ryeos_app::state_store::quote_destination_retries(selected_packets)?)?;
+    let per_pass = finalizer.checked_add(descriptors)?.checked_add(state)?
+        .checked_add(state_tail)?.checked_add(store_tail)?;
+    let total = registry_floor
+        .checked_add(late_owner)?
+        .checked_add(retirement_inputs)?
+        .checked_add(descriptor_owners)?
+        .checked_add(per_pass.checked_mul(attempts)?)?;
+    Ok((physical_maximum, total))
+}
+
 /// Quote the same-registry receipt checks and clock-alias join that consume the
 /// settled account/input source frames after registry retirement. The
 /// no-Store path can also retain one direct operator registration, so this
 /// covers twelve settled control sources plus that optional operator member.
 /// Each incomplete pass validates the whole retained frame before consuming
-/// any source; the selected composition's shared pass cap bounds retries.
+/// any source and charges this per-pass quote; `required_outside_cleanup`
+/// reserves it once per finalizer attempt.
 fn quote_finalization_control_source_receipt_join(
 ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let maximum_sources = RETAINED_CAPACITY_CONTROL_SOURCES
@@ -237,29 +343,18 @@ fn quote_finalization_control_source_receipt_join(
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer control-source receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: 0,
-        steps: per_pass
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))
-            .context("finalizer control-source receipt retry quote overflow")?,
-    })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
 }
 
 /// Quote the retained State/thread metadata membership receipts after the
-/// exact Store inventory has closed. This is an incremental finalizer-stage
-/// quote; it is not the complete outside-cleanup floor.
+/// exact Store inventory has closed, for one finalizer pass.
 fn quote_finalization_store_metadata_receipts(
 ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let per_pass = u64::try_from(RETAINED_STORE_METADATA_SOURCES)?
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer Store metadata receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: 0,
-        steps: per_pass
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))
-            .context("finalizer Store metadata retry quote overflow")?,
-    })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
 }
 
 fn quote_finalization_store_parent_receipts(
@@ -268,12 +363,7 @@ fn quote_finalization_store_parent_receipts(
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer Store parent receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: 0,
-        steps: per_pass
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))
-            .context("finalizer Store parent retry quote overflow")?,
-    })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
 }
 
 fn quote_finalization_store_scheduler_receipts(
@@ -282,12 +372,7 @@ fn quote_finalization_store_scheduler_receipts(
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer Store Scheduler receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: 0,
-        steps: per_pass
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))
-            .context("finalizer Store Scheduler retry quote overflow")?,
-    })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
 }
 
 /// Fixed census pass over the remaining outside-graph slots; per-frame
@@ -296,9 +381,7 @@ fn quote_finalization_store_exhaustion(
 ) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     Ok(lillux_sqlite::original_physical_custody::OutsideWork {
         bytes: 0,
-        steps: FINALIZER_CONTROL_SOURCE_PHASE_STEPS
-            .checked_mul(u64::from(super::MAX_FINALIZATION_ATTEMPTS))
-            .context("finalizer Store exhaustion retry quote overflow")?,
+        steps: FINALIZER_CONTROL_SOURCE_PHASE_STEPS,
     })
 }
 
@@ -331,6 +414,84 @@ fn require_finalizer_control_receipt(
         "settled finalizer control source role changed");
     drop(registration.receipt_in(retired_registry)?);
     Ok(())
+}
+
+/// Envelope-derived quantities `reserve` checks before any account effect.
+struct ReservationFloors {
+    tickets: u32,
+    host_layout: lillux_sqlite::original_host_owner::backing::HostStorageLayout,
+    outside_control_limit: u64,
+    physical_maximum: usize,
+    host_work: u64,
+}
+
+/// Every pure floor check of one signed incarnation envelope: native cleanup
+/// after the signed splits, host payload and resident span, the complete
+/// outside-cleanup floor (bytes and steps) and bounded host preparation.
+fn require_reservation_floors(
+    incarnation: &ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope,
+) -> Result<ReservationFloors> {
+    let units = incarnation.units;
+    let tickets = u32::try_from(units.connection_tickets)?;
+    // Pure native layout quote: no arena mapping or SQLite initialization.
+    // The actual host layout, rather than assumed source arithmetic, must
+    // fit the signed cleanup reserve before the first reservation effect.
+    let required = OriginalNativeFactory::required_cleanup_steps(units.storage_bytes, tickets)?;
+    let outside_cleanup_steps = incarnation.outside_cleanup_steps;
+    ensure!(
+        outside_cleanup_steps > 0,
+        "cleanup envelope has no original outside work reserve"
+    );
+    let native_cleanup_steps = units
+        .cleanup_steps
+        .checked_sub(incarnation.host_release_steps)
+        .and_then(|remaining| remaining.checked_sub(outside_cleanup_steps))
+        .context("original cleanup splits exceed signed total")?;
+    ensure!(
+        native_cleanup_steps >= required,
+        "native cleanup envelope cannot cover actual layout after signed outside splits"
+    );
+    let host_minimum = super::factory::LiveNativeFactory::minimum_host_payload_bytes(tickets)?;
+    ensure!(
+        units.host_control_storage_bytes >= host_minimum,
+        "host storage cannot cover actual factory/control payload layouts"
+    );
+    // Split ONE original durably reserved host dimension. The resident
+    // span is its actual rounded physical layout; the remainder funds
+    // ordinary outside receiver/refusal storage under this same owner.
+    let host_layout =
+        lillux_sqlite::original_host_owner::backing::HostStorage::quote_native_region()
+            .map_err(anyhow::Error::msg)?;
+    let outside_control_limit = units
+        .host_control_storage_bytes
+        .checked_sub(u64::try_from(host_layout.bytes())?)
+        .context("host allowance cannot cover actual rounded resident span")?;
+    ensure!(
+        outside_control_limit > 0,
+        "host allowance has no original outside control reserve"
+    );
+    let (physical_maximum, required_outside) = required_outside_cleanup(tickets)?;
+    ensure!(
+        outside_control_limit >= required_outside.bytes,
+        "outside control storage is short of the required outside-cleanup floor by {} bytes",
+        required_outside.bytes.saturating_sub(outside_control_limit)
+    );
+    ensure!(
+        outside_cleanup_steps >= required_outside.steps,
+        "outside cleanup is short of the required outside-cleanup floor by {} steps",
+        required_outside.steps.saturating_sub(outside_cleanup_steps)
+    );
+    // Reject an envelope that cannot fund every late outside charge
+    // across all finalizer attempts before account open/debit.
+    let host_work = host_layout
+        .work
+        .checked_add(super::factory::LiveNativeFactory::minimum_host_placement_steps())
+        .context("host preparation work overflow")?;
+    ensure!(
+        units.allocator_steps >= host_work,
+        "allocator work cannot cover bounded host preparation"
+    );
+    Ok(ReservationFloors { tickets, host_layout, outside_control_limit, physical_maximum, host_work })
 }
 
 pub struct LiveNativeCapacityReservation {
@@ -930,8 +1091,16 @@ impl SettledLiveNative {
         let admission_alias = self.input_sources.as_ref()
             .and_then(|sources| sources.exclusion_alias.as_ref())
             .map(|alias| &**alias);
-        anyhow::ensure!(admission_alias.is_some(),
-            "settled admission exclusion alias absent before Store target retirement");
+        if admission_alias.is_none() {
+            // A prior pass validated and retired the admission alias as its
+            // final step. Its completed receipts make this stage a no-op
+            // apart from the Store's own alias, which may still remain.
+            anyhow::ensure!(outside.finalizer_non_account_descriptors_retired()?,
+                "settled admission exclusion alias absent before Store target retirement");
+            // SAFETY: the same sealed registry reports every non-operator
+            // receipt; the original outside owner pays.
+            return unsafe { outside.retire_settled_store_exclusion_alias(None, &prepay) };
+        }
         // SAFETY: the same Store-held registry already contains every source;
         // durable settlement is complete and the original outside owner pays.
         unsafe {
@@ -1190,6 +1359,7 @@ impl SettledLiveNative {
         &mut self,
         outside: &mut ryeos_app::state_store::LiveStateStoreOutsideCustody,
     ) -> Result<()> {
+        self.require_original_process()?;
         if matches!(self.destination_phase, FinalizationDestinationPhase::StoreDestinationsRetired) {
             return Ok(());
         }
@@ -1197,6 +1367,7 @@ impl SettledLiveNative {
             matches!(self.destination_phase, FinalizationDestinationPhase::StoreRegistryRetired),
             "Store packet destinations cannot retire before the exact Store registry"
         );
+        self.require_finalization_cleanup()?;
         let late = Arc::clone(
             self.original
                 .late
@@ -1511,6 +1682,27 @@ impl SettledLiveNative {
         }
     }
 
+    /// Record the destination phase of a registry receipt that a refused pass
+    /// cached after retirement. The path is the one that retired it: a Store
+    /// graph stays retained until after its phase is recorded.
+    pub fn resume_finalization_registry_phase(&mut self, store_graph: bool) -> Result<()> {
+        self.require_original_process()?;
+        if !matches!(self.destination_phase, FinalizationDestinationPhase::Pending) {
+            return Ok(());
+        }
+        let Some(late) = self.original.late.as_ref() else { return Ok(()) };
+        if !late.registry_retired() {
+            return Ok(());
+        }
+        late.retired_registry()?;
+        self.destination_phase = if store_graph {
+            FinalizationDestinationPhase::StoreRegistryRetired
+        } else {
+            FinalizationDestinationPhase::NoStoreRegistryRetired
+        };
+        Ok(())
+    }
+
     pub fn finalization_registry_retired(&self) -> bool {
         self.original
             .late
@@ -1695,6 +1887,14 @@ impl SettledLiveNative {
         late.retire_clock(late.retired_registry()?)
     }
 
+    /// True once the late clock retired. Only the non-charging final
+    /// consumption may follow, so a retry needs no further cleanup window.
+    pub fn finalization_clock_retired(&self) -> bool {
+        self.require_original_process().is_ok()
+            && self.original.late.as_ref()
+                .is_some_and(|late| late.clock_retired().unwrap_or(false))
+    }
+
     /// Consume this settled phase into its final non-owning record once the
     /// clock retired and every finalizer source frame was consumed. A refusal
     /// returns the same settled owner unchanged.
@@ -1877,74 +2077,9 @@ impl LiveNativeCapacityReservation {
     pub fn reserve(inputs: Arc<LiveNativeCapacityInputs>) -> Result<Arc<Self>> {
         inputs.require_original(false)?;
         let units = inputs.policy.incarnation.units;
-        let tickets = u32::try_from(units.connection_tickets)?;
-        // Pure native layout quote: no arena mapping or SQLite initialization.
-        // The actual host layout, rather than assumed source arithmetic, must
-        // fit the signed cleanup reserve before the first reservation effect.
-        let required = OriginalNativeFactory::required_cleanup_steps(units.storage_bytes, tickets)?;
+        let ReservationFloors { tickets, host_layout, outside_control_limit, physical_maximum, host_work } =
+            require_reservation_floors(&inputs.policy.incarnation)?;
         let outside_cleanup_steps = inputs.policy.incarnation.outside_cleanup_steps;
-        ensure!(
-            outside_cleanup_steps > 0,
-            "cleanup envelope has no original outside work reserve"
-        );
-        let native_cleanup_steps = units
-            .cleanup_steps
-            .checked_sub(inputs.policy.incarnation.host_release_steps)
-            .and_then(|remaining| remaining.checked_sub(outside_cleanup_steps))
-            .context("original cleanup splits exceed signed total")?;
-        ensure!(
-            native_cleanup_steps >= required,
-            "native cleanup envelope cannot cover actual layout after signed outside splits"
-        );
-        let host_minimum = super::factory::LiveNativeFactory::minimum_host_payload_bytes(tickets)?;
-        ensure!(
-            units.host_control_storage_bytes >= host_minimum,
-            "host storage cannot cover actual factory/control payload layouts"
-        );
-        // Split ONE original durably reserved host dimension. The resident
-        // span is its actual rounded physical layout; the remainder funds
-        // ordinary outside receiver/refusal storage under this same owner.
-        let host_layout =
-            lillux_sqlite::original_host_owner::backing::HostStorage::quote_native_region()
-                .map_err(anyhow::Error::msg)?;
-        let outside_control_limit = units
-            .host_control_storage_bytes
-            .checked_sub(u64::try_from(host_layout.bytes())?)
-            .context("host allowance cannot cover actual rounded resident span")?;
-        ensure!(
-            outside_control_limit > 0,
-            "host allowance has no original outside control reserve"
-        );
-        let (physical_maximum, registry_floor) = minimum_registry_cleanup(tickets)?;
-        let late_owner_floor = LateNativeControl::maximum_storage_quote(physical_maximum)?;
-        let late_retirement_input_floor =
-            LateNativeControl::maximum_retirement_inputs_quote(physical_maximum, tickets)?;
-        let required_pre_mapping_floor = registry_floor
-            .checked_add(late_owner_floor)?
-            .checked_add(late_retirement_input_floor)?;
-        ensure!(
-            outside_control_limit >= required_pre_mapping_floor.bytes,
-            "outside control storage is short of the registry, descriptor, packet-pin, State-pin, and State/Operational-root retirement floor by {} bytes",
-            required_pre_mapping_floor.bytes.saturating_sub(outside_control_limit)
-        );
-        ensure!(
-            outside_cleanup_steps >= required_pre_mapping_floor.steps,
-            "outside cleanup is short of the registry, descriptor, packet-pin, State-pin, and State/Operational-root retirement floor by {} steps",
-            required_pre_mapping_floor.steps.saturating_sub(outside_cleanup_steps)
-        );
-        // Reject an envelope that cannot even fund the registry, retained late
-        // owner, bounded descriptor inputs, selected packet-pin and State
-        // metadata-pin stages and State generated/projection-root receipt transitions
-        // before account open/debit. This remains a partial floor: the complete
-        // finalizer/source-graph quote and native/host minima are separate.
-        let host_work = host_layout
-            .work
-            .checked_add(super::factory::LiveNativeFactory::minimum_host_placement_steps())
-            .context("host preparation work overflow")?;
-        ensure!(
-            units.allocator_steps >= host_work,
-            "allocator work cannot cover bounded host preparation"
-        );
         let account = RetainedCapacityAccount::open(&inputs)?;
         // Retain the real account and every partial publication by value.
         // Creating the shared reservation must not precede durable debit.
@@ -2494,14 +2629,53 @@ mod tests {
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 2 }
         );
         assert_eq!(quote_finalization_control_source_receipt_join().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 480 });
+            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 120 });
         assert_eq!(quote_finalization_store_metadata_receipts().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 288 });
+            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 72 });
         assert_eq!(quote_finalization_store_parent_receipts().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 192 });
+            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 48 });
         assert_eq!(quote_finalization_store_scheduler_receipts().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 128 });
+            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 32 });
         assert_eq!(quote_finalization_store_exhaustion().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 64 });
+            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 16 });
+        let (maximum, required) = required_outside_cleanup(64).unwrap();
+        assert_eq!(maximum, 426);
+        assert!(required.steps > floor.steps + late_owner.steps + retirement_inputs.steps);
+    }
+
+    /// Every shipped init profile that declares native capacity must pass the
+    /// same floor checks `reserve` runs, so a fresh node can start.
+    #[test]
+    fn shipped_profiles_satisfy_reservation_floors() {
+        use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
+        let profiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/.ai/node/init/profiles");
+        let mut entries = std::fs::read_dir(&profiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "yaml"))
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert!(entries.iter().any(|path| path.ends_with("core.yaml")));
+        let mut checked = 0usize;
+        for path in entries {
+            let document: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let Some(section) = document.get("policies").and_then(|p| p.get("native_capacity")) else {
+                continue;
+            };
+            let policy: NodeNativeCapacityPolicy = serde_yaml::from_value(section.clone())
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            policy.validate().unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let tickets = u32::try_from(policy.incarnation.units.connection_tickets).unwrap();
+            let (_, required) = required_outside_cleanup(tickets).unwrap();
+            assert!(policy.incarnation.outside_cleanup_steps >= required.steps,
+                "{}: outside_cleanup_steps {} below floor {}",
+                path.display(), policy.incarnation.outside_cleanup_steps, required.steps);
+            require_reservation_floors(&policy.incarnation)
+                .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+            checked += 1;
+        }
+        assert!(checked > 0, "no shipped profile declares native capacity");
     }
 }

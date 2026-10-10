@@ -9530,6 +9530,22 @@ impl RunningProcess {
         result
     }
 
+    /// Best-effort SIGKILL of the retained execution scope or process group,
+    /// for an owner process that is about to exit without running destructors.
+    /// Nothing is reaped or settled, and delivery is never cleanup proof. The
+    /// unreaped wrapper still reserves the numeric PGID while it is signalled.
+    /// Returns the wrapper PID that owns the group.
+    pub fn kill_retained_group_before_exit(&self) -> u32 {
+        if let Some(scope) = &self.process_scope {
+            // A selected scope never degrades to numeric group signalling.
+            let _ = scope.terminate_and_wait(ATTACHMENT_ABORT_SETTLE_TIMEOUT);
+            return self.wrapper_pid;
+        }
+        #[cfg(unix)]
+        kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, !self.wrapper_reaped);
+        self.wrapper_pid
+    }
+
     /// Wait for the process to finish (or time out) and return the result.
     pub fn wait(self) -> SubprocessResult {
         self.wait_interruptible(|| false)

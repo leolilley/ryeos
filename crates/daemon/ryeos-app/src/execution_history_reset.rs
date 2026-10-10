@@ -3990,7 +3990,7 @@ mod tests {
                     lease,
                     sql_work,
                 )
-                .map_err(anyhow::Error::new)?;
+                .map_err(|failure| anyhow::anyhow!("{failure}"))?;
                 // Never open/drop a filesystem alias while SQLite owns the inode.
                 let value: i64 =
                     owner
@@ -4003,7 +4003,7 @@ mod tests {
                         .execute_batch("DELETE FROM sample")
                         .is_err()
                 );
-                let proof = owner.close().map_err(anyhow::Error::new)?;
+                let proof = owner.close().map_err(|failure| anyhow::anyhow!("{failure}"))?;
                 Ok(SqliteInspectionOutcome::Closed {
                     accounting: Ok(copy),
                     proof,
@@ -4078,8 +4078,8 @@ mod tests {
                     lease,
                     sql_work,
                 )
-                .map_err(anyhow::Error::new)?;
-                let proof = owner.close().map_err(anyhow::Error::new)?;
+                .map_err(|failure| anyhow::anyhow!("{failure}"))?;
+                let proof = owner.close().map_err(|failure| anyhow::anyhow!("{failure}"))?;
                 Ok(SqliteInspectionOutcome::Closed {
                     accounting: Err(anyhow::anyhow!("injected accounting refusal")),
                     proof,
@@ -4150,7 +4150,7 @@ mod tests {
                 )
                 .err()
                 .expect("nonregular WAL must refuse acquisition");
-                let proof = failure.retry_close().map_err(anyhow::Error::new)?;
+                let proof = failure.retry_close().map_err(|failure| anyhow::anyhow!("{failure}"))?;
                 Ok(SqliteInspectionOutcome::AcquisitionReleased {
                     error: anyhow::anyhow!("injected acquisition refusal"),
                     proof,

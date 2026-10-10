@@ -961,7 +961,11 @@ mod tests {
         let original = fs::read_to_string(&path).unwrap();
         let expected_signer = ryeos_engine::item_resolution::parse_signature_header(
             &original,
-            &node_config_envelope(),
+            &ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".into(),
+                suffix: None,
+                after_shebang: false,
+            },
         )
         .unwrap()
         .signer_fingerprint;

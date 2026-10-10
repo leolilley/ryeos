@@ -707,28 +707,33 @@ async fn dispatch_tool_subprocess(
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
 
+    // Direct tools have no continuation admission. Refuse before resolution,
+    // finalization, CAS context or any vault access.
+    if let Some(previous) = request.previous_thread_id.as_deref() {
+        return Err(DispatchError::DirectContinuationUnsupported {
+            item_ref,
+            previous_thread_id: previous.to_owned(),
+        });
+    }
+
     require_terminal_executor_id(verified, &item_ref)?;
 
-    let admitted_resolution = if request.previous_thread_id.is_none() {
-        request
-            .root_admission
-            .as_ref()
-            .map(|admission| {
-                admission
-                    .ensure_matches_provenance(&request.provenance)
-                    .map_err(DispatchError::Internal)?;
-                admission
-                    .execution_request(
-                        ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
-                        request.launch_mode.to_owned(),
-                        request.params.clone(),
-                    )
-                    .map_err(DispatchError::Internal)
-            })
-            .transpose()?
-    } else {
-        None
-    };
+    let admitted_resolution = request
+        .root_admission
+        .as_ref()
+        .map(|admission| {
+            admission
+                .ensure_matches_provenance(&request.provenance)
+                .map_err(DispatchError::Internal)?;
+            admission
+                .execution_request(
+                    ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
+                    request.launch_mode.to_owned(),
+                    request.params.clone(),
+                )
+                .map_err(DispatchError::Internal)
+        })
+        .transpose()?;
     let resolution_engine = std::sync::Arc::clone(&ctx.engine);
     let resolution_item_ref = item_ref.clone();
     let resolution_plan_context = ctx.plan_ctx.clone();
@@ -745,8 +750,7 @@ async fn dispatch_tool_subprocess(
     let resolution_parameters = request.params.clone();
     let resolution_usage_subject = request.usage_subject.clone();
     let resolution_usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
-    let creates_chain_root =
-        request.previous_thread_id.is_none() && request.root_admission.is_none();
+    let creates_chain_root = request.root_admission.is_none();
     let mut resolved = match admitted_resolution {
         Some(resolved) => resolved,
         None => tokio::task::spawn_blocking(move || {
@@ -844,9 +848,7 @@ async fn dispatch_tool_subprocess(
     // A method-dispatch wrapper carries the target's admission through the
     // recursive request above. Only a concrete subprocess root may attach that
     // admission to the locally resolved subject.
-    if request.previous_thread_id.is_none()
-        && let Some(admission) = request.root_admission.as_ref()
-    {
+    if let Some(admission) = request.root_admission.as_ref() {
         let local_subject = verified.ok_or_else(|| {
             DispatchError::InvalidRef(
                 item_ref.clone(),
@@ -1130,6 +1132,98 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
     // envelope finite.
     let detail = ryeos_runtime::workload_client::bounded_error_message(&format!("{error:#}"));
     DispatchError::SubprocessRunFailed { item_ref, detail }
+}
+
+/// Static control: no production `DispatchRequest`/`DispatchLaunchOptions`
+/// literal produces a predecessor thread. A direct continuation needs its own
+/// admission first; until then a new producer must fail this control.
+#[cfg(test)]
+mod direct_continuation_producer_controls {
+    fn visit(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name != "tests" && name != "target" && !name.starts_with('.') {
+                    visit(&path, files);
+                }
+            } else if name.ends_with(".rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    fn literal_body(source: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &source[open..]
+    }
+
+    #[test]
+    fn no_production_literal_produces_a_previous_thread_id() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        visit(&crates, &mut files);
+        let mut literals = 0usize;
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            // Production code only: stop at the first test module.
+            let source = source.split("#[cfg(test)]").next().unwrap_or("");
+            for name in ["DispatchRequest {", "DispatchLaunchOptions {"] {
+                for (index, _) in source.match_indices(name) {
+                    let prefix = &source[..index];
+                    if prefix.ends_with("struct ") || prefix.ends_with("impl ")
+                        || prefix.ends_with("for ")
+                    {
+                        continue;
+                    }
+                    let body = literal_body(source, index + name.len() - 1);
+                    for line in body.lines().map(str::trim) {
+                        let Some(value) = line.strip_prefix("previous_thread_id") else {
+                            continue;
+                        };
+                        literals += 1;
+                        let value = value.trim_start_matches(':').trim();
+                        assert!(
+                            value.starts_with("None")
+                                || value.starts_with("request.previous_thread_id")
+                                || value == ",",
+                            "{}: a dispatch literal produces previous_thread_id `{line}`",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            // In a file that builds a dispatch literal, a shorthand forward
+            // must forward an existing request or option.
+            let builds_literal = ["DispatchRequest {", "DispatchLaunchOptions {"]
+                .iter()
+                .any(|name| source.contains(name));
+            for line in source.lines().map(str::trim).filter(|_| builds_literal) {
+                if let Some(value) = line.strip_prefix("let previous_thread_id =") {
+                    let value = value.trim();
+                    assert!(
+                        value.starts_with("request.previous_thread_id")
+                            || value.starts_with("options.previous_thread_id"),
+                        "{}: previous_thread_id local is produced, not forwarded: `{line}`",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(literals > 0, "the scan found no dispatch literal");
+    }
 }
 
 #[cfg(test)]

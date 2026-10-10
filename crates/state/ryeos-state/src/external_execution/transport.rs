@@ -1541,7 +1541,7 @@ mod tests {
         ));
         ordinary.validate().unwrap();
 
-        let mut q_with_ordinary_schema = q.clone();
+        let mut q_with_ordinary_schema = relay_bootstrap();
         q_with_ordinary_schema.schema = EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA;
         assert!(q_with_ordinary_schema.validate().is_err());
 

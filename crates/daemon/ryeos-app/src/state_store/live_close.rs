@@ -346,14 +346,23 @@ impl ClosedLiveStateStore {
         ] {
             super::live_outside::require_original_packet_pre_seal_complete(packets, source_kind)?;
         }
+        anyhow::ensure!(p.scheduler_unopened_database.as_ref()
+            .is_none_or(super::live_outside::UnopenedSchedulerDatabaseProgress::is_joined)
+            && p.scheduler_unopened_schema_reference.as_ref()
+                .is_none_or(super::live_outside::UnopenedNativeTransientProgress::is_joined)
+            && p.scheduler_admission_sources.as_ref()
+                .is_none_or(super::live_native::LiveSchedulerNativeAdmissionOutsideSources::is_joined),
+            "closed Store Scheduler unopened, reference or admission source is not joined before the region seal");
         self.require_state_native_sources_retired()
     }
 
     pub(super) fn require_state_native_sources_retired(&self) -> Result<()> {
-        anyhow::ensure!(self.progress.state_physical.as_ref()
-            .context("closed Store State physical frame absent before seal")?
-            .native_sources_retired(),
+        let state = self.progress.state_physical.as_ref()
+            .context("closed Store State physical frame absent before seal")?;
+        anyhow::ensure!(state.native_sources_retired(),
             "closed Store seal precedes State native-source retirement");
+        anyhow::ensure!(state.live_parent_completed()? && state.recovery_aliases_retired(),
+            "closed Store seal precedes the State live-parent or recovery-alias join");
         Ok(())
     }
 
@@ -1071,6 +1080,7 @@ impl ClosedLiveStateStore {
         let state = self.progress.state_closed.as_mut().context("actual closed State absent")?;
         state.advance_projection_sources(factory, terminal, prepay)?;
         state.advance_schema_sources(factory, terminal, prepay)?;
+        state.advance_destination_input_sources(factory, terminal, prepay)?;
         state.advance_operational_outside(factory, terminal, prepay)?;
         self.advance_runtime_sources(factory, terminal, prepay)
     }

@@ -1416,6 +1416,19 @@ mod tests {
     }
 
     #[test]
+    fn sealed_vault_store_refuses_protected_subprocess_env_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = SealedEnvelopeVault::new(
+            tmp.path().join("store.enc"),
+            lillux::vault::VaultSecretKey::generate(),
+        );
+        for name in ["LD_PRELOAD", "PATH"] {
+            assert!(v.set_secret("op", name, "value").is_err(), "{name} was stored");
+        }
+        assert!(v.list_keys("op").unwrap().is_empty());
+    }
+
+    #[test]
     fn sealed_vault_roundtrip_via_write_helper() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("store.enc");

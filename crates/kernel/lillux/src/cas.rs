@@ -2022,7 +2022,7 @@ mod bounded_cas_tests {
                 .is_err()
         );
 
-        let object = serde_json::json!({"kind":"bounded_fixture", "payload":"x".repeat(91)});
+        let object = serde_json::json!({"kind":"admitted_launch_capsule", "payload":"x".repeat(91)});
         let canonical = canonical_json(&object).unwrap();
         let object_hash = cas.store_object(&object).unwrap();
         let exact_limit = u64::try_from(canonical.len()).unwrap();

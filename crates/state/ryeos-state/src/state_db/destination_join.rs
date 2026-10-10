@@ -583,6 +583,38 @@ impl OriginalStateDestinationJoin {
         *destination = Some(original);
         Ok(())
     }
+    /// End the outside-pending mark of the transferred live parent body once
+    /// its parts are registered in the same registry and its host aliases
+    /// retired. Idempotent; a refusal changes nothing.
+    pub(crate) fn complete_live_parent(
+        self: &Arc<Self>,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
+        parts: &live_native::LiveStatePhysicalParent,
+        registry: &OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.require_original(factory, aggregate)?;
+        let quote = live_native::quote_live_state_host_alias_retirement(registry)?;
+        registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
+        self.require_original(factory, aggregate)?;
+        parts.require_completed_outside_parent(self, registry)?;
+        let mut state = self.state.try_lock()
+            .map_err(|_| anyhow::anyhow!("live State parent completion busy or poisoned"))?;
+        anyhow::ensure!(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
+            && state.leaves.iter().all(|leaf| leaf.source.is_none()),
+            "live State parent completion lacks its closed source census");
+        state.live_parent_outside_pending = false;
+        Ok(())
+    }
+    /// Cached completion of the live parent handoff; reads no factory.
+    pub(crate) fn live_parent_completed(&self) -> anyhow::Result<bool> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign original State join observation");
+        let state = self.state.try_lock()
+            .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
+        Ok(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
+            && !state.live_parent_outside_pending)
+    }
     pub(crate) unsafe fn register_generated_roots(
         &self,
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,

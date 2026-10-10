@@ -1238,6 +1238,31 @@ impl StoreStartupStatePhysical {
         }
     }
 
+    fn live_parent_completed(&self) -> Result<bool> {
+        match self {
+            Self::Closed(frame) => frame.live_parent_completed(),
+            Self::Failed(frame) => frame.live_parent_completed(),
+        }
+    }
+
+    /// A failed start has no PinnedStateAuthority, so a closed State frame
+    /// ends only its own RecoveryStore aliases. A released frame has none.
+    fn retire_recovery_aliases(&mut self,
+        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
+        match self {
+            Self::Closed(frame) => frame.retire_recovery_aliases(&mut None, registry, prepay),
+            Self::Failed(_) => Ok(()),
+        }
+    }
+
+    fn recovery_aliases_retired(&self) -> bool {
+        match self {
+            Self::Closed(frame) => frame.recovery_aliases_retired(),
+            Self::Failed(_) => true,
+        }
+    }
+
     fn consume_retired_projection_sources(
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
@@ -1457,6 +1482,14 @@ impl ReleasedLiveStateStoreStartup {
         }
         super::live_outside::require_original_packet_pre_seal_complete(&p.scheduler_packet_parts,
             super::live_outside::OriginalPacketSourceKind::Scheduler)?;
+        anyhow::ensure!(p.scheduler_unopened_database.as_ref()
+            .is_none_or(super::live_outside::UnopenedSchedulerDatabaseProgress::is_joined)
+            && [&p.scheduler_unopened_schema_reference, &p.runtime_unopened_schema_reference].into_iter()
+                .all(|reference| reference.as_ref()
+                    .is_none_or(super::live_outside::UnopenedNativeTransientProgress::is_joined))
+            && p.scheduler_admission_sources.as_ref()
+                .is_none_or(LiveSchedulerNativeAdmissionOutsideSources::is_joined),
+            "failed Store Scheduler/Runtime unopened, reference or admission source is not joined before the region seal");
         self.require_state_native_sources_retired()
     }
 
@@ -1464,6 +1497,8 @@ impl ReleasedLiveStateStoreStartup {
         if let Some(state) = self.progress.state_physical.as_ref() {
             anyhow::ensure!(state.native_sources_retired(),
                 "failed Store seal precedes State native-source retirement");
+            anyhow::ensure!(state.live_parent_completed()? && state.recovery_aliases_retired(),
+                "failed Store seal precedes the State live-parent or recovery-alias join");
             return Ok(());
         }
         Self::require_no_state_owner(&self.progress)
@@ -2434,6 +2469,7 @@ impl ReleasedLiveStateStoreStartup {
             original.require_close_factory(factory)?;
             let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> = original.clone();
             frame.retire_parent_host_aliases(factory, aggregate, &parent, &lease, registry, prepay)?;
+            frame.retire_recovery_aliases(registry, prepay)?;
         }
         drop(parent);
         self.advance_store_parent(factory, aggregate, prepay)
@@ -2606,11 +2642,13 @@ impl ReleasedLiveStateStoreStartup {
         if let Some(state) = &mut self.progress.state_closed {
             state.advance_projection_sources(factory, terminal, prepay)?;
             state.advance_schema_sources(factory, terminal, prepay)?;
+            state.advance_destination_input_sources(factory, terminal, prepay)?;
             state.advance_operational_outside(factory, terminal, prepay)?;
         }
         if let Some(state) = &mut self.progress.state_released {
             state.advance_projection_sources(factory, terminal, prepay)?;
             state.advance_schema_sources(factory, terminal, prepay)?;
+            state.advance_destination_input_sources(factory, terminal, prepay)?;
             state.advance_operational_outside(factory, terminal, prepay)?;
         }
         self.advance_runtime_sources(factory, terminal, prepay)

@@ -1122,6 +1122,7 @@ mod tests {
         let source = lillux::PinnedDirectory::open(source.path())
             .unwrap()
             .unwrap();
+        source.tighten_owner_private_directory().unwrap();
         let workspace = source.inherited_descriptor_authority().unwrap();
         let descendant = workspace
             .open_directory_descendant(Path::new("prepared/codex-home"))

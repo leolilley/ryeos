@@ -17,23 +17,23 @@ policies:
     allowance:
       # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.
       storage_bytes: 1073815552
-      host_control_storage_bytes: 16777216
+      host_control_storage_bytes: 50331648
       allocator_steps: 320000000
       connection_tickets: 1024
-      cleanup_steps: 4800000
+      cleanup_steps: 25600000
     incarnation:
       units:
         storage_bytes: 67108864
-        host_control_storage_bytes: 1048576
+        host_control_storage_bytes: 3145728
         allocator_steps: 20000000
         connection_tickets: 64
-        cleanup_steps: 300000
+        cleanup_steps: 1600000
       maximum_occupancy_ms: 7200000
       cleanup_occupancy_ms: 120000
       # Finite syscall-attempt allowance; no cleanup-success guarantee.
       host_release_steps: 64
       # Explicit share of cleanup_steps; never duplicates the paid envelope.
-      outside_cleanup_steps: 32768
+      outside_cleanup_steps: 1310720
     # Burned durably per recovery attempt; never native allocation credit.
     recovery:
       maximum_attempts: 32

@@ -9,7 +9,7 @@ use ryeos_state::objects::{
     LogicalSourceRoot, SourceClosureFile, SourceClosureManifest, SourceFileMode,
 };
 use serde_json::json;
-use std::{collections::BTreeMap, fs, sync::Arc};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 
 const WORKER: &str = "worker:fixture/session";
 

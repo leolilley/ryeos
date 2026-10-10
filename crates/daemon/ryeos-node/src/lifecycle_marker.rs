@@ -17,6 +17,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MARKER_FILE: &str = "lifecycle.json";
+
+/// Provisional exit reason staged before native finalization retires the
+/// operator target. It never proves a clean exit: only a completed finalizer
+/// replaces it with the staged reason.
+pub const FINALIZING_REASON: &str = "finalizing";
 const MAX_MARKER_BYTES: u64 = 64 * 1024;
 
 /// Warn when the state filesystem has less free space than this (bytes).
@@ -143,6 +148,18 @@ pub fn record_exit(
     error: Option<&str>,
     launch_route: LaunchRoute,
 ) {
+    write(
+        state_dir,
+        &exited_marker(reason, started_at, error, launch_route),
+    );
+}
+
+fn exited_marker(
+    reason: &str,
+    started_at: &str,
+    error: Option<&str>,
+    launch_route: LaunchRoute,
+) -> LifecycleMarker {
     const MAX_ERROR_BYTES: usize = 8 * 1024;
     let error = error.map(|value| {
         let mut end = value.len().min(MAX_ERROR_BYTES);
@@ -151,24 +168,81 @@ pub fn record_exit(
         }
         value[..end].trim().to_owned()
     });
-    write(
-        state_dir,
-        &LifecycleMarker::Exited {
-            reason: reason.to_string(),
-            pid: std::process::id(),
-            started_at: started_at.to_owned(),
-            exited_at: lillux::time::iso8601_now(),
-            error,
-            launch_route: Some(launch_route),
-        },
-    );
+    LifecycleMarker::Exited {
+        reason: reason.to_string(),
+        pid: std::process::id(),
+        started_at: started_at.to_owned(),
+        exited_at: lillux::time::iso8601_now(),
+        error,
+        launch_route: Some(launch_route),
+    }
+}
+
+/// Replace this run's own provisional [`FINALIZING_REASON`] marker with its
+/// final reason. The pinned compare-and-write refuses any other marker, so a
+/// successor's marker written after the exclusion was released is never
+/// overwritten. Returns whether the final reason was recorded.
+pub fn complete_finalizing_exit(
+    state_dir: &Path,
+    reason: &str,
+    started_at: &str,
+    error: Option<&str>,
+    launch_route: LaunchRoute,
+) -> bool {
+    let result = (|| -> anyhow::Result<()> {
+        let directory = lillux::PinnedDirectory::open(state_dir)?
+            .ok_or_else(|| anyhow::anyhow!("lifecycle state directory is absent"))?;
+        let existing = directory
+            .open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)?
+            .ok_or_else(|| anyhow::anyhow!("provisional lifecycle marker is absent"))?;
+        let observation = existing.observation()?;
+        let raw = existing.read_stable_bounded(&observation, MAX_MARKER_BYTES)?;
+        let decoded: LifecycleMarker = serde_json::from_slice(&raw)?;
+        let own_provisional = matches!(
+            &decoded,
+            LifecycleMarker::Exited { reason, pid, started_at: retained, .. }
+                if reason == FINALIZING_REASON
+                    && *pid == std::process::id()
+                    && retained == started_at
+        );
+        anyhow::ensure!(own_provisional, "lifecycle marker is not this run's provisional exit");
+        let body = serde_json::to_vec(&exited_marker(reason, started_at, error, launch_route))?;
+        directory.atomic_write_pinned_if_same(
+            std::ffi::OsStr::new(MARKER_FILE),
+            Some(&existing),
+            &body,
+            0o600,
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "provisional daemon lifecycle marker was not completed");
+            false
+        }
+    }
 }
 
 /// Inspect the previous run's marker and log its outcome: a recorded clean
-/// exit, or an inferred unclean exit when the marker is still `running` but the
-/// pid is gone.
+/// exit, an unproved finalization, or an inferred unclean exit when the marker
+/// is still `running` but the pid is gone.
 pub fn report_previous_exit(state_dir: &Path) {
     match read(state_dir) {
+        Some(LifecycleMarker::Exited {
+            reason,
+            pid,
+            exited_at,
+            error,
+            ..
+        }) if reason == FINALIZING_REASON => {
+            tracing::warn!(
+                pid,
+                at = %exited_at,
+                detail = error.as_deref().unwrap_or(""),
+                "previous ryeosd run did not prove native finalization (provisional exit marker) — treat its exit as unclean"
+            );
+        }
         Some(LifecycleMarker::Exited {
             reason, exited_at, ..
         }) => {
@@ -318,6 +392,54 @@ mod tests {
         // The reporter must not panic and must classify it as not-alive.
         assert!(!process_alive(u32::MAX - 1));
         report_previous_exit(tmp.path()); // smoke: logs the inferred-crash path
+    }
+
+    #[test]
+    fn provisional_finalizing_marker_completes_only_for_its_own_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let started_at = record_running(tmp.path(), LaunchRoute::Direct);
+        record_exit(
+            tmp.path(),
+            FINALIZING_REASON,
+            &started_at,
+            Some("staged reason: signal"),
+            LaunchRoute::Direct,
+        );
+        report_previous_exit(tmp.path());
+        assert!(!complete_finalizing_exit(
+            tmp.path(),
+            "signal",
+            "another-start",
+            None,
+            LaunchRoute::Direct,
+        ));
+        assert!(complete_finalizing_exit(
+            tmp.path(),
+            "signal",
+            &started_at,
+            None,
+            LaunchRoute::Direct,
+        ));
+        assert!(matches!(
+            read(tmp.path()),
+            Some(LifecycleMarker::Exited { reason, .. }) if reason == "signal"
+        ));
+        assert!(!complete_finalizing_exit(
+            tmp.path(),
+            "runtime_error",
+            &started_at,
+            None,
+            LaunchRoute::Direct,
+        ));
+        let _ = record_running(tmp.path(), LaunchRoute::Direct);
+        assert!(!complete_finalizing_exit(
+            tmp.path(),
+            "signal",
+            &started_at,
+            None,
+            LaunchRoute::Direct,
+        ));
+        assert!(matches!(read(tmp.path()), Some(LifecycleMarker::Running { .. })));
     }
 
     #[test]

@@ -1250,6 +1250,53 @@ impl OriginalNativeTransientInputs {
         Ok(Self { process: std::process::id(), domain, authority })
     }
 }
+/// The single destination input a native connection was opened with.
+pub enum OriginalNativeDestinationInputs {
+    Bound(OriginalNativeBoundInputs),
+    Transient(Arc<dyn OriginalNativeDestinationAuthority>),
+}
+/// Fixed work of one `take_destination_inputs` capture.
+pub const ORIGINAL_DESTINATION_INPUT_TAKE_STEPS: u64 = 4;
+impl OriginalNativeDestinationInputs {
+    pub fn authority(&self) -> &Arc<dyn OriginalNativeDestinationAuthority> {
+        match self {
+            Self::Bound(inputs) => &inputs.authority,
+            Self::Transient(authority) => authority,
+        }
+    }
+    /// Purpose metadata of Bound inputs; transient inputs carry none.
+    pub fn bound_domain(&self) -> Option<OriginalNativeDomain> {
+        match self {
+            Self::Bound(inputs) => Some(inputs.domain),
+            Self::Transient(_) => None,
+        }
+    }
+    fn into_fields(this: Option<Self>)
+        -> (Option<OriginalNativeBoundInputs>, Option<Arc<dyn OriginalNativeDestinationAuthority>>) {
+        match this {
+            Some(Self::Bound(inputs)) => (Some(inputs), None),
+            Some(Self::Transient(authority)) => (None, Some(authority)),
+            None => (None, None),
+        }
+    }
+}
+/// Weak authority identity cached when a receipt is built, so evidence stays
+/// stable after a take-capture moves the inputs out.
+fn destination_authority_witness(destination: &Option<OriginalNativeDestinationInputs>)
+    -> Option<std::sync::Weak<dyn OriginalNativeDestinationAuthority>> {
+    destination.as_ref().map(|inputs| Arc::downgrade(inputs.authority()))
+}
+/// Poisoning is recovered: the slot holds plain owners with no invariant a
+/// panic could break. Only contention refuses.
+fn lock_destination(slot: &Mutex<Option<OriginalNativeDestinationInputs>>)
+    -> Result<std::sync::MutexGuard<'_, Option<OriginalNativeDestinationInputs>>> {
+    match slot.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) =>
+            anyhow::bail!("original destination inputs are busy"),
+    }
+}
 pub struct OriginalNativeBoundInputs {
     process: u32,
     root: Arc<PinnedDirectory>,
@@ -1678,6 +1725,13 @@ impl OriginalNativeFactory {
     pub fn budget_snapshot(&self) -> Result<OriginalNativeBudgetSnapshot> {
         self.budget.snapshot()
     }
+    /// Debit bounded consumer bookkeeping done for an admitted issuance (for
+    /// example pruning a ticket-bounded issuance record) against the ordinary,
+    /// non-cleanup work allowance of this original budget.
+    pub fn debit_issuance_steps(&self, steps: u64) -> Result<()> {
+        self.require_process()?;
+        self.budget.debit_steps(steps, false)
+    }
     /// Original process check only, usable before cleanup mutex traversal.
     /// It does not authorize native effects or renew a clock.
     pub fn require_original_process(&self) -> Result<()> { self.require_process() }
@@ -1814,19 +1868,18 @@ impl OriginalNativeFactory {
         self: &Arc<Self>,
         inputs: OriginalNativeTransientInputs,
     ) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
-        self.open_owned(inputs.domain, None, Some(inputs.authority))
+        self.open_owned(inputs.domain, OriginalNativeDestinationInputs::Transient(inputs.authority))
     }
     pub fn open_bound(
         self: &Arc<Self>,
         inputs: OriginalNativeBoundInputs,
     ) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
-        self.open_owned(inputs.domain, Some(inputs), None)
+        self.open_owned(inputs.domain, OriginalNativeDestinationInputs::Bound(inputs))
     }
     fn open_owned(
         self: &Arc<Self>,
         domain: OriginalNativeDomain,
-        inputs: Option<OriginalNativeBoundInputs>,
-        transient: Option<Arc<dyn OriginalNativeDestinationAuthority>>,
+        destination: OriginalNativeDestinationInputs,
     ) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
         let mut ticket = None;
         let mut producer = None;
@@ -1837,7 +1890,7 @@ impl OriginalNativeFactory {
             let _effect = self.enter_effect()?;
             self.require_original(false)?;
             ensure!(
-                inputs.is_some()
+                matches!(destination, OriginalNativeDestinationInputs::Bound(_))
                     || matches!(
                         domain,
                         OriginalNativeDomain::StateTransient
@@ -1850,12 +1903,7 @@ impl OriginalNativeFactory {
                     ),
                 "only admitted State domain may open transient SQLite"
             );
-            if let Some(inputs) = &inputs {
-                inputs.authority.require_original(self)?;
-            }
-            if let Some(transient) = &transient {
-                transient.require_original(self)?;
-            }
+            destination.authority().require_original(self)?;
             let admission = match self.ticket() {
                 Ok(admission) => admission,
                 Err(error) => match error.downcast::<OriginalNativeConnectionAdmissionFailure>() {
@@ -1880,7 +1928,7 @@ impl OriginalNativeFactory {
             producer.as_ref().unwrap().checkpoint()?;
             let arena = self.arena()?;
             let _scope = arena.scope(false, original_ticket)?;
-            let body = if let Some(inputs) = &inputs {
+            let body = if let OriginalNativeDestinationInputs::Bound(inputs) = &destination {
                 match inputs.mode {
                     OriginalNativeBoundMode::ReadonlyInspection => {
                         let (lease, sql) = inputs.inspection.as_ref().unwrap();
@@ -1964,8 +2012,7 @@ impl OriginalNativeFactory {
                     deadline_anchor: std::cell::Cell::new(None),
                     hook_refused: std::cell::Cell::new(false),
                     body: Some(body),
-                    _inputs: inputs,
-                    transient,
+                    destination: Some(destination),
                 })
             }
             Err(error) => Err(OriginalNativeOpenFailure {
@@ -1976,8 +2023,7 @@ impl OriginalNativeFactory {
                 ticket,
                 producer,
                 owner: std::mem::ManuallyDrop::new(Mutex::new(acquired)),
-                _inputs: inputs,
-                transient,
+                destination: Some(destination),
             }),
         }
     }
@@ -2069,7 +2115,8 @@ impl OriginalNativeFactory {
             domain: None,
             factory: self.clone(), ticket: Some(ticket),
             original_error: anyhow::anyhow!("original producer preparation ended before publication"),
-            _inputs: None, inspection: None, closed_inspection: None, transient: None,
+            inspection: None, closed_inspection: None,
+            destination: Mutex::new(None), destination_authority: None,
         }))
     }
     fn mark_closed(&self, ticket: u32, acquisition: bool) -> Result<()> {
@@ -2596,8 +2643,7 @@ pub struct OriginalNativeConnection {
     domain: OriginalNativeDomain,
     producer: Option<SqliteInspectionProductionPermit>,
     body: Option<NativeConnectionBody>,
-    transient: Option<Arc<dyn OriginalNativeDestinationAuthority>>,
-    _inputs: Option<OriginalNativeBoundInputs>,
+    destination: Option<OriginalNativeDestinationInputs>,
 }
 impl OriginalNativeConnection {
     /// Check the actual factory process identity before changing wrapper state.
@@ -2620,7 +2666,9 @@ impl OriginalNativeConnection {
                 self.domain == OriginalNativeDomain::NodeOperational,
                 "live initialization durability requires NodeOperational"
             );
-            let inputs = self._inputs.as_ref().context("live Bound inputs absent")?;
+            let Some(OriginalNativeDestinationInputs::Bound(inputs)) = self.destination.as_ref() else {
+                anyhow::bail!("live Bound inputs absent");
+            };
             ensure!(
                 matches!(inputs.mode, OriginalNativeBoundMode::Existing
                     | OriginalNativeBoundMode::CreateExclusive
@@ -2866,11 +2914,8 @@ impl OriginalNativeConnection {
             .as_ref()
             .context("original native producer missing")?
             .checkpoint()?;
-        if let Some(inputs) = &self._inputs {
-            inputs.authority.require_original(&self.factory)?;
-        }
-        if let Some(transient) = &self.transient {
-            transient.require_original(&self.factory)?;
+        if let Some(destination) = &self.destination {
+            destination.authority().require_original(&self.factory)?;
         }
         let _scope = self.factory.arena()?.scope(false, 0)?;
         let result = operation(
@@ -2901,11 +2946,8 @@ impl OriginalNativeConnection {
             .as_ref()
             .context("original native producer missing")?
             .checkpoint()?;
-        if let Some(inputs) = &self._inputs {
-            inputs.authority.require_original(&self.factory)?;
-        }
-        if let Some(transient) = &self.transient {
-            transient.require_original(&self.factory)?;
+        if let Some(destination) = &self.destination {
+            destination.authority().require_original(&self.factory)?;
         }
         let _scope = self.factory.arena()?.scope(false, 0)?;
         let result = operation(
@@ -2938,8 +2980,7 @@ impl OriginalNativeConnection {
             domain: self.domain,
             producer: self.producer.take(),
             owner: std::mem::ManuallyDrop::new(Mutex::new(Some(NativeCloseOwner::Live(body)))),
-            _inputs: self._inputs.take(),
-            transient: self.transient.take(),
+            destination: self.destination.take(),
         }
         .retry()
     }
@@ -2950,11 +2991,8 @@ impl Drop for OriginalNativeConnection {
             if let Some(p) = self.producer.take() {
                 std::mem::forget(p);
             }
-            if let Some(i) = self._inputs.take() {
-                std::mem::forget(i);
-            }
-            if let Some(t) = self.transient.take() {
-                std::mem::forget(t);
+            if let Some(destination) = self.destination.take() {
+                std::mem::forget(destination);
             }
         }
         if let Some(body) = self.body.take() {
@@ -2971,8 +3009,9 @@ pub struct ClosedOriginalNativeConnection {
     ticket: u32,
     domain: OriginalNativeDomain,
     body: ClosedNativeBody,
-    transient: Option<Arc<dyn OriginalNativeDestinationAuthority>>,
-    _inputs: Option<OriginalNativeBoundInputs>,
+    // Moves out once, by a take-capture or the consuming outside handoff.
+    destination: Mutex<Option<OriginalNativeDestinationInputs>>,
+    destination_authority: Option<std::sync::Weak<dyn OriginalNativeDestinationAuthority>>,
     _scheduler_retirement: Option<OriginalSchedulerRetirementInputs>,
 }
 impl ClosedOriginalNativeConnection {
@@ -3027,16 +3066,11 @@ impl ClosedOriginalNativeConnection {
         require_current_native_process()?;
         terminal.require_original(factory)?;
         self.require_original(factory)?;
-        let authority = self
-            ._inputs
-            .as_ref()
-            .map(|inputs| &inputs.authority)
-            .or(self.transient.as_ref());
         let leaf = OriginalNativeOutsideLeafEvidence {
             process: std::process::id(),
             identity: OriginalNativeOutsideLeafIdentity::Closed(Arc::downgrade(self)),
             factory: Arc::downgrade(&self.factory),
-            authority: authority.map(Arc::downgrade),
+            authority: self.destination_authority.clone(),
             ticket: Some(self.ticket),
             domain: Some(self.domain),
             closed: true,
@@ -3151,10 +3185,36 @@ impl ClosedOriginalNativeConnection {
     pub fn bound_main_identity(&self) -> Option<(u64, u64)> {
         self.bound_identity
     }
-    /// Whether this closed receipt still owns its original Bound inputs
-    /// (root descriptor alias and destination authority).
-    pub fn retains_bound_inputs(&self) -> bool {
-        self._inputs.is_some()
+    /// Whether this closed receipt still owns its original destination
+    /// inputs (Bound root alias and authority, or a transient authority).
+    pub fn retains_destination_inputs(&self) -> Result<bool> {
+        Ok(lock_destination(&self.destination)?.is_some())
+    }
+    /// Move the destination inputs out of this shared receipt, once. The
+    /// capture is consuming for those inputs and may enter join leaf sets; a
+    /// later outside handoff of this allocation carries no destination. Any
+    /// refusal moves nothing; `None` means the inputs were already taken.
+    pub fn take_destination_inputs(
+        self: &Arc<Self>,
+        factory: &Arc<OriginalNativeFactory>,
+        terminal: &OriginalNativeTerminal,
+    ) -> Result<Option<(OriginalNativeOutsideLeafEvidence, OriginalNativeDestinationInputs)>> {
+        require_current_native_process()?;
+        terminal.require_original(factory)?;
+        self.require_original(factory)?;
+        ensure!(!self.durable_finalizer.load(Ordering::Acquire),
+            "original generated durability effect is in flight");
+        let mut slot = lock_destination(&self.destination)?;
+        let Some(inputs) = slot.take() else { return Ok(None) };
+        Ok(Some((OriginalNativeOutsideLeafEvidence {
+            process: std::process::id(),
+            identity: OriginalNativeOutsideLeafIdentity::Closed(Arc::downgrade(self)),
+            factory: Arc::downgrade(&self.factory),
+            authority: self.destination_authority.clone(),
+            ticket: Some(self.ticket),
+            domain: Some(self.domain),
+            closed: true,
+        }, inputs)))
     }
     /// Exact original generated Bound only, after real SQL/native close.
     /// No SQL reopen, raw connection, data descriptor or generic fsync grant.
@@ -3168,10 +3228,11 @@ impl ClosedOriginalNativeConnection {
             // proof against this SAME factory's final terminal snapshot.
             let _effect = self.factory.enter_effect()?;
             self.factory.require_original(false)?;
-            let inputs = self
-                ._inputs
-                .as_ref()
-                .context("original Bound inputs missing")?;
+            // Held for the whole effect so no take-capture can interleave.
+            let destination = lock_destination(&self.destination)?;
+            let Some(OriginalNativeDestinationInputs::Bound(inputs)) = destination.as_ref() else {
+                anyhow::bail!("original Bound inputs missing");
+            };
             ensure!(
                 self.domain == OriginalNativeDomain::StateGeneratedProjection
                     && inputs.mode == OriginalNativeBoundMode::CreateExclusive,
@@ -3357,7 +3418,7 @@ struct OriginalSchedulerRetirementBody {
     factory: Option<Arc<OriginalNativeFactory>>,
     ticket: u32,
     inputs: OriginalSchedulerRetirementInputs,
-    destination: Option<OriginalNativeBoundInputs>,
+    destination: Option<OriginalNativeDestinationInputs>,
     producer: Option<SqliteInspectionProductionPermit>,
     phase: Option<OriginalSchedulerRetirementPhase>,
     bound_identity: Option<(u64, u64)>,
@@ -3491,7 +3552,9 @@ impl OriginalSchedulerRetirement {
             if let Some(OriginalSchedulerRetirementPhase::Initial(owner)) = body.phase.as_ref() {
                 ensure!(owner.domain == OriginalNativeDomain::NodeScheduler,
                     "retirement requires actual NodeScheduler connection");
-                let destination = owner._inputs.as_ref().context("scheduler destination absent")?;
+                let Some(OriginalNativeDestinationInputs::Bound(destination)) = owner.destination.as_ref() else {
+                    anyhow::bail!("scheduler destination absent");
+                };
                 ensure!(destination.name.as_os_str() == OsStr::new("scheduler.sqlite3"),
                     "retirement requires exact fixed scheduler role");
                 if !cleanup { destination.authority.require_original(body.factory())?; }
@@ -3505,7 +3568,7 @@ impl OriginalSchedulerRetirement {
                 let Some(OriginalSchedulerRetirementPhase::Initial(mut owner)) = body.phase.take() else { unreachable!() };
                 let Some(NativeConnectionBody::Bound(bound)) = owner.body.take() else { unreachable!() };
                 body.factory = Some(owner.factory.clone());
-                body.destination = owner._inputs.take();
+                body.destination = owner.destination.take();
                 body.producer = owner.producer.take();
                 body.phase = Some(OriginalSchedulerRetirementPhase::Bound(bound));
             }
@@ -3644,8 +3707,9 @@ impl OriginalSchedulerRetirement {
                             generation: body.inputs.generation,
                             authority: body.inputs.authority.clone(),
                         }),
-                        bound_identity: body.bound_identity, transient: None,
-                        _inputs: body.destination.take(), durable_body: OnceLock::new(),
+                        bound_identity: body.bound_identity,
+                        destination_authority: destination_authority_witness(&body.destination),
+                        destination: Mutex::new(body.destination.take()), durable_body: OnceLock::new(),
                         durable_finalizer: AtomicBool::new(false),
                     });
                     // Actual receipt and destination custody survive every
@@ -3674,8 +3738,7 @@ pub struct OriginalNativeCloseFailure {
     domain: OriginalNativeDomain,
     producer: Option<SqliteInspectionProductionPermit>,
     owner: std::mem::ManuallyDrop<Mutex<Option<NativeCloseOwner>>>,
-    transient: Option<Arc<dyn OriginalNativeDestinationAuthority>>,
-    _inputs: Option<OriginalNativeBoundInputs>,
+    destination: Option<OriginalNativeDestinationInputs>,
 }
 impl OriginalNativeCloseFailure {
     pub fn error(&self) -> Option<&anyhow::Error> {
@@ -3806,8 +3869,8 @@ impl OriginalNativeCloseFailure {
                     ticket: self.ticket,
                     domain: self.domain,
                     body,
-                    transient: self.transient.take(),
-                    _inputs: self._inputs.take(),
+                    destination_authority: destination_authority_witness(&self.destination),
+                    destination: Mutex::new(self.destination.take()),
                     _scheduler_retirement: None,
                 }))
             }
@@ -3824,11 +3887,8 @@ impl Drop for OriginalNativeCloseFailure {
             if let Some(p) = self.producer.take() {
                 std::mem::forget(p);
             }
-            if let Some(i) = self._inputs.take() {
-                std::mem::forget(i);
-            }
-            if let Some(t) = self.transient.take() {
-                std::mem::forget(t);
+            if let Some(destination) = self.destination.take() {
+                std::mem::forget(destination);
             }
             return;
         }
@@ -3871,18 +3931,18 @@ pub struct OriginalNativeOpenFailure {
     ticket: Option<u32>,
     producer: Option<SqliteInspectionProductionPermit>,
     owner: std::mem::ManuallyDrop<Mutex<Option<NativeOpenOwner>>>,
-    transient: Option<Arc<dyn OriginalNativeDestinationAuthority>>,
-    _inputs: Option<OriginalNativeBoundInputs>,
+    destination: Option<OriginalNativeDestinationInputs>,
 }
 pub struct ReleasedOriginalNativeAcquisition {
     domain: Option<OriginalNativeDomain>,
     factory: Arc<OriginalNativeFactory>,
     ticket: Option<u32>,
     original_error: anyhow::Error,
-    _inputs: Option<OriginalNativeBoundInputs>,
     inspection: Option<Arc<ReleasedSqliteInspection>>,
     closed_inspection: Option<Arc<ClosedSqliteInspection>>,
-    transient: Option<Arc<dyn OriginalNativeDestinationAuthority>>,
+    // Moves out once, by a take-capture or the consuming outside handoff.
+    destination: Mutex<Option<OriginalNativeDestinationInputs>>,
+    destination_authority: Option<std::sync::Weak<dyn OriginalNativeDestinationAuthority>>,
 }
 impl ReleasedOriginalNativeAcquisition {
     /// Copied original purpose observation only; never ticket/native/physical
@@ -3919,6 +3979,33 @@ impl ReleasedOriginalNativeAcquisition {
     }
     pub fn inspection_released(&self) -> Option<Arc<ReleasedSqliteInspection>> {
         self.inspection.clone()
+    }
+    /// Whether this release still owns its original destination inputs.
+    pub fn retains_destination_inputs(&self) -> Result<bool> {
+        Ok(lock_destination(&self.destination)?.is_some())
+    }
+    /// Move the destination inputs out of this shared release, once, with
+    /// the same consuming semantics as the closed-receipt capture. Ticketless
+    /// releases are checked by factory identity only.
+    pub fn take_destination_inputs(
+        self: &Arc<Self>,
+        factory: &Arc<OriginalNativeFactory>,
+        terminal: &OriginalNativeTerminal,
+    ) -> Result<Option<(OriginalNativeOutsideLeafEvidence, OriginalNativeDestinationInputs)>> {
+        require_current_native_process()?;
+        terminal.require_original(factory)?;
+        self.require_original(factory)?;
+        let mut slot = lock_destination(&self.destination)?;
+        let Some(inputs) = slot.take() else { return Ok(None) };
+        Ok(Some((OriginalNativeOutsideLeafEvidence {
+            process: std::process::id(),
+            identity: OriginalNativeOutsideLeafIdentity::Released(Arc::downgrade(self)),
+            factory: Arc::downgrade(&self.factory),
+            authority: self.destination_authority.clone(),
+            ticket: self.ticket,
+            domain: self.domain,
+            closed: false,
+        }, inputs)))
     }
 }
 impl OriginalNativeOpenFailure {
@@ -4105,10 +4192,10 @@ impl OriginalNativeOpenFailure {
                         &mut self.error,
                         anyhow::anyhow!("original error transferred"),
                     ),
-                    _inputs: self._inputs.take(),
                     inspection,
                     closed_inspection,
-                    transient: self.transient.take(),
+                    destination_authority: destination_authority_witness(&self.destination),
+                    destination: Mutex::new(self.destination.take()),
                 }))
             }
             Err(error) => {
@@ -4126,11 +4213,8 @@ impl Drop for OriginalNativeOpenFailure {
             if let Some(p) = self.producer.take() {
                 std::mem::forget(p);
             }
-            if let Some(i) = self._inputs.take() {
-                std::mem::forget(i);
-            }
-            if let Some(t) = self.transient.take() {
-                std::mem::forget(t);
+            if let Some(destination) = self.destination.take() {
+                std::mem::forget(destination);
             }
             return;
         }
@@ -4185,9 +4269,12 @@ enum OriginalNativeOutsideLeafIdentity {
     Released(std::sync::Weak<ReleasedOriginalNativeAcquisition>),
 }
 /// A consuming capture enters outside-custody leaf sets and `same_original_leaf`
-/// comparisons. A borrowed capture from `retained_durable_metadata_leaf` only
-/// binds metadata-pin retirement inputs: the connection stays with its owner,
-/// so it is never a consumed-leaf receipt and must not join those sets.
+/// comparisons. A `take_destination_inputs` capture is consuming for the
+/// inputs it moves; that take is one-shot, so a later outside handoff of the
+/// same allocation carries no destination and cannot add a second leaf. A
+/// borrowed capture from `retained_durable_metadata_leaf` only binds
+/// metadata-pin retirement inputs: the connection stays with its owner, so it
+/// is never a consumed-leaf receipt and must not join those sets.
 #[derive(Clone)]
 pub struct OriginalNativeOutsideLeafEvidence {
     process: u32,
@@ -4303,6 +4390,20 @@ impl OriginalNativeConnectionTerminal {
         if let Err(error) = terminal.require_original(factory).and_then(|()| self.require_original(factory)) {
             return Err(OriginalNativeOutsideCustodyFailure { error, original: std::mem::ManuallyDrop::new(self) });
         }
+        // After a take-capture the inputs already joined a receiver; this
+        // allocation must not report a destination-free handoff.
+        let taken = match &self {
+            Self::Closed(owner) => owner.destination_authority.is_some()
+                && lock_destination(&owner.destination).map_or(true, |slot| slot.is_none()),
+            Self::Released(owner) => owner.destination_authority.is_some()
+                && lock_destination(&owner.destination).map_or(true, |slot| slot.is_none()),
+        };
+        if taken {
+            return Err(OriginalNativeOutsideCustodyFailure {
+                error: anyhow::anyhow!("original destination inputs were taken or are busy"),
+                original: std::mem::ManuallyDrop::new(self),
+            });
+        }
         let process = std::process::id();
         let parts = match self {
             Self::Closed(owner) => {
@@ -4315,7 +4416,10 @@ impl OriginalNativeConnectionTerminal {
                     }),
                 };
                 let ClosedOriginalNativeConnection { durable_body, durable_finalizer: _, bound_identity: _,
-                    factory, ticket, domain, body, transient, _inputs, _scheduler_retirement } = owner;
+                    factory, ticket, domain, body, destination, destination_authority,
+                    _scheduler_retirement } = owner;
+                let (_inputs, transient) = OriginalNativeDestinationInputs::into_fields(
+                    destination.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
                 let durable_pins = match durable_body.into_inner() {
                     Some(body) => [Some(body.main.clone()), body.wal.clone()],
                     None => [None, None],
@@ -4323,9 +4427,8 @@ impl OriginalNativeConnectionTerminal {
                 let inspection = match body { ClosedNativeBody::Plain => None, ClosedNativeBody::Inspection(owner) => Some(owner) };
                 // Only the direct native facade edge ends here. Every original
                 // descriptor/authority owner was moved intact into this packet.
-                let authority = _inputs.as_ref().map(|inputs| &inputs.authority).or(transient.as_ref());
                 let leaf_evidence = OriginalNativeOutsideLeafEvidence { process, identity,
-                    factory: Arc::downgrade(&factory), authority: authority.map(Arc::downgrade),
+                    factory: Arc::downgrade(&factory), authority: destination_authority,
                     ticket: Some(ticket), domain: Some(domain), closed: true };
                 drop(factory);
                 OriginalNativeOutsideConnectionParts { leaf_evidence, ticket: Some(ticket), domain: Some(domain),
@@ -4342,10 +4445,11 @@ impl OriginalNativeConnectionTerminal {
                     }),
                 };
                 let ReleasedOriginalNativeAcquisition { domain, factory, ticket, original_error,
-                    _inputs, inspection, closed_inspection, transient } = owner;
-                let authority = _inputs.as_ref().map(|inputs| &inputs.authority).or(transient.as_ref());
+                    inspection, closed_inspection, destination, destination_authority } = owner;
+                let (_inputs, transient) = OriginalNativeDestinationInputs::into_fields(
+                    destination.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
                 let leaf_evidence = OriginalNativeOutsideLeafEvidence { process, identity,
-                    factory: Arc::downgrade(&factory), authority: authority.map(Arc::downgrade),
+                    factory: Arc::downgrade(&factory), authority: destination_authority,
                     ticket, domain, closed: false };
                 drop(factory);
                 OriginalNativeOutsideConnectionParts { leaf_evidence, ticket, domain, bound_inputs: _inputs,

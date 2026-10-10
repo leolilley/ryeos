@@ -904,6 +904,13 @@ impl RunningExecution {
         }
     }
 
+    /// Best-effort kill of the retained process group before the owning
+    /// process exits without destructors. Not cleanup proof; returns the PID
+    /// that owns the signalled group.
+    pub fn kill_retained_group_before_exit(&self) -> u32 {
+        self.running.kill_retained_group_before_exit()
+    }
+
     pub fn abort(self) {
         self.running.abort();
     }

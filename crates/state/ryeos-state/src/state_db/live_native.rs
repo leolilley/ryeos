@@ -77,7 +77,7 @@ pub fn quote_live_projection_retired_sources(
     anyhow::ensure!(selected_roots <= slots.checked_mul(2)
         .context("retired projection source bound overflow")?,
         "retired projection roots exceed their owner slots");
-    quote_retired_root_receipts(slots, selected_roots)
+    retired_root_receipt_work(slots, selected_roots)
 }
 
 fn quote_retired_root_receipts(
@@ -86,6 +86,15 @@ fn quote_retired_root_receipts(
 ) -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     anyhow::ensure!(selected_roots <= slots,
         "retired root receipts exceed their selected registration slots");
+    retired_root_receipt_work(slots, selected_roots)
+}
+
+/// Per-slot validation plus per-root receipt work; each caller bounds roots
+/// by its own owner shape (a projection slot holds up to two roots).
+fn retired_root_receipt_work(
+    slots: usize,
+    selected_roots: usize,
+) -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let slot_steps = u64::try_from(slots)?
         .checked_mul(4)
         .context("retired root slot validation quote overflow")?;
@@ -699,20 +708,65 @@ pub(super) fn prepay_state_native_source_retirement(
         prepay(quote.bytes, quote.steps))
 }
 
-/// Refuse ending retained refusals while any still carries an owner-bearing
-/// failure frame anywhere in its chain; such owners belong in typed custody,
-/// never in a diagnostic that the native-source stage ends.
+/// Refuse ending retained refusals while any layer of a chain may carry an
+/// owner; such owners belong in typed custody, never in a diagnostic that the
+/// native-source stage ends. Every error type of the native, State and
+/// filesystem owner crates is classified: only the diagnostic ones, which
+/// hold copied facts alone (region refusal codes, role-mutation reports,
+/// schema/event conflicts, callback panic payloads), are absent here. An enum
+/// with diagnostic-only variants is matched by its owner-bearing variants.
 pub(super) fn require_refusals_without_native_owners<'a>(
     refusals: impl IntoIterator<Item = &'a anyhow::Error>,
 ) -> anyhow::Result<()> {
     fn owner_bearing(error: &(dyn std::error::Error + 'static)) -> bool {
+        // State.
         error.is::<GeneratedProjectionPublicationFailure>()
             || error.is::<OriginalProjectionLeaseSetupFailure>()
+            || error.is::<OriginalProjectionSchemaAdmissionFailure>()
+            || error.is::<LiveStateDatabaseOpenFailure>()
+            || error.is::<LiveStateStartupRecoveryFailure>()
+            || error.is::<super::LiveStateCloseFailure>()
+            || error.is::<super::OriginalStateOutsideRetirementFailure>()
+            || error.is::<super::OriginalStateRetirementFailure>()
             || error.is::<crate::projection::OriginalProjectionFailure>()
             || error.is::<crate::sqlite_schema::NativeSchemaSqlReferenceFailure>()
-            || error.is::<OriginalProjectionSchemaAdmissionFailure>()
-            || error.is::<lillux_sqlite::OriginalNativeCloseFailure>()
+            || error.is::<crate::sqlite_schema::NativeSchemaSqlReferenceOutsideFailure>()
+            || error.is::<crate::operational::OriginalOperationalFailure>()
+            || error.is::<crate::operational::LiveOperationalOpenFailure>()
+            || error.is::<crate::operational::LiveOperationalStartupRecoveryFailure>()
+            // Native kernel.
+            || error.is::<lillux_sqlite::OriginalNativeProjectionLeaseAdmissionFailure>()
+            || error.is::<lillux_sqlite::OriginalProjectionLeaseFailure>()
+            || error.is::<lillux_sqlite::OriginalNativeConnectionAdmissionFailure>()
+            || error.is::<lillux_sqlite::OriginalDestinationCustodyFailure>()
+            || error.is::<lillux_sqlite::OriginalNativeFactoryFailure>()
+            || error.is::<lillux_sqlite::LiveOperationalInitializationFailure>()
             || error.is::<lillux_sqlite::OriginalNativeDurabilityFailure>()
+            || error.is::<lillux_sqlite::OriginalSchedulerRetirementFailure>()
+            || error.is::<lillux_sqlite::OriginalNativeCloseFailure>()
+            || error.is::<lillux_sqlite::OriginalNativeOpenFailure>()
+            || error.is::<lillux_sqlite::OriginalNativeOutsideCustodyFailure>()
+            || error.is::<lillux_sqlite::OriginalMetadataPinRetirementFailure>()
+            || error.is::<lillux_sqlite::OriginalOutsideFinalizerFileRetirementFailure>()
+            || error.is::<lillux_sqlite::OriginalFinalizerFileRetirementFailure>()
+            || error.is::<lillux_sqlite::SqliteInspectionProductionFailure>()
+            || error.is::<lillux_sqlite::SqliteDestinationRetirementFailure>()
+            || error.is::<lillux_sqlite::OriginalWitnessRetirementFailure>()
+            || error.is::<lillux_sqlite::ReadonlySqliteOpenFailure>()
+            || error.is::<lillux_sqlite::ReadonlySqliteCloseFailure>()
+            || error.is::<lillux_sqlite::SqliteProjectionRetirementFailure>()
+            || error.is::<lillux_sqlite::BoundSqliteOpenFailure>()
+            // Only a held role resolution reports a retained filesystem role;
+            // refused and budget-exhausted resolutions are copied diagnostics.
+            || matches!(error.downcast_ref::<lillux_sqlite::SqliteRoleResolutionError>(),
+                Some(lillux_sqlite::SqliteRoleResolutionError::Held(_)))
+            // Filesystem custody.
+            || error.is::<lillux::secure_fs::ExclusiveFileCreationFailure>()
+            || error.is::<lillux::secure_fs::PlannedQuarantineFailure>()
+            || error.is::<lillux::secure_fs::EmptyChildRemovalFailure>()
+            || error.is::<lillux::secure_fs::ChildDirectoryCreationFailure>()
+            || error.is::<lillux::secure_fs::AtomicRegularCreationFailure>()
+            || error.is::<lillux::time::RetainedClockCloseFailure>()
     }
     for error in refusals {
         anyhow::ensure!(!error.chain().any(owner_bearing),
@@ -721,14 +775,246 @@ pub(super) fn require_refusals_without_native_owners<'a>(
     Ok(())
 }
 
-/// Refuse while any census connection still owns its original Bound inputs
-/// (root descriptor alias and destination authority).
-pub(super) fn require_census_without_bound_inputs(
+/// Refuse while any census connection still owns its original destination
+/// inputs (Bound root alias and authority, or a transient authority).
+pub(super) fn require_census_without_destination_inputs(
     candidates: &[Arc<lillux_sqlite::ClosedOriginalNativeConnection>],
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(candidates.iter().all(|closed| !closed.retains_bound_inputs()),
-        "State closed connection still retains its original Bound inputs");
+    for closed in candidates {
+        anyhow::ensure!(!closed.retains_destination_inputs()?,
+            "State closed connection still retains its original destination inputs");
+    }
     Ok(())
+}
+
+/// A released State acquisition may be ended only with no destination
+/// inputs, no inspection owner (State has no copy-lease receiver) and a
+/// refusal that carries no owner.
+pub(super) fn require_released_without_owner_inputs(
+    released: &lillux_sqlite::ReleasedOriginalNativeAcquisition,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!released.retains_destination_inputs()?,
+        "State released acquisition still retains its original destination inputs");
+    anyhow::ensure!(released.inspection_released().is_none() && released.inspection_closed().is_none(),
+        "State released acquisition retains an inspection owner");
+    require_refusals_without_native_owners(std::iter::once(released.original_error()))
+}
+
+/// Census guard before a State frame enters physical custody: no terminal
+/// of the context or of `projection_native` still owns destination inputs.
+pub(super) fn require_no_destination_inputs(
+    context: Option<&OriginalProjectionBuildContext>,
+    projection_native: &[lillux_sqlite::OriginalNativeConnectionTerminal],
+) -> anyhow::Result<()> {
+    if let Some(context) = context {
+        for closed in context.terminals.iter().cloned().chain(context.durable.iter().map(|proof| proof.closed())) {
+            anyhow::ensure!(!closed.retains_destination_inputs()?,
+                "State terminal still retains its original destination inputs");
+        }
+    }
+    for native in projection_native {
+        let retained = match native {
+            lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed) => closed.retains_destination_inputs()?,
+            lillux_sqlite::OriginalNativeConnectionTerminal::Released(released) => released.retains_destination_inputs()?,
+        };
+        anyhow::ensure!(!retained, "State projection terminal still retains its original destination inputs");
+    }
+    Ok(())
+}
+
+/// One destination input taken from a State terminal. It is cached here
+/// before any fallible step and converted in place toward its State leaf.
+pub(super) struct StateTakenDestination {
+    evidence: lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+    stage: StateTakenStage,
+}
+enum StateTakenStage {
+    Raw(lillux_sqlite::OriginalNativeDestinationInputs),
+    Parts(lillux_sqlite::OriginalNativeOutsideBoundParts),
+    Leaf {
+        leaf: super::destination_join::StateDestinationLeaf,
+        root_alias: Option<Arc<lillux::PinnedDirectory>>,
+    },
+}
+
+/// Storage of `terminals` taken inputs, plus each take and its identity scan
+/// over `issued` records.
+pub fn quote_state_destination_input_transfer(terminals: usize, issued: usize)
+    -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    let bytes = terminals.checked_mul(std::mem::size_of::<StateTakenDestination>())
+        .context("State destination input storage quote overflow")?;
+    let per_take = lillux_sqlite::ORIGINAL_DESTINATION_INPUT_TAKE_STEPS
+        .checked_add(u64::try_from(issued)?)
+        .context("State destination input work quote overflow")?;
+    let steps = u64::try_from(terminals)?.checked_mul(per_take)
+        .and_then(|steps| steps.checked_add(8))
+        .context("State destination input work quote overflow")?;
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: u64::try_from(bytes)?, steps })
+}
+
+/// Worst case of one pass: every census candidate (3T) plus the inputs a
+/// refused earlier pass kept taken (at most the T issued destinations), each
+/// checked against a full issuance record.
+pub fn quote_maximum_state_destination_input_transfer(resource_tickets: u32)
+    -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    let issued = super::destination_join::maximum_state_destination_leaves(resource_tickets)?;
+    let taken = maximum_state_metadata_pin_candidates(resource_tickets)?
+        .checked_add(issued)
+        .context("State destination input census bound overflow")?;
+    quote_state_destination_input_transfer(taken, issued)
+}
+
+/// Move every destination input still held by a State terminal into the State
+/// destination join as a typed leaf. Root aliases end once the leaf (which
+/// holds the same root) is retained. A refusal keeps every taken entry in
+/// `slot` for the next pass; an unmatched authority is never dropped.
+pub(super) fn advance_destination_input_sources(
+    context: Option<&OriginalProjectionBuildContext>,
+    projection_native: &[lillux_sqlite::OriginalNativeConnectionTerminal],
+    slot: &mut Vec<StateTakenDestination>,
+    join: &Arc<super::destination_join::OriginalStateDestinationJoin>,
+    factory: &Arc<OriginalNativeFactory>,
+    terminal: &lillux_sqlite::OriginalNativeTerminal,
+    prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    factory.require_original_process()?;
+    terminal.require_original(factory)?;
+    join.require_original(factory, terminal)?;
+    let (terminals, durable): (&[Arc<lillux_sqlite::ClosedOriginalNativeConnection>],
+        &[Arc<lillux_sqlite::DurableOriginalNativeBound>]) = match context {
+        Some(context) => (&context.terminals, &context.durable),
+        None => (&[], &[]),
+    };
+    let mut retained = !slot.is_empty();
+    for closed in terminals.iter().cloned().chain(durable.iter().map(|proof| proof.closed())) {
+        retained = retained || closed.retains_destination_inputs()?;
+    }
+    for native in projection_native {
+        retained = retained || match native {
+            lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed) => closed.retains_destination_inputs()?,
+            lillux_sqlite::OriginalNativeConnectionTerminal::Released(released) => released.retains_destination_inputs()?,
+        };
+    }
+    if !retained { return Ok(()); }
+    let candidates = terminals.len().checked_add(durable.len())
+        .and_then(|count| count.checked_add(projection_native.len()))
+        .context("State destination input census overflow")?;
+    let issued = match context { Some(context) => context.issued_destination_count()?, None => 0 };
+    let quote = quote_state_destination_input_transfer(
+        candidates.checked_add(slot.len()).context("State destination input census overflow")?, issued)?;
+    lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
+        prepay(quote.bytes, quote.steps))?;
+    slot.try_reserve_exact(candidates)?;
+    factory.require_original_process()?;
+    terminal.require_original(factory)?;
+    // Each take is pushed at once into reserved capacity, so a later
+    // refusal cannot strand an input outside this slot.
+    for closed in terminals.iter().cloned().chain(durable.iter().map(|proof| proof.closed())) {
+        if let Some((evidence, inputs)) = closed.take_destination_inputs(factory, terminal)? {
+            slot.push(StateTakenDestination { evidence, stage: StateTakenStage::Raw(inputs) });
+        }
+    }
+    for native in projection_native {
+        let taken = match native {
+            lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed) =>
+                closed.take_destination_inputs(factory, terminal)?,
+            lillux_sqlite::OriginalNativeConnectionTerminal::Released(released) =>
+                released.take_destination_inputs(factory, terminal)?,
+        };
+        if let Some((evidence, inputs)) = taken {
+            slot.push(StateTakenDestination { evidence, stage: StateTakenStage::Raw(inputs) });
+        }
+    }
+    while let Some(StateTakenDestination { evidence, stage }) = slot.pop() {
+        let (stage, refusal) = advance_taken_destination(stage, context);
+        if let Some(error) = refusal {
+            slot.push(StateTakenDestination { evidence, stage });
+            return Err(error);
+        }
+        let StateTakenStage::Leaf { leaf, root_alias } = stage else {
+            slot.push(StateTakenDestination { evidence, stage });
+            anyhow::bail!("State destination input did not reach its typed leaf");
+        };
+        match join.retain_leaf(leaf, evidence, factory, terminal, prepay) {
+            // The retained leaf holds the same root allocation.
+            Ok(()) => drop(root_alias),
+            Err((leaf, evidence, error)) => {
+                slot.push(StateTakenDestination { evidence, stage: StateTakenStage::Leaf { leaf, root_alias } });
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Convert one taken input toward its typed State leaf. Every refusal
+/// returns the furthest stage reached, still owning every input.
+fn advance_taken_destination(
+    mut stage: StateTakenStage,
+    context: Option<&OriginalProjectionBuildContext>,
+) -> (StateTakenStage, Option<anyhow::Error>) {
+    fn state_projection_domain(domain: Option<lillux_sqlite::OriginalNativeDomain>) -> bool {
+        matches!(domain, Some(lillux_sqlite::OriginalNativeDomain::NodeProjection
+            | lillux_sqlite::OriginalNativeDomain::StateGeneratedProjection))
+    }
+    loop {
+        stage = match stage {
+            StateTakenStage::Raw(lillux_sqlite::OriginalNativeDestinationInputs::Bound(inputs)) => {
+                if !state_projection_domain(Some(inputs.domain())) {
+                    return (StateTakenStage::Raw(lillux_sqlite::OriginalNativeDestinationInputs::Bound(inputs)),
+                        Some(anyhow::anyhow!("State Bound input selects a foreign domain")));
+                }
+                match inputs.into_original_parts() {
+                    Ok(parts) => StateTakenStage::Parts(parts),
+                    Err(inputs) => return (
+                        StateTakenStage::Raw(lillux_sqlite::OriginalNativeDestinationInputs::Bound(inputs)),
+                        Some(anyhow::anyhow!("State Bound input extraction refused"))),
+                }
+            }
+            StateTakenStage::Raw(lillux_sqlite::OriginalNativeDestinationInputs::Transient(authority)) => {
+                let concrete = match context.map(|context| context.issued_schema(&authority)) {
+                    Some(Ok(Some(concrete))) => concrete,
+                    Some(Err(error)) => return (
+                        StateTakenStage::Raw(lillux_sqlite::OriginalNativeDestinationInputs::Transient(authority)),
+                        Some(error)),
+                    Some(Ok(None)) | None => return (
+                        StateTakenStage::Raw(lillux_sqlite::OriginalNativeDestinationInputs::Transient(authority)),
+                        Some(anyhow::anyhow!("State transient input selects an authority this State did not issue"))),
+                };
+                // The concrete Arc is the same allocation; only the dyn alias ends.
+                drop(authority);
+                StateTakenStage::Leaf {
+                    leaf: super::destination_join::StateDestinationLeaf::State(concrete),
+                    root_alias: None,
+                }
+            }
+            StateTakenStage::Parts(parts) => {
+                if parts.inspection.is_some() || !state_projection_domain(Some(parts.domain)) {
+                    return (StateTakenStage::Parts(parts),
+                        Some(anyhow::anyhow!("State Bound parts carry an inspection or foreign domain")));
+                }
+                let concrete = match context.map(|context| context.issued_generated(&parts.authority)) {
+                    Some(Ok(Some(concrete))) if Arc::ptr_eq(&concrete.root, &parts.root) => concrete,
+                    Some(Err(error)) => return (StateTakenStage::Parts(parts), Some(error)),
+                    Some(Ok(_)) | None => return (StateTakenStage::Parts(parts),
+                        Some(anyhow::anyhow!("State Bound parts select an authority or root this State did not issue"))),
+                };
+                let lillux_sqlite::OriginalNativeOutsideBoundParts {
+                    root, name, mode, domain, authority, inspection } = parts;
+                // Coordinate facts and the dyn alias end; the concrete leaf
+                // keeps the same authority and root allocations.
+                drop(name);
+                let _ = (mode, domain);
+                drop(inspection);
+                drop(authority);
+                StateTakenStage::Leaf {
+                    leaf: super::destination_join::StateDestinationLeaf::Generated(concrete),
+                    root_alias: Some(root),
+                }
+            }
+            leaf @ StateTakenStage::Leaf { leaf: _, root_alias: _ } => return (leaf, None),
+        };
+    }
 }
 
 /// One closed State connection's durable metadata-pin disposition. The Weak
@@ -1095,6 +1381,27 @@ impl LiveStatePhysicalParent {
         // outside factory before these redundant edges end. No owner disposal,
         // expiry renewal or terminal acknowledgement follows from this fact.
         drop(lease_authority); drop(authority); drop(original_factory);
+        Ok(())
+    }
+
+    /// This body is the live parent `join` transferred out, is registered in
+    /// `registry` with its recovery roots, and has retired its host aliases.
+    pub(crate) fn require_completed_outside_parent(&self,
+        join: &Arc<super::destination_join::OriginalStateDestinationJoin>,
+        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign live State parent completion");
+        {
+            let link = self._join_link.try_lock()
+                .map_err(|_| anyhow::anyhow!("live State parent join link busy or poisoned"))?;
+            anyhow::ensure!(std::sync::Weak::ptr_eq(&link, &Arc::downgrade(join)),
+                "live State parent body belongs to another destination join");
+        }
+        anyhow::ensure!(self._host.is_none() && self.retired_host.is_some(),
+            "live State parent host aliases remain before completion");
+        self.require_registered(registry)?;
+        for binding in &self.recovery_registrations.bindings {
+            registry.require_membership(binding.as_ref().context("actual State recovery membership absent")?)?;
+        }
         Ok(())
     }
 
@@ -1480,6 +1787,8 @@ pub struct ReleasedLiveStateStartup {
     projection_files: std::mem::ManuallyDrop<Vec<crate::projection::OutsideOriginalProjectionCustody>>,
     projection_native: std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>>,
     projection_refusals: std::mem::ManuallyDrop<Vec<anyhow::Error>>,
+    // Destination inputs taken from State terminals, pending their State leaf.
+    destination_inputs: std::mem::ManuallyDrop<Vec<StateTakenDestination>>,
     destination_join: std::sync::OnceLock<Arc<super::destination_join::OriginalStateDestinationJoin>>, progress: std::mem::ManuallyDrop<StartupCloseProgress> }
 // Original failed-start frame after its redundant parent edges end. Retaining
 // this graph is a resumable source transfer, not a physical terminal receipt.
@@ -1590,12 +1899,14 @@ impl ReleasedLiveStatePhysicalCustody {
                 lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed) => Some(Arc::clone(closed)),
                 lillux_sqlite::OriginalNativeConnectionTerminal::Released(_) => None,
             }));
-            require_census_without_bound_inputs(&candidates)?;
+            require_census_without_destination_inputs(&candidates)?;
             metadata_pins.retire(candidates, factory, terminal, prepay, issue_inputs)?;
         }
         // Holders already ended by earlier joins: the parent body moved into
         // its parts, generation leases became metadata roots, and the receiver
         // retains no leaf source (including a strong `Live` State owner).
+        anyhow::ensure!(join.live_parent_completed()?,
+            "State live parent handoff is not complete before native-source retirement");
         anyhow::ensure!(parent.is_none() && parent_parts.is_some(),
             "failed State parent body was not transferred into its parts");
         projection_physical.require_leases_retired()?;
@@ -1617,6 +1928,11 @@ impl ReleasedLiveStatePhysicalCustody {
         anyhow::ensure!(_projection.0.is_empty() && _schema.0.is_empty() && _schema.2.is_empty(),
             "failed State retains an unregistered projection file or schema source");
         require_refusals_without_native_owners(_projection.2.iter().chain(_refusal.iter()))?;
+        for native in _projection.1.iter() {
+            if let lillux_sqlite::OriginalNativeConnectionTerminal::Released(released) = native {
+                require_released_without_owner_inputs(released)?;
+            }
+        }
         prepay_state_native_source_retirement(factory, owners, prepay)?;
         terminal.require_original(factory)?;
         let receipt = metadata_pins.into_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
@@ -1649,6 +1965,11 @@ impl ReleasedLiveStatePhysicalCustody {
         self.native_retired.is_some()
     }
 
+    /// Cached: the live parent handoff completed and its pending mark ended.
+    pub fn live_parent_completed(&self) -> anyhow::Result<bool> {
+        self.join.live_parent_completed()
+    }
+
     /// Bounded failure diagnostics kept after the native-source stage ended
     /// the projection refusals and prior refusal: (refusal count, prior?).
     pub fn retired_native_source_diagnostics(&self) -> Option<(usize, bool)> {
@@ -1662,8 +1983,9 @@ impl ReleasedLiveStatePhysicalCustody {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         self.require_original(factory, aggregate)?;
-        self.parent_parts.as_mut().context("actual State parent parts absent")?
-            .retire_host_aliases(factory, aggregate, store, lease, registry, prepay)
+        let parts = self.parent_parts.as_mut().context("actual State parent parts absent")?;
+        parts.retire_host_aliases(factory, aggregate, store, lease, registry, prepay)?;
+        self.join.complete_live_parent(factory, aggregate, parts, registry, prepay)
     }
 
     /// # Safety
@@ -1756,6 +2078,10 @@ impl ReleasedLiveStateStartup {
             if let Some(outside) = &p.operational_outside {
                 outside.require_shared_roots_registered(registry, prepay)?;
             }
+            anyhow::ensure!(self.destination_inputs.is_empty(),
+                "failed State destination inputs remain outside the State join");
+            require_no_destination_inputs(p.context.as_ref(), &self.projection_native)?;
+            require_refusals_without_native_owners(self.projection_refusals.iter())?;
             let quote = quote_released_live_state_physical_custody()?;
             prepay(quote.bytes, quote.steps)?;
             factory.require_original_process()?;
@@ -1765,7 +2091,10 @@ impl ReleasedLiveStateStartup {
         });
         if let Err(error) = checked { return Err((self, error)); }
         let Self { schema_pending, schema_definitions, projection_leases_retired: _,
-            projection_files, projection_native, projection_refusals, destination_join, progress } = self;
+            projection_files, projection_native, projection_refusals, destination_inputs,
+            destination_join, progress } = self;
+        // Checked empty above.
+        drop(std::mem::ManuallyDrop::into_inner(destination_inputs));
         let StartupCloseProgress { original, context, operational, operational_failure, operational_closed,
             operational_outside, projection_failure, projection_released, schema_failure,
             schema_released, schema_admission_custody, publication_custody, lease_setup_custody,
@@ -1779,7 +2108,10 @@ impl ReleasedLiveStateStartup {
         let (context, authority) = match context {
             Some(context) => {
                 let OriginalProjectionBuildContext { factory, authority, terminals, durable,
-                    retired_selected, schema_references, generation_leases, generation_lease_attempts } = context;
+                    retired_selected, schema_references, generation_leases, generation_lease_attempts,
+                    issued_destinations } = context;
+                // Non-owning identity records; every issued input already joined.
+                drop(issued_destinations);
                 (Some(RetiredStartupProjectionContext { _factory: factory, _terminals: terminals,
                     _durable: durable, _selected: retired_selected, _schema: schema_references,
                     _leases: generation_leases, _attempts: generation_lease_attempts }), Some(authority))
@@ -1977,6 +2309,16 @@ impl ReleasedLiveStateStartup {
                 anyhow::bail!("original released schema source transfer refused")
             }
         }
+    }
+    /// Move every destination input still held by this failed-start State's
+    /// terminals into its destination join as a typed leaf. Runs after the
+    /// projection and schema stages; a refusal keeps every taken input here.
+    pub fn advance_destination_input_sources(&mut self,
+        factory: &Arc<OriginalNativeFactory>, terminal: &lillux_sqlite::OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        let join = self.destination_join.get().context("actual failed-start State receiver not prepared")?;
+        advance_destination_input_sources(self.progress.context.as_ref(),
+            &self.projection_native, &mut self.destination_inputs, join, factory, terminal, prepay)
     }
     /// Consume actual recovered projection sources while the whole unpublished
     /// State stays under its original Store supervisor. Native ACK and receiver
@@ -2292,6 +2634,7 @@ fn advance_startup_close(progress: StartupCloseProgress)
         projection_files: std::mem::ManuallyDrop::new(Vec::new()),
         projection_native: std::mem::ManuallyDrop::new(Vec::new()),
         projection_refusals: std::mem::ManuallyDrop::new(Vec::new()),
+        destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
         destination_join: std::sync::OnceLock::new(), progress };
     if released.native_terminals(&factory).is_err() {
         return Err(retain(released.progress));
@@ -2318,8 +2661,13 @@ mod quote_tests {
         LiveProjectionPhysicalSlot, directory_wrapper_storage_bound,
         maximum_live_projection_physical_sources, quote_live_projection_physical,
         quote_live_projection_retired_sources, quote_live_projection_validation,
+        LiveStatePhysicalParent, ReleasedLiveStatePhysicalCustody, quote_live_projection_retry,
+        quote_live_state_destination_join, quote_live_state_physical_parent,
+        quote_live_state_root_registration_handoff, quote_released_live_state_physical_custody,
+        quote_startup_closed_schema_sources, quote_startup_released_schema_source,
     };
     use std::mem::size_of;
+    use std::sync::Arc;
 
     #[test]
     fn live_projection_quote_covers_slots_wrappers_and_registration_work() {

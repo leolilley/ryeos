@@ -554,7 +554,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             .to_string()
             .contains("death-settled local Worker")
     );
-    assert!(read_record(&fixture.db.conn, placement).unwrap().is_none());
+    assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
     fixture.retain_terminal_testimony();
     assert!(
         fixture
@@ -574,7 +574,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             .to_string()
             .contains("has not been applied")
     );
-    assert!(read_record(&fixture.db.conn, placement).unwrap().is_none());
+    assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
     let plan = fixture
         .db
         .prepare_external_qualification_scope_settlement(placement)
@@ -604,7 +604,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
         .bind_qualification_worker_transcript(&source, &prepared.manifest, &prepared.manifest_hash)
         .unwrap();
     assert_eq!(
-        read_record(&fixture.db.conn, placement).unwrap(),
+        fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap(),
         Some(first.clone())
     );
     assert_eq!(
@@ -620,7 +620,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
     );
     // Close fresh occurrence contact through its real durable owner. Historical
     // publication remains readable/replayable without renewing admission.
-    let allocation = read(&fixture.db.conn, placement).unwrap().unwrap();
+    let allocation = fixture.db.conn.with_sql(|connection| read(connection, placement)).unwrap().unwrap();
     let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
     else {
         unreachable!()
@@ -642,7 +642,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
         .reserve_qualification_termination(&termination)
         .unwrap();
     assert!(
-        require_contactable_qualification_owner(&fixture.db.conn, &allocation.reservation).is_err()
+        fixture.db.conn.with_sql(|connection| require_contactable_qualification_owner(connection, &allocation.reservation)).is_err()
     );
     assert_eq!(
         fixture
@@ -670,7 +670,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             .contains("source changed")
     );
     assert_eq!(
-        read_record(&fixture.db.conn, placement).unwrap(),
+        fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap(),
         Some(first)
     );
 }
@@ -699,7 +699,7 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
             .qualification_worker_transcript_source(placement)
             .is_err()
     );
-    assert!(read_record(&fixture.db.conn, placement).unwrap().is_none());
+    assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
     let root = tempfile::tempdir().unwrap();
     let state = ryeos_state::StateDb::open(
         root.path(),
@@ -867,7 +867,7 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
         first
     );
     assert_eq!(
-        read_record(&fixture.db.conn, placement).unwrap(),
+        fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap(),
         Some(first)
     );
 }

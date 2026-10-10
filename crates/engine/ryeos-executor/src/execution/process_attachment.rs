@@ -354,12 +354,15 @@ pub(crate) fn run_spawned_lillux_attached(
     let identity = match identity_result {
         Ok(identity) => identity,
         Err(error) => {
-            let cleanup = spawned.abort_and_reap().err();
-            return Err(match cleanup {
-                Some(cleanup) => {
-                    error.context(format!("pending-process cleanup failed: {cleanup}"))
-                }
-                None => error,
+            let (pid, pgid) = (spawned.pid(), spawned.pgid());
+            return Err(match spawned.abort_and_reap() {
+                Ok(_) => error,
+                Err(cleanup) => anyhow::Error::new(LaunchFailure::unsettled_uncaptured(
+                    LaunchOwnerCoordinate::thread(thread_id, launch_owner),
+                    pid,
+                    pgid,
+                    error.context(format!("pending-process cleanup failed: {cleanup}")),
+                )),
             });
         }
     };
@@ -561,7 +564,16 @@ pub(crate) enum PhysicalDisposition {
 #[derive(Debug)]
 pub(crate) struct UnsettledLaunchCleanup {
     coord: LaunchOwnerCoordinate,
-    identity: ryeos_app::process::ExecutionProcessIdentity,
+    process: UnsettledProcess,
+}
+
+/// The process coordinate an unsettled cleanup retains.
+#[derive(Debug)]
+enum UnsettledProcess {
+    Exact(ryeos_app::process::ExecutionProcessIdentity),
+    /// Identity capture itself failed; only the held numeric coordinate of
+    /// the still-unreleased process exists.
+    Uncaptured { pid: u32, pgid: i64 },
 }
 
 impl UnsettledLaunchCleanup {
@@ -573,18 +585,33 @@ impl UnsettledLaunchCleanup {
     pub(crate) fn for_test(coord: LaunchOwnerCoordinate) -> Self {
         Self {
             coord,
-            identity: release_failure_controls::identity(),
+            process: UnsettledProcess::Exact(release_failure_controls::identity()),
         }
     }
 }
 
 impl Drop for UnsettledLaunchCleanup {
     fn drop(&mut self) {
-        tracing::error!(
-            thread_id = %self.coord.thread_id(),
-            target_pid = self.identity.target_pid,
-            "launch cleanup is unproved; exact attachment retained for owner stop or reconcile"
-        );
+        // Before attachment no durable row names this process, so the log is
+        // the only surviving coordinate: record the full exact identity.
+        match &self.process {
+            UnsettledProcess::Exact(identity) => tracing::error!(
+                thread_id = %self.coord.thread_id(),
+                boot_id = %identity.boot_id,
+                target_pid = identity.target_pid,
+                target_start_time_ticks = identity.target_start_time_ticks,
+                group_leader_pid = identity.group_leader_pid,
+                group_leader_start_time_ticks = identity.group_leader_start_time_ticks,
+                process_scope = ?identity.process_scope,
+                "launch cleanup is unproved; exact attachment retained for owner stop or reconcile"
+            ),
+            UnsettledProcess::Uncaptured { pid, pgid } => tracing::error!(
+                thread_id = %self.coord.thread_id(),
+                pid,
+                pgid,
+                "launch cleanup is unproved before identity capture; no durable attachment names this process"
+            ),
+        }
     }
 }
 
@@ -612,7 +639,25 @@ impl LaunchFailure {
             stage,
             disposition: PhysicalDisposition::UnsettledCleanup(UnsettledLaunchCleanup {
                 coord: coord.clone(),
-                identity: identity.clone(),
+                process: UnsettledProcess::Exact(identity.clone()),
+            }),
+        }
+    }
+
+    /// Identity capture failed and the abort of the held process could not be
+    /// proved either.
+    fn unsettled_uncaptured(
+        coord: LaunchOwnerCoordinate,
+        pid: u32,
+        pgid: i64,
+        error: anyhow::Error,
+    ) -> Self {
+        Self {
+            error,
+            stage: LaunchStage::PreAttach,
+            disposition: PhysicalDisposition::UnsettledCleanup(UnsettledLaunchCleanup {
+                coord,
+                process: UnsettledProcess::Uncaptured { pid, pgid },
             }),
         }
     }
@@ -637,7 +682,9 @@ impl LaunchFailure {
 
 impl std::fmt::Display for LaunchFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{:#}", self.error)?;
+        // Only the outermost message: the rest of the chain is `source()`, so
+        // an alternate render prints each cause once.
+        write!(formatter, "{}", self.error)?;
         match &self.disposition {
             PhysicalDisposition::Aborted { stop_settled: true } => {
                 write!(formatter, " (durable stop settled)")
@@ -654,7 +701,7 @@ impl std::fmt::Display for LaunchFailure {
 
 impl std::error::Error for LaunchFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.error.as_ref())
+        self.error.chain().nth(1)
     }
 }
 
@@ -1171,5 +1218,68 @@ mod release_failure_controls {
         let failure = release_failure(&coord(), &identity(), opaque, || Ok(()), || Ok(false));
         assert!(failure.is_unsettled());
         assert!(failure.error.downcast_ref::<ItemReleaseError>().is_some());
+    }
+
+    #[test]
+    fn launch_failure_alternate_render_prints_each_cause_once() {
+        let failure = release_failure(
+            &coord(),
+            &identity(),
+            fixture(true),
+            || anyhow::bail!("workspace binding changed"),
+            || Ok(false),
+        );
+        let rendered = format!("{:#}", anyhow::Error::new(failure).context("spawn/attach"));
+        assert_eq!(rendered.matches("workspace binding changed").count(), 1, "{rendered}");
+        assert_eq!(
+            rendered.matches("wrapper/scope disposition unresolved").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(rendered.contains("physical cleanup unproved"), "{rendered}");
+    }
+
+    #[test]
+    fn class_b_capture_and_abort_failure_is_typed_unsettled() {
+        let failure = LaunchFailure::unsettled_uncaptured(
+            coord(),
+            4242,
+            4242,
+            anyhow::anyhow!("capture held callback subprocess identity")
+                .context("pending-process cleanup failed: reap unproved"),
+        );
+        assert!(failure.is_unsettled());
+        assert_eq!(failure.stage, LaunchStage::PreAttach);
+        assert!(matches!(
+            &failure.disposition,
+            PhysicalDisposition::UnsettledCleanup(UnsettledLaunchCleanup {
+                process: UnsettledProcess::Uncaptured { pid: 4242, pgid: 4242 },
+                coord: _,
+            })
+        ));
+        let carried = anyhow::Error::new(failure).context("spawn/attach");
+        assert!(is_unsettled_launch_cleanup(&carried));
+    }
+
+    #[test]
+    fn class_a_and_b_unsettled_failures_are_never_finalizable() {
+        for stage in [LaunchStage::Attach, LaunchStage::Release, LaunchStage::Settlement] {
+            let failure = LaunchFailure::unsettled(
+                &coord(),
+                &identity(),
+                stage,
+                anyhow::anyhow!("cleanup unproved"),
+            );
+            assert!(failure.is_unsettled());
+            assert_eq!(failure.stage, stage);
+            assert!(is_unsettled_launch_cleanup(&anyhow::Error::new(failure)));
+        }
+        let aborted = LaunchFailure::aborted(
+            LaunchStage::Attach,
+            anyhow::anyhow!("attach refused"),
+            Ok(true),
+        );
+        assert!(!aborted.is_unsettled());
+        assert!(!is_unsettled_launch_cleanup(&anyhow::Error::new(aborted)));
     }
 }

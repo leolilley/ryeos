@@ -392,6 +392,7 @@ mod tests {
                 started_at: "2026-09-10T01:02:03Z".to_owned(),
                 exited_at: "2026-09-10T01:02:04Z".to_owned(),
                 error: Some("failed to bind 127.0.0.1:7400".to_owned()),
+                launch_route: None,
             },
         )
         .expect("startup failure marker must classify");

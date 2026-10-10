@@ -110,6 +110,8 @@ pub struct ClosedLiveState {
     projection_native: std::mem::ManuallyDrop<Vec<OriginalNativeConnectionTerminal>>,
     projection_refusals: std::mem::ManuallyDrop<Vec<anyhow::Error>>,
     projection_sources_started: bool,
+    // Destination inputs taken from State terminals, pending their State leaf.
+    destination_inputs: std::mem::ManuallyDrop<Vec<super::live_native::StateTakenDestination>>,
     destination_join: std::sync::OnceLock<Arc<super::destination_join::OriginalStateDestinationJoin>>, progress: std::mem::ManuallyDrop<LiveStateCloseProgress>, prior_refusal: Option<anyhow::Error> }
 // Whole normal-close frame after its redundant State-parent edge ends. All
 // canonical/recovery, schema, lease, native and refusal fields remain accessible
@@ -293,12 +295,14 @@ impl ClosedLiveStatePhysicalCustody {
                 OriginalNativeConnectionTerminal::Closed(closed) => Some(Arc::clone(closed)),
                 OriginalNativeConnectionTerminal::Released(_) => None,
             }));
-            super::live_native::require_census_without_bound_inputs(&candidates)?;
+            super::live_native::require_census_without_destination_inputs(&candidates)?;
             metadata_pins.retire(candidates, factory, terminal, prepay, issue_inputs)?;
         }
         // Holders already ended by earlier joins: the parent body moved into
         // its parts, generation leases became metadata roots, and the receiver
         // retains no leaf source (including a strong `Live` State owner).
+        anyhow::ensure!(join.live_parent_completed()?,
+            "State live parent handoff is not complete before native-source retirement");
         anyhow::ensure!(parent.is_none() && parent_parts.is_some(),
             "closed State parent body was not transferred into its parts");
         projection_physical.require_leases_retired()?;
@@ -317,6 +321,11 @@ impl ClosedLiveStatePhysicalCustody {
             .context("closed State native owner count overflow")?;
         super::live_native::require_refusals_without_native_owners(
             _projection.2.iter().chain(_refusal.iter()))?;
+        for native in _projection.1.iter() {
+            if let OriginalNativeConnectionTerminal::Released(released) = native {
+                super::live_native::require_released_without_owner_inputs(released)?;
+            }
+        }
         super::live_native::prepay_state_native_source_retirement(factory, owners, prepay)?;
         terminal.require_original(factory)?;
         let receipt = metadata_pins.into_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
@@ -345,6 +354,15 @@ impl ClosedLiveStatePhysicalCustody {
 
     pub fn native_sources_retired(&self) -> bool {
         self.native_retired.is_some()
+    }
+
+    /// Cached: the live parent handoff completed and its pending mark ended.
+    pub fn live_parent_completed(&self) -> anyhow::Result<bool> {
+        self.join.live_parent_completed()
+    }
+
+    pub fn recovery_aliases_retired(&self) -> bool {
+        self.recovery_aliases_retired
     }
 
     /// Bounded failure diagnostics kept after the native-source stage ended
@@ -479,8 +497,9 @@ impl ClosedLiveStatePhysicalCustody {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         self.require_original(factory, aggregate)?;
-        self.parent_parts.as_mut().context("actual State parent parts absent")?
-            .retire_host_aliases(factory, aggregate, store, lease, registry, prepay)
+        let parts = self.parent_parts.as_mut().context("actual State parent parts absent")?;
+        parts.retire_host_aliases(factory, aggregate, store, lease, registry, prepay)?;
+        self.join.complete_live_parent(factory, aggregate, parts, registry, prepay)
     }
 
     /// # Safety
@@ -569,6 +588,10 @@ impl ClosedLiveState {
             anyhow::ensure!(p.context.generated.schema_references.try_lock()
                 .map_err(|_| anyhow::anyhow!("State schema census busy or poisoned"))?.is_empty(),
                 "actual State schema sources remain");
+            anyhow::ensure!(self.destination_inputs.is_empty(),
+                "State destination inputs remain outside the State join");
+            super::live_native::require_no_destination_inputs(Some(&p.context.generated), &self.projection_native)?;
+            super::live_native::require_refusals_without_native_owners(self.projection_refusals.iter())?;
             p.operational_outside.as_ref().context("actual Operational outside absent")?
                 .require_shared_roots_registered(registry, prepay)?;
             anyhow::ensure!(matches!(p.context.generated.authority, OriginalProjectionStateOwner::Live(_)),
@@ -582,7 +605,9 @@ impl ClosedLiveState {
         });
         if let Err(error) = checked { return Err((self, error)); }
         let Self { schema_definitions, projection_files, projection_native, projection_refusals,
-            projection_sources_started: _, destination_join, progress, prior_refusal } = self;
+            projection_sources_started: _, destination_inputs, destination_join, progress, prior_refusal } = self;
+        // Checked empty above.
+        drop(std::mem::ManuallyDrop::into_inner(destination_inputs));
         let LiveStateCloseProgress { context, operational, operational_failure, operational_closed,
             operational_outside, projection, projection_failure, projection_closed } = std::mem::ManuallyDrop::into_inner(progress);
         // Checked-empty effect owners are consumed explicitly; every resource
@@ -592,7 +617,9 @@ impl ClosedLiveState {
         let LiveRetiredStateContext { runtime, _offline_namespace, cas, refs, locators,
             recovery_directory, _paths, previous, generated, recovery, _trust, _head_cache, _repair_sink } = context;
         let OriginalProjectionBuildContext { factory, authority, terminals, durable, retired_selected,
-            schema_references, generation_leases, generation_lease_attempts } = generated;
+            schema_references, generation_leases, generation_lease_attempts, issued_destinations } = generated;
+        // Non-owning identity records; every issued input already joined.
+        drop(issued_destinations);
         let frame = ClosedLiveStatePhysicalCustody {
             projection_physical: std::mem::ManuallyDrop::new(super::live_native::LiveProjectionPhysicalCustody::empty()),
             parent: std::mem::ManuallyDrop::new(None),
@@ -748,6 +775,16 @@ impl ClosedLiveState {
             }
         }
         Ok(())
+    }
+    /// Move every destination input still held by this State's terminals into
+    /// its destination join as a typed leaf. Runs after the projection and
+    /// schema stages; a refusal keeps every taken input in this frame.
+    pub fn advance_destination_input_sources(&mut self,
+        factory: &Arc<OriginalNativeFactory>, terminal: &lillux_sqlite::OriginalNativeTerminal,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        let join = self.destination_join.get().context("actual live State receiver not prepared")?;
+        super::live_native::advance_destination_input_sources(Some(&self.progress.context.generated),
+            &self.projection_native, &mut self.destination_inputs, join, factory, terminal, prepay)
     }
     /// Advance actual projection sources in place after genuine native ACK.
     /// Every file/lease/error and canonical receipt remains in this same closed
@@ -1001,6 +1038,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: LiveStateCloseCus
         projection_native: std::mem::ManuallyDrop::new(Vec::new()),
         projection_refusals: std::mem::ManuallyDrop::new(Vec::new()),
         projection_sources_started: false,
+        destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
         destination_join: std::sync::OnceLock::new(), progress, prior_refusal: prior };
     if let Err(error) = closed.native_terminals() { return Err(retain(error, LiveStateCloseCustody::Closed(closed))); }
     Ok(closed)

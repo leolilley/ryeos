@@ -1561,6 +1561,21 @@ pub mod test_support {
         )
     }
 
+    pub fn plan_bound_artifact_identity(
+        execution_plan: &serde_json::Value,
+    ) -> anyhow::Result<crate::objects::AdmittedLaunchArtifactIdentity> {
+        let mut artifact =
+            crate::external_content::products::qualification::test_support::launch_artifact_identity();
+        if let crate::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash, ..
+        } = &mut artifact
+        {
+            *execution_plan_hash =
+                lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
+        }
+        Ok(artifact)
+    }
+
     pub fn qualified_external_candidate_capsule(
         requirement: ExternalCandidateRequirement,
         runtime_manifest_hash: &str,
@@ -1588,7 +1603,7 @@ pub mod test_support {
             (SOURCE_CLOSURE_DERIVED_KEY): source.to_value()?,
             (EXTERNAL_REALIZATIONS_DERIVED_KEY): realizations.to_value()?
         }}}});
-        let artifact = crate::external_content::products::qualification::test_support::launch_artifact_identity();
+        let artifact = plan_bound_artifact_identity(&json!({}))?;
         let executable_blob_hash = "6".repeat(64);
         let capsule = AdmittedPersistentSessionCapsule {
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
@@ -2481,7 +2496,10 @@ mod tests {
         ] {
             let mut wire = serde_json::to_value(&program).unwrap();
             wire[field] = serde_json::json!("0".repeat(64));
-            let changed: AdmittedExternalCandidateProgram = serde_json::from_value(wire).unwrap();
+            let Ok(changed) = serde_json::from_value::<AdmittedExternalCandidateProgram>(wire) else {
+                assert_eq!(field, "runtime_source", "{field} must stay wire-decodable");
+                continue;
+            };
             assert!(
                 changed.verify_selections(Some(&selections)).is_err(),
                 "{field}"
@@ -3188,7 +3206,7 @@ mod tests {
             (SOURCE_CLOSURE_DERIVED_KEY):source.to_value().unwrap(),
             (EXTERNAL_REALIZATIONS_DERIVED_KEY):realizations.to_value().unwrap()
         }}}});
-        let artifact = crate::external_content::products::qualification::tests::artifact_identity();
+        let artifact = test_support::plan_bound_artifact_identity(&json!({})).unwrap();
         let capsule = AdmittedPersistentSessionCapsule {
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
             kind: PERSISTENT_SESSION_CAPSULE_KIND.into(),

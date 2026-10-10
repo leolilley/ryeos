@@ -10234,9 +10234,15 @@ mod tests {
                     validate_workspace_view_context(state, project, None).is_err(),
                     requires_view
                 );
+                let accepts_view = state == IsolationRuntimeState::Enforced
+                    && matches!(
+                        project,
+                        IsolationProjectAuthority::RuntimeWorkspace
+                            | IsolationProjectAuthority::EphemeralScratch
+                    );
                 assert_eq!(
                     validate_workspace_view_context(state, project, Some(&view)).is_ok(),
-                    requires_view
+                    accepts_view
                 );
             }
         }

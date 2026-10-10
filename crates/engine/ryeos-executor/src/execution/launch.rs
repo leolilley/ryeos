@@ -12257,7 +12257,17 @@ mod tests {
         bare_name: &str,
         signing_key: &lillux::crypto::SigningKey,
     ) -> ExecutableMaterializerFixture {
-        let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        // A bounded host-native prefix keeps the arch check real without
+        // copying the whole debug test binary past the executor size cap.
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(
+                std::fs::File::open(std::env::current_exe().unwrap()).unwrap(),
+                64 * 1024,
+            ),
+            &mut bytes,
+        )
+        .unwrap();
         let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
         let objects_root = ai_dir.join("objects");
         let cas = lillux::cas::CasStore::new(objects_root.clone());

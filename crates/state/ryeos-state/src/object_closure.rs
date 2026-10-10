@@ -2284,7 +2284,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("exceeds max_total_object_bytes"));
+        assert!(err.to_string().contains("exceeds byte limit"), "{err:#}");
     }
 
     #[test]

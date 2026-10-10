@@ -65,7 +65,7 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("failed to commit commit failure transaction"));
-        assert!(db.with_sql(|connection| Ok(connection.is_autocommit())));
+        assert!(db.with_sql(|connection| Ok(connection.is_autocommit())).unwrap());
         let rows: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(rows, 0, "failed commit must not leave projected rows live");

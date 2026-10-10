@@ -529,12 +529,15 @@ impl LateNativeControl {
         &self,
         receipt: lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
+        // Cache the one-shot receipt before any fallible check so a refusal
+        // cannot lose it; only a duplicate is ever left with the caller.
+        let duplicate = self.registry_retirement.set(receipt).err();
         self.require_original_process()?;
         let identity = self
             .registry_identity
             .get()
             .context("original physical registry identity was not bound before mapping")?;
-        if let Err(receipt) = self.registry_retirement.set(receipt) {
+        if let Some(receipt) = duplicate {
             receipt.require_same_registry(identity)?;
         }
         self.retired_registry()?;
