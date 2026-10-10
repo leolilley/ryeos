@@ -64,6 +64,13 @@ pub trait SchedulerContext: Send + Sync + 'static {
     /// mutations are in progress.
     fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>>;
 
+    /// Refuse dispatch while an in-process project schedule transaction has
+    /// unresolved partial state. Startup recovery must clear this condition
+    /// before the timer or recovered fires are released.
+    fn ensure_dispatch_available(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// The trust store for schedule signature verification.
     fn schedule_trust_store(&self) -> &TrustStore;
 

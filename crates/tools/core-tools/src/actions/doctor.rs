@@ -436,7 +436,7 @@ fn import_one(
         source_path: verified.resolved.source_path.clone(),
         content_hash: verified.resolved.content_hash.clone(),
     }];
-    Ok(ryeos_app::env_probe::import_dry_run(
+    Ok(ryeos_engine::env_probe::import_dry_run(
         engine,
         plan_ctx,
         &verified,

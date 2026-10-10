@@ -11,6 +11,7 @@ test-support = []
 
 [dependencies]
 lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }

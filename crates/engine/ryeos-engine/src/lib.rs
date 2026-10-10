@@ -6,6 +6,7 @@ pub mod contracts;
 pub mod dispatch;
 pub mod effective_validators;
 pub mod engine;
+pub mod env_probe;
 pub mod error;
 pub mod execution_contract;
 pub mod execution_evidence;

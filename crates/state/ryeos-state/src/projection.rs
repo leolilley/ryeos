@@ -18,6 +18,13 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::sqlite_schema;
 
+mod native;
+mod generation_lease;
+pub(crate) use generation_lease::OriginalGenerationLease;
+use native::ProjectionConnection;
+pub(crate) use native::{ClosedOriginalProjection, DurableOriginalProjection, OutsideOriginalProjectionCustody};
+pub use native::{OriginalProjectionFailure, ReleasedOriginalProjectionAcquisition, RecoveredOriginalProjectionDurability};
+
 mod chain_commit;
 mod cursor;
 mod events;
@@ -39,9 +46,25 @@ pub use cursor::ProjectionMeta;
 use schema::schema_spec_fingerprint;
 use schema::{PROJECTION_APP_ID, SCHEMA_SQL, projection_schema_epoch, projection_schema_spec};
 
+pub(crate) enum ProjectionInstanceLease {
+    Host(fs::File),
+    Original(std::sync::Arc<OriginalGenerationLease>),
+}
+impl ProjectionInstanceLease {
+    fn metadata(&self) -> anyhow::Result<fs::Metadata> {
+        match self { Self::Host(file) => Ok(file.metadata()?), Self::Original(owner) => owner.metadata() }
+    }
+    fn share_original(&self) -> anyhow::Result<Self> {
+        match self {
+            Self::Host(file) => Ok(Self::Host(file.try_clone()?)),
+            Self::Original(owner) => { owner.require_active(&owner.factory()?)?; Ok(Self::Original(std::sync::Arc::clone(owner))) }
+        }
+    }
+}
+
 /// Projection database connection wrapper.
 pub struct ProjectionDb {
-    conn: Connection,
+    conn: ProjectionConnection,
     path: PathBuf,
     // Selected generation instances are opened relative to the exact runtime
     // directory retained by StateDb. Keeping this descriptor alive also keeps
@@ -59,7 +82,7 @@ pub struct ProjectionDb {
     // exclusive non-blocking lease before unlinking an unselected generation,
     // so abandoned WAL/journal sidecars can be reclaimed without racing a
     // process that still has the generation instance open.
-    _instance_lease: Option<fs::File>,
+    _instance_lease: Option<ProjectionInstanceLease>,
 }
 
 /// Result of opening the projection database.
@@ -152,15 +175,29 @@ fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn projection_schema_sql() -> &'static str { SCHEMA_SQL }
+
+fn assert_projection_schema_sql(
+    conn: &Connection,
+    path: &Path,
+    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+) -> anyhow::Result<()> {
+    match reference {
+        Some(reference) => reference.require_matches(conn, path),
+        None => sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path),
+    }
+}
+
 fn init_current_projection_schema(
     conn: &Connection,
     spec: &sqlite_schema::SchemaSpec,
     path: &Path,
+    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
 ) -> anyhow::Result<()> {
     sqlite_schema::init_owned(conn, spec, SCHEMA_SQL, path)?;
     stamp_projection_schema_epoch(conn)?;
     sqlite_schema::assert_owned(conn, spec, path)?;
-    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?;
+    assert_projection_schema_sql(conn, path, reference)?;
     Ok(())
 }
 
@@ -547,7 +584,7 @@ impl ProjectionDb {
         })?;
         ensure_pinned_projection_file(directory, name, &instance_file)?;
         ensure_sqlite_retains_projection_file(&instance_file, "projection database")?;
-        validate_selected_current(&conn, &directory.path().join(name))?;
+        validate_selected_current(&conn, &directory.path().join(name), None)?;
         let (wal_file, shm_file) = if read_only {
             let sidecars = open_existing_projection_sidecars_in_directory(directory, name)?;
             if let Some(wal) = sidecars.0.as_ref() {
@@ -561,14 +598,14 @@ impl ProjectionDb {
             establish_projection_sidecars_in_directory(&conn, directory, name)?
         };
         Ok(Self {
-            conn,
+            conn: ProjectionConnection::Standard(conn),
             path: directory.path().join(name),
             _instance_directory: Some(directory.try_clone()?),
             _instance_name: Some(name.to_os_string()),
             _instance_file: Some(instance_file),
             _wal_file: wal_file,
             _shm_file: shm_file,
-            _instance_lease: Some(lease),
+            _instance_lease: Some(ProjectionInstanceLease::Host(lease)),
         })
     }
 
@@ -600,18 +637,18 @@ impl ProjectionDb {
             .context("failed to set projection synchronous=FULL")?;
         let path = directory.path().join(name);
         let spec = projection_schema_spec();
-        init_current_projection_schema(&conn, &spec, &path)?;
+        init_current_projection_schema(&conn, &spec, &path, None)?;
         let (wal_file, shm_file) =
             establish_projection_sidecars_in_directory(&conn, directory, name)?;
         Ok(Self {
-            conn,
+            conn: ProjectionConnection::Standard(conn),
             path,
             _instance_directory: Some(directory.try_clone()?),
             _instance_name: Some(name.to_os_string()),
             _instance_file: Some(instance_file),
             _wal_file: wal_file,
             _shm_file: shm_file,
-            _instance_lease: Some(lease),
+            _instance_lease: Some(ProjectionInstanceLease::Host(lease)),
         })
     }
 
@@ -621,16 +658,16 @@ impl ProjectionDb {
         let instance_lease = acquire_existing_projection_instance_lease(path)?;
         let (conn, instance_file) = open_existing_projection_connection(path, true)
             .context("failed to open selected projection instance read-only")?;
-        validate_selected_current(&conn, path)?;
+        validate_selected_current(&conn, path, None)?;
         Ok(Self {
-            conn,
+            conn: ProjectionConnection::Standard(conn),
             path: path.to_path_buf(),
             _instance_directory: None,
             _instance_name: None,
             _instance_file: Some(instance_file),
             _wal_file: None,
             _shm_file: None,
-            _instance_lease: Some(instance_lease),
+            _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
         })
     }
 
@@ -641,16 +678,16 @@ impl ProjectionDb {
         let instance_lease = acquire_projection_instance_lease(path)?;
         let (conn, instance_file) = open_existing_projection_connection(path, false)
             .context("failed to open selected projection instance")?;
-        validate_selected_current(&conn, path)?;
+        validate_selected_current(&conn, path, None)?;
         Ok(Self {
-            conn,
+            conn: ProjectionConnection::Standard(conn),
             path: path.to_path_buf(),
             _instance_directory: None,
             _instance_name: None,
             _instance_file: Some(instance_file),
             _wal_file: None,
             _shm_file: None,
-            _instance_lease: Some(instance_lease),
+            _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
         })
     }
 
@@ -663,9 +700,9 @@ impl ProjectionDb {
         conn.pragma_update(None, "synchronous", "FULL")
             .context("configure transient projection durability mode")?;
         let spec = projection_schema_spec();
-        init_current_projection_schema(&conn, &spec, &path)?;
+        init_current_projection_schema(&conn, &spec, &path, None)?;
         Ok(Self {
-            conn,
+            conn: ProjectionConnection::Standard(conn),
             path,
             _instance_directory: None,
             _instance_name: None,
@@ -700,17 +737,17 @@ impl ProjectionDb {
 
         match classify_projection_db(&conn, spec.application_id)? {
             ProjectionOwnershipState::Empty => {
-                init_current_projection_schema(&conn, &spec, path)?;
+                init_current_projection_schema(&conn, &spec, path, None)?;
                 return Ok(ProjectionOpenResult {
                     db: Self {
-                        conn,
+                        conn: ProjectionConnection::Standard(conn),
                         path: path.to_path_buf(),
                         _instance_directory: None,
                         _instance_name: None,
                         _instance_file: Some(instance_file),
                         _wal_file: None,
                         _shm_file: None,
-                        _instance_lease: Some(instance_lease),
+                        _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
                     },
                     reset: false,
                 });
@@ -745,17 +782,17 @@ impl ProjectionDb {
 
             let (conn, instance_file) =
                 open_projection_connection(path).context("failed to reopen projection database")?;
-            init_current_projection_schema(&conn, &spec, path)?;
+            init_current_projection_schema(&conn, &spec, path, None)?;
             return Ok(ProjectionOpenResult {
                 db: Self {
-                    conn,
+                    conn: ProjectionConnection::Standard(conn),
                     path: path.to_path_buf(),
                     _instance_directory: None,
                     _instance_name: None,
                     _instance_file: Some(instance_file),
                     _wal_file: None,
                     _shm_file: None,
-                    _instance_lease: Some(instance_lease),
+                    _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
                 },
                 reset: true,
             });
@@ -765,27 +802,30 @@ impl ProjectionDb {
         sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path)?;
         Ok(ProjectionOpenResult {
             db: Self {
-                conn,
+                conn: ProjectionConnection::Standard(conn),
                 path: path.to_path_buf(),
                 _instance_directory: None,
                 _instance_name: None,
                 _instance_file: Some(instance_file),
                 _wal_file: None,
                 _shm_file: None,
-                _instance_lease: Some(instance_lease),
+                _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
             },
             reset: false,
         })
     }
 
-    /// Get the underlying connection for queries.
-    pub fn connection(&self) -> &Connection {
-        &self.conn
-    }
-
-    /// Get a mutable connection for transactions.
-    pub fn connection_mut(&mut self) -> &mut Connection {
-        &mut self.conn
+    /// Run SQL without allowing a connection or statement borrow to escape.
+    /// The selected native connection owner supplies this same scoped entry
+    /// when offline reset admission is joined; callers retain owned results.
+    pub fn with_sql<T>(
+        &self,
+        operation: impl for<'connection> FnOnce(&'connection Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        match &self.conn {
+            ProjectionConnection::Standard(connection) => operation(connection),
+            ProjectionConnection::Original { connection, .. } => connection.with_sql(operation),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -805,6 +845,24 @@ impl ProjectionDb {
             _shm_file: shm_file,
             _instance_lease: instance_lease,
         } = self;
+        let conn = match conn {
+            ProjectionConnection::Standard(connection) => connection,
+            original @ ProjectionConnection::Original { .. } => {
+                let retained = Self {
+                    conn: original, path,
+                    _instance_directory: instance_directory,
+                    _instance_name: instance_name,
+                    _instance_file: instance_file,
+                    _wal_file: wal_file,
+                    _shm_file: shm_file,
+                    _instance_lease: instance_lease,
+                };
+                return Err(anyhow::Error::new(OriginalProjectionFailure::retain_projection(
+                    retained,
+                    anyhow::anyhow!("original projection requires supervised native close and retained terminal proof"),
+                )));
+            }
+        };
         let instance_file = instance_file.ok_or_else(|| {
             anyhow::anyhow!("transient projection cannot be durably closed by filesystem path")
         })?;
@@ -981,7 +1039,7 @@ fn ensure_sqlite_retains_projection_file(file: &fs::File, label: &str) -> anyhow
     }
 }
 
-fn validate_selected_current(conn: &Connection, path: &Path) -> anyhow::Result<()> {
+fn validate_selected_current(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> anyhow::Result<()> {
     let spec = projection_schema_spec();
     match classify_projection_db(conn, spec.application_id)? {
         ProjectionOwnershipState::Owned => {}
@@ -1001,7 +1059,7 @@ fn validate_selected_current(conn: &Connection, path: &Path) -> anyhow::Result<(
         );
     }
     sqlite_schema::assert_owned(conn, &spec, path)?;
-    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)
+    assert_projection_schema_sql(conn, path, reference)
 }
 
 pub(crate) fn projection_instance_lease_path(path: &Path) -> PathBuf {
@@ -1118,16 +1176,13 @@ mod tests {
         let db = ProjectionDb::open(&path).unwrap();
 
         // Verify tables were created
-        let mut stmt = db
-            .conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
-            .unwrap();
-
-        let tables: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
+        let tables: Vec<String> = db.with_sql(|connection| {
+            let mut stmt = connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
+            let tables = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|row| row.ok())
+                .collect();
+            Ok(tables)
+        }).unwrap();
 
         assert!(tables.contains(&"projection_meta".to_string()));
         assert!(tables.contains(&"threads".to_string()));
@@ -1145,13 +1200,11 @@ mod tests {
         }
 
         assert_eq!(
-            stored_projection_schema_epoch(db.connection()).unwrap(),
+            db.with_sql(stored_projection_schema_epoch).unwrap(),
             projection_schema_epoch()
         );
 
-        let synchronous: i64 = db
-            .connection()
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        let synchronous: i64 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(synchronous, 2, "projection DB must use synchronous=FULL");
     }
@@ -1189,14 +1242,12 @@ mod tests {
         let name = std::ffi::OsStr::new("projection.instance.sqlite3");
 
         let original = ProjectionDb::create_in_directory(&original_runtime, name).unwrap();
-        original
-            .connection()
-            .execute(
+        original.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO projection_meta (
                     chain_root_id, indexed_chain_state_hash, updated_at
                  ) VALUES ('original', 'original-hash', '2026-01-01T00:00:00Z')",
                 [],
-            )
+            )?))
             .unwrap();
         original.close_durable().unwrap();
 
@@ -1207,36 +1258,30 @@ mod tests {
             .unwrap()
             .expect("replacement runtime exists");
         let replacement = ProjectionDb::create_in_directory(&replacement_runtime, name).unwrap();
-        replacement
-            .connection()
-            .execute(
+        replacement.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO projection_meta (
                     chain_root_id, indexed_chain_state_hash, updated_at
                  ) VALUES ('replacement', 'replacement-hash', '2026-01-01T00:00:00Z')",
                 [],
-            )
+            )?))
             .unwrap();
         replacement.close_durable().unwrap();
 
         let selected =
             ProjectionDb::open_selected_current_in_directory(&original_runtime, name, true)
                 .unwrap();
-        let selected_root: String = selected
-            .connection()
-            .query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
+        let selected_root: String = selected.with_sql(|connection| Ok(connection.query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
                 row.get(0)
-            })
+            })?))
             .unwrap();
         assert_eq!(selected_root, "original");
 
         let replacement =
             ProjectionDb::open_selected_current_in_directory(&replacement_runtime, name, true)
                 .unwrap();
-        let replacement_root: String = replacement
-            .connection()
-            .query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
+        let replacement_root: String = replacement.with_sql(|connection| Ok(connection.query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
                 row.get(0)
-            })
+            })?))
             .unwrap();
         assert_eq!(replacement_root, "replacement");
     }
@@ -1283,13 +1328,12 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
         let db = ProjectionDb::open(&path).unwrap();
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO projection_meta (
                     chain_root_id, indexed_chain_state_hash, updated_at
                  ) VALUES ('T-root', 'hash', '2026-01-01T00:00:00Z')",
                 [],
-            )
+            )?))
             .unwrap();
 
         db.close_durable().unwrap();
@@ -1300,9 +1344,7 @@ mod tests {
             "durably closed projection must not retain live WAL data"
         );
         let reopened = ProjectionDb::open_selected_current(&path).unwrap();
-        let rows: i64 = reopened
-            .connection()
-            .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
+        let rows: i64 = reopened.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(rows, 1);
     }
@@ -1312,19 +1354,16 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
         let db = ProjectionDb::open(&path).unwrap();
-        db.connection()
-            .busy_timeout(std::time::Duration::ZERO)
+        db.with_sql(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
             .unwrap();
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO projection_meta (
                     chain_root_id, indexed_chain_state_hash, updated_at
                  ) VALUES ('T-before', 'before', '2026-01-01T00:00:00Z')",
                 [],
-            )
+            )?))
             .unwrap();
-        db.connection()
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        db.with_sql(|connection| Ok(connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?))
             .unwrap();
 
         let reader = Connection::open(&path).unwrap();
@@ -1332,13 +1371,12 @@ mod tests {
         let _: i64 = reader
             .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
             .unwrap();
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO projection_meta (
                     chain_root_id, indexed_chain_state_hash, updated_at
                  ) VALUES ('T-after', 'after', '2026-01-01T00:00:01Z')",
                 [],
-            )
+            )?))
             .unwrap();
 
         let error = db.close_durable().unwrap_err();
@@ -1401,13 +1439,11 @@ mod tests {
         let opened = ProjectionDb::open_with_status(&path).unwrap();
         assert!(!opened.reset);
         assert_eq!(
-            stored_projection_schema_epoch(opened.db.connection()).unwrap(),
+            opened.db.with_sql(stored_projection_schema_epoch).unwrap(),
             projection_schema_epoch()
         );
         let synchronous: i64 = opened
-            .db
-            .connection()
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(synchronous, 2, "reopened projection DB must use FULL");
         assert!(reset_backups(&path).is_empty());
@@ -1429,23 +1465,18 @@ mod tests {
         let opened = ProjectionDb::open_with_status(&path).unwrap();
         assert!(opened.reset);
         assert_eq!(
-            stored_projection_schema_epoch(opened.db.connection()).unwrap(),
+            opened.db.with_sql(stored_projection_schema_epoch).unwrap(),
             projection_schema_epoch()
         );
-        assert!(table_exists(
-            opened.db.connection(),
-            "thread_usage_subjects"
-        ));
+        assert!(opened.db.with_sql(|connection| Ok(table_exists(connection, "thread_usage_subjects"))).unwrap());
         let synchronous: i64 = opened
-            .db
-            .connection()
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(
             synchronous, 2,
             "post-epoch-reset projection DB must use FULL"
         );
-        assert!(!table_exists(opened.db.connection(), "sentinel"));
+        assert!(!opened.db.with_sql(|connection| Ok(table_exists(connection, "sentinel"))).unwrap());
         assert_eq!(reset_backups(&path).len(), 1);
     }
 
@@ -1670,8 +1701,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
         let db = ProjectionDb::open(&path).unwrap();
-        db.connection()
-            .execute_batch("DROP TABLE thread_edges")
+        db.with_sql(|connection| Ok(connection.execute_batch("DROP TABLE thread_edges")?))
             .unwrap();
         let snapshot = ThreadSnapshotBuilder::new(
             "T-child",
@@ -1862,19 +1892,15 @@ mod tests {
             project_event(&db, &edge).unwrap();
         }
 
-        let artifacts: i64 = db
-            .connection()
-            .query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
+        let artifacts: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
                 row.get(0)
-            })
+            })?))
             .unwrap();
-        let edges: i64 = db
-            .connection()
-            .query_row(
+        let edges: i64 = db.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM thread_edges WHERE source_event_hash IS NOT NULL",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(artifacts, 1);
         assert_eq!(edges, 1);
@@ -1900,11 +1926,9 @@ mod tests {
         project_event(&db, &existing).unwrap();
         let error = project_event(&db, &authoritative).unwrap_err();
         assert!(error.is::<ProjectionEventConflict>());
-        let artifacts: i64 = db
-            .connection()
-            .query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
+        let artifacts: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
                 row.get(0)
-            })
+            })?))
             .unwrap();
         assert_eq!(artifacts, 0);
     }

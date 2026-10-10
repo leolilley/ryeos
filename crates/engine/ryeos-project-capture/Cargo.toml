@@ -6,6 +6,7 @@ license.workspace = true
 description = "Descriptor-relative project capture shared by RyeOS execution runtimes"
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 lillux = { workspace = true }
 ryeos-state = { workspace = true }

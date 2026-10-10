@@ -13,15 +13,29 @@ basic-parsers = [
     "dep:serde",
     "dep:serde_yaml",
 ]
-full-handlers = [
+core-handlers = [
     "basic-parsers",
-    "dep:anyhow",
-    "dep:ryeos-directive-definition",
-    "dep:ryeos-effect-contract",
     "dep:ryeos-engine",
+    "dep:ryeos-state",
+]
+extends-composer = [
+    "common-handler",
+    "dep:regex",
+    "dep:serde",
+    "dep:ryeos-engine",
+]
+graph-handlers = [
+    "core-handlers",
+    "extends-composer",
+    "dep:anyhow",
+    "dep:ryeos-effect-contract",
     "dep:ryeos-graph-definition",
     "dep:ryeos-runtime",
-    "dep:ryeos-state",
+]
+directive-handlers = [
+    "core-handlers",
+    "extends-composer",
+    "dep:ryeos-directive-definition",
 ]
 
 [dependencies]
@@ -56,47 +70,47 @@ required-features = ["basic-parsers"]
 [[bin]]
 name = "rye-composer-extends-chain"
 path = "src/bin/composer_extends_chain.rs"
-required-features = ["full-handlers"]
+required-features = ["extends-composer"]
 
 [[bin]]
 name = "rye-composer-identity"
 path = "src/bin/composer_identity.rs"
-required-features = ["full-handlers"]
+required-features = ["core-handlers"]
 
 [[bin]]
 name = "ryeos-directive-launch-preparer"
 path = "src/bin/directive_launch_preparer.rs"
-required-features = ["full-handlers"]
+required-features = ["directive-handlers"]
 
 [[bin]]
 name = "ryeos-graph-effective-validator"
 path = "src/bin/graph_effective_validator.rs"
-required-features = ["full-handlers"]
+required-features = ["graph-handlers"]
 
 [[bin]]
 name = "ryeos-graph-launch-preparer"
 path = "src/bin/graph_launch_preparer.rs"
-required-features = ["full-handlers"]
+required-features = ["graph-handlers"]
 
 [[bin]]
 name = "ryeos-graph-execution-evidence"
 path = "src/bin/graph_execution_evidence.rs"
-required-features = ["full-handlers"]
+required-features = ["graph-handlers"]
 
 [[bin]]
 name = "ryeos-direct-execution-evidence"
 path = "src/bin/direct_execution_evidence.rs"
-required-features = ["full-handlers"]
+required-features = ["core-handlers"]
 
 [[bin]]
 name = "ryeos-scoped-qualification-execution-evidence"
 path = "src/bin/scoped_qualification_execution_evidence.rs"
-required-features = ["full-handlers"]
+required-features = ["core-handlers"]
 
 [[bin]]
 name = "tool-streaming-demo"
 path = "src/bin/tool_streaming_demo.rs"
-required-features = ["full-handlers"]
+required-features = ["core-handlers"]
 
 [lib]
 path = "src/lib.rs"

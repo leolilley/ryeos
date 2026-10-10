@@ -720,7 +720,7 @@ pub struct RetainedRuntimeBinarySelectionV1 {
     pub expanded_command: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleExecutorMemberSourceProofV1 {
     pub requested_binary_ref: String,

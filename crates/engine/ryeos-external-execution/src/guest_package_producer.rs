@@ -180,7 +180,9 @@ fn remove_private_package(
 ) -> Result<()> {
     root.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
     ensure!(
-        parent.remove_empty_child_if_same(name, root)?,
+        parent
+            .remove_empty_child_if_same(name, root)
+            .map(|receipt| receipt.is_some())?,
         "private guest package generation changed before cleanup"
     );
     Ok(())

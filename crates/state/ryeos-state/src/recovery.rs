@@ -188,6 +188,77 @@ pub struct RecoveryStore {
     directory: std::sync::Arc<lillux::PinnedDirectory>,
 }
 
+/// A scoped in-process borrow of actual recovery roots, not an authority
+/// reconstructed from marker bytes. The real exclusive CAS guard remains required.
+pub(crate) struct RecoveryAcknowledgementCustody {
+    runtime_directory: std::sync::Arc<lillux::PinnedDirectory>,
+    directory: std::sync::Arc<lillux::PinnedDirectory>,
+}
+impl RecoveryAcknowledgementCustody {
+    pub(crate) fn finish(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cas_mutation_guard.is_exclusive(),
+            "thread-history discard requires the exclusive CAS guard"
+        );
+        cas_mutation_guard.ensure_protects_pinned_runtime(&self.runtime_directory)?;
+        operation.validate()?;
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        let Some(pin) = self.directory.open_mount_entry(name)? else {
+            return self
+                .directory
+                .sync()
+                .context("sync acknowledged thread-history discard activation");
+        };
+        anyhow::ensure!(
+            read_thread_history_discard_operation(&self.directory)?.as_ref() == Some(operation),
+            "thread-history discard acknowledgement differs from its active operation"
+        );
+        let pinned = lillux::observe_open_file_identity(&pin)?;
+        let current = self
+            .directory
+            .entry_no_follow(name)?
+            .context("thread-history discard marker disappeared before acknowledgement")?;
+        anyhow::ensure!(
+            current.entry_type == lillux::PinnedEntryType::Regular
+                && current.containing_device == pinned.device()
+                && current.inode == pinned.inode(),
+            "thread-history discard marker changed before acknowledgement"
+        );
+        self.directory
+            .remove_if_same(name, &pin)
+            .context("remove completed thread-history discard activation")?;
+        self.directory
+            .sync()
+            .context("sync completed thread-history discard activation")
+    }
+}
+
+fn read_thread_history_discard_operation(
+    directory: &lillux::PinnedDirectory,
+) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+    let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+    if directory.entry_no_follow(name)?.is_none() {
+        return Ok(None);
+    }
+    let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
+        directory,
+        name,
+        THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
+    )?
+    .context("thread-history discard marker disappeared during intake")?;
+    let marker: ThreadHistoryDiscardMarker =
+        serde_json::from_slice(&bytes).context("decode strict thread-history discard marker")?;
+    anyhow::ensure!(
+        marker.canonical_bytes()? == bytes,
+        "thread-history discard marker is not canonical"
+    );
+    Ok(Some(marker.operation))
+}
+
 fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 32]> {
     let bytes = file.read_bounded(33)?;
     if bytes.len() != 32 {
@@ -202,8 +273,77 @@ fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 3
 }
 
 const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
-const THREAD_HISTORY_DISCARD_MARKER_BYTES: &[u8] =
-    br#"{"kind":"thread_history_discard","schema":1}"#;
+const THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES: usize = 512;
+
+/// Opaque activation reference. Shape validation is not operation authority:
+/// App must authenticate the staged signed bytes, options and original owners.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadHistoryDiscardOperationRef {
+    pub operation_id: String,
+    pub sha256: String,
+}
+
+impl ThreadHistoryDiscardOperationRef {
+    pub fn validate(&self) -> Result<()> {
+        for (label, value, length) in [
+            ("operation id", self.operation_id.as_str(), 32),
+            ("signed operation digest", self.sha256.as_str(), 64),
+        ] {
+            anyhow::ensure!(
+                value.len() == length
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "invalid thread-history discard {label}"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadHistoryDiscardMarker {
+    kind: String,
+    schema: u32,
+    operation: ThreadHistoryDiscardOperationRef,
+}
+
+impl ThreadHistoryDiscardMarker {
+    fn for_operation(operation: &ThreadHistoryDiscardOperationRef) -> Result<Self> {
+        operation.validate()?;
+        Ok(Self {
+            kind: "thread_history_discard".to_owned(),
+            schema: 2,
+            operation: operation.clone(),
+        })
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            self.kind == "thread_history_discard" && self.schema == 2,
+            "unsupported thread-history discard marker"
+        );
+        self.operation.validate()?;
+        // This validated schema has only fixed ASCII kind/schema and two
+        // exact hexadecimal strings. Write its canonical sorted-key JSON
+        // directly into one bounded buffer, without intermediate JSON maps.
+        let mut bytes = Vec::with_capacity(THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES);
+        bytes.extend_from_slice(
+            b"{\"kind\":\"thread_history_discard\",\"operation\":{\"operation_id\":\"",
+        );
+        bytes.extend_from_slice(self.operation.operation_id.as_bytes());
+        bytes.extend_from_slice(b"\",\"sha256\":\"");
+        bytes.extend_from_slice(self.operation.sha256.as_bytes());
+        bytes.extend_from_slice(b"\"},\"schema\":2}");
+        anyhow::ensure!(
+            bytes.len() <= THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
+            "thread-history discard marker exceeds its byte bound"
+        );
+        Ok(bytes)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1436,7 +1576,9 @@ impl CasMutationGuard {
         })();
         if result.is_err() {
             let _ = recovery.remove_contents_recursive();
-            let _ = runtime.remove_empty_child_if_same(recovery_name, &recovery);
+            let _ = runtime
+                .remove_empty_child_if_same(recovery_name, &recovery)
+                .map(|receipt| receipt.is_some());
         }
         result
     }
@@ -1959,6 +2101,22 @@ fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> R
 }
 
 impl RecoveryStore {
+    /// Borrow the SAME pinned directory allocations while preserving the
+    /// typed semantic recovery owner. This cannot acknowledge recovery or
+    /// authorize descriptor retirement. Caller funds counted alias work first.
+    pub(crate) fn borrow_original_directory_custody(&self)
+        -> [std::sync::Arc<lillux::PinnedDirectory>; 2] {
+        [std::sync::Arc::clone(&self.runtime_directory), std::sync::Arc::clone(&self.directory)]
+    }
+
+    /// Move the real pinned owners after the original controller has completed
+    /// semantic recovery. No reopen, duplicate, close or retirement receipt.
+    pub(crate) fn into_original_directory_custody(
+        self,
+    ) -> [std::sync::Arc<lillux::PinnedDirectory>; 2] {
+        [self.runtime_directory, self.directory]
+    }
+
     pub fn from_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
         let runtime = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
             .context("pin recovery runtime-state directory")?;
@@ -2061,68 +2219,81 @@ impl RecoveryStore {
         self.root.join("generation.json")
     }
 
-    /// Whether an explicitly requested offline thread-history discard has not
-    /// yet completed. Ordinary startup must refuse while this marker exists;
-    /// rerunning the offline command resumes the idempotent cleanup.
-    pub fn thread_history_discard_in_progress(&self) -> Result<bool> {
-        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        let Some(mut file) = self.directory.open_regular(name, false)? else {
-            return Ok(false);
-        };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .context("read thread-history discard marker")?;
-        if bytes != THREAD_HISTORY_DISCARD_MARKER_BYTES {
-            anyhow::bail!(
-                "invalid thread-history discard marker: {}",
-                self.directory.path().join(name).display()
-            );
-        }
-        Ok(true)
+    /// Read the strict active operation locator, without opening an observer
+    /// data descriptor that could close a live SQLite alias. This reference
+    /// locates evidence; it does not authenticate App policy or signatures.
+    pub fn thread_history_discard_operation(
+        &self,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        read_thread_history_discard_operation(&self.directory)
     }
 
-    /// Publish the durable intent for an explicit offline discard before its
-    /// first destructive step. Repeating this after interruption is harmless.
+    /// Ordinary startup refuses any active marker, including malformed or
+    /// unsupported evidence. Re-entry must verify the exact staged operation
+    /// before a projection preview can manufacture new accounting.
+    pub fn thread_history_discard_in_progress(&self) -> Result<bool> {
+        Ok(self.thread_history_discard_operation()?.is_some())
+    }
+
+    /// Activate the already-staged immutable operation after actual CAS
+    /// admission. An uncertain acknowledgement retries this same reference.
     pub(crate) fn begin_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
     ) -> Result<()> {
-        if !cas_mutation_guard.is_exclusive() {
-            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
-        }
+        anyhow::ensure!(
+            cas_mutation_guard.is_exclusive(),
+            "thread-history discard requires the exclusive CAS guard"
+        );
         self.ensure_guard(cas_mutation_guard)?;
+        let bytes = ThreadHistoryDiscardMarker::for_operation(operation)?.canonical_bytes()?;
         let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        if self.thread_history_discard_in_progress()? {
-            return Ok(());
+        if let Some(active) = self.thread_history_discard_operation()? {
+            anyhow::ensure!(
+                &active == operation,
+                "thread-history discard marker activates a different operation"
+            );
+            return self
+                .directory
+                .sync()
+                .context("sync retained thread-history discard activation");
+        }
+        // The no-replace publisher never overwrites another operation. A
+        // publication collision is accepted only after exact guarded intake.
+        if self
+            .directory
+            .atomic_create_regular(name, &bytes, 0o600)?
+            .is_none()
+        {
+            anyhow::ensure!(
+                self.thread_history_discard_operation()?.as_ref() == Some(operation),
+                "thread-history discard marker appeared with different evidence"
+            );
         }
         self.directory
-            .atomic_create_regular(name, THREAD_HISTORY_DISCARD_MARKER_BYTES, 0o600)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("thread-history discard marker appeared concurrently")
-            })?;
-        Ok(())
+            .sync()
+            .context("sync thread-history discard activation")
     }
 
-    /// Remove the durable intent only after every participating store has
-    /// reached its empty-current state.
+    /// Acknowledge only this exact operation after every participating owner
+    /// is terminal. Keep the staged operation until this removal is durable.
     pub(crate) fn finish_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
     ) -> Result<()> {
-        if !cas_mutation_guard.is_exclusive() {
-            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
+        self.final_ack_custody()
+            .finish(cas_mutation_guard, operation)
+    }
+
+    /// Retain only the SAME real recovery/runtime directory owners for the
+    /// bounded ACK effect. No File duplication or diagnostic path allocation.
+    pub(crate) fn final_ack_custody(&self) -> RecoveryAcknowledgementCustody {
+        RecoveryAcknowledgementCustody {
+            runtime_directory: self.runtime_directory.clone(),
+            directory: self.directory.clone(),
         }
-        self.ensure_guard(cas_mutation_guard)?;
-        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        let Some(file) = self.directory.open_regular(name, false)? else {
-            return Ok(());
-        };
-        if !self.thread_history_discard_in_progress()? {
-            anyhow::bail!("thread-history discard marker disappeared during validation");
-        }
-        self.directory
-            .remove_if_same(name, &file)
-            .context("remove completed thread-history discard marker")
     }
 
     /// Drop every chain-head recovery record as one part of an explicitly
@@ -2402,7 +2573,10 @@ impl RecoveryStore {
             return Ok(());
         };
         parts.remove_contents_recursive()?;
-        if !parts_root.remove_empty_child_if_same(std::ffi::OsStr::new(staging_id), &parts)? {
+        if !parts_root
+            .remove_empty_child_if_same(std::ffi::OsStr::new(staging_id), &parts)
+            .map(|receipt| receipt.is_some())?
+        {
             anyhow::bail!("durable blob-parts directory changed during retirement");
         }
         Ok(())
@@ -2416,7 +2590,10 @@ impl RecoveryStore {
             return Ok(());
         };
         parts.remove_contents_recursive()?;
-        if !parts_root.remove_empty_child_if_same(std::ffi::OsStr::new(lease_id), &parts)? {
+        if !parts_root
+            .remove_empty_child_if_same(std::ffi::OsStr::new(lease_id), &parts)
+            .map(|receipt| receipt.is_some())?
+        {
             anyhow::bail!("staged blob-parts directory changed during retirement");
         }
         Ok(())
@@ -2558,15 +2735,17 @@ impl RecoveryStore {
     }
 
     pub fn read_generation(&self) -> Result<Option<ProjectionRecoveryGeneration>> {
-        let Some(mut file) = self
-            .directory
-            .open_regular(std::ffi::OsStr::new("generation.json"), false)?
+        // Intake remains bounded and the native alias gate spans every data
+        // open/read/close. Metadata observations alone cannot safely read JSON.
+        let Some(bytes) = lillux_sqlite::read_regular_without_sqlite_alias(
+            &self.directory,
+            std::ffi::OsStr::new("generation.json"),
+            65_536,
+        )
+        .context("read bounded recovery generation without SQLite alias")?
         else {
             return Ok(None);
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .context("read recovery generation")?;
         let generation: ProjectionRecoveryGeneration =
             serde_json::from_slice(&bytes).context("decode recovery generation")?;
         generation.validate()?;
@@ -2578,7 +2757,14 @@ impl RecoveryStore {
         let value = serde_json::to_value(generation)?;
         let bytes = lillux::canonical_json(&value).context("canonicalize recovery generation")?;
         let name = std::ffi::OsStr::new("generation.json");
-        let expected = self.directory.open_regular(name, false)?;
+        let expected = self.directory.open_mount_entry(name)?;
+        if let Some(file) = &expected {
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "recovery generation target is not regular"
+            );
+            self.directory.ensure_open_regular_same_mount(file)?;
+        }
         self.directory
             .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
             .context("durably write recovery generation")
@@ -3905,14 +4091,167 @@ mod tests {
         CasMutationGuard::ensure_anchor(temp.path()).unwrap();
         let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
 
+        let operation = ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        };
         assert!(!store.thread_history_discard_in_progress().unwrap());
-        store.begin_thread_history_discard(&guard).unwrap();
-        store.begin_thread_history_discard(&guard).unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
         assert!(store.thread_history_discard_in_progress().unwrap());
 
-        store.finish_thread_history_discard(&guard).unwrap();
-        store.finish_thread_history_discard(&guard).unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
         assert!(!store.thread_history_discard_in_progress().unwrap());
+    }
+
+    #[test]
+    fn discard_activation_rejects_different_operation_without_replacing_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        };
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let before = std::fs::read(store.root().join(THREAD_HISTORY_DISCARD_MARKER)).unwrap();
+        let other = ThreadHistoryDiscardOperationRef {
+            operation_id: operation.operation_id.clone(),
+            sha256: "c".repeat(64),
+        };
+        assert!(store.begin_thread_history_discard(&guard, &other).is_err());
+        assert!(store.finish_thread_history_discard(&guard, &other).is_err());
+        assert_eq!(
+            store.thread_history_discard_operation().unwrap(),
+            Some(operation.clone())
+        );
+        assert_eq!(
+            std::fs::read(store.root().join(THREAD_HISTORY_DISCARD_MARKER)).unwrap(),
+            before
+        );
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        assert_eq!(store.thread_history_discard_operation().unwrap(), None);
+    }
+
+    #[test]
+    fn discard_activation_refuses_unbound_malformed_and_noncanonical_markers() {
+        let valid = ThreadHistoryDiscardMarker::for_operation(&ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        })
+        .unwrap();
+        let value = serde_json::to_value(&valid).unwrap();
+        let mut cases = vec![
+            br#"{"kind":"thread_history_discard","schema":1}"#.to_vec(),
+            vec![b'x'; THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES + 1],
+        ];
+        for key in ["kind", "schema", "operation"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            cases.push(lillux::canonical_json(&missing).unwrap().into_bytes());
+        }
+        for key in ["operation_id", "sha256"] {
+            let mut missing = value.clone();
+            missing["operation"].as_object_mut().unwrap().remove(key);
+            cases.push(lillux::canonical_json(&missing).unwrap().into_bytes());
+        }
+        let mut extra = value.clone();
+        extra["operation"]["authority"] = serde_json::json!(true);
+        cases.push(lillux::canonical_json(&extra).unwrap().into_bytes());
+        let mut wrong_id = value.clone();
+        wrong_id["operation"]["operation_id"] = serde_json::json!("A".repeat(32));
+        cases.push(lillux::canonical_json(&wrong_id).unwrap().into_bytes());
+        let mut whitespace = valid.canonical_bytes().unwrap();
+        whitespace.push(10);
+        cases.push(whitespace);
+        for bytes in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+            let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+            std::fs::write(&marker, &bytes).unwrap();
+            assert!(store.thread_history_discard_operation().is_err());
+            assert!(store.thread_history_discard_in_progress().is_err());
+            assert_eq!(std::fs::read(marker).unwrap(), bytes);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discard_marker_sqlite_alias_probes_preserve_original_posix_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let path = temp.path().join("stock.sqlite3");
+        // Open the sole test probe before SQLite takes any locks, and retain
+        // it until the connection is closed. F_OFD_GETLK sees this process's
+        // POSIX lock without another observer open/close.
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kept(value INTEGER); INSERT INTO kept VALUES(7); BEGIN IMMEDIATE;",
+        )
+        .unwrap();
+        std::fs::hard_link(&path, store.root().join(THREAD_HISTORY_DISCARD_MARKER)).unwrap();
+        let assert_reserved = || {
+            use std::os::fd::AsRawFd;
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = libc::F_WRLCK as _;
+            lock.l_whence = libc::SEEK_SET as _;
+            lock.l_start = 0x40000001;
+            lock.l_len = 1;
+            assert_eq!(
+                unsafe { libc::fcntl(probe.as_raw_fd(), libc::F_OFD_GETLK, &mut lock) },
+                0
+            );
+            assert_eq!(lock.l_type, libc::F_WRLCK as _);
+        };
+        assert_reserved();
+        let operation = ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        };
+        assert!(store.thread_history_discard_operation().is_err());
+        assert_reserved();
+        assert!(
+            store
+                .begin_thread_history_discard(&guard, &operation)
+                .is_err()
+        );
+        assert_reserved();
+        assert!(
+            store
+                .finish_thread_history_discard(&guard, &operation)
+                .is_err()
+        );
+        assert_reserved();
+        assert_eq!(
+            conn.query_row("SELECT value FROM kept", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        conn.execute_batch("ROLLBACK").unwrap();
+        drop(conn);
+        drop(probe);
     }
 
     #[test]

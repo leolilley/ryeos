@@ -785,8 +785,8 @@ fn load_hashed_chain_state_with_budget(
     budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
 ) -> anyhow::Result<ChainState> {
     let value = match budget.as_deref_mut() {
-        Some(budget) => budget.get_object(cas, hash, u64::MAX)?,
-        None => cas.get_object(hash)?,
+        Some(budget) => budget.get_object(cas, hash, u64::MAX),
+        None => cas.get_object(hash),
     }
         .with_context(|| format!("read authoritative ChainState object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative ChainState object {hash} is absent"))?;
@@ -826,8 +826,8 @@ fn load_hashed_snapshot_with_budget(
     budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
 ) -> anyhow::Result<ThreadSnapshot> {
     let value = match budget.as_deref_mut() {
-        Some(budget) => budget.get_object(cas, hash, u64::MAX)?,
-        None => cas.get_object(hash)?,
+        Some(budget) => budget.get_object(cas, hash, u64::MAX),
+        None => cas.get_object(hash),
     }
         .with_context(|| format!("read authoritative snapshot object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
@@ -858,8 +858,8 @@ fn load_hashed_event_with_budget(
     budget: &mut Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
 ) -> anyhow::Result<ThreadEvent> {
     let value = match budget.as_deref_mut() {
-        Some(budget) => budget.get_object(cas, hash, u64::MAX)?,
-        None => cas.get_object(hash)?,
+        Some(budget) => budget.get_object(cas, hash, u64::MAX),
+        None => cas.get_object(hash),
     }
         .with_context(|| format!("read authoritative event object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative event object {hash} is absent"))?;

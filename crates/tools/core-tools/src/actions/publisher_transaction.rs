@@ -182,6 +182,7 @@ pub(super) fn with_staged_bundle_generation<T>(
                             staging.file_name().expect("staging name checked"),
                             &old_generation,
                         )
+                        .map(|receipt| receipt.is_some())
                         .and_then(|removed| {
                             if removed {
                                 Ok(())
@@ -261,7 +262,10 @@ fn create_staging_directory(
                 .ok_or_else(|| anyhow!("stale publisher staging disappeared"))?;
             stale.ensure_path_binding()?;
             stale.remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL)?;
-            if !parent.remove_empty_child_if_same(&staging_name, &stale)? {
+            if !parent
+                .remove_empty_child_if_same(&staging_name, &stale)
+                .map(|receipt| receipt.is_some())?
+            {
                 bail!("stale publisher staging remained non-empty");
             }
         }
@@ -523,7 +527,9 @@ fn restore_floor_excluded_content_open(
                 // A restored descendant keeps the scaffold non-empty.  An
                 // empty scaffold represented only obsolete generated content
                 // and must not alter the committed generation.
-                let _ = live.remove_empty_child_if_same(&entry.name, &live_child)?;
+                let _ = live
+                    .remove_empty_child_if_same(&entry.name, &live_child)
+                    .map(|receipt| receipt.is_some())?;
             }
             old.ensure_entry_observation(&entry)?;
         }
@@ -597,7 +603,8 @@ impl Drop for StagingCleanup {
                 .remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL);
             let _ = self
                 .parent
-                .remove_empty_child_if_same(&self.name, &self.directory);
+                .remove_empty_child_if_same(&self.name, &self.directory)
+                .map(|receipt| receipt.is_some());
         }
     }
 }

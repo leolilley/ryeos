@@ -285,85 +285,102 @@ fn rebuild_projection_with_verified_baseline_inner(
     trust_store: &TrustStore,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<(RebuildReport, VerifiedBaseline)> {
-    let mut report = RebuildReport::default();
-    let mut verified_heads = Vec::new();
-    let mut progress = RebuildProgress::new();
-    let mut observer_progress = ObserverProgressThrottle::new();
+    projection.with_sql(|connection| {
+        let mut report = RebuildReport::default();
+        let mut verified_heads = Vec::new();
+        let mut progress = RebuildProgress::new();
+        let mut observer_progress = ObserverProgressThrottle::new();
 
-    // Clear existing projection tables (schema will be re-created)
-    let conn = projection.connection();
-    conn.execute_batch(CLEAR_HEAD_DERIVED_PROJECTION_SQL)
-        .context("failed to clear projection tables")?;
+        // Clear existing projection tables (schema will be re-created)
+        let conn = connection;
+        conn.execute_batch(CLEAR_HEAD_DERIVED_PROJECTION_SQL)
+            .context("failed to clear projection tables")?;
 
-    ensure_not_cancelled(observer)?;
-    let heads = chain_heads_with_observer(refs, trust_store, observer)?;
-    // Retention intentionally leaves empty per-chain directories behind. Only
-    // authoritative head entries are work units and belong in progress totals.
-    let chains_total = heads.len();
-    notify_observer(
-        observer,
-        ProjectionRecoveryProgress {
-            stage: ProjectionRecoveryStage::Rebuilding,
-            chains_total: Some(chains_total),
-            chains_done: 0,
-            threads_restored: 0,
-            events_projected: 0,
-            pending_total: None,
-            pending_done: 0,
-        },
-    )?;
-    if heads.is_empty() {
-        return Ok((
-            report,
-            VerifiedBaseline {
-                heads: verified_heads,
-            },
-        ));
-    }
-
-    let mut batch = ProjectionBatch::new(projection, "rebuild");
-
-    for head in heads {
         ensure_not_cancelled(observer)?;
-        let chain_root_id = head.name;
-        validate_chain_root_id_for_rebuild(&chain_root_id)?;
-        let chain_state_hash = head.target_hash.as_str();
-        verify_repair_closure_with_cas_and_observer(
-            cas,
-            &chain_root_id,
-            chain_state_hash,
-            true,
+        let heads = chain_heads_with_observer(refs, trust_store, observer)?;
+        // Retention intentionally leaves empty per-chain directories behind. Only
+        // authoritative head entries are work units and belong in progress totals.
+        let chains_total = heads.len();
+        notify_observer(
             observer,
+            ProjectionRecoveryProgress {
+                stage: ProjectionRecoveryStage::Rebuilding,
+                chains_total: Some(chains_total),
+                chains_done: 0,
+                threads_restored: 0,
+                events_projected: 0,
+                pending_total: None,
+                pending_done: 0,
+            },
         )?;
+        if heads.is_empty() {
+            return Ok((
+                report,
+                VerifiedBaseline {
+                    heads: verified_heads,
+                },
+            ));
+        }
 
-        batch.ensure_started()?;
+        let mut batch = ProjectionBatch::new(connection, "rebuild");
 
-        // Walk chain history (newest to oldest via prev_chain_state_hash)
-        let chain_report = rebuild_chain_with_observer(
-            projection,
-            cas,
-            &chain_root_id,
-            chain_state_hash,
-            observer,
-        )?;
+        for head in heads {
+            ensure_not_cancelled(observer)?;
+            let chain_root_id = head.name;
+            validate_chain_root_id_for_rebuild(&chain_root_id)?;
+            let chain_state_hash = head.target_hash.as_str();
+            verify_repair_closure_with_cas_and_observer(
+                cas,
+                &chain_root_id,
+                chain_state_hash,
+                true,
+                observer,
+            )?;
 
-        // Update projection_meta to point to the head
-        // Read the head chain_state to get updated_at
-        let meta = head_projection_meta(cas, &chain_root_id, chain_state_hash)?;
-        projection.update_projection_meta(&meta)?;
-        verified_heads.push(VerifiedBaselineHead { meta });
+            batch.ensure_started()?;
 
-        report.chains_rebuilt += 1;
-        report.threads_restored += chain_report.threads;
-        report.events_projected += chain_report.events;
-        batch.note_chain()?;
-        progress.note(
-            "rebuild",
-            report.chains_rebuilt,
-            report.threads_restored,
-            report.events_projected,
-        );
-        observer_progress.maybe_notify(
+            // Walk chain history (newest to oldest via prev_chain_state_hash)
+            let chain_report = rebuild_chain_with_observer(
+                projection,
+                cas,
+                &chain_root_id,
+                chain_state_hash,
+                observer,
+            )?;
+
+            // Update projection_meta to point to the head
+            // Read the head chain_state to get updated_at
+            let meta = head_projection_meta(cas, &chain_root_id, chain_state_hash)?;
+            projection.update_projection_meta(&meta)?;
+            verified_heads.push(VerifiedBaselineHead { meta });
+
+            report.chains_rebuilt += 1;
+            report.threads_restored += chain_report.threads;
+            report.events_projected += chain_report.events;
+            batch.note_chain()?;
+            progress.note(
+                "rebuild",
+                report.chains_rebuilt,
+                report.threads_restored,
+                report.events_projected,
+            );
+            observer_progress.maybe_notify(
+                observer,
+                ProjectionRecoveryProgress {
+                    stage: ProjectionRecoveryStage::Rebuilding,
+                    chains_total: Some(chains_total),
+                    chains_done: report.chains_rebuilt,
+                    threads_restored: report.threads_restored,
+                    events_projected: report.events_projected,
+                    pending_total: None,
+                    pending_done: 0,
+                },
+            );
+        }
+
+        batch.commit_partial()?;
+
+        notify_observer(
             observer,
             ProjectionRecoveryProgress {
                 stage: ProjectionRecoveryStage::Rebuilding,
@@ -374,30 +391,15 @@ fn rebuild_projection_with_verified_baseline_inner(
                 pending_total: None,
                 pending_done: 0,
             },
-        );
-    }
+        )?;
 
-    batch.commit_partial()?;
-
-    notify_observer(
-        observer,
-        ProjectionRecoveryProgress {
-            stage: ProjectionRecoveryStage::Rebuilding,
-            chains_total: Some(chains_total),
-            chains_done: report.chains_rebuilt,
-            threads_restored: report.threads_restored,
-            events_projected: report.events_projected,
-            pending_total: None,
-            pending_done: 0,
-        },
-    )?;
-
-    Ok((
-        report,
-        VerifiedBaseline {
-            heads: verified_heads,
-        },
-    ))
+        Ok((
+            report,
+            VerifiedBaseline {
+                heads: verified_heads,
+            },
+        ))
+    })
 }
 
 /// Verify every authoritative signed chain head, its complete CAS closure, and
@@ -461,86 +463,87 @@ fn verify_projection_with_authority(
     trust_store: &TrustStore,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<ProjectionVerificationReport> {
-    ensure_not_cancelled(observer)?;
-    let mut cursors = BTreeMap::new();
-    let mut statement = projection
-        .connection()
-        .prepare(
-            "SELECT chain_root_id, indexed_chain_state_hash, updated_at
-             FROM projection_meta
-             ORDER BY chain_root_id",
-        )
-        .context("read projection cursors for verification")?;
-    let rows = statement.query_map([], |row| {
-        Ok(crate::projection::ProjectionMeta {
-            chain_root_id: row.get(0)?,
-            indexed_chain_state_hash: row.get(1)?,
-            updated_at: row.get(2)?,
-        })
-    })?;
-    for row in rows {
+    projection.with_sql(|connection| {
         ensure_not_cancelled(observer)?;
-        let cursor = row.context("decode projection cursor for verification")?;
-        cursors.insert(cursor.chain_root_id.clone(), cursor);
-    }
-
-    let mut report = ProjectionVerificationReport::default();
-    for head in chain_heads_with_observer(refs, trust_store, observer)? {
-        ensure_not_cancelled(observer)?;
-        let chain_root_id = head.name;
-        validate_chain_root_id_for_rebuild(&chain_root_id)?;
-        verify_repair_closure_with_cas_and_observer(
-            cas,
-            &chain_root_id,
-            &head.target_hash,
-            true,
-            observer,
-        )?;
-        report.signed_heads_verified += 1;
-
-        let expected = head_projection_meta(cas, &chain_root_id, &head.target_hash)?;
-        let actual = cursors.remove(&chain_root_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "projection cursor missing for signed head {chain_root_id}@{}",
-                head.target_hash
+        let mut cursors = BTreeMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT chain_root_id, indexed_chain_state_hash, updated_at
+                 FROM projection_meta
+                 ORDER BY chain_root_id",
             )
+            .context("read projection cursors for verification")?;
+        let rows = statement.query_map([], |row| {
+            Ok(crate::projection::ProjectionMeta {
+                chain_root_id: row.get(0)?,
+                indexed_chain_state_hash: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
         })?;
-        if actual.indexed_chain_state_hash != expected.indexed_chain_state_hash
-            || actual.updated_at != expected.updated_at
-        {
+        for row in rows {
+            ensure_not_cancelled(observer)?;
+            let cursor = row.context("decode projection cursor for verification")?;
+            cursors.insert(cursor.chain_root_id.clone(), cursor);
+        }
+
+        let mut report = ProjectionVerificationReport::default();
+        for head in chain_heads_with_observer(refs, trust_store, observer)? {
+            ensure_not_cancelled(observer)?;
+            let chain_root_id = head.name;
+            validate_chain_root_id_for_rebuild(&chain_root_id)?;
+            verify_repair_closure_with_cas_and_observer(
+                cas,
+                &chain_root_id,
+                &head.target_hash,
+                true,
+                observer,
+            )?;
+            report.signed_heads_verified += 1;
+
+            let expected = head_projection_meta(cas, &chain_root_id, &head.target_hash)?;
+            let actual = cursors.remove(&chain_root_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "projection cursor missing for signed head {chain_root_id}@{}",
+                    head.target_hash
+                )
+            })?;
+            if actual.indexed_chain_state_hash != expected.indexed_chain_state_hash
+                || actual.updated_at != expected.updated_at
+            {
+                anyhow::bail!(
+                    "projection cursor mismatch for signed head {chain_root_id}: expected hash={} updated_at={}, got hash={} updated_at={}",
+                    expected.indexed_chain_state_hash,
+                    expected.updated_at,
+                    actual.indexed_chain_state_hash,
+                    actual.updated_at,
+                );
+            }
+            report.projection_cursors_verified += 1;
+        }
+
+        if let Some((chain_root_id, cursor)) = cursors.into_iter().next() {
             anyhow::bail!(
-                "projection cursor mismatch for signed head {chain_root_id}: expected hash={} updated_at={}, got hash={} updated_at={}",
-                expected.indexed_chain_state_hash,
-                expected.updated_at,
-                actual.indexed_chain_state_hash,
-                actual.updated_at,
+                "projection contains cursor without an authoritative signed head: {chain_root_id}@{}",
+                cursor.indexed_chain_state_hash
             );
         }
-        report.projection_cursors_verified += 1;
-    }
 
-    if let Some((chain_root_id, cursor)) = cursors.into_iter().next() {
-        anyhow::bail!(
-            "projection contains cursor without an authoritative signed head: {chain_root_id}@{}",
-            cursor.indexed_chain_state_hash
-        );
-    }
-
-    // A cursor is a commit marker, not proof that every materialized row is
-    // present and correct. Rebuild the expected head-derived view in memory
-    // under the caller's frozen CAS/head guard, then compare deterministic
-    // semantic fingerprints for every authoritative projection table.
-    let expected = ProjectionDb::open_transient()?;
-    rebuild_projection_with_verified_baseline_inner(&expected, cas, refs, trust_store, observer)
-        .context("rederive expected projection during verification")?;
-    let expected_fingerprints = projection_content_fingerprints_with_observer(&expected, observer)?;
-    verify_projection_matches_fingerprints_with_observer(
-        projection,
-        &expected_fingerprints,
-        observer,
-    )?;
-    report.projection_tables_verified = expected_fingerprints.len();
-    Ok(report)
+        // A cursor is a commit marker, not proof that every materialized row is
+        // present and correct. Rebuild the expected head-derived view in memory
+        // under the caller's frozen CAS/head guard, then compare deterministic
+        // semantic fingerprints for every authoritative projection table.
+        let expected = ProjectionDb::open_transient()?;
+        rebuild_projection_with_verified_baseline_inner(&expected, cas, refs, trust_store, observer)
+            .context("rederive expected projection during verification")?;
+        let expected_fingerprints = projection_content_fingerprints_with_observer(&expected, observer)?;
+        verify_projection_matches_fingerprints_with_observer(
+            projection,
+            &expected_fingerprints,
+            observer,
+        )?;
+        report.projection_tables_verified = expected_fingerprints.len();
+        Ok(report)
+    })
 }
 
 /// Verify a staged projection against the exact head set that already passed
@@ -724,29 +727,30 @@ fn read_projection_cursors(
     projection: &ProjectionDb,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<BTreeMap<String, crate::projection::ProjectionMeta>> {
-    ensure_not_cancelled(observer)?;
-    let mut statement = projection
-        .connection()
-        .prepare(
-            "SELECT chain_root_id, indexed_chain_state_hash, updated_at
-             FROM projection_meta
-             ORDER BY chain_root_id",
-        )
-        .context("read projection cursors for preverified verification")?;
-    let rows = statement.query_map([], |row| {
-        Ok(crate::projection::ProjectionMeta {
-            chain_root_id: row.get(0)?,
-            indexed_chain_state_hash: row.get(1)?,
-            updated_at: row.get(2)?,
-        })
-    })?;
-    let mut cursors = BTreeMap::new();
-    for row in rows {
+    projection.with_sql(|connection| {
         ensure_not_cancelled(observer)?;
-        let cursor = row.context("decode projection cursor for preverified verification")?;
-        cursors.insert(cursor.chain_root_id.clone(), cursor);
-    }
-    Ok(cursors)
+        let mut statement = connection
+            .prepare(
+                "SELECT chain_root_id, indexed_chain_state_hash, updated_at
+                 FROM projection_meta
+                 ORDER BY chain_root_id",
+            )
+            .context("read projection cursors for preverified verification")?;
+        let rows = statement.query_map([], |row| {
+            Ok(crate::projection::ProjectionMeta {
+                chain_root_id: row.get(0)?,
+                indexed_chain_state_hash: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })?;
+        let mut cursors = BTreeMap::new();
+        for row in rows {
+            ensure_not_cancelled(observer)?;
+            let cursor = row.context("decode projection cursor for preverified verification")?;
+            cursors.insert(cursor.chain_root_id.clone(), cursor);
+        }
+        Ok(cursors)
+    })
 }
 
 fn rederive_projection_from_verified_baseline(
@@ -755,34 +759,35 @@ fn rederive_projection_from_verified_baseline(
     baseline: &VerifiedBaseline,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<()> {
-    ensure_not_cancelled(observer)?;
-    projection
-        .connection()
-        .execute_batch(CLEAR_HEAD_DERIVED_PROJECTION_SQL)
-        .context("clear expected preverified projection")?;
-
-    let mut batch = ProjectionBatch::new(projection, "preverified rederive");
-    for head in &baseline.heads {
+    projection.with_sql(|connection| {
         ensure_not_cancelled(observer)?;
-        batch.ensure_started()?;
-        rebuild_chain_with_observer(
-            projection,
-            cas,
-            &head.meta.chain_root_id,
-            &head.meta.indexed_chain_state_hash,
-            observer,
-        )?;
-        let meta = head_projection_meta(
-            cas,
-            &head.meta.chain_root_id,
-            &head.meta.indexed_chain_state_hash,
-        )?;
-        require_exact_projection_meta("preverified rederive head", &head.meta, &meta)?;
-        projection.update_projection_meta(&meta)?;
-        batch.note_chain()?;
-    }
-    batch.commit_partial()?;
-    ensure_not_cancelled(observer)
+        connection
+            .execute_batch(CLEAR_HEAD_DERIVED_PROJECTION_SQL)
+            .context("clear expected preverified projection")?;
+
+        let mut batch = ProjectionBatch::new(connection, "preverified rederive");
+        for head in &baseline.heads {
+            ensure_not_cancelled(observer)?;
+            batch.ensure_started()?;
+            rebuild_chain_with_observer(
+                projection,
+                cas,
+                &head.meta.chain_root_id,
+                &head.meta.indexed_chain_state_hash,
+                observer,
+            )?;
+            let meta = head_projection_meta(
+                cas,
+                &head.meta.chain_root_id,
+                &head.meta.indexed_chain_state_hash,
+            )?;
+            require_exact_projection_meta("preverified rederive head", &head.meta, &meta)?;
+            projection.update_projection_meta(&meta)?;
+            batch.note_chain()?;
+        }
+        batch.commit_partial()?;
+        ensure_not_cancelled(observer)
+    })
 }
 
 pub(crate) fn projection_content_fingerprints_with_observer(
@@ -823,42 +828,44 @@ fn with_projection_sqlite_cancellation<T>(
     observer: Option<&dyn ProjectionRecoveryObserver>,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    ensure_not_cancelled(observer)?;
-    let Some(observer) = observer else {
-        return operation();
-    };
+    projection.with_sql(|connection| {
+        ensure_not_cancelled(observer)?;
+        let Some(observer) = observer else {
+            return operation();
+        };
 
-    let interrupt = projection.connection().get_interrupt_handle();
-    let interrupted = std::sync::atomic::AtomicBool::new(false);
-    let result = std::thread::scope(|scope| {
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        let interrupted = &interrupted;
-        scope.spawn(move || {
-            loop {
-                match finished_rx.recv_timeout(SQLITE_CANCELLATION_POLL_EVERY) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        if observer.is_cancelled() {
-                            interrupted.store(true, std::sync::atomic::Ordering::Release);
-                            // Keep interrupting until the scoped operation exits:
-                            // cancellation may become visible just before SQLite
-                            // starts its next scan/sort statement.
-                            interrupt.interrupt();
+        let interrupt = connection.get_interrupt_handle();
+        let interrupted = std::sync::atomic::AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let interrupted = &interrupted;
+            scope.spawn(move || {
+                loop {
+                    match finished_rx.recv_timeout(SQLITE_CANCELLATION_POLL_EVERY) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if observer.is_cancelled() {
+                                interrupted.store(true, std::sync::atomic::Ordering::Release);
+                                // Keep interrupting until the scoped operation exits:
+                                // cancellation may become visible just before SQLite
+                                // starts its next scan/sort statement.
+                                interrupt.interrupt();
+                            }
                         }
                     }
                 }
-            }
+            });
+
+            let result = operation();
+            let _ = finished_tx.send(());
+            result
         });
 
-        let result = operation();
-        let _ = finished_tx.send(());
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) || observer.is_cancelled() {
+            anyhow::bail!("projection recovery cancelled");
+        }
         result
-    });
-
-    if interrupted.load(std::sync::atomic::Ordering::Acquire) || observer.is_cancelled() {
-        anyhow::bail!("projection recovery cancelled");
-    }
-    result
+    })
 }
 
 fn projection_table_fingerprints(
@@ -914,14 +921,15 @@ fn verify_fingerprint_sets(
 }
 
 fn verify_sqlite_integrity(projection: &ProjectionDb) -> Result<()> {
-    let result: String = projection
-        .connection()
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .context("run projection SQLite integrity check")?;
-    if result != "ok" {
-        anyhow::bail!("projection SQLite integrity check failed: {result}");
-    }
-    Ok(())
+    projection.with_sql(|connection| {
+        let result: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .context("run projection SQLite integrity check")?;
+        if result != "ok" {
+            anyhow::bail!("projection SQLite integrity check failed: {result}");
+        }
+        Ok(())
+    })
 }
 
 fn projection_table_fingerprint(
@@ -929,48 +937,50 @@ fn projection_table_fingerprint(
     table: &'static str,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<ProjectionTableFingerprint> {
-    if !HEAD_DERIVED_PROJECTION_TABLES.contains(&table) {
-        anyhow::bail!("refusing to fingerprint unregistered projection table {table}");
-    }
-    let columns = projection_table_columns(projection, table, true)?;
-    if columns.is_empty() {
-        anyhow::bail!("projection table {table} has no semantic columns");
-    }
-    let quoted_columns = quoted_projection_columns(&columns);
-    let sql = format!("SELECT {quoted_columns} FROM \"{table}\" ORDER BY {quoted_columns}");
-    let mut statement = projection.connection().prepare(&sql)?;
-    let mut rows = statement.query([])?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"ryeos:projection-table:v1\0");
-    hash_framed(&mut hasher, 1, table.as_bytes());
-    for column in &columns {
-        hash_framed(&mut hasher, 2, column.as_bytes());
-    }
-    let mut row_count = 0_u64;
-    while let Some(row) = rows.next()? {
-        ensure_not_cancelled(observer)?;
-        row_count = row_count
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("projection row count overflow for {table}"))?;
-        hasher.update([3]);
-        for index in 0..columns.len() {
-            use rusqlite::types::ValueRef;
-            match row.get_ref(index)? {
-                ValueRef::Null => hasher.update([0]),
-                ValueRef::Integer(value) => hash_framed(&mut hasher, 1, &value.to_be_bytes()),
-                ValueRef::Real(value) => {
-                    hash_framed(&mut hasher, 2, &value.to_bits().to_be_bytes())
+    projection.with_sql(|connection| {
+        if !HEAD_DERIVED_PROJECTION_TABLES.contains(&table) {
+            anyhow::bail!("refusing to fingerprint unregistered projection table {table}");
+        }
+        let columns = projection_table_columns(projection, table, true)?;
+        if columns.is_empty() {
+            anyhow::bail!("projection table {table} has no semantic columns");
+        }
+        let quoted_columns = quoted_projection_columns(&columns);
+        let sql = format!("SELECT {quoted_columns} FROM \"{table}\" ORDER BY {quoted_columns}");
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query([])?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"ryeos:projection-table:v1\0");
+        hash_framed(&mut hasher, 1, table.as_bytes());
+        for column in &columns {
+            hash_framed(&mut hasher, 2, column.as_bytes());
+        }
+        let mut row_count = 0_u64;
+        while let Some(row) = rows.next()? {
+            ensure_not_cancelled(observer)?;
+            row_count = row_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("projection row count overflow for {table}"))?;
+            hasher.update([3]);
+            for index in 0..columns.len() {
+                use rusqlite::types::ValueRef;
+                match row.get_ref(index)? {
+                    ValueRef::Null => hasher.update([0]),
+                    ValueRef::Integer(value) => hash_framed(&mut hasher, 1, &value.to_be_bytes()),
+                    ValueRef::Real(value) => {
+                        hash_framed(&mut hasher, 2, &value.to_bits().to_be_bytes())
+                    }
+                    ValueRef::Text(value) => hash_framed(&mut hasher, 3, value),
+                    ValueRef::Blob(value) => hash_framed(&mut hasher, 4, value),
                 }
-                ValueRef::Text(value) => hash_framed(&mut hasher, 3, value),
-                ValueRef::Blob(value) => hash_framed(&mut hasher, 4, value),
             }
         }
-    }
-    Ok(ProjectionTableFingerprint {
-        table,
-        columns,
-        rows: row_count,
-        digest: hasher.finalize().into(),
+        Ok(ProjectionTableFingerprint {
+            table,
+            columns,
+            rows: row_count,
+            digest: hasher.finalize().into(),
+        })
     })
 }
 
@@ -979,22 +989,24 @@ fn projection_table_columns(
     table: &'static str,
     semantic_only: bool,
 ) -> Result<Vec<String>> {
-    let pragma = format!("PRAGMA table_info(\"{table}\")");
-    let mut schema = projection.connection().prepare(&pragma)?;
-    let columns = schema
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if columns.is_empty() {
-        anyhow::bail!("projection table {table} is absent");
-    }
-    if semantic_only {
-        Ok(columns
-            .into_iter()
-            .filter(|column| !SURROGATE_COLUMNS.contains(&column.as_str()))
-            .collect())
-    } else {
-        Ok(columns)
-    }
+    projection.with_sql(|connection| {
+        let pragma = format!("PRAGMA table_info(\"{table}\")");
+        let mut schema = connection.prepare(&pragma)?;
+        let columns = schema
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if columns.is_empty() {
+            anyhow::bail!("projection table {table} is absent");
+        }
+        if semantic_only {
+            Ok(columns
+                .into_iter()
+                .filter(|column| !SURROGATE_COLUMNS.contains(&column.as_str()))
+                .collect())
+        } else {
+            Ok(columns)
+        }
+    })
 }
 
 fn quoted_projection_columns(columns: &[String]) -> String {
@@ -1542,16 +1554,16 @@ fn head_projection_meta_with_reader<R: ProjectionCasObjectReader>(
 }
 
 struct ProjectionBatch<'a> {
-    projection: &'a ProjectionDb,
+    connection: &'a rusqlite::Connection,
     stage: &'static str,
     tx: Option<rusqlite::Transaction<'a>>,
     chains: usize,
 }
 
 impl<'a> ProjectionBatch<'a> {
-    fn new(projection: &'a ProjectionDb, stage: &'static str) -> Self {
+    fn new(connection: &'a rusqlite::Connection, stage: &'static str) -> Self {
         Self {
-            projection,
+            connection,
             stage,
             tx: None,
             chains: 0,
@@ -1565,8 +1577,7 @@ impl<'a> ProjectionBatch<'a> {
             // BEGINs on this connection. Keep sync-job immediate transactions
             // out of this path.
             self.tx = Some(
-                self.projection
-                    .connection()
+                self.connection
                     .unchecked_transaction()
                     .with_context(|| {
                         format!("failed to begin projection {} transaction", self.stage)
@@ -1634,83 +1645,85 @@ fn rebuild_chain_with_reader<R: ProjectionCasObjectReader>(
     head_hash: &str,
     observer: Option<&dyn ProjectionRecoveryObserver>,
 ) -> Result<ChainReport> {
-    ensure_not_cancelled(observer)?;
-    // A full repair is replacement, never an overlay. This also makes a
-    // failed delta-ancestry fallback remove stale derived rows before replay.
-    projection.delete_chain_projection_in_transaction(chain_root_id)?;
-    let mut report = ChainReport {
-        threads: 0,
-        events: 0,
-    };
-
-    // Load the complete ChainState history head → oldest. Replay must never
-    // translate an unreadable or malformed authoritative link into an early
-    // end-of-history: doing so could still publish the head cursor over an
-    // incomplete materialized view.
-    let mut states = Vec::new();
-    let mut current_hash = head_hash.to_string();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    loop {
+    projection.with_sql(|connection| {
         ensure_not_cancelled(observer)?;
-        if !visited.insert(current_hash.clone()) {
-            anyhow::bail!("cycle in ChainState history for {chain_root_id} at {current_hash}");
-        }
-        let state = load_chain_state_with_reader(reader, &current_hash, chain_root_id)
-            .with_context(|| format!("load ChainState history link {current_hash}"))?;
-        let previous = state.prev_chain_state_hash.clone();
-        states.push((current_hash, state));
-        match previous {
-            Some(previous) => current_hash = previous,
-            None => break,
-        }
-    }
+        // A full repair is replacement, never an overlay. This also makes a
+        // failed delta-ancestry fallback remove stale derived rows before replay.
+        projection.delete_chain_projection_in_transaction(chain_root_id)?;
+        let mut report = ChainReport {
+            threads: 0,
+            events: 0,
+        };
 
-    // Reverse: oldest → newest so we project in chronological order
-    states.reverse();
+        // Load the complete ChainState history head → oldest. Replay must never
+        // translate an unreadable or malformed authoritative link into an early
+        // end-of-history: doing so could still publish the head cursor over an
+        // incomplete materialized view.
+        let mut states = Vec::new();
+        let mut current_hash = head_hash.to_string();
+        let mut visited: HashSet<String> = HashSet::new();
 
-    // Walk chain states in order and project thread snapshots.
-    for (state_hash, state) in &states {
-        ensure_not_cancelled(observer)?;
-        for (thread_id, entry) in &state.threads {
+        loop {
             ensure_not_cancelled(observer)?;
-            let snapshot = load_thread_snapshot_with_reader(reader, &entry.snapshot_hash).with_context(|| {
-                format!(
-                    "load snapshot {} for thread {thread_id} from ChainState {state_hash}",
-                    entry.snapshot_hash
-                )
-            })?;
-            validate_snapshot_entry(state, thread_id, entry, &snapshot).with_context(|| {
-                format!(
-                    "validate snapshot {} for thread {thread_id} from ChainState {state_hash}",
-                    entry.snapshot_hash
-                )
-            })?;
-            // Earlier snapshots are intentionally overwritten by later states.
-            project_thread_snapshot(projection, &snapshot, chain_root_id)?;
+            if !visited.insert(current_hash.clone()) {
+                anyhow::bail!("cycle in ChainState history for {chain_root_id} at {current_hash}");
+            }
+            let state = load_chain_state_with_reader(reader, &current_hash, chain_root_id)
+                .with_context(|| format!("load ChainState history link {current_hash}"))?;
+            let previous = state.prev_chain_state_hash.clone();
+            states.push((current_hash, state));
+            match previous {
+                Some(previous) => current_hash = previous,
+                None => break,
+            }
         }
-    }
 
-    // For events, walk from each thread's last_event_hash toward earlier links
-    // via prev_chain_event_hash to get all events in the chain.
-    // But we need the chain-level events, so we walk from chain_state's last_event_hash.
-    let (_, head_state) = states
-        .last()
-        .expect("a full ChainState traversal always contains its head");
-    report.events += walk_and_project_events_with_reader(projection, reader, head_state, observer)?;
+        // Reverse: oldest → newest so we project in chronological order
+        states.reverse();
 
-    // Count unique threads
-    let conn = projection.connection();
-    let count: usize = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT thread_id) FROM threads WHERE chain_root_id = ?",
-            rusqlite::params![chain_root_id],
-            |row| row.get(0),
-        )
-        .with_context(|| format!("count rebuilt threads for chain {chain_root_id}"))?;
-    report.threads = count;
+        // Walk chain states in order and project thread snapshots.
+        for (state_hash, state) in &states {
+            ensure_not_cancelled(observer)?;
+            for (thread_id, entry) in &state.threads {
+                ensure_not_cancelled(observer)?;
+                let snapshot = load_thread_snapshot_with_reader(reader, &entry.snapshot_hash).with_context(|| {
+                    format!(
+                        "load snapshot {} for thread {thread_id} from ChainState {state_hash}",
+                        entry.snapshot_hash
+                    )
+                })?;
+                validate_snapshot_entry(state, thread_id, entry, &snapshot).with_context(|| {
+                    format!(
+                        "validate snapshot {} for thread {thread_id} from ChainState {state_hash}",
+                        entry.snapshot_hash
+                    )
+                })?;
+                // Earlier snapshots are intentionally overwritten by later states.
+                project_thread_snapshot(projection, &snapshot, chain_root_id)?;
+            }
+        }
 
-    Ok(report)
+        // For events, walk from each thread's last_event_hash toward earlier links
+        // via prev_chain_event_hash to get all events in the chain.
+        // But we need the chain-level events, so we walk from chain_state's last_event_hash.
+        let (_, head_state) = states
+            .last()
+            .expect("a full ChainState traversal always contains its head");
+        report.events += walk_and_project_events_with_reader(projection, reader, head_state, observer)?;
+
+        // Count unique threads
+        let conn = connection;
+        let count: usize = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT thread_id) FROM threads WHERE chain_root_id = ?",
+                rusqlite::params![chain_root_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("count rebuilt threads for chain {chain_root_id}"))?;
+        report.threads = count;
+
+        Ok(report)
+    })
 }
 
 /// Rebuild only the delta from `from_hash` to `to_hash` for a chain.
@@ -2578,23 +2591,20 @@ mod tests {
         assert_eq!(report.events_projected, 1);
 
         // Verify projection has the thread
-        let conn = proj.connection();
-        let status: String = conn
-            .query_row(
+        let status: String = proj.with_sql(|connection| Ok(connection.query_row(
                 "SELECT status FROM threads WHERE thread_id = 'T-root'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(status, "running");
 
         // Verify projection has the event
-        let event_count: usize = conn
-            .query_row(
+        let event_count: usize = proj.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM events WHERE thread_id = 'T-root'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(event_count, 1);
     }
@@ -2705,13 +2715,11 @@ mod tests {
         assert_eq!(report.events_projected, 1);
 
         // Verify latest status
-        let conn = proj.connection();
-        let status: String = conn
-            .query_row(
+        let status: String = proj.with_sql(|connection| Ok(connection.query_row(
                 "SELECT status FROM threads WHERE thread_id = 'T-root'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(status, "running");
     }
@@ -2754,13 +2762,11 @@ mod tests {
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
         assert_eq!(cursor.indexed_chain_state_hash, base_hash);
-        let status: String = projection
-            .connection()
-            .query_row(
+        let status: String = projection.with_sql(|connection| Ok(connection.query_row(
                 "SELECT status FROM threads WHERE thread_id = 'T-root'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(status, "created");
     }
@@ -2844,13 +2850,11 @@ mod tests {
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
         assert_eq!(cursor.indexed_chain_state_hash, base_hash);
-        let status: String = projection
-            .connection()
-            .query_row(
+        let status: String = projection.with_sql(|connection| Ok(connection.query_row(
                 "SELECT status FROM threads WHERE thread_id = 'T-root'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(status, "created");
     }
@@ -2907,13 +2911,11 @@ mod tests {
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
         assert_eq!(cursor.indexed_chain_state_hash, missing_cursor_hash);
-        let status: String = projection
-            .connection()
-            .query_row(
+        let status: String = projection.with_sql(|connection| Ok(connection.query_row(
                 "SELECT status FROM threads WHERE thread_id = 'T-root'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(status, "created");
     }
@@ -3125,17 +3127,13 @@ mod tests {
         walk_and_project_events_from(&projection, &cas_root, &newer_state, Some(&older_state))
             .unwrap();
 
-        let value: Vec<u8> = projection
-            .connection()
-            .query_row(
+        let value: Vec<u8> = projection.with_sql(|connection| Ok(connection.query_row(
                 "SELECT value FROM thread_facets WHERE thread_id='T-root' AND key='phase'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
-        let events: i64 = projection
-            .connection()
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        let events: i64 = projection.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(value, b"new");
         assert_eq!(events, 2);

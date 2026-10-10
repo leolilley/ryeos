@@ -87,6 +87,8 @@ pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
     CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
+    ClosedOriginalOperational, OriginalOperationalFailure, OriginalOperationalMutationAuthority,
+    PreparedReplayIndexReset,
     OperationalCredentialProfileRecord, OperationalDb, ReplayIndexActivationRequired,
     ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome, ReplayPublishOutcome,
     ReplayRecordVerification, SYNC_JOB_UNBOUNDED_ATTEMPTS,
@@ -115,10 +117,12 @@ pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
     DurableExternalCandidateReceipt, HeadOperation, PendingChainHeadTransition,
     PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
-    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, TransitionPhase,
+    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, ThreadHistoryDiscardOperationRef,
+    TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
+pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
     AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
     AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
@@ -128,7 +132,7 @@ pub use state_db::{
     AuthoritativeThreadHistoryDiscardReport, AuthoritativeThreadPairReadback,
     AuthoritativeThreadSnapshotReadback, AuthoritativeThreadSnapshotWithLastEventReadback,
     CommittedWrite, CreateChainWithEventSuccessorRequest, PendingRemoveHeadState,
-    PendingReplayReport, PinnedStateAuthority, ProjectionRecoveryObserver,
+    PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection, ProjectionRecoveryObserver,
     ProjectionRecoveryProgress, ProjectionRecoveryStage, ProjectionRepairRequest,
     ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector, StateDb,
 };

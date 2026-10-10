@@ -365,7 +365,8 @@ impl PreparedConsumerArchive {
             .remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
         ensure!(
             self.parent
-                .remove_empty_child_if_same(&self.name, &self.root)?,
+                .remove_empty_child_if_same(&self.name, &self.root)
+                .map(|receipt| receipt.is_some())?,
             "private consumer archive generation changed before cleanup"
         );
         Ok(())
@@ -457,7 +458,9 @@ pub fn prepare_private_consumer_archive(
                     1, 1,
                 ))?;
                 ensure!(
-                    owner.remove_empty_child_if_same(&name, &root)?,
+                    owner
+                        .remove_empty_child_if_same(&name, &root)
+                        .map(|receipt| receipt.is_some())?,
                     "private consumer archive generation changed before cleanup"
                 );
                 Ok(())

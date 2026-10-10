@@ -1,25 +1,25 @@
 #[cfg(not(feature = "common-handler"))]
 compile_error!(
-    "select an explicit handler composition: common-handler, basic-parsers, or full-handlers"
+    "select an explicit handler composition: common-handler, basic-parsers, core-handlers, extends-composer, graph-handlers, or directive-handlers"
 );
 
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "core-handlers")]
 pub mod direct_execution_evidence;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "directive-handlers")]
 pub mod directive_launch;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "extends-composer")]
 pub mod extends_chain;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "graph-handlers")]
 pub mod graph_effective_validator;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "graph-handlers")]
 pub mod graph_execution_evidence;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "graph-handlers")]
 pub mod graph_launch;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "core-handlers")]
 pub mod identity;
 #[cfg(feature = "basic-parsers")]
 pub mod regex_kv;
-#[cfg(feature = "full-handlers")]
+#[cfg(feature = "core-handlers")]
 pub mod scoped_qualification_execution_evidence;
 #[cfg(feature = "basic-parsers")]
 pub mod yaml_document;

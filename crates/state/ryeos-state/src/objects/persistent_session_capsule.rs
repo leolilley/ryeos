@@ -5,6 +5,7 @@
 //! realization.  The daemon may pool a process admitted by this capsule; the
 //! owning adapter assigns meaning to request and response bodies.
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};

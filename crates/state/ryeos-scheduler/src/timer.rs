@@ -60,6 +60,7 @@ where
             {
                 anyhow::bail!("scheduler fire projection became incomplete after daemon readiness");
             }
+            ctx.ensure_dispatch_available()?;
 
             specs = load_specs(&ctx)?;
             let now = lillux::time::timestamp_millis();
@@ -343,6 +344,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
     trigger_reason: &str,
     skip_claim: bool,
 ) -> anyhow::Result<FireDispatchOutcome> {
+    ctx.ensure_dispatch_available()?;
     types::validate_schedule_spec_record(spec)?;
     let thread_id = types::thread_id_from_fire(fire_id);
     let mut reserved = if skip_claim {
@@ -604,6 +606,7 @@ async fn dispatch_recovery_fire_inner<Ctx: SchedulerContext>(
     ctx: Arc<Ctx>,
     intent: super::reconcile::ResumeIntent,
 ) -> anyhow::Result<FireDispatchOutcome> {
+    ctx.ensure_dispatch_available()?;
     if matches!(intent.kind, super::reconcile::ResumeIntentKind::DispatchNew) {
         return dispatch_fire(
             &ctx,
@@ -812,9 +815,9 @@ mod tests {
         }
     }
 
-    fn projectless_execution() -> crate::types::ScheduleExecution {
-        crate::types::ScheduleExecution {
-            authority: crate::types::ScheduleExecutionAuthority::Node {
+    fn projectless_execution() -> ryeos_scheduler_contract::ScheduleExecution {
+        ryeos_scheduler_contract::ScheduleExecution {
+            authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                 principal_id: format!("fp:{}", "33".repeat(32)),
                 effective_origin_site_id: "site:test".to_string(),
             },

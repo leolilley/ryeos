@@ -444,7 +444,7 @@ impl BoundedCasObjectReadBudget {
         };
         let maximum = usize::try_from(maximum_bytes)
             .context("admitted verification object limit exceeds this platform")?;
-        let canonical_len = u64::try_from(canonical_json_bounded(&value, maximum)?.len())
+        let canonical_len = u64::try_from(lillux::canonical_json_bounded(&value, maximum)?.len())
             .context("verification object canonical size exceeds u64")?;
         self.validation_work_bytes = self
             .validation_work_bytes

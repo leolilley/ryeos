@@ -14,6 +14,7 @@ pub mod events;
 pub mod process_outcome;
 pub use ryeos_expression as expression;
 pub mod framing;
+pub mod graph_result;
 pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod method_wire;

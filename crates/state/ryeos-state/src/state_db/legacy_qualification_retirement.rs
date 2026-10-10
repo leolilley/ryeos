@@ -146,10 +146,16 @@ pub(super) fn retirement_in_progress(directory: &lillux::PinnedDirectory) -> Res
 }
 
 fn read_intent(directory: &lillux::PinnedDirectory) -> Result<Option<RetirementIntent>> {
-    let Some(file) = directory.open_pinned_regular(OsStr::new(MARKER), false)? else {
+    // This fence is rechecked while admitted State/Runtime SQLite owners may
+    // be live. Refuse a database/SHM alias before opening a descriptor whose
+    // close could release that process's held POSIX locks.
+    let Some(bytes) = lillux_sqlite::read_regular_without_sqlite_alias(
+        directory,
+        OsStr::new(MARKER),
+        usize::try_from(MAX_MARKER_BYTES).context("qualification retirement marker bound exceeds this platform")?,
+    )? else {
         return Ok(None);
     };
-    let bytes = file.read_bounded(MAX_MARKER_BYTES)?;
     let intent: RetirementIntent = serde_json::from_slice(&bytes)?;
     intent.validate()?;
     ensure!(

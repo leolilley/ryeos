@@ -528,7 +528,9 @@ fn remove_staged_generation(
 ) -> Result<()> {
     root.remove_contents_recursive_bounded(staging_budget())?;
     ensure!(
-        parent.remove_empty_child_if_same(name, root)?,
+        parent
+            .remove_empty_child_if_same(name, root)
+            .map(|receipt| receipt.is_some())?,
         "guest staging generation changed before cleanup"
     );
     Ok(())
@@ -1840,6 +1842,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient_scratch)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
         let opened =
@@ -1975,6 +1978,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
         let artifacts = private

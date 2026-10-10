@@ -906,7 +906,7 @@ pub(crate) fn compile_with_handlers_and_execution_root(
     // not solve this by adding a deferred child environment to a parent launch
     // preparer: an ordinary child owns this admission itself.
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
-        let owner = ctx.spec_overrides.runtime_command_owner.as_ref().ok_or_else(|| {
+        let owner = spec_overrides.runtime_command_owner.as_ref().ok_or_else(|| {
             EngineError::InvalidRuntimeConfig {
                 path: "config.command".to_owned(),
                 reason: "binary command has no authenticated singleton runtime owner".to_owned(),

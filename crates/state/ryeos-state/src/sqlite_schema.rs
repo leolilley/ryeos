@@ -353,6 +353,379 @@ struct SchemaSqlEntry {
     sql: Option<String>,
 }
 
+/// Exact same-library schema observation, not execution or mutation authority.
+pub struct SchemaSqlDefinition(Vec<SchemaSqlEntry>);
+impl SchemaSqlDefinition {
+    pub fn capture_reference(reference: &Connection) -> Result<Self> {
+        Ok(Self(schema_sql_entries(reference)?))
+    }
+    pub fn require_matches(&self, conn: &Connection, path: &Path) -> Result<()> {
+        if schema_sql_entries(conn)? != self.0 {
+            bail!("complete schema SQL mismatch in {}; CHECK/UNIQUE/foreign-key/index predicates must exactly match the current operational schema", path.display());
+        }
+        Ok(())
+    }
+    pub fn matches_table(&self, conn: &Connection, table: &str) -> Result<bool> {
+        let actual = schema_sql_entries(conn)?;
+        Ok(actual.iter().filter(|entry| entry.table_name == table)
+            .eq(self.0.iter().filter(|entry| entry.table_name == table)))
+    }
+}
+
+/// A genuine closed transient owner plus its semantic observation. Keep this
+/// actual terminal for the original factory census; the data grants no intake.
+pub struct ClosedNativeSchemaSqlReference {
+    definition: SchemaSqlDefinition,
+    terminal: lillux_sqlite::OriginalNativeConnectionTerminal,
+}
+
+/// Refusal to transfer the schema-reference terminal after native
+/// acknowledgement. The captured definition stays paired with the exact
+/// original terminal so retry cannot substitute another schema observation.
+pub struct NativeSchemaSqlReferenceOutsideFailure {
+    definition: SchemaSqlDefinition,
+    failure: lillux_sqlite::OriginalNativeOutsideCustodyFailure,
+}
+
+impl NativeSchemaSqlReferenceOutsideFailure {
+    pub fn into_original(
+        self,
+    ) -> std::result::Result<ClosedNativeSchemaSqlReference, (Self, anyhow::Error)> {
+        let Self { definition, failure } = self;
+        match failure.into_original() {
+            Ok(terminal) => Ok(ClosedNativeSchemaSqlReference { definition, terminal }),
+            Err(failure) => Err((
+                Self { definition, failure },
+                anyhow::anyhow!("original schema-reference terminal remains outside custody"),
+            )),
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeSchemaSqlReferenceOutsideFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeSchemaSqlReferenceOutsideFailure")
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for NativeSchemaSqlReferenceOutsideFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.failure, f)
+    }
+}
+impl std::error::Error for NativeSchemaSqlReferenceOutsideFailure {}
+
+impl ClosedNativeSchemaSqlReference {
+    /// Consume both actual components; semantic evidence is not discarded and
+    /// the genuine terminal remains with its original outside cleanup owner.
+    pub fn into_original_parts(self) -> (SchemaSqlDefinition, lillux_sqlite::OriginalNativeConnectionTerminal) {
+        (self.definition, self.terminal)
+    }
+
+    pub fn definition(&self) -> &SchemaSqlDefinition { &self.definition }
+    pub fn terminal(&self) -> &lillux_sqlite::OriginalNativeConnectionTerminal { &self.terminal }
+
+    /// Consume the exact schema terminal only after the genuine aggregate
+    /// native acknowledgement. The refusal retains its original definition
+    /// and terminal for a same-owner retry.
+    pub fn into_outside_custody(
+        self,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> std::result::Result<
+        lillux_sqlite::OriginalNativeOutsideConnectionCustody,
+        NativeSchemaSqlReferenceOutsideFailure,
+    > {
+        let Self { definition, terminal } = self;
+        match terminal.into_outside_custody(aggregate) {
+            Ok(custody) => Ok(custody),
+            Err(failure) => Err(NativeSchemaSqlReferenceOutsideFailure { definition, failure }),
+        }
+    }
+    /// Verify the actual closed reference purpose and same original factory
+    /// before a consumer uses its schema definition. This neither opens the
+    /// target nor substitutes for matching the complete target schema.
+    pub fn require_original_closed(
+        &self,
+        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        expected: lillux_sqlite::OriginalNativeDomain,
+    ) -> Result<()> {
+        self.terminal.require_original(factory)?;
+        let lillux_sqlite::OriginalNativeConnectionTerminal::Closed(owner) = &self.terminal else {
+            bail!("schema definition requires an actual closed reference, not released acquisition");
+        };
+        anyhow::ensure!(owner.domain() == expected,
+            "closed schema reference belongs to another native purpose");
+        Ok(())
+    }
+}
+enum NativeSchemaReferenceCustody {
+    BeforeOpen(Option<lillux_sqlite::OriginalNativeTransientInputs>),
+    Open(lillux_sqlite::OriginalNativeOpenFailure),
+    Live(lillux_sqlite::OriginalNativeConnection),
+    Close(lillux_sqlite::OriginalNativeCloseFailure),
+    Terminal(lillux_sqlite::OriginalNativeConnectionTerminal),
+}
+pub struct NativeSchemaSqlReferenceFailure {
+    error: anyhow::Error,
+    factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    // A future recovery consumer must take this actual checkout before effects.
+    // Discarding a failure cannot close SQLite or release its original owners.
+    _custody: std::mem::ManuallyDrop<std::sync::Mutex<NativeSchemaReferenceCustody>>,
+    _definition: Option<SchemaSqlDefinition>,
+}
+impl std::fmt::Debug for NativeSchemaSqlReferenceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("NativeSchemaSqlReferenceFailure").field("error", &self.error).finish_non_exhaustive() }
+}
+impl std::fmt::Display for NativeSchemaSqlReferenceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "native schema reference retained: {}", self.error) }
+}
+impl std::error::Error for NativeSchemaSqlReferenceFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+}
+
+/// Disposal evidence from a refused schema construction. It grants no schema
+/// definition or service admission, even if construction had observed data.
+pub struct ReleasedNativeSchemaSqlReference {
+    factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    terminal: Option<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    unused_transient_inputs: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    prior_refusal: anyhow::Error,
+    _definition: Option<SchemaSqlDefinition>,
+    outside_custody: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
+    outside_failure: Option<lillux_sqlite::OriginalNativeOutsideCustodyFailure>,
+}
+impl ReleasedNativeSchemaSqlReference {
+    /// Consume the exact refused construction after genuine same-factory ACK.
+    /// Its optional definition and original error remain evidence, not admission.
+    pub(crate) fn into_original_parts(self,
+        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal)
+        -> std::result::Result<(Option<SchemaSqlDefinition>, Option<lillux_sqlite::OriginalNativeConnectionTerminal>, anyhow::Error), Self> {
+        if self.outside_custody.is_some() || self.outside_failure.is_some()
+            || self.unused_transient_inputs.is_some() {
+            return Err(self);
+        }
+        if factory.require_original_process().and_then(|_| aggregate.require_original(factory))
+            .and_then(|_| self.terminal(factory).map(|_| ())).is_err() { return Err(self); }
+        let Self { factory: original_factory, terminal, prior_refusal, _definition, .. } = self;
+        let parts = (_definition, terminal, prior_refusal);
+        // The actual caller's same factory stays retained; only this redundant
+        // facade alias retires after every owned evidence field has moved.
+        drop(original_factory);
+        Ok(parts)
+    }
+    pub fn terminal(&self, factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>)
+        -> Result<Option<&lillux_sqlite::OriginalNativeConnectionTerminal>> {
+        factory.require_original_process()?;
+        anyhow::ensure!(std::sync::Arc::ptr_eq(factory, &self.factory), "foreign recovered schema factory");
+        if let Some(terminal) = &self.terminal { terminal.require_original(factory)?; }
+        Ok(self.terminal.as_ref())
+    }
+    pub fn prior_refusal(&self) -> &anyhow::Error { &self.prior_refusal }
+
+    /// Transfer an acknowledged failed schema attempt into the same outside
+    /// source graph as its Store. Every refused terminal handoff stays inside
+    /// this owner with its original definition and diagnostic.
+    pub fn into_outside_parts(
+        mut self,
+        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> std::result::Result<
+        (Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+            Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+            anyhow::Error),
+        (Self, anyhow::Error),
+    > {
+        let checked = (|| -> Result<()> {
+            factory.require_original_process()?;
+            aggregate.require_original(factory)?;
+            anyhow::ensure!(std::sync::Arc::ptr_eq(factory, &self.factory),
+                "released schema source selects another original factory");
+            if let Some(terminal) = &self.terminal {
+                terminal.require_original(factory)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked { return Err((self, error)); }
+
+        if let Some(failure) = self.outside_failure.take() {
+            match failure.into_original() {
+                Ok(terminal) => self.terminal = Some(terminal),
+                Err(failure) => {
+                    self.outside_failure = Some(failure);
+                    return Err((self, anyhow::anyhow!(
+                        "released schema outside refusal remains retained")));
+                }
+            }
+        }
+        if let Some(custody) = self.outside_custody.take() {
+            match custody.into_original_parts() {
+                Ok(parts) => {
+                    let Self { factory: original_factory, terminal: _, prior_refusal,
+                        unused_transient_inputs, _definition: _, outside_custody: _,
+                        outside_failure: _ } = self;
+                    drop(original_factory);
+                    return Ok((Some(parts), unused_transient_inputs, prior_refusal));
+                }
+                Err(custody) => {
+                    self.outside_custody = Some(custody);
+                    return Err((self, anyhow::anyhow!(
+                        "released schema outside parts belong to another process")));
+                }
+            }
+        }
+
+        if let Some(terminal) = self.terminal.take() {
+            match terminal.into_outside_custody(aggregate) {
+                Ok(custody) => self.outside_custody = Some(custody),
+                Err(failure) => {
+                    self.outside_failure = Some(failure);
+                    return Err((self, anyhow::anyhow!(
+                        "released schema native source remains in outside refusal custody")));
+                }
+            }
+            let custody = self.outside_custody.take()
+                .expect("actual released schema outside custody");
+            match custody.into_original_parts() {
+                Ok(parts) => {
+                    let Self { factory: original_factory, terminal: _, prior_refusal,
+                        unused_transient_inputs, _definition: _, outside_custody: _,
+                        outside_failure: _ } = self;
+                    drop(original_factory);
+                    Ok((Some(parts), unused_transient_inputs, prior_refusal))
+                }
+                Err(custody) => {
+                    self.outside_custody = Some(custody);
+                    Err((self, anyhow::anyhow!(
+                        "released schema outside parts belong to another process")))
+                }
+            }
+        } else {
+            let Self { factory: original_factory, terminal: _, prior_refusal,
+                unused_transient_inputs, _definition: _, outside_custody: _,
+                outside_failure: _ } = self;
+            drop(original_factory);
+            Ok((None, unused_transient_inputs, prior_refusal))
+        }
+    }
+}
+impl NativeSchemaSqlReferenceFailure {
+    /// Consume the actual checkout outside its retention mutex. Every refusal
+    /// restores the same lower owner; no DDL, reopen or replacement ticket runs.
+    pub fn close_retained(self) -> std::result::Result<ReleasedNativeSchemaSqlReference, Self> {
+        if self.factory.require_original_process().is_err() { return Err(self); }
+        let Self { error, factory, _custody, _definition } = self;
+        let custody = std::mem::ManuallyDrop::into_inner(_custody)
+            .into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let retain = |custody, error, _definition| Self { error, factory: std::sync::Arc::clone(&factory),
+            _custody: std::mem::ManuallyDrop::new(std::sync::Mutex::new(custody)), _definition };
+        let mut unused_transient_inputs = None;
+        let terminal = match custody {
+            NativeSchemaReferenceCustody::BeforeOpen(Some(inputs)) => {
+                // No native producer has been entered in this actual stage.
+                unused_transient_inputs = Some(std::mem::ManuallyDrop::new(inputs));
+                None
+            }
+            NativeSchemaReferenceCustody::BeforeOpen(None) =>
+                return Err(retain(NativeSchemaReferenceCustody::BeforeOpen(None), error, _definition)),
+            NativeSchemaReferenceCustody::Open(mut failure) => {
+                if failure.retained_admission().is_some() {
+                    if let Err(refusal) = failure.recover_retained_admission() {
+                        return Err(retain(NativeSchemaReferenceCustody::Open(failure), refusal.context(error), _definition));
+                    }
+                }
+                match failure.retry_close() {
+                    Ok(proof) => Some(lillux_sqlite::OriginalNativeConnectionTerminal::Released(proof)),
+                    Err(failure) => return Err(retain(NativeSchemaReferenceCustody::Open(failure), error, _definition)),
+                }
+            }
+            NativeSchemaReferenceCustody::Live(owner) => match owner.close() {
+                Ok(proof) => Some(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(proof)),
+                Err(failure) => return Err(retain(NativeSchemaReferenceCustody::Close(failure), error, _definition)),
+            },
+            NativeSchemaReferenceCustody::Close(failure) => match failure.retry() {
+                Ok(proof) => Some(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(proof)),
+                Err(failure) => return Err(retain(NativeSchemaReferenceCustody::Close(failure), error, _definition)),
+            },
+            NativeSchemaReferenceCustody::Terminal(terminal) => Some(terminal),
+        };
+        // The actual terminal remains retained on any validation refusal.
+        if let Some(proof) = &terminal {
+            if proof.require_original(&factory).is_err() {
+                return Err(retain(NativeSchemaReferenceCustody::Terminal(terminal.expect("actual terminal")), error, _definition));
+            }
+        }
+        // The refusal is preserved, never converted into successful schema work.
+        Ok(ReleasedNativeSchemaSqlReference { factory, terminal, unused_transient_inputs,
+            prior_refusal: error, _definition, outside_custody: None, outside_failure: None })
+    }
+}
+
+/// Build and close a schema reference with genuine host-issued transient
+/// admission. There is no plain open, default budget or regenerated terminal.
+pub fn prepare_native_schema_sql_reference(
+    factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    inputs: lillux_sqlite::OriginalNativeTransientInputs,
+    expected: lillux_sqlite::OriginalNativeDomain,
+    ddl: &str,
+) -> std::result::Result<ClosedNativeSchemaSqlReference, NativeSchemaSqlReferenceFailure> {
+    // Keep actual checkout custody inert on unwind as well as typed refusal.
+    // This is retention only: no close, terminal census or recovery is inferred.
+    let mut custody = std::mem::ManuallyDrop::new(NativeSchemaReferenceCustody::BeforeOpen(Some(inputs)));
+    let mut definition = None;
+    let result = (|| -> Result<()> {
+        let NativeSchemaReferenceCustody::BeforeOpen(inputs) = &mut *custody else { unreachable!() };
+        anyhow::ensure!(matches!(expected,
+            lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference
+            | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference
+            | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference
+            | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference),
+            "requested purpose is not a live schema reference");
+        anyhow::ensure!(inputs.as_ref().expect("retained reference inputs").domain() == expected,
+            "schema reference input selects another purpose");
+        factory.require_ready()?;
+        let inputs = inputs.take().expect("retained reference inputs");
+        let owner = match factory.open_transient(inputs) {
+            Ok(owner) => owner,
+            Err(failure) => {
+                // Retain the actual partial owner before any diagnostic
+                // allocation; the original error remains in typed custody.
+                *custody = NativeSchemaReferenceCustody::Open(failure);
+                return Err(anyhow::anyhow!("native schema reference acquisition refused; original custody retained"));
+            }
+        };
+        *custody = NativeSchemaReferenceCustody::Live(owner);
+        let NativeSchemaReferenceCustody::Live(owner) = &*custody else { unreachable!() };
+        anyhow::ensure!(matches!(owner.domain(), lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference),
+            "native schema reference has the wrong actual purpose");
+        definition = Some(owner.with_sql(|connection| {
+            connection.execute_batch(ddl).context("build admitted reference SQLite schema")?;
+            SchemaSqlDefinition::capture_reference(connection)
+        })?);
+        let NativeSchemaReferenceCustody::Live(owner) = std::mem::replace(&mut *custody, NativeSchemaReferenceCustody::BeforeOpen(None)) else { unreachable!() };
+        let terminal = match owner.close() {
+            Ok(terminal) => lillux_sqlite::OriginalNativeConnectionTerminal::Closed(terminal),
+            Err(failure) => {
+                *custody = NativeSchemaReferenceCustody::Close(failure);
+                bail!("native schema reference close retained");
+            }
+        };
+        *custody = NativeSchemaReferenceCustody::Terminal(terminal);
+        let NativeSchemaReferenceCustody::Terminal(terminal) = &*custody else { unreachable!() };
+        terminal.require_original(&factory)?;
+        factory.require_ready()
+    })();
+    if let Err(error) = result {
+        return Err(NativeSchemaSqlReferenceFailure { error, factory,
+            _custody: std::mem::ManuallyDrop::new(std::sync::Mutex::new(std::mem::ManuallyDrop::into_inner(custody))), _definition: definition });
+    }
+    // Validate the data half before transferring the inert terminal owner.
+    let definition = definition.expect("actual reference observation");
+    let NativeSchemaReferenceCustody::Terminal(terminal) = std::mem::ManuallyDrop::into_inner(custody) else { unreachable!() };
+    Ok(ClosedNativeSchemaSqlReference { definition, terminal })
+}
+
 fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
     let mut statement = conn.prepare(
         "SELECT type, name, tbl_name, sql
@@ -392,15 +765,7 @@ pub fn assert_complete_schema_sql(conn: &Connection, ddl: &str, path: &Path) -> 
     reference
         .execute_batch(ddl)
         .context("build reference SQLite schema")?;
-    let expected = schema_sql_entries(&reference)?;
-    let actual = schema_sql_entries(conn)?;
-    if actual != expected {
-        bail!(
-            "complete schema SQL mismatch in {}; CHECK/UNIQUE/foreign-key/index predicates must exactly match the current operational schema",
-            path.display()
-        );
-    }
-    Ok(())
+    SchemaSqlDefinition::capture_reference(&reference)?.require_matches(conn, path)
 }
 
 /// Initialize a fresh database with the given schema spec.

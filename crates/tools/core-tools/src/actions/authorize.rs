@@ -278,8 +278,7 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
     // identity/authorize-client service and its retained identity instead.
     let _stopped_node_lock = acquire_semantic_conversion_lock(&params)?;
     let root = ryeos_engine::roots::RuntimeRoot::new(params.app_root.clone());
-    let node_identity =
-        ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
+    let node_identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
     run_authorize_client_with_authority(
         params,
         &node_identity,
@@ -402,7 +401,7 @@ pub fn run_mint_admission_token(
 /// state from a confined subprocess Tool.
 pub fn mint_admission_token_with_policy(
     params: MintAdmissionTokenParams,
-    policy: &ryeos_app::node_policy::sections::hosted::HostedNodePolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy,
     policy_source: &std::path::Path,
 ) -> Result<MintAdmissionTokenResult> {
     if params.ttl_secs == 0 {
@@ -725,8 +724,7 @@ admission_enabled: {admission_enabled}
         assert_eq!(converted.origin_site_id.as_deref(), Some("site:source"));
 
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(tmp.path());
-        let _live_daemon_lock =
-            ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let _live_daemon_lock = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
         let while_live = run_authorize_client(AuthorizeClientParams {
             app_root: tmp.path().to_path_buf(),
             public_key: client,

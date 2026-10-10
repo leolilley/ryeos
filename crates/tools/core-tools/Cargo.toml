@@ -36,16 +36,14 @@ lillux = { workspace = true }
 
 ryeos-vault = { workspace = true }
 ryeos-bundle = { workspace = true }
-ryeos-app = { workspace = true }
 
 # A current-thread tokio runtime to block on the async `runtime.author_item`
 # callback from the sync `author-item` subcommand. Owns the features it uses
 # (`enable_all` needs the IO driver via `net`, plus `time`) rather than relying
-# on unification through ryeos-runtime / ryeos-app.
+# on unification through other workspace consumers.
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 
 [dev-dependencies]
-ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [features]
@@ -55,7 +53,7 @@ default = []
 # need a manifest-stable copy of the `core` bundle (eliminates the
 # dev-tree manifest concurrency race documented in
 # `docs/operations/dev-tree-caveats.md`).
-test-support = ["ryeos-node-runtime/test-support", ]
+test-support = []
 
 # ── Unified core tools binary ──────────────────────────────────────
 # Subcommands: sign, fetch, verify, identity. Invoked by tool YAMLs

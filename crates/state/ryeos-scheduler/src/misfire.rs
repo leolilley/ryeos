@@ -11,49 +11,14 @@ use super::db::SchedulerDb;
 use super::projection;
 use super::types::{FireRecord, PendingFire, ScheduleSpecRecord};
 use crate::SchedulerContext;
+use ryeos_scheduler_contract::{MisfirePolicy, parse_misfire_policy};
 
 // Processing bound only, not schedule policy: subsequent timer passes resume
 // from the persisted fire/cursor boundary and continue the same downtime gap.
 const MISFIRE_SCAN_BATCH: usize = 10_000;
 
-/// All four misfire policies.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MisfirePolicy {
-    Skip,
-    FireOnceNow,
-    CatchUpBounded(usize),
-    CatchUpWithinSecs(u64),
-}
-
 pub fn resolve_misfire_policy(spec: &ScheduleSpecRecord) -> Result<MisfirePolicy> {
     parse_misfire_policy(&spec.misfire_policy)
-}
-
-pub fn parse_misfire_policy(raw: &str) -> Result<MisfirePolicy> {
-    match raw {
-        "skip" => Ok(MisfirePolicy::Skip),
-        "fire_once_now" => Ok(MisfirePolicy::FireOnceNow),
-        s if s.starts_with("catch_up_bounded:") => {
-            let count = s
-                .strip_prefix("catch_up_bounded:")
-                .expect("prefix checked")
-                .parse::<usize>()
-                .map_err(|_| anyhow::anyhow!("invalid misfire_policy: {raw}"))?;
-            Ok(MisfirePolicy::CatchUpBounded(count))
-        }
-        s if s.starts_with("catch_up_within_secs:") => {
-            let seconds = s
-                .strip_prefix("catch_up_within_secs:")
-                .expect("prefix checked")
-                .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("invalid misfire_policy: {raw}"))?;
-            if seconds > (i64::MAX as u64) / 1_000 {
-                anyhow::bail!("misfire_policy window is too large: {raw}");
-            }
-            Ok(MisfirePolicy::CatchUpWithinSecs(seconds))
-        }
-        _ => anyhow::bail!("invalid misfire_policy: {raw}"),
-    }
 }
 
 /// Detect missed fires after `anchor` and before `horizon_exclusive`.
@@ -330,8 +295,8 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 0,
-            execution: crate::types::ScheduleExecution {
-                authority: crate::types::ScheduleExecutionAuthority::Node {
+            execution: ryeos_scheduler_contract::ScheduleExecution {
+                authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                     principal_id: format!("fp:{}", "33".repeat(32)),
                     effective_origin_site_id: "site:test".to_string(),
                 },

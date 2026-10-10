@@ -1,3 +1,4 @@
+use ryeos_runtime::graph_result::ErrorRecord;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -5,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::context::ExecutionContext;
 use crate::evaluation::{ExpressionScope, GraphRunExpressionContext, validate_runtime_value};
-use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
+use crate::model::{DispatchObservation, GraphNode, GraphToolCallStatus, RetryConfig};
 use ryeos_graph_definition::CompiledNode;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError};

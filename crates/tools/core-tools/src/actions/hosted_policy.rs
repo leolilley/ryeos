@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use ryeos_app::node_policy::NodePolicyTable;
-use ryeos_app::node_policy::sections::hosted::HostedNodePolicy;
+use ryeos_node_runtime::node_policy::NodePolicyTable;
+use ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy;
 
 #[derive(Debug, Clone)]
 pub struct LoadedHostedNodePolicy {
@@ -32,7 +32,7 @@ pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
     )
     .context("hosted policy: load trust store")?;
     let snapshot =
-        ryeos_app::node_policy::load_snapshot(app_root, &trust_store, &NodePolicyTable::new())
+        ryeos_node_runtime::node_policy::load_snapshot(app_root, &trust_store, &NodePolicyTable::new())
             .context("hosted policy: load verified node policy generation")?;
     Ok(LoadedHostedNodePolicy {
         policy: snapshot.require::<HostedNodePolicy>()?.clone(),
@@ -52,7 +52,7 @@ pub(crate) fn write_required_non_hosted_test_policies(
     let seed_path = workspace.join("bundles/.ai/node/init/profiles/hosted-workflow.yaml");
     let signed = std::fs::read_to_string(&seed_path).expect("read hosted-workflow node profile");
     let body = lillux::signature::strip_signature_lines(&signed);
-    let seed: ryeos_app::node_policy::generation::NodeInitProfile =
+    let seed: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
         serde_yaml::from_str(&body).expect("parse hosted-workflow node profile");
     let policy_dir = app_root.join(".ai/node/policies");
     std::fs::create_dir_all(&policy_dir).expect("create test node-policy directory");

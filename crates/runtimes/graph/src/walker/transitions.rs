@@ -1,4 +1,5 @@
-use crate::model::{ErrorMode, ErrorRecord, GraphConfig, GraphNode};
+use crate::model::{ErrorMode, GraphConfig, GraphNode};
+use ryeos_runtime::graph_result::ErrorRecord;
 
 use super::outcome::NextOnError;
 

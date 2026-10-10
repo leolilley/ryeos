@@ -96,6 +96,7 @@ impl Drop for PreparedProjectSnapshotTransfer {
         let _ = self.root.remove_contents_recursive().and_then(|()| {
             self.parent
                 .remove_empty_child_if_same(&self.name, &self.root)
+                .map(|receipt| receipt.is_some())
                 .and_then(|removed| {
                     if removed {
                         Ok(())
@@ -193,7 +194,9 @@ pub fn prepare_project_snapshot_transfer(
         Ok(value) => value,
         Err(error) => {
             let _ = root.remove_contents_recursive();
-            let _ = transfer_parent.remove_empty_child_if_same(&name, &root);
+            let _ = transfer_parent
+                .remove_empty_child_if_same(&name, &root)
+                .map(|receipt| receipt.is_some());
             return Err(error);
         }
     };
@@ -343,7 +346,8 @@ pub fn install_project_snapshot_transfer(
         Ok(root) => root,
         Err(error) => {
             let _ = candidate_runtime
-                .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root);
+                .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root)
+                .map(|receipt| receipt.is_some());
             return Err(error);
         }
     };
@@ -384,16 +388,19 @@ pub fn install_project_snapshot_transfer(
                 lillux::DirectoryTraversalBudget::new(MAX_TRANSFER_ENTRIES, MAX_TRANSFER_DEPTH),
             );
             let _ = candidate_runtime
-                .remove_empty_child_if_same(std::ffi::OsStr::new("recovery"), &recovery);
+                .remove_empty_child_if_same(std::ffi::OsStr::new("recovery"), &recovery)
+                .map(|receipt| receipt.is_some());
         }
         let _ = cas_root.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(
             MAX_TRANSFER_ENTRIES,
             MAX_TRANSFER_DEPTH,
         ));
         let _ = candidate_runtime
-            .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root);
-        let _ =
-            candidate_runtime.remove_empty_child_if_same(std::ffi::OsStr::new("refs"), &refs_root);
+            .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root)
+            .map(|receipt| receipt.is_some());
+        let _ = candidate_runtime
+            .remove_empty_child_if_same(std::ffi::OsStr::new("refs"), &refs_root)
+            .map(|receipt| receipt.is_some());
     }
     result
 }
@@ -688,7 +695,7 @@ mod tests {
         ingest_project_tree, is_operationally_excluded, materialize_project_file,
         restore_operational_shadow_files,
     };
-    use ryeos_app::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
 
     #[test]
     fn live_descriptor_capture_cannot_be_redirected_by_rebinding_diagnostic_path() {
@@ -812,17 +819,17 @@ mod tests {
             "/../../../bundles/.ai/node/init/profiles/standard.yaml"
         ));
         let body = lillux::signature::strip_signature_lines(raw);
-        let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+        let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
             serde_yaml::from_str(&body).unwrap();
         profile
             .validate(
-                &ryeos_app::node_policy::NodePolicyTable::new(),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
                 Path::new("standard.yaml"),
             )
             .unwrap();
-        let parsed = ryeos_app::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
+        let parsed = ryeos_node_runtime::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
             .parse(
-                &ryeos_app::node_policy::NodePolicyContext {
+                &ryeos_node_runtime::node_policy::NodePolicyContext {
                     section: "ingest_ignore".to_owned(),
                     source_file: "standard.yaml".into(),
                     signer_fingerprint: "ab".repeat(32),
@@ -833,7 +840,7 @@ mod tests {
         let policy_record = parsed
             .as_any()
             .downcast_ref::<
-                ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy,
+                ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy,
             >()
             .unwrap();
 

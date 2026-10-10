@@ -471,6 +471,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
     }

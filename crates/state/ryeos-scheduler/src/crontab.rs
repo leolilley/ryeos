@@ -4,6 +4,7 @@
 //! Interval and at types are handled directly.
 
 use anyhow::{Context, Result, bail};
+use ryeos_scheduler_contract::parse_iso_ts;
 use std::str::FromStr;
 
 /// Compute the next fire time (millis since epoch) after `after_ms`.
@@ -163,72 +164,15 @@ fn next_at_fire(expression: &str, now_ms: i64) -> Result<Option<i64>> {
     }
 }
 
-pub fn parse_iso_ts(expression: &str) -> Option<i64> {
-    // Try chrono's ISO 8601 parsing
-    chrono::DateTime::parse_from_rfc3339(expression)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
-        .or_else(|| {
-            // Try without timezone (assume UTC)
-            let with_z = format!("{}Z", expression);
-            chrono::DateTime::parse_from_rfc3339(&with_z)
-                .ok()
-                .map(|dt| dt.timestamp_millis())
-        })
-}
-
-// ── Validation ──────────────────────────────────────────────────────
-
-/// Validate a schedule expression parses correctly for the given type.
-pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> {
-    match schedule_type {
-        "cron" => {
-            cron::Schedule::from_str(expression)
-                .with_context(|| format!("invalid cron expression: {}", expression))?;
-            Ok(())
-        }
-        "interval" => {
-            let secs: i64 = expression
-                .parse()
-                .with_context(|| format!("interval must be integer seconds: {}", expression))?;
-            if secs <= 0 {
-                bail!("interval must be positive, got: {}", secs);
-            }
-            Ok(())
-        }
-        "at" => {
-            if parse_iso_ts(expression).is_none() {
-                bail!(
-                    "invalid at expression (must be ISO 8601 timestamp): {}",
-                    expression
-                );
-            }
-            Ok(())
-        }
-        other => bail!("unknown schedule_type: {}", other),
-    }
-}
-
 /// Check if an `at` schedule's timestamp is in the past.
 pub fn is_at_past(expression: &str, now_ms: i64) -> bool {
     parse_iso_ts(expression).is_none_or(|ts| ts <= now_ms)
 }
 
-/// Validate a timezone string.
-pub fn validate_timezone(tz: &str) -> Result<()> {
-    tz.parse::<chrono_tz::Tz>()
-        .with_context(|| format!("invalid IANA timezone: {}", tz))?;
-    Ok(())
-}
-
-/// Validate the canonical schedule identity shared with durable fire records.
-pub fn validate_schedule_id(id: &str) -> Result<()> {
-    ryeos_state::gc::retention::validate_schedule_id(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_scheduler_contract::{validate_expression, validate_schedule_id, validate_timezone};
 
     // ── validate_expression ──────────────────────────────────────
 

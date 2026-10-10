@@ -732,11 +732,15 @@ fn sweep_sharded_directory(
                 }
             }
             if !dry_run {
-                shard1.remove_empty_child_if_same(&shard2_name, &shard2)?;
+                shard1
+                    .remove_empty_child_if_same(&shard2_name, &shard2)
+                    .map(|receipt| receipt.is_some())?;
             }
         }
         if !dry_run {
-            namespace_dir.remove_empty_child_if_same(&shard1_name, &shard1)?;
+            namespace_dir
+                .remove_empty_child_if_same(&shard1_name, &shard1)
+                .map(|receipt| receipt.is_some())?;
         }
     }
 
@@ -808,7 +812,9 @@ fn remove_directory_contents(
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
                 if !dry_run {
-                    let removed = directory.remove_empty_child_if_same(&name, &child)?;
+                    let removed = directory
+                        .remove_empty_child_if_same(&name, &child)
+                        .map(|receipt| receipt.is_some())?;
                     if !removed {
                         anyhow::bail!(
                             "runtime directory changed while being purged: {}",
@@ -864,7 +870,11 @@ fn remove_rebuildable_cache_directory(
         match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
-                if !dry_run && !cache_directory.remove_empty_child_if_same(&name, &child)? {
+                if !dry_run
+                    && !cache_directory
+                        .remove_empty_child_if_same(&name, &child)
+                        .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!(
                         "runtime cache directory changed while being purged: {}",
                         child.path().display()

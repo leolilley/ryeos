@@ -1583,6 +1583,7 @@ fn validate_resolution_action(intent: &SchedulerRetirementResolutionIntent) -> R
             "FinishPurgeAtResolutionQuarantine is not justified by retained purge testimony"
         ),
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1906,6 +1907,10 @@ where
         "scheduler retirement record is not in canonical field order/encoding"
     );
     Ok(record)
+}
+
+fn validate_generation(value: &str) -> Result<()> {
+    validate_hex(value, 32, "generation")
 }
 
 fn validate_hex(value: &str, length: usize, label: &str) -> Result<()> {

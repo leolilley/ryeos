@@ -6,16 +6,40 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::sqlite_schema;
+mod original;
+mod original_mutation;
+mod live_native;
+pub use live_native::{LiveOperationalOpenFailure, LiveOperationalStartupRecoveryFailure, ReleasedLiveOperationalStartup, ReleasedLiveOperationalPhysicalCustody};
+#[doc(hidden)]
+pub use live_native::{
+    quote_operational_startup_metadata_retirement,
+    quote_maximum_operational_metadata_retirement,
+    quote_operational_startup_packet_transfer,
+    quote_released_live_operational_physical_custody,
+};
+pub use original::{ClosedOriginalOperational, OriginalOperationalFailure, OutsideOriginalOperationalCustody};
+#[doc(hidden)]
+pub use original::{
+    quote_operational_live_context, quote_operational_main_packet,
+    quote_operational_live_metadata_retirement, quote_maximum_operational_live_metadata_retirement,
+    quote_operational_membership, quote_operational_metadata, quote_operational_retired_shared_roots,
+    quote_operational_marker_owner, quote_operational_marker_receipt,
+    quote_operational_offline_context, quote_operational_packet_sources,
+    quote_operational_root_transfer, quote_operational_schema_sources,
+};
+pub use original_mutation::OriginalOperationalMutationAuthority;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
+pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 4;
+/// One main Operational source plus its four fixed schema-reference sources.
+pub const MAX_LIVE_OPERATIONAL_PACKET_SOURCES: usize = MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1;
 // Dispatch-effect records retain complete launch and caller authority. Epoch 14
 // is the clean-cut activation for launch-capsule schema 34, including retained
 // remote-verifier sources and complete production consumer inputs. Predecessor
@@ -26,8 +50,8 @@ const REPLAY_INDEX_EPOCH: i32 = 14;
 #[cfg(test)]
 const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 34;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
-pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
-const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
+pub const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
+pub const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -882,12 +906,21 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
 
 /// Stable SQLite state for operational records that cannot be rebuilt from
 /// signed heads.
+enum OperationalConnection {
+    Plain(Connection),
+    Live(live_native::LiveOperationalConnection),
+    Original {
+        owner: lillux_sqlite::OriginalNativeConnection,
+        factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    },
+}
+
 pub struct OperationalDb {
-    conn: Connection,
+    conn: OperationalConnection,
     path: PathBuf,
-    _runtime_directory: lillux::PinnedDirectory,
+    _runtime_directory: std::sync::Arc<lillux::PinnedDirectory>,
     _directory_lock: lillux::secure_fs::PinnedDirectoryLock,
-    _database_file: File,
+    _database_file: Option<File>,
     _wal_file: Option<File>,
     _shm_file: Option<File>,
     _initialization_marker: Option<File>,
@@ -1118,18 +1151,33 @@ pub struct ReplayIndexResetReport {
 /// discard intent. Only activation releases a current OperationalDb. Do not
 /// expose the inner store or add stale-epoch exceptions to ordinary open.
 pub struct PreparedReplayIndexReset {
-    db: OperationalDb,
+    db: Option<OperationalDb>,
     report: ReplayIndexResetReport,
     read_only: bool,
+    activation: ReplayResetActivationPhase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplayResetActivationPhase {
+    Prepared,
+    MutationEntered,
+    Validated,
+    Transferred,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_REPLAY_ACTIVATION_AFTER_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl PreparedReplayIndexReset {
     fn new(db: OperationalDb, read_only: bool) -> Result<Self> {
-        let report = inspect_replay_index_reset(&db.conn, &db.path)?;
+        let report = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path))?;
         Ok(Self {
-            db,
+            db: Some(db),
             report,
             read_only,
+            activation: ReplayResetActivationPhase::Prepared,
         })
     }
 
@@ -1138,26 +1186,89 @@ impl PreparedReplayIndexReset {
     }
 
     pub fn credential_profiles(&self) -> Result<Vec<OperationalCredentialProfileRecord>> {
-        self.db.credential_profiles()
+        self.db
+            .as_ref()
+            .context("replay reset database already transferred")?
+            .credential_profiles()
     }
 
-    pub fn activate(self) -> Result<(OperationalDb, ReplayIndexResetReport)> {
+    /// Errors leave this same connection and namespace owner in preparation.
+    /// A commit followed by a failed acknowledgement is retried through that
+    /// owner; the original report is never replaced by a current-epoch zero.
+    pub fn activate(&mut self) -> Result<ReplayIndexResetReport> {
+        if self.db.as_ref().is_some_and(|db| matches!(&db.conn, OperationalConnection::Original { .. })) {
+            anyhow::bail!("original Operational activation requires its durable-intent caller authority");
+        }
+        self.activate_after_authority()
+    }
+
+    fn activate_after_authority(&mut self) -> Result<ReplayIndexResetReport> {
         if self.read_only {
             anyhow::bail!("read-only replay-index preview cannot activate a reset");
         }
-        ensure_operational_bindings(&self.db)?;
-        let report = inspect_replay_index_reset(&self.db.conn, &self.db.path)?;
-        if report != self.report {
+        let db = self
+            .db
+            .as_ref()
+            .context("replay reset database already transferred")?;
+        ensure_operational_bindings(db)?;
+        let current = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path))?;
+        let own_committed_retry = self.activation != ReplayResetActivationPhase::Prepared
+            && current.stored_epoch == self.report.current_epoch
+            && current.current_epoch == self.report.current_epoch
+            && current.scope == ReplayIndexResetScope::Unchanged;
+        if current != self.report && !own_committed_retry {
             anyhow::bail!("replay-index retirement decision changed after preparation");
         }
-        enforce_replay_index_epoch(&self.db.conn, &self.db.path, true)?;
-        assert_current(&self.db.conn, &self.db.path)?;
-        ensure_operational_bindings(&self.db)?;
-        Ok((self.db, report))
+        self.activation = ReplayResetActivationPhase::MutationEntered;
+        db.with_sql(|connection| enforce_replay_index_epoch(connection, &db.path, true))?;
+        #[cfg(test)]
+        if FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.replace(false)) {
+            anyhow::bail!("injected replay activation acknowledgement failure after commit");
+        }
+        db.with_sql(|connection| assert_current(connection, &db.path, None))?;
+        ensure_operational_bindings(db)?;
+        self.activation = ReplayResetActivationPhase::Validated;
+        Ok(self.report)
+    }
+
+    /// Transfer is allowed exactly once after activation validation. Refusal
+    /// leaves the original owner here, including after an activation error.
+    pub fn take_activated(&mut self) -> Result<(OperationalDb, ReplayIndexResetReport)> {
+        if self.db.as_ref().is_some_and(|db| matches!(&db.conn, OperationalConnection::Original { .. })) {
+            anyhow::bail!("original Operational transfer requires its durable-intent caller authority");
+        }
+        self.take_activated_after_authority()
+    }
+
+    fn take_activated_after_authority(&mut self) -> Result<(OperationalDb, ReplayIndexResetReport)> {
+        if self.activation != ReplayResetActivationPhase::Validated {
+            anyhow::bail!("replay reset database is not validated for transfer");
+        }
+        let db = self
+            .db
+            .as_ref()
+            .context("replay reset database already transferred")?;
+        ensure_operational_bindings(db)?;
+        let db = self
+            .db
+            .take()
+            .context("replay reset database already transferred")?;
+        self.activation = ReplayResetActivationPhase::Transferred;
+        Ok((db, self.report))
     }
 }
 
 impl OperationalDb {
+    /// SQL borrows stay within this owner's callback. Original native
+    /// admission and consuming close remain separate reset caller gates.
+    fn with_sql<T>(&self, operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>) -> Result<T> {
+        match &self.conn {
+            OperationalConnection::Plain(connection) => operation(connection),
+            OperationalConnection::Original { owner, .. } => owner.with_sql(operation),
+            OperationalConnection::Live(live) => live.owner.with_sql(operation),
+        }
+    }
+
     /// Open the stable store at its protocol-owned runtime-state path.
     ///
     /// The independent marker distinguishes a normal first initialization
@@ -1235,7 +1346,7 @@ impl OperationalDb {
             )?
         };
         if marker.is_some() {
-            assert_integrity(&db.conn, &db.path)?;
+            db.with_sql(|connection| assert_integrity(connection, &db.path))?;
             db._initialization_marker = marker;
         } else {
             db.sync_initialization()?;
@@ -1269,7 +1380,7 @@ impl OperationalDb {
     /// migrating it.
     pub fn open_existing_current(path: &Path) -> Result<Self> {
         let db = Self::open_existing_owned(path)?;
-        assert_integrity(&db.conn, path)?;
+        db.with_sql(|connection| assert_integrity(connection, path))?;
         Ok(db)
     }
 
@@ -1281,7 +1392,7 @@ impl OperationalDb {
     /// unified predecessor it retires only dispatch-effect rows and preserves
     /// provider-call evidence; older pre-unified layouts are discarded as one
     /// explicit clean cut.
-    pub fn open_for_explicit_replay_reset(path: &Path) -> Result<(Self, ReplayIndexResetReport)> {
+    pub fn prepare_explicit_replay_reset(path: &Path) -> Result<PreparedReplayIndexReset> {
         let (directory, name) = pin_operational_parent(path, false)?;
         let directory_lock = directory.lock_exclusive()?;
         let db = Self::open_in_pinned_directory(
@@ -1290,8 +1401,8 @@ impl OperationalDb {
             OperationalOpenMode::PrepareReplayReset { read_only: false },
             directory_lock,
         )?;
-        assert_integrity(&db.conn, path)?;
-        PreparedReplayIndexReset::new(db, false)?.activate()
+        db.with_sql(|connection| assert_integrity(connection, path))?;
+        PreparedReplayIndexReset::new(db, false)
     }
 
     /// Strictly open established operational state while sharing the caller's
@@ -1354,7 +1465,7 @@ impl OperationalDb {
             directory_lock,
         )?;
         db._initialization_marker = Some(marker);
-        assert_integrity(&db.conn, &db.path)?;
+        db.with_sql(|connection| assert_integrity(connection, &db.path))?;
         ensure_operational_bindings(&db)?;
         Ok(db)
     }
@@ -1380,7 +1491,7 @@ impl OperationalDb {
             OperationalOpenMode::ExistingReadOnly,
             directory_lock,
         )?;
-        assert_integrity(&db.conn, path)?;
+        db.with_sql(|connection| assert_integrity(connection, path))?;
         Ok(db)
     }
 
@@ -1463,9 +1574,14 @@ impl OperationalDb {
         if mode.may_initialize() && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
             sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, &path)?;
         }
-        if !mode.is_read_only() {
-            migrate_forward_if_owned(&conn, &path)?;
+        if !mode.is_read_only()
+            && !matches!(mode, OperationalOpenMode::PrepareReplayReset { .. })
+        {
+            migrate_forward_if_owned(&conn, &path, None)?;
         }
+        // Preparing a reset is observation before durable intent. It cannot
+        // repair a schema or advance source-of-truth versions implicitly.
+
         assert_operational_identity(&conn, &path)?;
         if matches!(mode, OperationalOpenMode::PrepareReplayReset { .. }) {
             // This handle remains private to PreparedReplayIndexReset. Validate
@@ -1473,7 +1589,7 @@ impl OperationalDb {
             inspect_replay_index_reset(&conn, &path)?;
         } else {
             enforce_replay_index_epoch(&conn, &path, false)?;
-            assert_current(&conn, &path)?;
+            assert_current(&conn, &path, None)?;
         }
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -1530,11 +1646,11 @@ impl OperationalDb {
         ensure_file_binding(directory, name, &database_file, "operational database")?;
         inspect_operational_sidecars(directory, name)?;
         Ok(Self {
-            conn,
+            conn: OperationalConnection::Plain(conn),
             path,
-            _runtime_directory: directory.try_clone()?,
+            _runtime_directory: std::sync::Arc::new(directory.try_clone()?),
             _directory_lock: directory_lock,
-            _database_file: database_file,
+            _database_file: Some(database_file),
             _wal_file: wal_file,
             _shm_file: shm_file,
             _initialization_marker: None,
@@ -1546,16 +1662,18 @@ impl OperationalDb {
     }
 
     fn sync_initialization(&self) -> Result<()> {
-        self.conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .context("checkpoint initialized operational database")?;
-        self._database_file
-            .sync_all()
-            .with_context(|| format!("sync operational database {}", self.path.display()))?;
-        self._runtime_directory
-            .sync()
-            .with_context(|| format!("sync operational database parent {}", self.path.display()))?;
-        Ok(())
+        self.with_sql(|connection| {
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .context("checkpoint initialized operational database")?;
+            self._database_file.as_ref().context("initialized operational main owner absent")?
+                .sync_all()
+                .with_context(|| format!("sync operational database {}", self.path.display()))?;
+            self._runtime_directory
+                .sync()
+                .with_context(|| format!("sync operational database parent {}", self.path.display()))?;
+            Ok(())
+        })
     }
 
     fn immediate_transaction<T>(
@@ -1563,32 +1681,34 @@ impl OperationalDb {
         label: &'static str,
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .with_context(|| format!("failed to begin {label} transaction"))?;
-        match f() {
-            Ok(value) => match self.conn.execute_batch("COMMIT") {
-                Ok(()) => Ok(value),
-                Err(commit_error) => {
-                    let commit_error = anyhow::Error::new(commit_error)
-                        .context(format!("failed to commit {label} transaction"));
-                    match self.conn.execute_batch("ROLLBACK") {
-                        Ok(()) => Err(commit_error),
-                        Err(rollback_error) => Err(commit_error.context(format!(
-                            "failed to roll back {label} transaction after commit failure: \
+        self.with_sql(|connection| {
+            connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .with_context(|| format!("failed to begin {label} transaction"))?;
+            match f() {
+                Ok(value) => match connection.execute_batch("COMMIT") {
+                    Ok(()) => Ok(value),
+                    Err(commit_error) => {
+                        let commit_error = anyhow::Error::new(commit_error)
+                            .context(format!("failed to commit {label} transaction"));
+                        match connection.execute_batch("ROLLBACK") {
+                            Ok(()) => Err(commit_error),
+                            Err(rollback_error) => Err(commit_error.context(format!(
+                                "failed to roll back {label} transaction after commit failure: \
                              {rollback_error}"
-                        ))),
+                            ))),
+                        }
                     }
-                }
-            },
-            Err(error) => match self.conn.execute_batch("ROLLBACK") {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(error.context(format!(
-                    "failed to roll back {label} transaction after operation failure: \
+                },
+                Err(error) => match connection.execute_batch("ROLLBACK") {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(error.context(format!(
+                        "failed to roll back {label} transaction after operation failure: \
                      {rollback_error}"
-                ))),
-            },
-        }
+                    ))),
+                },
+            }
+        })
     }
 }
 
@@ -1597,43 +1717,46 @@ impl OperationalDb {
         &self,
         profile_id: &str,
     ) -> Result<Option<OperationalCredentialProfileRecord>> {
-        if profile_id.is_empty() || profile_id.len() > 256 {
-            anyhow::bail!("credential profile id is invalid");
-        }
-        let profile = self
-            .conn
-            .query_row(
-                "SELECT profile_id, owner_principal, home_id, authority_revision,
+        self.with_sql(|connection| {
+            if profile_id.is_empty() || profile_id.len() > 256 {
+                anyhow::bail!("credential profile id is invalid");
+            }
+            let profile = connection
+                .query_row(
+                    "SELECT profile_id, owner_principal, home_id, authority_revision,
                         credential_generation, state, active_login_id, login_epoch,
                         login_expires_at_ms, sanitized_account_json, created_at_ms,
                         updated_at_ms
                    FROM credential_profiles WHERE profile_id=?1",
-                [profile_id],
-                operational_credential_profile_from_row,
-            )
-            .optional()
-            .context("read stable credential profile")?;
-        if let Some(profile) = profile.as_ref() {
-            validate_operational_credential_profile(profile)?;
-        }
-        Ok(profile)
+                    [profile_id],
+                    operational_credential_profile_from_row,
+                )
+                .optional()
+                .context("read stable credential profile")?;
+            if let Some(profile) = profile.as_ref() {
+                validate_operational_credential_profile(profile)?;
+            }
+            Ok(profile)
+        })
     }
 
     pub fn credential_profiles(&self) -> Result<Vec<OperationalCredentialProfileRecord>> {
-        let mut statement = self.conn.prepare(
-            "SELECT profile_id, owner_principal, home_id, authority_revision,
+        self.with_sql(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT profile_id, owner_principal, home_id, authority_revision,
                     credential_generation, state, active_login_id, login_epoch,
                     login_expires_at_ms, sanitized_account_json, created_at_ms,
                     updated_at_ms
                FROM credential_profiles ORDER BY profile_id",
-        )?;
-        let profiles = statement
-            .query_map([], operational_credential_profile_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for profile in &profiles {
-            validate_operational_credential_profile(profile)?;
-        }
-        Ok(profiles)
+            )?;
+            let profiles = statement
+                .query_map([], operational_credential_profile_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for profile in &profiles {
+                validate_operational_credential_profile(profile)?;
+            }
+            Ok(profiles)
+        })
     }
 
     /// Fold a RuntimeDb projection into stable authority after a committed
@@ -1643,54 +1766,65 @@ impl OperationalDb {
         &self,
         candidate: &OperationalCredentialProfileRecord,
     ) -> Result<OperationalCredentialProfileRecord> {
-        validate_operational_credential_profile(candidate)?;
-        let account_json = candidate
-            .sanitized_account
-            .as_ref()
-            .map(lillux::canonical_json)
-            .transpose()?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
-            .context("begin stable credential-profile merge")?;
-        let existing = tx
-            .query_row(
-                "SELECT profile_id, owner_principal, home_id, authority_revision,
+        if matches!(&self.conn, OperationalConnection::Original { .. }) {
+            anyhow::bail!("original Operational credential mutation requires its durable-intent caller authority");
+        }
+        self.merge_credential_profile_after_authority(candidate)
+    }
+
+    fn merge_credential_profile_after_authority(
+        &self,
+        candidate: &OperationalCredentialProfileRecord,
+    ) -> Result<OperationalCredentialProfileRecord> {
+        self.with_sql(|connection| {
+            validate_operational_credential_profile(candidate)?;
+            let account_json = candidate
+                .sanitized_account
+                .as_ref()
+                .map(lillux::canonical_json)
+                .transpose()?;
+            let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+                .context("begin stable credential-profile merge")?;
+            let existing = tx
+                .query_row(
+                    "SELECT profile_id, owner_principal, home_id, authority_revision,
                         credential_generation, state, active_login_id, login_epoch,
                         login_expires_at_ms, sanitized_account_json, created_at_ms,
                         updated_at_ms
                    FROM credential_profiles WHERE profile_id=?1",
-                [&candidate.profile_id],
-                operational_credential_profile_from_row,
-            )
-            .optional()?;
-        if let Some(existing) = existing.as_ref() {
-            if existing.owner_principal != candidate.owner_principal
-                || existing.home_id != candidate.home_id
-            {
-                anyhow::bail!("credential profile stable identity changed");
-            }
-            if existing.authority_revision > candidate.authority_revision {
-                tx.commit()?;
-                return Ok(existing.clone());
-            }
-            if existing.authority_revision == candidate.authority_revision {
-                let mut normalized_existing = existing.clone();
-                let mut normalized_candidate = candidate.clone();
-                // Runtime lock acquisition updates this presentation timestamp
-                // without advancing stable lifecycle authority.
-                normalized_existing.updated_at_ms = 0;
-                normalized_candidate.updated_at_ms = 0;
-                if normalized_existing != normalized_candidate {
-                    anyhow::bail!(
-                        "credential profile revision {} has divergent stable content",
-                        candidate.authority_revision
-                    );
+                    [&candidate.profile_id],
+                    operational_credential_profile_from_row,
+                )
+                .optional()?;
+            if let Some(existing) = existing.as_ref() {
+                if existing.owner_principal != candidate.owner_principal
+                    || existing.home_id != candidate.home_id
+                {
+                    anyhow::bail!("credential profile stable identity changed");
                 }
-                tx.commit()?;
-                return Ok(existing.clone());
+                if existing.authority_revision > candidate.authority_revision {
+                    tx.commit()?;
+                    return Ok(existing.clone());
+                }
+                if existing.authority_revision == candidate.authority_revision {
+                    let mut normalized_existing = existing.clone();
+                    let mut normalized_candidate = candidate.clone();
+                    // Runtime lock acquisition updates this presentation timestamp
+                    // without advancing stable lifecycle authority.
+                    normalized_existing.updated_at_ms = 0;
+                    normalized_candidate.updated_at_ms = 0;
+                    if normalized_existing != normalized_candidate {
+                        anyhow::bail!(
+                            "credential profile revision {} has divergent stable content",
+                            candidate.authority_revision
+                        );
+                    }
+                    tx.commit()?;
+                    return Ok(existing.clone());
+                }
             }
-        }
-        tx.execute(
-            "INSERT INTO credential_profiles (
+            tx.execute(
+                "INSERT INTO credential_profiles (
                 profile_id, owner_principal, home_id, authority_revision,
                 credential_generation, state, active_login_id, login_epoch,
                 login_expires_at_ms, sanitized_account_json, created_at_ms, updated_at_ms
@@ -1704,25 +1838,26 @@ impl OperationalDb {
                 login_expires_at_ms=excluded.login_expires_at_ms,
                 sanitized_account_json=excluded.sanitized_account_json,
                 updated_at_ms=excluded.updated_at_ms",
-            rusqlite::params![
-                &candidate.profile_id,
-                &candidate.owner_principal,
-                &candidate.home_id,
-                i64::try_from(candidate.authority_revision)?,
-                i64::try_from(candidate.credential_generation)?,
-                &candidate.state,
-                &candidate.active_login_id,
-                i64::try_from(candidate.login_epoch)?,
-                candidate.login_expires_at_ms,
-                account_json,
-                candidate.created_at_ms,
-                candidate.updated_at_ms,
-            ],
-        )?;
-        tx.commit()
-            .context("commit stable credential-profile merge")?;
-        self.credential_profile(&candidate.profile_id)?
-            .ok_or_else(|| anyhow::anyhow!("merged credential profile disappeared"))
+                rusqlite::params![
+                    &candidate.profile_id,
+                    &candidate.owner_principal,
+                    &candidate.home_id,
+                    i64::try_from(candidate.authority_revision)?,
+                    i64::try_from(candidate.credential_generation)?,
+                    &candidate.state,
+                    &candidate.active_login_id,
+                    i64::try_from(candidate.login_epoch)?,
+                    candidate.login_expires_at_ms,
+                    account_json,
+                    candidate.created_at_ms,
+                    candidate.updated_at_ms,
+                ],
+            )?;
+            tx.commit()
+                .context("commit stable credential-profile merge")?;
+            self.credential_profile(&candidate.profile_id)?
+                .ok_or_else(|| anyhow::anyhow!("merged credential profile disappeared"))
+        })
     }
 }
 
@@ -1851,25 +1986,24 @@ fn ensure_same_file(expected: &File, current: &File, label: &str, path: &Path) -
 }
 
 fn inspect_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<Option<File>> {
-    let Some(mut marker) = directory
-        .open_regular(OsStr::new(OPERATIONAL_INITIALIZED_FILENAME), false)
-        .context("open operational initialization marker through pinned directory")?
-    else {
-        return Ok(None);
-    };
-    let mut content = Vec::new();
-    marker
-        .read_to_end(&mut content)
-        .context("read operational initialization marker")?;
-    if content != OPERATIONAL_INITIALIZED_CONTENT {
-        anyhow::bail!(
-            "invalid operational initialization marker: {}",
-            directory
-                .path()
-                .join(OPERATIONAL_INITIALIZED_FILENAME)
-                .display()
-        );
-    }
+    // Metadata-only custody cannot close an aliased live SQLite data inode.
+    let Some(marker) = directory.open_mount_entry(OsStr::new(OPERATIONAL_INITIALIZED_FILENAME))?
+    else { return Ok(None); };
+    anyhow::ensure!(marker.metadata()?.is_file(), "operational initialization marker is not regular");
+    let before = lillux::observe_open_file_identity(&marker)?;
+    anyhow::ensure!(before.size() == OPERATIONAL_INITIALIZED_CONTENT.len() as u64,
+        "operational initialization marker has invalid extent");
+    let bytes = lillux_sqlite::read_regular_without_sqlite_alias(directory,
+        OsStr::new(OPERATIONAL_INITIALIZED_FILENAME), OPERATIONAL_INITIALIZED_CONTENT.len())?
+        .context("operational initialization marker disappeared during guarded read")?;
+    anyhow::ensure!(bytes.as_slice() == OPERATIONAL_INITIALIZED_CONTENT,
+        "invalid operational initialization marker content");
+    let current = directory.open_mount_entry(OsStr::new(OPERATIONAL_INITIALIZED_FILENAME))?
+        .context("operational initialization marker disappeared after guarded read")?;
+    let after = lillux::observe_open_file_identity(&current)?;
+    anyhow::ensure!(current.metadata()?.is_file() && before.device() == after.device()
+        && before.inode() == after.inode() && before.size() == after.size(),
+        "operational initialization marker changed during guarded read");
     Ok(Some(marker))
 }
 
@@ -1983,10 +2117,40 @@ fn ensure_operational_bindings(db: &OperationalDb) -> Result<()> {
             db.path.display()
         )
     })?;
+    db._directory_lock.ensure_protects(&db._runtime_directory)?;
+    if let OperationalConnection::Live(live) = &db.conn {
+        anyhow::ensure!(db._database_file.is_none() && db._wal_file.is_none() && db._shm_file.is_none(),
+            "live Operational must not duplicate Bound data custody");
+        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(live.original.as_ref(), live.original.factory())?;
+        let identity = live.owner.bound_main_identity()?;
+        let current = db._runtime_directory.entry_no_follow(name)?.context("live Operational main absent")?;
+        anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
+            && (current.containing_device, current.inode) == identity,
+            "live Operational differs from actual Bound identity");
+        let marker = inspect_initialized_marker(&db._runtime_directory)?.context("live Operational initialized marker absent")?;
+        ensure_same_file(db._initialization_marker.as_ref().context("original live marker absent")?, &marker,
+            "live Operational marker", &db.path)?;
+        return Ok(());
+    }
+    if let OperationalConnection::Original { owner, factory } = &db.conn {
+        anyhow::ensure!(db._database_file.is_none() && db._wal_file.is_none()
+            && db._shm_file.is_none() && db._initialization_marker.is_none(),
+            "original Operational owner must not duplicate lower source/keeper custody");
+        factory.require_runtime_binding(&db._runtime_directory)?;
+        // This actual native call validates the retained destination authority,
+        // including its original charged marker read, before observing identity.
+        let identity = owner.bound_main_identity()?;
+        let current = db._runtime_directory.entry_no_follow(name)?
+            .context("original Operational main coordinate disappeared")?;
+        anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
+            && (current.containing_device, current.inode) == identity,
+            "original Operational main differs from actual Bound keeper");
+        return Ok(());
+    }
     ensure_file_binding(
         &db._runtime_directory,
         name,
-        &db._database_file,
+        db._database_file.as_ref().context("plain Operational main owner absent")?,
         "operational database",
     )?;
     inspect_operational_sidecars(&db._runtime_directory, name)?;
@@ -2073,7 +2237,8 @@ fn sync_job_schema_entries(conn: &Connection) -> Result<Vec<SyncJobSchemaEntry>>
         .context("read sync-job schema fragment")
 }
 
-fn sync_job_schema_matches(conn: &Connection, reference_ddl: &str) -> Result<bool> {
+fn sync_job_schema_matches(conn: &Connection, reference_ddl: &str, references: Option<&live_native::LiveOperationalSchemaReferences>) -> Result<bool> {
+    if let Some(references) = references { return references.sync_jobs_match(conn, reference_ddl); }
     let reference = Connection::open_in_memory().context("open sync-job schema reference")?;
     reference
         .execute_batch(reference_ddl)
@@ -2127,13 +2292,14 @@ fn migrate_sync_jobs_to_v6(
     conn: &Connection,
     path: &Path,
     appended_column_present: bool,
+    references: Option<&live_native::LiveOperationalSchemaReferences>,
 ) -> Result<()> {
     let expected = if appended_column_present {
         appended_sync_job_v6_ddl()
     } else {
         SYNC_JOBS_V5_DDL.to_owned()
     };
-    if !sync_job_schema_matches(conn, &expected)? {
+    if !sync_job_schema_matches(conn, &expected, references)? {
         anyhow::bail!(
             "operational sync-job schema is not the exact recognized {} contract in {}; refusing forward migration",
             if appended_column_present {
@@ -2197,7 +2363,7 @@ fn migrate_sync_jobs_to_v6(
 /// stamped NEWER than this binary is untouched and fails loudly downstream —
 /// that is an operator downgrade, not a cutover. A foreign application id is
 /// untouched for the same reason: the strict ownership check speaks.
-fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
+fn migrate_forward_if_owned(conn: &Connection, path: &Path, references: Option<&live_native::LiveOperationalSchemaReferences>) -> Result<()> {
     let application_id: i32 = conn
         .query_row("PRAGMA application_id", [], |row| row.get(0))
         .context("read operational application id before migration")?;
@@ -2211,8 +2377,8 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
         match stored {
             v if v > OPERATIONAL_SCHEMA_VERSION => return Ok(()),
             OPERATIONAL_SCHEMA_VERSION => {
-                if sync_job_schema_matches(conn, &appended_sync_job_v6_ddl())? {
-                    migrate_sync_jobs_to_v6(conn, path, true)?;
+                if sync_job_schema_matches(conn, &appended_sync_job_v6_ddl(), references)? {
+                    migrate_sync_jobs_to_v6(conn, path, true, references)?;
                     tracing::warn!(
                         path = %path.display(),
                         "repaired exact operational v6 appended-column intermediate"
@@ -2280,7 +2446,7 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                 );
             }
             5 => {
-                if sync_job_schema_matches(conn, SYNC_JOBS_V6_DDL)? {
+                if sync_job_schema_matches(conn, SYNC_JOBS_V6_DDL, references)? {
                     // A partially staged forward migration may already have
                     // installed the exact canonical fragment before stamping
                     // the global version. Complete only its typed legacy-row
@@ -2294,7 +2460,7 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                     tx.commit()
                         .context("commit staged operational v6 sync-operation migration")?;
                 } else {
-                    migrate_sync_jobs_to_v6(conn, path, false)?;
+                    migrate_sync_jobs_to_v6(conn, path, false, references)?;
                 }
                 tracing::info!(
                     path = %path.display(),
@@ -2380,7 +2546,7 @@ fn assert_exact_legacy_replay_layout(conn: &Connection, path: &Path) -> Result<(
 fn inspect_replay_index_reset(conn: &Connection, path: &Path) -> Result<ReplayIndexResetReport> {
     let stored = replay_index_epoch(conn)?;
     if stored == REPLAY_INDEX_EPOCH {
-        assert_current(conn, path)?;
+        assert_current(conn, path, None)?;
         return Ok(ReplayIndexResetReport {
             stored_epoch: stored,
             current_epoch: REPLAY_INDEX_EPOCH,
@@ -2406,7 +2572,7 @@ fn inspect_replay_index_reset(conn: &Connection, path: &Path) -> Result<ReplayIn
     if has_unified_replay_index {
         // Epoch contents may be stale, but a unified predecessor must retain
         // the exact current physical schema before any row is discarded.
-        assert_current(conn, path).context("validate unified replay predecessor before reset")?;
+        assert_current(conn, path, None).context("validate unified replay predecessor before reset")?;
     } else {
         // The only admitted pre-unified shape is the exact v2/v3 pair. Do not
         // let DROP TABLE normalize an unknown/corrupt table into something
@@ -2464,7 +2630,7 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
         rusqlite::params![REPLAY_INDEX_EPOCH],
     )
     .context("stamp current replay-index epoch")?;
-    assert_current(&tx, path).context("validate replay-index reset before commit")?;
+    assert_current(&tx, path, None).context("validate replay-index reset before commit")?;
     if replay_index_epoch(&tx)? != REPLAY_INDEX_EPOCH {
         anyhow::bail!("replay-index reset did not establish the current epoch");
     }
@@ -2477,9 +2643,9 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
     Ok(())
 }
 
-fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
+fn assert_current(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> Result<()> {
     sqlite_schema::assert_owned(conn, &operational_schema_spec(), path)?;
-    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?;
+    match reference { Some(reference) => reference.require_matches(conn, path)?, None => sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?, }
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read operational schema version")?;
@@ -2802,12 +2968,13 @@ pub struct FinishSyncJobAttempt {
 
 impl OperationalDb {
     pub fn record_cas_entry(&self, entry: &NewCasEntryAttribution) -> Result<()> {
-        validate_canonical_hash("CAS entry hash", &entry.hash)?;
-        let bytes = i64::try_from(entry.bytes).context("CAS entry byte count exceeds i64")?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO cas_entries (
+        self.with_sql(|connection| {
+            validate_canonical_hash("CAS entry hash", &entry.hash)?;
+            let bytes = i64::try_from(entry.bytes).context("CAS entry byte count exceeds i64")?;
+            let now = lillux::time::iso8601_now();
+            connection
+                .execute(
+                    "INSERT INTO cas_entries (
                     hash, entry_kind, bytes, first_seen_at, updated_at,
                     source_principal, source_peer, job_id, state
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2834,20 +3001,21 @@ impl OperationalDb {
                             THEN cas_entries.state
                         ELSE excluded.state
                     END",
-                rusqlite::params![
-                    &entry.hash,
-                    entry.entry_kind.as_str(),
-                    bytes,
-                    &now,
-                    &now,
-                    &entry.source_principal,
-                    &entry.source_peer,
-                    &entry.job_id,
-                    entry.state.as_str(),
-                ],
-            )
-            .context("failed to record CAS entry attribution")?;
-        Ok(())
+                    rusqlite::params![
+                        &entry.hash,
+                        entry.entry_kind.as_str(),
+                        bytes,
+                        &now,
+                        &now,
+                        &entry.source_principal,
+                        &entry.source_peer,
+                        &entry.job_id,
+                        entry.state.as_str(),
+                    ],
+                )
+                .context("failed to record CAS entry attribution")?;
+            Ok(())
+        })
     }
 
     pub fn set_cas_entry_state(
@@ -2856,41 +3024,42 @@ impl OperationalDb {
         hash: &str,
         state: CasEntryState,
     ) -> Result<()> {
-        validate_canonical_hash("CAS entry hash", hash)?;
-        let current = self.get_cas_entry(entry_kind, hash)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "CAS entry attribution not found for {} hash {hash}",
-                entry_kind.as_str()
-            )
-        })?;
-        if !cas_entry_transition_allowed(current.state, state) {
-            anyhow::bail!(
-                "illegal CAS entry state transition for {} hash {}: {} -> {}",
-                entry_kind.as_str(),
-                hash,
-                current.state.as_str(),
-                state.as_str()
-            );
-        }
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE cas_entries SET state = ?, updated_at = ? WHERE entry_kind = ? AND hash = ?",
-                rusqlite::params![
-                    state.as_str(),
-                    lillux::time::iso8601_now(),
+        self.with_sql(|connection| {
+            validate_canonical_hash("CAS entry hash", hash)?;
+            let current = self.get_cas_entry(entry_kind, hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CAS entry attribution not found for {} hash {hash}",
+                    entry_kind.as_str()
+                )
+            })?;
+            if !cas_entry_transition_allowed(current.state, state) {
+                anyhow::bail!(
+                    "illegal CAS entry state transition for {} hash {}: {} -> {}",
                     entry_kind.as_str(),
                     hash,
-                ],
-            )
-            .context("failed to update CAS entry attribution state")?;
-        if changed == 0 {
-            anyhow::bail!(
-                "CAS entry attribution not found for {} hash {hash}",
-                entry_kind.as_str()
-            );
-        }
-        Ok(())
+                    current.state.as_str(),
+                    state.as_str()
+                );
+            }
+            let changed = connection
+                .execute(
+                    "UPDATE cas_entries SET state = ?, updated_at = ? WHERE entry_kind = ? AND hash = ?",
+                    rusqlite::params![
+                        state.as_str(),
+                        lillux::time::iso8601_now(),
+                        entry_kind.as_str(),
+                        hash,
+                    ],
+                )
+                .context("failed to update CAS entry attribution state")?;
+            if changed == 0 {
+                anyhow::bail!(
+                    "CAS entry attribution not found for {} hash {hash}",
+                    entry_kind.as_str()
+                );
+            }
+            Ok(())
+        })
     }
 
     pub fn get_cas_entry(
@@ -2898,59 +3067,63 @@ impl OperationalDb {
         entry_kind: CasEntryKind,
         hash: &str,
     ) -> Result<Option<CasEntryAttribution>> {
-        validate_canonical_hash("CAS entry hash", hash)?;
-        self.conn
-            .query_row(
-                "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
+        self.with_sql(|connection| {
+            validate_canonical_hash("CAS entry hash", hash)?;
+            connection
+                .query_row(
+                    "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
                     source_principal, source_peer, job_id, state
                  FROM cas_entries WHERE entry_kind = ? AND hash = ?",
-                rusqlite::params![entry_kind.as_str(), hash],
-                cas_entry_from_row,
-            )
-            .optional()
-            .context("failed to get CAS entry attribution")
+                    rusqlite::params![entry_kind.as_str(), hash],
+                    cas_entry_from_row,
+                )
+                .optional()
+                .context("failed to get CAS entry attribution")
+        })
     }
 
     pub fn list_cas_entries_by_state(
         &self,
         state: CasEntryState,
     ) -> Result<Vec<CasEntryAttribution>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
+        self.with_sql(|connection| {
+            let mut stmt = connection
+                .prepare_cached(
+                    "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
                     source_principal, source_peer, job_id, state
                  FROM cas_entries WHERE state = ? ORDER BY first_seen_at, hash",
-            )
-            .context("failed to prepare CAS entry attribution query")?;
-        let rows = stmt
-            .query_map([state.as_str()], cas_entry_from_row)
-            .context("failed to query CAS entry attribution by state")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect CAS entry attribution rows")
+                )
+                .context("failed to prepare CAS entry attribution query")?;
+            let rows = stmt
+                .query_map([state.as_str()], cas_entry_from_row)
+                .context("failed to query CAS entry attribution by state")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to collect CAS entry attribution rows")
+        })
     }
 
     pub fn cas_entries_by_state_summary(&self) -> Result<Vec<CasEntriesByStateSummary>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT state, COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS total_bytes FROM cas_entries GROUP BY state ORDER BY state")
-            .context("failed to prepare CAS entry attribution summary")?;
-        let rows = stmt
-            .query_map([], |row| {
-                let state: String = row.get("state")?;
-                let count: i64 = row.get("count")?;
-                let total_bytes: i64 = row.get("total_bytes")?;
-                Ok(CasEntriesByStateSummary {
-                    state: CasEntryState::from_str(&state)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    count: u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    total_bytes: u64::try_from(total_bytes)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        self.with_sql(|connection| {
+            let mut stmt = connection
+                .prepare_cached("SELECT state, COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS total_bytes FROM cas_entries GROUP BY state ORDER BY state")
+                .context("failed to prepare CAS entry attribution summary")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let state: String = row.get("state")?;
+                    let count: i64 = row.get("count")?;
+                    let total_bytes: i64 = row.get("total_bytes")?;
+                    Ok(CasEntriesByStateSummary {
+                        state: CasEntryState::from_str(&state)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        count: u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        total_bytes: u64::try_from(total_bytes)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    })
                 })
-            })
-            .context("failed to query CAS entry attribution summary")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect CAS entry attribution summary")
+                .context("failed to query CAS entry attribution summary")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to collect CAS entry attribution summary")
+        })
     }
 
     /// Read and verify one current replay row. Only a database-proven absence is an
@@ -2961,32 +3134,33 @@ impl OperationalDb {
         namespace: &ReplayIndexNamespace,
         cache_key: &str,
     ) -> Result<ReplayLookupOutcome> {
-        validate_canonical_hash("replay cache key", cache_key)?;
-        let indexed = self
-            .conn
-            .query_row(
-                "SELECT cache_key, answer_digest, record_hash FROM replay_records
+        self.with_sql(|connection| {
+            validate_canonical_hash("replay cache key", cache_key)?;
+            let indexed = connection
+                .query_row(
+                    "SELECT cache_key, answer_digest, record_hash FROM replay_records
                  WHERE namespace = ?1 AND cache_key = ?2",
-                rusqlite::params![namespace.as_str(), cache_key],
-                |row| {
-                    Ok(ReplayIndexRecord {
-                        cache_key: row.get(0)?,
-                        answer_digest: row.get(1)?,
-                        record_hash: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
-            .context("failed to look up replay record")?;
-        let Some(indexed) = indexed else {
-            return Ok(ReplayLookupOutcome::Absent);
-        };
-        if let Err(error) = validate_replay_index_record(&indexed) {
-            return Ok(ReplayLookupOutcome::IntegrityFailure {
-                reason: error.to_string(),
-            });
-        }
-        Ok(ReplayLookupOutcome::Present(indexed))
+                    rusqlite::params![namespace.as_str(), cache_key],
+                    |row| {
+                        Ok(ReplayIndexRecord {
+                            cache_key: row.get(0)?,
+                            answer_digest: row.get(1)?,
+                            record_hash: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()
+                .context("failed to look up replay record")?;
+            let Some(indexed) = indexed else {
+                return Ok(ReplayLookupOutcome::Absent);
+            };
+            if let Err(error) = validate_replay_index_record(&indexed) {
+                return Ok(ReplayLookupOutcome::IntegrityFailure {
+                    reason: error.to_string(),
+                });
+            }
+            Ok(ReplayLookupOutcome::Present(indexed))
+        })
     }
 
     /// Refresh retention for the exact immutable replay row that was verified
@@ -2997,23 +3171,24 @@ impl OperationalDb {
         namespace: &ReplayIndexNamespace,
         indexed: &ReplayIndexRecord,
     ) -> Result<bool> {
-        let now = lillux::time::iso8601_now();
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE replay_records SET last_replayed_at = ?1
+        self.with_sql(|connection| {
+            let now = lillux::time::iso8601_now();
+            let changed = connection
+                .execute(
+                    "UPDATE replay_records SET last_replayed_at = ?1
                  WHERE namespace = ?2 AND cache_key = ?3
                    AND answer_digest = ?4 AND record_hash = ?5",
-                rusqlite::params![
-                    &now,
-                    namespace.as_str(),
-                    &indexed.cache_key,
-                    &indexed.answer_digest,
-                    &indexed.record_hash,
-                ],
-            )
-            .context("failed to touch verified replay record")?;
-        Ok(changed == 1)
+                    rusqlite::params![
+                        &now,
+                        namespace.as_str(),
+                        &indexed.cache_key,
+                        &indexed.answer_digest,
+                        &indexed.record_hash,
+                    ],
+                )
+                .context("failed to touch verified replay record")?;
+            Ok(changed == 1)
+        })
     }
 
     pub fn lookup_replay_record(
@@ -3056,103 +3231,106 @@ impl OperationalDb {
         candidate: &ReplayIndexRecord,
         mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
     ) -> Result<ReplayPublishOutcome> {
-        validate_replay_index_record(candidate)?;
-        match verify(candidate) {
-            ReplayRecordVerification::Verified => {}
-            ReplayRecordVerification::Unavailable { reason } => {
-                return Ok(ReplayPublishOutcome::Unavailable { reason });
+        self.with_sql(|connection| {
+            validate_replay_index_record(candidate)?;
+            match verify(candidate) {
+                ReplayRecordVerification::Verified => {}
+                ReplayRecordVerification::Unavailable { reason } => {
+                    return Ok(ReplayPublishOutcome::Unavailable { reason });
+                }
+                ReplayRecordVerification::IntegrityFailure { reason } => {
+                    return Ok(ReplayPublishOutcome::IntegrityFailure { reason });
+                }
             }
-            ReplayRecordVerification::IntegrityFailure { reason } => {
-                return Ok(ReplayPublishOutcome::IntegrityFailure { reason });
-            }
-        }
 
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
-            .context("begin immutable replay publication")?;
-        let existing = tx
-            .query_row(
-                "SELECT cache_key, answer_digest, record_hash FROM replay_records
+            let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+                .context("begin immutable replay publication")?;
+            let existing = tx
+                .query_row(
+                    "SELECT cache_key, answer_digest, record_hash FROM replay_records
                  WHERE namespace = ?1 AND cache_key = ?2",
-                rusqlite::params![namespace.as_str(), &candidate.cache_key],
-                |row| {
-                    Ok(ReplayIndexRecord {
-                        cache_key: row.get(0)?,
-                        answer_digest: row.get(1)?,
-                        record_hash: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
-            .context("read immutable replay publication slot")?;
+                    rusqlite::params![namespace.as_str(), &candidate.cache_key],
+                    |row| {
+                        Ok(ReplayIndexRecord {
+                            cache_key: row.get(0)?,
+                            answer_digest: row.get(1)?,
+                            record_hash: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()
+                .context("read immutable replay publication slot")?;
 
-        let outcome = match existing {
-            None => {
-                let now = lillux::time::iso8601_now();
-                tx.execute(
-                    "INSERT INTO replay_records
+            let outcome = match existing {
+                None => {
+                    let now = lillux::time::iso8601_now();
+                    tx.execute(
+                        "INSERT INTO replay_records
                      (namespace, cache_key, answer_digest, record_hash, produced_at, last_replayed_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        namespace.as_str(),
-                        &candidate.cache_key,
-                        &candidate.answer_digest,
-                        &candidate.record_hash,
-                        &now,
-                        &now,
-                    ],
-                )
-                .context("insert immutable replay publication")?;
-                ReplayPublishOutcome::Inserted {
-                    record_hash: candidate.record_hash.clone(),
-                }
-            }
-            Some(existing) => {
-                if let Err(error) = validate_replay_index_record(&existing) {
-                    ReplayPublishOutcome::IntegrityFailure {
-                        reason: error.to_string(),
-                    }
-                } else {
-                    match verify(&existing) {
-                        ReplayRecordVerification::Verified
-                            if existing.answer_digest == candidate.answer_digest =>
-                        {
-                            ReplayPublishOutcome::Folded {
-                                record_hash: existing.record_hash,
-                            }
-                        }
-                        ReplayRecordVerification::Verified => {
-                            ReplayPublishOutcome::IntegrityConflict {
-                                existing_record_hash: existing.record_hash,
-                                candidate_record_hash: candidate.record_hash.clone(),
-                            }
-                        }
-                        ReplayRecordVerification::Unavailable { reason } => {
-                            ReplayPublishOutcome::Unavailable { reason }
-                        }
-                        ReplayRecordVerification::IntegrityFailure { reason } => {
-                            ReplayPublishOutcome::IntegrityFailure { reason }
-                        }
+                        rusqlite::params![
+                            namespace.as_str(),
+                            &candidate.cache_key,
+                            &candidate.answer_digest,
+                            &candidate.record_hash,
+                            &now,
+                            &now,
+                        ],
+                    )
+                    .context("insert immutable replay publication")?;
+                    ReplayPublishOutcome::Inserted {
+                        record_hash: candidate.record_hash.clone(),
                     }
                 }
-            }
-        };
-        tx.commit().context("commit immutable replay publication")?;
-        Ok(outcome)
+                Some(existing) => {
+                    if let Err(error) = validate_replay_index_record(&existing) {
+                        ReplayPublishOutcome::IntegrityFailure {
+                            reason: error.to_string(),
+                        }
+                    } else {
+                        match verify(&existing) {
+                            ReplayRecordVerification::Verified
+                                if existing.answer_digest == candidate.answer_digest =>
+                            {
+                                ReplayPublishOutcome::Folded {
+                                    record_hash: existing.record_hash,
+                                }
+                            }
+                            ReplayRecordVerification::Verified => {
+                                ReplayPublishOutcome::IntegrityConflict {
+                                    existing_record_hash: existing.record_hash,
+                                    candidate_record_hash: candidate.record_hash.clone(),
+                                }
+                            }
+                            ReplayRecordVerification::Unavailable { reason } => {
+                                ReplayPublishOutcome::Unavailable { reason }
+                            }
+                            ReplayRecordVerification::IntegrityFailure { reason } => {
+                                ReplayPublishOutcome::IntegrityFailure { reason }
+                            }
+                        }
+                    }
+                }
+            };
+            tx.commit().context("commit immutable replay publication")?;
+            Ok(outcome)
+        })
     }
 
     /// Every indexed record hash. These are garbage-collection roots: a
     /// record stays reachable exactly as long as its row exists, and
     /// retention is row deletion followed by an ordinary sweep.
     pub fn list_replay_record_hashes(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT record_hash FROM replay_records ORDER BY record_hash")
-            .context("failed to prepare replay record root query")?;
-        let rows = stmt
-            .query_map([], |row| row.get(0))
-            .context("failed to query replay record roots")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect replay record roots")
+        self.with_sql(|connection| {
+            let mut stmt = connection
+                .prepare_cached("SELECT record_hash FROM replay_records ORDER BY record_hash")
+                .context("failed to prepare replay record root query")?;
+            let rows = stmt
+                .query_map([], |row| row.get(0))
+                .context("failed to query replay record roots")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to collect replay record roots")
+        })
     }
 
     /// Retention: drop records beyond `max_rows`, never-replayed rows first
@@ -3173,22 +3351,21 @@ impl OperationalDb {
         namespace: &ReplayIndexNamespace,
         max_rows: usize,
     ) -> Result<usize> {
-        let count: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM replay_records WHERE namespace = ?1",
-                [namespace.as_str()],
-                |row| row.get(0),
-            )
-            .context("failed to count replay records")?;
-        let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
-        if excess == 0 {
-            return Ok(0);
-        }
-        let deleted = self
-            .conn
-            .execute(
-                "DELETE FROM replay_records
+        self.with_sql(|connection| {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM replay_records WHERE namespace = ?1",
+                    [namespace.as_str()],
+                    |row| row.get(0),
+                )
+                .context("failed to count replay records")?;
+            let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
+            if excess == 0 {
+                return Ok(0);
+            }
+            let deleted = connection
+                .execute(
+                    "DELETE FROM replay_records
                  WHERE namespace = ?1 AND cache_key IN (
                     SELECT cache_key FROM replay_records
                     WHERE namespace = ?1
@@ -3197,10 +3374,11 @@ impl OperationalDb {
                              cache_key ASC
                     LIMIT ?2
                 )",
-                rusqlite::params![namespace.as_str(), excess as i64],
-            )
-            .context("failed to prune replay records")?;
-        Ok(deleted)
+                    rusqlite::params![namespace.as_str(), excess as i64],
+                )
+                .context("failed to prune replay records")?;
+            Ok(deleted)
+        })
     }
 
     pub fn delete_replay_records(
@@ -3208,42 +3386,44 @@ impl OperationalDb {
         namespace: &ReplayIndexNamespace,
         cache_keys: &[String],
     ) -> Result<usize> {
-        let mut deleted = 0usize;
-        for cache_key in cache_keys {
-            validate_canonical_hash("replay record cache key", cache_key)?;
-            deleted += self
-                .conn
-                .execute(
-                    "DELETE FROM replay_records WHERE namespace = ?1 AND cache_key = ?2",
-                    rusqlite::params![namespace.as_str(), cache_key],
-                )
-                .context("failed to delete replay record")?;
-        }
-        Ok(deleted)
+        self.with_sql(|connection| {
+            let mut deleted = 0usize;
+            for cache_key in cache_keys {
+                validate_canonical_hash("replay record cache key", cache_key)?;
+                deleted += connection
+                    .execute(
+                        "DELETE FROM replay_records WHERE namespace = ?1 AND cache_key = ?2",
+                        rusqlite::params![namespace.as_str(), cache_key],
+                    )
+                    .context("failed to delete replay record")?;
+            }
+            Ok(deleted)
+        })
     }
 
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,
     ) -> Result<()> {
-        validate_canonical_hash("admission attestation hash", &record.attestation_hash)?;
-        validate_canonical_hash("admission subject hash", &record.subject_hash)?;
-        validate_non_empty_label("admission policy", &record.policy)?;
-        validate_non_empty_label("admission claim", &record.claim)?;
-        validate_non_empty_label("admission issuer", &record.issuer)?;
-        validate_non_empty_label("admission issued_at", &record.issued_at)?;
-        if let Some(head_ref_path) = record.head_ref_path.as_deref()
-            && (head_ref_path.is_empty()
-                || head_ref_path.len() > 512
-                || head_ref_path.starts_with('/')
-                || head_ref_path.contains(".."))
-        {
-            anyhow::bail!("invalid admission head_ref_path: {head_ref_path}");
-        }
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO admission_attestations (
+        self.with_sql(|connection| {
+            validate_canonical_hash("admission attestation hash", &record.attestation_hash)?;
+            validate_canonical_hash("admission subject hash", &record.subject_hash)?;
+            validate_non_empty_label("admission policy", &record.policy)?;
+            validate_non_empty_label("admission claim", &record.claim)?;
+            validate_non_empty_label("admission issuer", &record.issuer)?;
+            validate_non_empty_label("admission issued_at", &record.issued_at)?;
+            if let Some(head_ref_path) = record.head_ref_path.as_deref()
+                && (head_ref_path.is_empty()
+                    || head_ref_path.len() > 512
+                    || head_ref_path.starts_with('/')
+                    || head_ref_path.contains(".."))
+            {
+                anyhow::bail!("invalid admission head_ref_path: {head_ref_path}");
+            }
+            let now = lillux::time::iso8601_now();
+            connection
+                .execute(
+                    "INSERT INTO admission_attestations (
                     attestation_hash, subject_hash, policy, claim, issuer, issued_at,
                     expires_at, head_ref_path, indexed_at, state
                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -3257,21 +3437,22 @@ impl OperationalDb {
                     head_ref_path = excluded.head_ref_path,
                     indexed_at = excluded.indexed_at,
                     state = excluded.state",
-                rusqlite::params![
-                    &record.attestation_hash,
-                    &record.subject_hash,
-                    &record.policy,
-                    &record.claim,
-                    &record.issuer,
-                    &record.issued_at,
-                    &record.expires_at,
-                    &record.head_ref_path,
-                    &now,
-                    record.state.as_str(),
-                ],
-            )
-            .context("failed to record admission attestation index")?;
-        Ok(())
+                    rusqlite::params![
+                        &record.attestation_hash,
+                        &record.subject_hash,
+                        &record.policy,
+                        &record.claim,
+                        &record.issuer,
+                        &record.issued_at,
+                        &record.expires_at,
+                        &record.head_ref_path,
+                        &now,
+                        record.state.as_str(),
+                    ],
+                )
+                .context("failed to record admission attestation index")?;
+            Ok(())
+        })
     }
 
     pub fn list_admission_attestations_for_subject(
@@ -3279,45 +3460,45 @@ impl OperationalDb {
         subject_hash: &str,
         policy: Option<&str>,
     ) -> Result<Vec<AdmissionAttestationRecord>> {
-        validate_canonical_hash("admission subject hash", subject_hash)?;
-        if let Some(policy) = policy {
-            validate_non_empty_label("admission policy", policy)?;
-            let mut stmt = self
-                .conn
-                .prepare_cached(
-                    "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
+        self.with_sql(|connection| {
+            validate_canonical_hash("admission subject hash", subject_hash)?;
+            if let Some(policy) = policy {
+                validate_non_empty_label("admission policy", policy)?;
+                let mut stmt = connection
+                    .prepare_cached(
+                        "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
                         expires_at, head_ref_path, indexed_at, state
                      FROM admission_attestations
                      WHERE subject_hash = ? AND policy = ?
                      ORDER BY indexed_at DESC, attestation_hash DESC",
-                )
-                .context("failed to prepare admission attestation subject/policy query")?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params![subject_hash, policy],
-                    admission_attestation_from_row,
-                )
-                .context("failed to query admission attestations by subject/policy")?;
-            return rows
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .context("failed to collect admission attestations by subject/policy");
-        }
+                    )
+                    .context("failed to prepare admission attestation subject/policy query")?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![subject_hash, policy],
+                        admission_attestation_from_row,
+                    )
+                    .context("failed to query admission attestations by subject/policy")?;
+                return rows
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .context("failed to collect admission attestations by subject/policy");
+            }
 
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
+            let mut stmt = connection
+                .prepare_cached(
+                    "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
                     expires_at, head_ref_path, indexed_at, state
                  FROM admission_attestations
                  WHERE subject_hash = ?
                  ORDER BY indexed_at DESC, attestation_hash DESC",
-            )
-            .context("failed to prepare admission attestation subject query")?;
-        let rows = stmt
-            .query_map([subject_hash], admission_attestation_from_row)
-            .context("failed to query admission attestations by subject")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect admission attestations by subject")
+                )
+                .context("failed to prepare admission attestation subject query")?;
+            let rows = stmt
+                .query_map([subject_hash], admission_attestation_from_row)
+                .context("failed to query admission attestations by subject")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to collect admission attestations by subject")
+        })
     }
 }
 
@@ -3327,39 +3508,38 @@ impl OperationalDb {
     /// any recovery worker creates a new attempt. The durable job remains
     /// retryable; no remote phase or effect is inferred from process death.
     pub fn reconcile_interrupted_sync_job_attempts(&self) -> Result<usize> {
-        self.immediate_transaction("reconcile interrupted sync job attempts", || {
-            let now = lillux::time::iso8601_now();
-            let interrupted_unbounded_jobs = {
-                let mut statement = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT DISTINCT attempts.job_id
+        self.with_sql(|connection| {
+            self.immediate_transaction("reconcile interrupted sync job attempts", || {
+                let now = lillux::time::iso8601_now();
+                let interrupted_unbounded_jobs = {
+                    let mut statement = connection
+                        .prepare_cached(
+                            "SELECT DISTINCT attempts.job_id
                            FROM sync_job_attempts attempts
                            JOIN sync_jobs jobs ON jobs.job_id = attempts.job_id
                           WHERE attempts.state = 'running'
                             AND jobs.max_attempts = ?1
                           ORDER BY attempts.job_id",
-                    )
-                    .context("failed to prepare interrupted unbounded sync-job query")?;
-                let rows = statement
-                    .query_map([SYNC_JOB_UNBOUNDED_ATTEMPTS], |row| row.get::<_, String>(0))
-                    .context("failed to query interrupted unbounded sync jobs")?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-                    .context("failed to collect interrupted unbounded sync jobs")?
-            };
-            let interrupted = self
-                .conn
-                .execute(
-                    "UPDATE sync_job_attempts SET
+                        )
+                        .context("failed to prepare interrupted unbounded sync-job query")?;
+                    let rows = statement
+                        .query_map([SYNC_JOB_UNBOUNDED_ATTEMPTS], |row| row.get::<_, String>(0))
+                        .context("failed to query interrupted unbounded sync jobs")?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()
+                        .context("failed to collect interrupted unbounded sync jobs")?
+                };
+                let interrupted = connection
+                    .execute(
+                        "UPDATE sync_job_attempts SET
                         state = 'failed', updated_at = ?1, finished_at = ?1,
                         error = 'daemon restarted before this attempt settled'
                      WHERE state = 'running'",
-                    [&now],
-                )
-                .context("failed to settle interrupted sync job attempts")?;
-            self.conn
-                .execute(
-                    "UPDATE sync_jobs SET
+                        [&now],
+                    )
+                    .context("failed to settle interrupted sync job attempts")?;
+                connection
+                    .execute(
+                        "UPDATE sync_jobs SET
                         state = 'retryable', updated_at = ?1, finished_at = NULL,
                         last_error = 'daemon restarted before the active attempt settled'
                      WHERE state IN ('planned', 'running', 'retryable')
@@ -3369,13 +3549,14 @@ impl OperationalDb {
                             AND sync_job_attempts.finished_at = ?1
                             AND sync_job_attempts.error = 'daemon restarted before this attempt settled'
                        )",
-                    [&now],
-                )
-                .context("failed to make interrupted sync jobs retryable")?;
-            for job_id in interrupted_unbounded_jobs {
-                self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
-            }
-            Ok(interrupted)
+                        [&now],
+                    )
+                    .context("failed to make interrupted sync jobs retryable")?;
+                for job_id in interrupted_unbounded_jobs {
+                    self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
+                }
+                Ok(interrupted)
+            })
         })
     }
 
@@ -3393,73 +3574,75 @@ impl OperationalDb {
         phase: &str,
         result: Option<&serde_json::Value>,
     ) -> Result<SyncJobRecord> {
-        validate_sync_job_id(&job.job_id)?;
-        validate_non_empty_label("operation_type", &job.operation_type)?;
-        validate_non_empty_label("phase", phase)?;
-        if !matches!(state, SyncJobState::Planned | SyncJobState::Running) {
-            anyhow::bail!("a newly created sync job must be planned or running");
-        }
-        let operation = job
-            .operation
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("sync job operation must be a JSON object"))?;
-        if operation
-            .get("operation_type")
-            .and_then(serde_json::Value::as_str)
-            != Some(job.operation_type.as_str())
-        {
-            anyhow::bail!("sync job operation_type does not match its canonical operation payload");
-        }
-        for hash in job.roots.iter().chain(job.heads.iter()) {
-            validate_canonical_hash("sync job root/head hash", hash)?;
-        }
-        let max_attempts = i64::try_from(job.max_attempts).context("max_attempts exceeds i64")?;
-        let now = lillux::time::iso8601_now();
-        let roots_json = serde_json::to_vec(&job.roots).context("failed to serialize job roots")?;
-        let heads_json = serde_json::to_vec(&job.heads).context("failed to serialize job heads")?;
-        let operation_json =
-            serde_json::to_vec(&job.operation).context("failed to serialize job operation")?;
-        if operation_json.len() > 256 * 1024 {
-            anyhow::bail!("sync job operation exceeds the 256 KiB maximum");
-        }
-        let result_json = result
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize initial sync job result")?;
-        if result_json
-            .as_ref()
-            .is_some_and(|value| value.len() > 256 * 1024)
-        {
-            anyhow::bail!("sync job result exceeds the 256 KiB maximum");
-        }
-        let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
-        self.conn
-            .execute(
-                "INSERT INTO sync_jobs (
+        self.with_sql(|connection| {
+            validate_sync_job_id(&job.job_id)?;
+            validate_non_empty_label("operation_type", &job.operation_type)?;
+            validate_non_empty_label("phase", phase)?;
+            if !matches!(state, SyncJobState::Planned | SyncJobState::Running) {
+                anyhow::bail!("a newly created sync job must be planned or running");
+            }
+            let operation = job
+                .operation
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("sync job operation must be a JSON object"))?;
+            if operation
+                .get("operation_type")
+                .and_then(serde_json::Value::as_str)
+                != Some(job.operation_type.as_str())
+            {
+                anyhow::bail!("sync job operation_type does not match its canonical operation payload");
+            }
+            for hash in job.roots.iter().chain(job.heads.iter()) {
+                validate_canonical_hash("sync job root/head hash", hash)?;
+            }
+            let max_attempts = i64::try_from(job.max_attempts).context("max_attempts exceeds i64")?;
+            let now = lillux::time::iso8601_now();
+            let roots_json = serde_json::to_vec(&job.roots).context("failed to serialize job roots")?;
+            let heads_json = serde_json::to_vec(&job.heads).context("failed to serialize job heads")?;
+            let operation_json =
+                serde_json::to_vec(&job.operation).context("failed to serialize job operation")?;
+            if operation_json.len() > 256 * 1024 {
+                anyhow::bail!("sync job operation exceeds the 256 KiB maximum");
+            }
+            let result_json = result
+                .map(serde_json::to_vec)
+                .transpose()
+                .context("failed to serialize initial sync job result")?;
+            if result_json
+                .as_ref()
+                .is_some_and(|value| value.len() > 256 * 1024)
+            {
+                anyhow::bail!("sync job result exceeds the 256 KiB maximum");
+            }
+            let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
+            connection
+                .execute(
+                    "INSERT INTO sync_jobs (
                     job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?, NULL)",
-                rusqlite::params![
-                    &job.job_id,
-                    &job.operation_type,
-                    operation_json,
-                    &job.peer,
-                    state.as_str(),
-                    phase,
-                    roots_json,
-                    heads_json,
-                    empty_hashes,
-                    empty_hashes,
-                    max_attempts,
-                    result_json,
-                    &now,
-                    &now,
-                ],
-            )
-            .context("failed to create sync job")?;
-        self.get_sync_job(&job.job_id)?
-            .ok_or_else(|| anyhow::anyhow!("created sync job {} not found", job.job_id))
+                    rusqlite::params![
+                        &job.job_id,
+                        &job.operation_type,
+                        operation_json,
+                        &job.peer,
+                        state.as_str(),
+                        phase,
+                        roots_json,
+                        heads_json,
+                        empty_hashes,
+                        empty_hashes,
+                        max_attempts,
+                        result_json,
+                        &now,
+                        &now,
+                    ],
+                )
+                .context("failed to create sync job")?;
+            self.get_sync_job(&job.job_id)?
+                .ok_or_else(|| anyhow::anyhow!("created sync job {} not found", job.job_id))
+        })
     }
 
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> Result<()> {
@@ -3502,106 +3685,105 @@ impl OperationalDb {
         update: &SyncJobUpdate,
         reconcile_exhausted_completion: bool,
     ) -> Result<()> {
-        validate_sync_job_id(job_id)?;
-        validate_non_empty_label("phase", &update.phase)?;
-        let current_state = self
-            .conn
-            .query_row(
-                "SELECT state FROM sync_jobs WHERE job_id = ?",
-                [job_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .context("failed to load sync job state")?
-            .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
-        let current_state = SyncJobState::from_str(&current_state)?;
-        if !reconcile_exhausted_completion {
-            validate_sync_job_transition(current_state, update.state)?;
-        }
-        if matches!(
-            update.state,
-            SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled
-        ) {
-            let running_attempts: i64 = self
-                .conn
+        self.with_sql(|connection| {
+            validate_sync_job_id(job_id)?;
+            validate_non_empty_label("phase", &update.phase)?;
+            let current_state = connection
                 .query_row(
-                    "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
+                    "SELECT state FROM sync_jobs WHERE job_id = ?",
                     [job_id],
-                    |row| row.get(0),
+                    |row| row.get::<_, String>(0),
                 )
-                .context("failed to count running sync job attempts")?;
-            if running_attempts > 0 {
-                anyhow::bail!(
-                    "cannot mark sync job {job_id} terminal while {running_attempts} attempt(s) are still running"
-                );
+                .optional()
+                .context("failed to load sync job state")?
+                .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
+            let current_state = SyncJobState::from_str(&current_state)?;
+            if !reconcile_exhausted_completion {
+                validate_sync_job_transition(current_state, update.state)?;
             }
-        }
-        for hash in update
-            .roots
-            .iter()
-            .flatten()
-            .chain(update.heads.iter().flatten())
-            .chain(update.uploaded_hashes.iter())
-            .chain(update.fetched_hashes.iter())
-        {
-            validate_canonical_hash("sync job transfer hash", hash)?;
-        }
-        let roots_json = update
-            .roots
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize job roots")?;
-        let heads_json = update
-            .heads
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize job heads")?;
-        let uploaded_json = serde_json::to_vec(&update.uploaded_hashes)
-            .context("failed to serialize uploaded hashes")?;
-        let fetched_json = serde_json::to_vec(&update.fetched_hashes)
-            .context("failed to serialize fetched hashes")?;
-        let result_json = update
-            .result
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize sync job result")?;
-        let now = lillux::time::iso8601_now();
-        let finished_at = match update.state {
-            SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled => {
-                Some(now.clone())
+            if matches!(
+                update.state,
+                SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled
+            ) {
+                let running_attempts: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
+                        [job_id],
+                        |row| row.get(0),
+                    )
+                    .context("failed to count running sync job attempts")?;
+                if running_attempts > 0 {
+                    anyhow::bail!(
+                        "cannot mark sync job {job_id} terminal while {running_attempts} attempt(s) are still running"
+                    );
+                }
             }
-            SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable => None,
-        };
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sync_jobs SET
+            for hash in update
+                .roots
+                .iter()
+                .flatten()
+                .chain(update.heads.iter().flatten())
+                .chain(update.uploaded_hashes.iter())
+                .chain(update.fetched_hashes.iter())
+            {
+                validate_canonical_hash("sync job transfer hash", hash)?;
+            }
+            let roots_json = update
+                .roots
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .context("failed to serialize job roots")?;
+            let heads_json = update
+                .heads
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .context("failed to serialize job heads")?;
+            let uploaded_json = serde_json::to_vec(&update.uploaded_hashes)
+                .context("failed to serialize uploaded hashes")?;
+            let fetched_json = serde_json::to_vec(&update.fetched_hashes)
+                .context("failed to serialize fetched hashes")?;
+            let result_json = update
+                .result
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .context("failed to serialize sync job result")?;
+            let now = lillux::time::iso8601_now();
+            let finished_at = match update.state {
+                SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled => {
+                    Some(now.clone())
+                }
+                SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable => None,
+            };
+            let changed = connection
+                .execute(
+                    "UPDATE sync_jobs SET
                 state = ?, phase = ?,
                 roots_json = COALESCE(?, roots_json), heads_json = COALESCE(?, heads_json),
                 uploaded_hashes_json = ?, fetched_hashes_json = ?,
                 last_error = ?, result_json = ?,
                 updated_at = ?, finished_at = ?
              WHERE job_id = ?",
-                rusqlite::params![
-                    update.state.as_str(),
-                    &update.phase,
-                    roots_json,
-                    heads_json,
-                    uploaded_json,
-                    fetched_json,
-                    &update.last_error,
-                    result_json,
-                    &now,
-                    &finished_at,
-                    job_id,
-                ],
-            )
-            .context("failed to update sync job")?;
-        debug_assert_eq!(changed, 1);
-        Ok(())
+                    rusqlite::params![
+                        update.state.as_str(),
+                        &update.phase,
+                        roots_json,
+                        heads_json,
+                        uploaded_json,
+                        fetched_json,
+                        &update.last_error,
+                        result_json,
+                        &now,
+                        &finished_at,
+                        job_id,
+                    ],
+                )
+                .context("failed to update sync job")?;
+            debug_assert_eq!(changed, 1);
+            Ok(())
+        })
     }
 
     pub fn create_sync_job_attempt(
@@ -3617,103 +3799,102 @@ impl OperationalDb {
         &self,
         attempt: &NewSyncJobAttempt,
     ) -> Result<SyncJobAttemptRecord> {
-        validate_sync_job_id(&attempt.job_id)?;
-        validate_sync_job_id(&attempt.attempt_id)?;
-        validate_non_empty_label("phase", &attempt.phase)?;
-        if let Some(worker_id) = attempt.worker_id.as_deref() {
-            validate_non_empty_label("worker_id", worker_id)?;
-        }
+        self.with_sql(|connection| {
+            validate_sync_job_id(&attempt.job_id)?;
+            validate_sync_job_id(&attempt.attempt_id)?;
+            validate_non_empty_label("phase", &attempt.phase)?;
+            if let Some(worker_id) = attempt.worker_id.as_deref() {
+                validate_non_empty_label("worker_id", worker_id)?;
+            }
 
-        let (job_state, attempt_count, max_attempts) = self
-            .conn
-            .query_row(
-                "SELECT state, attempt_count, max_attempts FROM sync_jobs WHERE job_id = ?",
-                [&attempt.job_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .context("failed to load sync job state for attempt")?
-            .ok_or_else(|| anyhow::anyhow!("sync job not found: {}", attempt.job_id))?;
-        let job_state = SyncJobState::from_str(&job_state)?;
-        if !matches!(
-            job_state,
-            SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable
-        ) {
-            anyhow::bail!(
-                "cannot create attempt for terminal sync job {} in state {}",
-                attempt.job_id,
-                job_state.as_str()
-            );
-        }
-        if sync_job_attempts_exhausted(
-            u64::try_from(attempt_count).context("negative sync job attempt count")?,
-            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
-        ) {
-            anyhow::bail!(
-                "sync job {} has exhausted attempts ({attempt_count}/{max_attempts})",
-                attempt.job_id
-            );
-        }
-        let running_attempts: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
-                [&attempt.job_id],
-                |row| row.get(0),
-            )
-            .context("failed to count running sync job attempts")?;
-        if running_attempts > 0 {
-            anyhow::bail!("sync job {} already has a running attempt", attempt.job_id);
-        }
-        if sync_job_attempts_are_unbounded(
-            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
-        ) {
-            self.prune_unbounded_sync_job_attempts_inner(&attempt.job_id)?;
-        }
+            let (job_state, attempt_count, max_attempts) = connection
+                .query_row(
+                    "SELECT state, attempt_count, max_attempts FROM sync_jobs WHERE job_id = ?",
+                    [&attempt.job_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("failed to load sync job state for attempt")?
+                .ok_or_else(|| anyhow::anyhow!("sync job not found: {}", attempt.job_id))?;
+            let job_state = SyncJobState::from_str(&job_state)?;
+            if !matches!(
+                job_state,
+                SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable
+            ) {
+                anyhow::bail!(
+                    "cannot create attempt for terminal sync job {} in state {}",
+                    attempt.job_id,
+                    job_state.as_str()
+                );
+            }
+            if sync_job_attempts_exhausted(
+                u64::try_from(attempt_count).context("negative sync job attempt count")?,
+                u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+            ) {
+                anyhow::bail!(
+                    "sync job {} has exhausted attempts ({attempt_count}/{max_attempts})",
+                    attempt.job_id
+                );
+            }
+            let running_attempts: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
+                    [&attempt.job_id],
+                    |row| row.get(0),
+                )
+                .context("failed to count running sync job attempts")?;
+            if running_attempts > 0 {
+                anyhow::bail!("sync job {} already has a running attempt", attempt.job_id);
+            }
+            if sync_job_attempts_are_unbounded(
+                u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+            ) {
+                self.prune_unbounded_sync_job_attempts_inner(&attempt.job_id)?;
+            }
 
-        let attempt_number: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM sync_job_attempts WHERE job_id = ?",
-                [&attempt.job_id],
-                |row| row.get(0),
-            )
-            .context("failed to compute next sync job attempt number")?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO sync_job_attempts (
+            let attempt_number: i64 = connection
+                .query_row(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM sync_job_attempts WHERE job_id = ?",
+                    [&attempt.job_id],
+                    |row| row.get(0),
+                )
+                .context("failed to compute next sync job attempt number")?;
+            let now = lillux::time::iso8601_now();
+            connection
+                .execute(
+                    "INSERT INTO sync_job_attempts (
                     attempt_id, job_id, attempt_number, worker_id, state, phase,
                     started_at, updated_at, finished_at, error, result_json
                 ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, NULL, NULL, NULL)",
-                rusqlite::params![
-                    &attempt.attempt_id,
-                    &attempt.job_id,
-                    attempt_number,
-                    &attempt.worker_id,
-                    &attempt.phase,
-                    &now,
-                    &now,
-                ],
-            )
-            .context("failed to create sync job attempt")?;
-        self.conn
-            .execute(
-                "UPDATE sync_jobs SET state = 'running', phase = ?, attempt_count = attempt_count + 1, updated_at = ?, finished_at = NULL WHERE job_id = ?",
-                rusqlite::params![&attempt.phase, &now, &attempt.job_id],
-            )
-            .context("failed to activate sync job attempt")?;
+                    rusqlite::params![
+                        &attempt.attempt_id,
+                        &attempt.job_id,
+                        attempt_number,
+                        &attempt.worker_id,
+                        &attempt.phase,
+                        &now,
+                        &now,
+                    ],
+                )
+                .context("failed to create sync job attempt")?;
+            connection
+                .execute(
+                    "UPDATE sync_jobs SET state = 'running', phase = ?, attempt_count = attempt_count + 1, updated_at = ?, finished_at = NULL WHERE job_id = ?",
+                    rusqlite::params![&attempt.phase, &now, &attempt.job_id],
+                )
+                .context("failed to activate sync job attempt")?;
 
-        self.get_sync_job_attempt(&attempt.attempt_id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("created sync job attempt {} not found", attempt.attempt_id)
-            })
+            self.get_sync_job_attempt(&attempt.attempt_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("created sync job attempt {} not found", attempt.attempt_id)
+                })
+        })
     }
 
     pub fn finish_sync_job_attempt(
@@ -3731,78 +3912,79 @@ impl OperationalDb {
         attempt_id: &str,
         finish: &FinishSyncJobAttempt,
     ) -> Result<()> {
-        validate_sync_job_id(attempt_id)?;
-        validate_non_empty_label("phase", &finish.phase)?;
-        if !finish.state.is_terminal() {
-            anyhow::bail!(
-                "finish_sync_job_attempt requires terminal state, got {}",
-                finish.state.as_str()
-            );
-        }
-        let (current_state, job_id, max_attempts) = self
-            .conn
-            .query_row(
-                "SELECT sync_job_attempts.state, sync_job_attempts.job_id, sync_jobs.max_attempts
+        self.with_sql(|connection| {
+            validate_sync_job_id(attempt_id)?;
+            validate_non_empty_label("phase", &finish.phase)?;
+            if !finish.state.is_terminal() {
+                anyhow::bail!(
+                    "finish_sync_job_attempt requires terminal state, got {}",
+                    finish.state.as_str()
+                );
+            }
+            let (current_state, job_id, max_attempts) = connection
+                .query_row(
+                    "SELECT sync_job_attempts.state, sync_job_attempts.job_id, sync_jobs.max_attempts
                    FROM sync_job_attempts
                    JOIN sync_jobs ON sync_jobs.job_id = sync_job_attempts.job_id
                   WHERE sync_job_attempts.attempt_id = ?",
-                [attempt_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .context("failed to load sync job attempt state")?
-            .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
-        let current_state = SyncJobAttemptState::from_str(&current_state)?;
-        if current_state.is_terminal() {
-            anyhow::bail!(
-                "sync job attempt {attempt_id} is already terminal in state {}",
-                current_state.as_str()
-            );
-        }
-        let result_json = finish
-            .result
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize sync job attempt result")?;
-        let now = lillux::time::iso8601_now();
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sync_job_attempts SET
+                    [attempt_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("failed to load sync job attempt state")?
+                .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
+            let current_state = SyncJobAttemptState::from_str(&current_state)?;
+            if current_state.is_terminal() {
+                anyhow::bail!(
+                    "sync job attempt {attempt_id} is already terminal in state {}",
+                    current_state.as_str()
+                );
+            }
+            let result_json = finish
+                .result
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .context("failed to serialize sync job attempt result")?;
+            let now = lillux::time::iso8601_now();
+            let changed = connection
+                .execute(
+                    "UPDATE sync_job_attempts SET
                     state = ?, phase = ?, updated_at = ?, finished_at = ?, error = ?, result_json = ?
                  WHERE attempt_id = ?",
-                rusqlite::params![
-                    finish.state.as_str(),
-                    &finish.phase,
-                    &now,
-                    &now,
-                    &finish.error,
-                    result_json,
-                    attempt_id,
-                ],
-            )
-            .context("failed to finish sync job attempt")?;
-        debug_assert_eq!(changed, 1);
-        if sync_job_attempts_are_unbounded(
-            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
-        ) {
-            self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
-        }
-        Ok(())
+                    rusqlite::params![
+                        finish.state.as_str(),
+                        &finish.phase,
+                        &now,
+                        &now,
+                        &finish.error,
+                        result_json,
+                        attempt_id,
+                    ],
+                )
+                .context("failed to finish sync job attempt")?;
+            debug_assert_eq!(changed, 1);
+            if sync_job_attempts_are_unbounded(
+                u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+            ) {
+                self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
+            }
+            Ok(())
+        })
     }
 
     fn prune_unbounded_sync_job_attempts_inner(&self, job_id: &str) -> Result<()> {
-        let retained = i64::try_from(SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS)?;
-        self.conn
-            .execute(
-                "DELETE FROM sync_job_attempts
+        self.with_sql(|connection| {
+            let retained = i64::try_from(SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS)?;
+            connection
+                .execute(
+                    "DELETE FROM sync_job_attempts
                   WHERE job_id = ?1
                     AND state != 'running'
                     AND attempt_id NOT IN (
@@ -3811,10 +3993,11 @@ impl OperationalDb {
                          ORDER BY attempt_number DESC
                          LIMIT ?2
                     )",
-                rusqlite::params![job_id, retained],
-            )
-            .context("failed to compact unbounded sync-job attempt diagnostics")?;
-        Ok(())
+                    rusqlite::params![job_id, retained],
+                )
+                .context("failed to compact unbounded sync-job attempt diagnostics")?;
+            Ok(())
+        })
     }
 
     pub fn finish_sync_job_attempt_and_update_job(
@@ -3824,72 +4007,78 @@ impl OperationalDb {
         job_id: &str,
         update: &SyncJobUpdate,
     ) -> Result<()> {
-        self.immediate_transaction("finish sync job attempt and update job", || {
-            let attempt_job_id: String = self
-                .conn
-                .query_row(
-                    "SELECT job_id FROM sync_job_attempts WHERE attempt_id = ?",
-                    [attempt_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .context("failed to load sync job attempt owner")?
-                .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
-            if attempt_job_id != job_id {
-                anyhow::bail!(
-                    "sync job attempt {attempt_id} belongs to job {attempt_job_id}, not {job_id}"
-                );
-            }
-            self.finish_sync_job_attempt_inner(attempt_id, finish)?;
-            self.update_sync_job(job_id, update)?;
-            Ok(())
+        self.with_sql(|connection| {
+            self.immediate_transaction("finish sync job attempt and update job", || {
+                let attempt_job_id: String = connection
+                    .query_row(
+                        "SELECT job_id FROM sync_job_attempts WHERE attempt_id = ?",
+                        [attempt_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .context("failed to load sync job attempt owner")?
+                    .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
+                if attempt_job_id != job_id {
+                    anyhow::bail!(
+                        "sync job attempt {attempt_id} belongs to job {attempt_job_id}, not {job_id}"
+                    );
+                }
+                self.finish_sync_job_attempt_inner(attempt_id, finish)?;
+                self.update_sync_job(job_id, update)?;
+                Ok(())
+            })
         })
     }
 
     pub fn get_sync_job_attempt(&self, attempt_id: &str) -> Result<Option<SyncJobAttemptRecord>> {
-        validate_sync_job_id(attempt_id)?;
-        self.conn
-            .query_row(
-                "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
+        self.with_sql(|connection| {
+            validate_sync_job_id(attempt_id)?;
+            connection
+                .query_row(
+                    "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
                     started_at, updated_at, finished_at, error, result_json
                  FROM sync_job_attempts WHERE attempt_id = ?",
-                [attempt_id],
-                sync_job_attempt_from_row,
-            )
-            .optional()
-            .context("failed to get sync job attempt")
+                    [attempt_id],
+                    sync_job_attempt_from_row,
+                )
+                .optional()
+                .context("failed to get sync job attempt")
+        })
     }
 
     pub fn list_sync_job_attempts(&self, job_id: &str) -> Result<Vec<SyncJobAttemptRecord>> {
-        validate_sync_job_id(job_id)?;
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
+        self.with_sql(|connection| {
+            validate_sync_job_id(job_id)?;
+            let mut stmt = connection
+                .prepare_cached(
+                    "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
                     started_at, updated_at, finished_at, error, result_json
                  FROM sync_job_attempts WHERE job_id = ? ORDER BY attempt_number ASC",
-            )
-            .context("failed to prepare sync job attempt list query")?;
-        let rows = stmt
-            .query_map([job_id], sync_job_attempt_from_row)
-            .context("failed to query sync job attempts")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect sync job attempts")
+                )
+                .context("failed to prepare sync job attempt list query")?;
+            let rows = stmt
+                .query_map([job_id], sync_job_attempt_from_row)
+                .context("failed to query sync job attempts")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to collect sync job attempts")
+        })
     }
 
     pub fn get_sync_job(&self, job_id: &str) -> Result<Option<SyncJobRecord>> {
-        validate_sync_job_id(job_id)?;
-        self.conn
-            .query_row(
-                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+        self.with_sql(|connection| {
+            validate_sync_job_id(job_id)?;
+            connection
+                .query_row(
+                    "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
                  FROM sync_jobs WHERE job_id = ?",
-                [job_id],
-                sync_job_from_row,
-            )
-            .optional()
-            .context("failed to get sync job")
+                    [job_id],
+                    sync_job_from_row,
+                )
+                .optional()
+                .context("failed to get sync job")
+        })
     }
 
     pub fn list_sync_jobs_by_state(
@@ -3897,33 +4086,34 @@ impl OperationalDb {
         state: Option<SyncJobState>,
         limit: usize,
     ) -> Result<Vec<SyncJobRecord>> {
-        let limit = limit.clamp(1, 500);
-        let sql = if state.is_some() {
-            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+        self.with_sql(|connection| {
+            let limit = limit.clamp(1, 500);
+            let sql = if state.is_some() {
+                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                 uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                 last_error, result_json, created_at, updated_at, finished_at
              FROM sync_jobs WHERE state = ? ORDER BY created_at DESC, job_id DESC LIMIT ?"
-        } else {
-            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+            } else {
+                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                 uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                 last_error, result_json, created_at, updated_at, finished_at
              FROM sync_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?"
-        };
-        let mut stmt = self
-            .conn
-            .prepare_cached(sql)
-            .context("failed to prepare sync job list query")?;
-        let rows = if let Some(state) = state {
-            stmt.query_map(
-                rusqlite::params![state.as_str(), limit as i64],
-                sync_job_from_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            stmt.query_map(rusqlite::params![limit as i64], sync_job_from_row)?
+            };
+            let mut stmt = connection
+                .prepare_cached(sql)
+                .context("failed to prepare sync job list query")?;
+            let rows = if let Some(state) = state {
+                stmt.query_map(
+                    rusqlite::params![state.as_str(), limit as i64],
+                    sync_job_from_row,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        Ok(rows)
+            } else {
+                stmt.query_map(rusqlite::params![limit as i64], sync_job_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            Ok(rows)
+        })
     }
 
     /// Newest-first keyset scan for one durable operation family, including
@@ -3936,54 +4126,54 @@ impl OperationalDb {
         before: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<SyncJobRecord>> {
-        validate_non_empty_label("operation_type", operation_type)?;
-        let limit = i64::try_from(limit.clamp(1, 500))?;
-        let rows = match before {
-            Some((created_at, job_id)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+        self.with_sql(|connection| {
+            validate_non_empty_label("operation_type", operation_type)?;
+            let limit = i64::try_from(limit.clamp(1, 500))?;
+            let rows = match before {
+                Some((created_at, job_id)) => {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                             uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                             last_error, result_json, created_at, updated_at, finished_at
                          FROM sync_jobs
                          WHERE operation_type = ?1
                            AND (created_at < ?2 OR (created_at = ?2 AND job_id < ?3))
                          ORDER BY created_at DESC, job_id DESC LIMIT ?4",
-                    )
-                    .context("failed to prepare paged sync operation history query")?;
-                let mut rows = stmt.query_map(
-                    rusqlite::params![operation_type, created_at, job_id, limit],
-                    sync_job_from_row,
-                )?;
-                let mut jobs = Vec::new();
-                while let Some(row) = rows.next() {
-                    jobs.push(row?);
+                        )
+                        .context("failed to prepare paged sync operation history query")?;
+                    let mut rows = stmt.query_map(
+                        rusqlite::params![operation_type, created_at, job_id, limit],
+                        sync_job_from_row,
+                    )?;
+                    let mut jobs = Vec::new();
+                    while let Some(row) = rows.next() {
+                        jobs.push(row?);
+                    }
+                    jobs
                 }
-                jobs
-            }
-            None => {
-                let mut stmt = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                None => {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                             uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                             last_error, result_json, created_at, updated_at, finished_at
                          FROM sync_jobs
                          WHERE operation_type = ?1
                          ORDER BY created_at DESC, job_id DESC LIMIT ?2",
-                    )
-                    .context("failed to prepare sync operation history query")?;
-                let mut rows =
-                    stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
-                let mut jobs = Vec::new();
-                while let Some(row) = rows.next() {
-                    jobs.push(row?);
+                        )
+                        .context("failed to prepare sync operation history query")?;
+                    let mut rows =
+                        stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
+                    let mut jobs = Vec::new();
+                    while let Some(row) = rows.next() {
+                        jobs.push(row?);
+                    }
+                    jobs
                 }
-                jobs
-            }
-        };
-        Ok(rows)
+            };
+            Ok(rows)
+        })
     }
 
     /// Oldest-first bounded recovery scan for one durable operation family.
@@ -4007,54 +4197,54 @@ impl OperationalDb {
         after: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<SyncJobRecord>> {
-        validate_non_empty_label("operation_type", operation_type)?;
-        let limit = i64::try_from(limit.clamp(1, 500))?;
-        let rows = match after {
-            Some((created_at, job_id)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+        self.with_sql(|connection| {
+            validate_non_empty_label("operation_type", operation_type)?;
+            let limit = i64::try_from(limit.clamp(1, 500))?;
+            let rows = match after {
+                Some((created_at, job_id)) => {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                             uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                             last_error, result_json, created_at, updated_at, finished_at
                          FROM sync_jobs
                          WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
                            AND (created_at > ?2 OR (created_at = ?2 AND job_id > ?3))
                          ORDER BY created_at ASC, job_id ASC LIMIT ?4",
-                    )
-                    .context("failed to prepare paged active sync recovery query")?;
-                let mut rows = stmt.query_map(
-                    rusqlite::params![operation_type, created_at, job_id, limit],
-                    sync_job_from_row,
-                )?;
-                let mut jobs = Vec::new();
-                while let Some(row) = rows.next() {
-                    jobs.push(row?);
+                        )
+                        .context("failed to prepare paged active sync recovery query")?;
+                    let mut rows = stmt.query_map(
+                        rusqlite::params![operation_type, created_at, job_id, limit],
+                        sync_job_from_row,
+                    )?;
+                    let mut jobs = Vec::new();
+                    while let Some(row) = rows.next() {
+                        jobs.push(row?);
+                    }
+                    jobs
                 }
-                jobs
-            }
-            None => {
-                let mut stmt = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                None => {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                             uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                             last_error, result_json, created_at, updated_at, finished_at
                          FROM sync_jobs
                          WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
                          ORDER BY created_at ASC, job_id ASC LIMIT ?2",
-                    )
-                    .context("failed to prepare active sync operation recovery query")?;
-                let mut rows =
-                    stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
-                let mut jobs = Vec::new();
-                while let Some(row) = rows.next() {
-                    jobs.push(row?);
+                        )
+                        .context("failed to prepare active sync operation recovery query")?;
+                    let mut rows =
+                        stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
+                    let mut jobs = Vec::new();
+                    while let Some(row) = rows.next() {
+                        jobs.push(row?);
+                    }
+                    jobs
                 }
-                jobs
-            }
-        };
-        Ok(rows)
+            };
+            Ok(rows)
+        })
     }
 
     /// Oldest-first bounded scan for one exact operation family and state.
@@ -4079,95 +4269,96 @@ impl OperationalDb {
         after: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<SyncJobRecord>> {
-        validate_non_empty_label("operation_type", operation_type)?;
-        let limit = i64::try_from(limit.clamp(1, 500))?;
-        let rows = match after {
-            Some((created_at, job_id)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+        self.with_sql(|connection| {
+            validate_non_empty_label("operation_type", operation_type)?;
+            let limit = i64::try_from(limit.clamp(1, 500))?;
+            let rows = match after {
+                Some((created_at, job_id)) => {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                             uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                             last_error, result_json, created_at, updated_at, finished_at
                          FROM sync_jobs
                          WHERE operation_type = ?1 AND state = ?2
                            AND (created_at > ?3 OR (created_at = ?3 AND job_id > ?4))
                          ORDER BY created_at ASC, job_id ASC LIMIT ?5",
-                    )
-                    .context("failed to prepare paged exact sync operation state query")?;
-                let mut rows = stmt.query_map(
-                    rusqlite::params![operation_type, state.as_str(), created_at, job_id, limit],
-                    sync_job_from_row,
-                )?;
-                let mut jobs = Vec::new();
-                while let Some(row) = rows.next() {
-                    jobs.push(row?);
+                        )
+                        .context("failed to prepare paged exact sync operation state query")?;
+                    let mut rows = stmt.query_map(
+                        rusqlite::params![operation_type, state.as_str(), created_at, job_id, limit],
+                        sync_job_from_row,
+                    )?;
+                    let mut jobs = Vec::new();
+                    while let Some(row) = rows.next() {
+                        jobs.push(row?);
+                    }
+                    jobs
                 }
-                jobs
-            }
-            None => {
-                let mut stmt = self
-                    .conn
-                    .prepare_cached(
-                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                None => {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                             uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                             last_error, result_json, created_at, updated_at, finished_at
                          FROM sync_jobs
                          WHERE operation_type = ?1 AND state = ?2
                          ORDER BY created_at ASC, job_id ASC LIMIT ?3",
-                    )
-                    .context("failed to prepare exact sync operation state query")?;
-                let mut rows = stmt.query_map(
-                    rusqlite::params![operation_type, state.as_str(), limit],
-                    sync_job_from_row,
-                )?;
-                let mut jobs = Vec::new();
-                while let Some(row) = rows.next() {
-                    jobs.push(row?);
+                        )
+                        .context("failed to prepare exact sync operation state query")?;
+                    let mut rows = stmt.query_map(
+                        rusqlite::params![operation_type, state.as_str(), limit],
+                        sync_job_from_row,
+                    )?;
+                    let mut jobs = Vec::new();
+                    while let Some(row) = rows.next() {
+                        jobs.push(row?);
+                    }
+                    jobs
                 }
-                jobs
-            }
-        };
-        Ok(rows)
+            };
+            Ok(rows)
+        })
     }
 
     pub fn count_active_sync_jobs(&self) -> Result<u64> {
-        let count: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_jobs WHERE state IN ('planned', 'running', 'retryable')",
-                [],
-                |row| row.get(0),
-            )
-            .context("failed to count active sync jobs")?;
-        u64::try_from(count).context("active sync job count was negative")
+        self.with_sql(|connection| {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_jobs WHERE state IN ('planned', 'running', 'retryable')",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("failed to count active sync jobs")?;
+            u64::try_from(count).context("active sync job count was negative")
+        })
     }
 
     /// Delete terminal sync jobs finished before `cutoff_iso`, together with
     /// their attempt rows. Active jobs are never removed.
     pub fn delete_terminal_sync_jobs_before(&self, cutoff_iso: &str) -> Result<(usize, usize)> {
-        self.immediate_transaction("sync-job retention", || {
-            let attempts = self
-                .conn
-                .execute(
-                    "DELETE FROM sync_job_attempts WHERE job_id IN (
+        self.with_sql(|connection| {
+            self.immediate_transaction("sync-job retention", || {
+                let attempts = connection
+                    .execute(
+                        "DELETE FROM sync_job_attempts WHERE job_id IN (
                         SELECT job_id FROM sync_jobs
                         WHERE state IN ('completed', 'failed', 'cancelled')
                           AND COALESCE(finished_at, updated_at) < ?1
                     )",
-                    rusqlite::params![cutoff_iso],
-                )
-                .context("failed to delete retired sync job attempts")?;
-            let jobs = self
-                .conn
-                .execute(
-                    "DELETE FROM sync_jobs
+                        rusqlite::params![cutoff_iso],
+                    )
+                    .context("failed to delete retired sync job attempts")?;
+                let jobs = connection
+                    .execute(
+                        "DELETE FROM sync_jobs
                      WHERE state IN ('completed', 'failed', 'cancelled')
                        AND COALESCE(finished_at, updated_at) < ?1",
-                    rusqlite::params![cutoff_iso],
-                )
-                .context("failed to delete retired sync jobs")?;
-            Ok((jobs, attempts))
+                        rusqlite::params![cutoff_iso],
+                    )
+                    .context("failed to delete retired sync jobs")?;
+                Ok((jobs, attempts))
+            })
         })
     }
 }
@@ -4343,33 +4534,23 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         let db = OperationalDb::open(&path).unwrap();
 
-        let app_id: i32 = db
-            .conn
-            .query_row("PRAGMA application_id", [], |row| row.get(0))
+        let app_id: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA application_id", [], |row| row.get(0))?))
             .unwrap();
-        let version: i32 = db
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+        let version: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?))
             .unwrap();
-        let synchronous: i32 = db
-            .conn
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        let synchronous: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
             .unwrap();
-        let tables: i64 = db
-            .conn
-            .query_row(
+        let tables: i64 = db.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
-        let indexes: i64 = db
-            .conn
-            .query_row(
+        let indexes: i64 = db.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
 
         assert_eq!(app_id, OPERATIONAL_APP_ID);
@@ -4377,7 +4558,7 @@ mod tests {
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
         assert_eq!(tables, 7);
         assert_eq!(indexes, 17);
-        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
     fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecord {
@@ -4393,7 +4574,8 @@ mod tests {
     }
 
     fn rewrite_current_sync_jobs_as_v5(db: &OperationalDb) {
-        let tx = db.conn.unchecked_transaction().unwrap();
+        db.with_sql(|connection| {
+        let tx = connection.unchecked_transaction().unwrap();
         tx.execute_batch(
             "DROP INDEX idx_sync_jobs_state;
              DROP INDEX idx_sync_jobs_operation_type;
@@ -4419,6 +4601,9 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+
+            Ok(())
+        }).unwrap();
     }
 
     fn create_migration_fixture(db: &OperationalDb) {
@@ -4454,7 +4639,7 @@ mod tests {
     }
 
     fn assert_migrated_fixture(db: &OperationalDb) {
-        assert_current(&db.conn, db.path()).unwrap();
+        db.with_sql(|connection| assert_current(connection, db.path(), None)).unwrap();
         let job = db.get_sync_job("job:predecessor").unwrap().unwrap();
         assert_eq!(
             job.operation,
@@ -4469,6 +4654,45 @@ mod tests {
         assert_eq!(profile.authority_revision, 4);
         assert_eq!(profile.credential_generation, 2);
         assert_eq!(profile.state, "active");
+    }
+
+    #[test]
+    fn replay_preparation_refuses_schema_changes_before_intent() {
+        for appended_intermediate in [false, true] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+            {
+                let db = OperationalDb::open(&path).unwrap();
+                create_migration_fixture(&db);
+                rewrite_current_sync_jobs_as_v5(&db);
+                if appended_intermediate {
+                    db.with_sql(|connection| Ok(connection.execute_batch(SYNC_JOB_OPERATION_DDL)?)).unwrap();
+                    db.with_sql(|connection| Ok(connection.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)?)).unwrap();
+                }
+            }
+            let snapshot = |connection: &Connection| {
+                let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+                let layout = connection.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name")
+                    .unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                let job: (String, String, i64) = connection.query_row(
+                    "SELECT job_id, operation_type, attempt_count FROM sync_jobs WHERE job_id='job:predecessor'",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+                let credential: (i64, i64, String) = connection.query_row(
+                    "SELECT authority_revision, credential_generation, state FROM credential_profiles WHERE profile_id='profile-preserved'",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+                (version, layout, job, credential)
+            };
+            let before = {
+                let connection = Connection::open(&path).unwrap();
+                snapshot(&connection)
+            };
+            assert!(OperationalDb::prepare_explicit_replay_reset(&path).is_err(),
+                "reset preparation cannot migrate or repair a source-of-truth schema");
+            let connection = Connection::open(&path).unwrap();
+            assert_eq!(snapshot(&connection), before,
+                "preparation refusal must preserve schema, job and credential authority");
+        }
     }
 
     #[test]
@@ -4494,11 +4718,10 @@ mod tests {
             let db = OperationalDb::open(&path).unwrap();
             create_migration_fixture(&db);
             rewrite_current_sync_jobs_as_v5(&db);
-            db.conn.execute_batch(SYNC_JOB_OPERATION_DDL).unwrap();
-            db.conn
-                .pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+            db.with_sql(|connection| Ok(connection.execute_batch(SYNC_JOB_OPERATION_DDL)?)).unwrap();
+            db.with_sql(|connection| Ok(connection.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)?))
                 .unwrap();
-            assert!(sync_job_schema_matches(&db.conn, &appended_sync_job_v6_ddl()).unwrap());
+            assert!(db.with_sql(|connection| sync_job_schema_matches(connection, &appended_sync_job_v6_ddl(), None)).unwrap());
         }
 
         let db = OperationalDb::open(&path).unwrap();
@@ -4731,8 +4954,7 @@ mod tests {
                 state: CasEntryState::Mirrored,
             })
             .unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "DROP INDEX idx_credential_profiles_owner_state;
                      DROP TABLE credential_profiles;
                      DROP INDEX idx_replay_records_retention;
@@ -4740,7 +4962,7 @@ mod tests {
                      DROP TABLE replay_records;
                      DROP TABLE replay_index_epoch;
                      PRAGMA user_version=1;",
-                )
+                )?))
                 .unwrap();
         }
 
@@ -4752,10 +4974,10 @@ mod tests {
                 .downcast_ref::<ReplayIndexActivationRequired>()
                 .is_some()
         );
-        let (db, _) = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
-        let version: i32 = db
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
+        prepared.activate().unwrap();
+        let (db, _) = prepared.take_activated().unwrap();
+        let version: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
         // Non-replay operational rows survive. The two runtime-only replay
@@ -4766,7 +4988,7 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
         assert!(db.list_replay_record_hashes().unwrap().is_empty());
     }
 
@@ -4779,8 +5001,7 @@ mod tests {
             // shape with a row that must be discarded, never decoded or
             // translated.
             let db = OperationalDb::open(&path).unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "DROP INDEX idx_credential_profiles_owner_state;
                      DROP TABLE credential_profiles;
                      DROP INDEX idx_replay_records_retention;
@@ -4788,12 +5009,11 @@ mod tests {
                      DROP TABLE replay_records;
                      DROP TABLE replay_index_epoch;
                      PRAGMA user_version=3;",
-                )
+                )?))
                 .unwrap();
-            db.conn.execute_batch(EFFECT_RECORDS_DDL).unwrap();
-            db.conn.execute_batch(PROVIDER_CALL_RECORDS_DDL).unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(EFFECT_RECORDS_DDL)?)).unwrap();
+            db.with_sql(|connection| Ok(connection.execute_batch(PROVIDER_CALL_RECORDS_DDL)?)).unwrap();
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "INSERT INTO effect_records VALUES (
                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                         'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
@@ -4801,7 +5021,7 @@ mod tests {
                         '2026-01-01T00:00:00Z',
                         '2026-01-01T00:00:00Z'
                      );",
-                )
+                )?))
                 .unwrap();
         }
 
@@ -4813,7 +5033,9 @@ mod tests {
                 .downcast_ref::<ReplayIndexActivationRequired>()
                 .is_some()
         );
-        let (db, _) = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
+        prepared.activate().unwrap();
+        let (db, _) = prepared.take_activated().unwrap();
         assert!(db.list_replay_record_hashes().unwrap().is_empty());
     }
 
@@ -4823,8 +5045,7 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
             let db = OperationalDb::open(&path).unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "INSERT INTO replay_records VALUES (
                         'provider.call',
                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -4835,11 +5056,11 @@ mod tests {
                      );
                      ALTER TABLE replay_records ADD COLUMN unexpected TEXT;
                      UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;",
-                )
+                )?))
                 .unwrap();
         }
 
-        assert!(OperationalDb::open_for_explicit_replay_reset(&path).is_err());
+        assert!(OperationalDb::prepare_explicit_replay_reset(&path).is_err());
         let conn = Connection::open(&path).unwrap();
         assert_eq!(replay_index_epoch(&conn).unwrap(), 6);
         let count: i64 = conn
@@ -4862,8 +5083,7 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
             let db = OperationalDb::open(&path).unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "DROP INDEX idx_replay_records_retention;
                      DROP INDEX idx_replay_records_record_hash;
                      DROP TABLE replay_records;
@@ -4897,11 +5117,11 @@ mod tests {
                         'retained'
                      );
                      UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
-                )
+                )?))
                 .unwrap();
         }
 
-        assert!(OperationalDb::open_for_explicit_replay_reset(&path).is_err());
+        assert!(OperationalDb::prepare_explicit_replay_reset(&path).is_err());
         let conn = Connection::open(&path).unwrap();
         assert_eq!(replay_index_epoch(&conn).unwrap(), 4);
         let retained: String = conn
@@ -4942,27 +5162,25 @@ mod tests {
             {
                 let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
                 db.merge_credential_profile(&profile).unwrap();
-                db.conn
-                    .execute_batch(
+                db.with_sql(|connection| Ok(connection.execute_batch(
                         "INSERT INTO replay_records VALUES ('dispatch.effect',
                      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                      'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
                      '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
-                    )
+                    )?))
                     .unwrap();
-                db.conn
-                    .execute(
+                db.with_sql(|connection| Ok(connection.execute(
                         "UPDATE replay_index_epoch SET epoch = ?1",
                         [REPLAY_INDEX_EPOCH - epochs_back],
-                    )
+                    )?))
                     .unwrap();
             }
             let directory = lillux::PinnedDirectory::open(tempdir.path())
                 .unwrap()
                 .unwrap();
             let lock = directory.lock_exclusive().unwrap();
-            let preview = OperationalDb::prepare_replay_reset_with_namespace_authority(
+            let mut preview = OperationalDb::prepare_replay_reset_with_namespace_authority(
                 &directory,
                 lock.clone(),
                 true,
@@ -5015,14 +5233,27 @@ mod tests {
                     .is_err()
                 );
             }
-            let (db, actual) = OperationalDb::prepare_replay_reset_with_namespace_authority(
+            let mut prepared = OperationalDb::prepare_replay_reset_with_namespace_authority(
                 &directory,
                 lock.clone(),
                 false,
             )
-            .unwrap()
-            .activate()
             .unwrap();
+            assert!(prepared.take_activated().is_err());
+            if epochs_back > 0 {
+                FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.set(true));
+                assert!(prepared.activate().is_err());
+                assert!(prepared.take_activated().is_err());
+                assert_eq!(prepared.report(), expected);
+                assert_eq!(
+                    prepared.credential_profiles().unwrap(),
+                    vec![profile.clone()]
+                );
+            }
+            assert_eq!(prepared.activate().unwrap(), expected);
+            let (db, actual) = prepared.take_activated().unwrap();
+            assert!(prepared.take_activated().is_err());
+            assert!(prepared.activate().is_err());
             assert_eq!(actual, expected);
             assert_eq!(db.credential_profiles().unwrap(), vec![profile]);
             assert_eq!(
@@ -5030,7 +5261,7 @@ mod tests {
                 usize::from(epochs_back == 0)
             );
             drop(db);
-            let repeated = OperationalDb::prepare_replay_reset_with_namespace_authority(
+            let mut repeated = OperationalDb::prepare_replay_reset_with_namespace_authority(
                 &directory, lock, false,
             )
             .unwrap();
@@ -5044,11 +5275,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         {
             let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "UPDATE replay_index_epoch SET epoch = ?1",
                     [REPLAY_INDEX_EPOCH + 1],
-                )
+                )?))
                 .unwrap();
         }
         let directory = lillux::PinnedDirectory::open(tempdir.path())
@@ -5087,8 +5317,7 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
             let db = OperationalDb::open(&path).unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "INSERT INTO replay_records VALUES (
                         'dispatch.effect',
                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -5106,7 +5335,7 @@ mod tests {
                         '2026-01-01T00:00:00Z'
                      );
                      UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
-                )
+                )?))
                 .unwrap();
         }
 
@@ -5118,10 +5347,12 @@ mod tests {
                 .downcast_ref::<ReplayIndexActivationRequired>()
                 .is_some()
         );
-        let (db, report) = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
+        prepared.activate().unwrap();
+        let (db, report) = prepared.take_activated().unwrap();
         assert_eq!(report.scope, ReplayIndexResetScope::AllReplayRecords);
         assert!(db.list_replay_record_hashes().unwrap().is_empty());
-        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
     #[test]
@@ -5130,8 +5361,7 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
             let db = OperationalDb::open(&path).unwrap();
-            db.conn
-                .execute_batch(
+            db.with_sql(|connection| Ok(connection.execute_batch(
                     "INSERT INTO replay_records VALUES (
                         'dispatch.effect',
                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -5148,29 +5378,28 @@ mod tests {
                         '2026-01-01T00:00:00Z',
                         '2026-01-01T00:00:00Z'
                      );",
-                )
+                )?))
                 .unwrap();
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
                     rusqlite::params![REPLAY_INDEX_EPOCH - 1],
-                )
+                )?))
                 .unwrap();
         }
 
         assert!(OperationalDb::open(&path).is_err());
-        let (db, report) = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
+        prepared.activate().unwrap();
+        let (db, report) = prepared.take_activated().unwrap();
         assert_eq!(report.scope, ReplayIndexResetScope::DispatchEffects);
-        let rows: Vec<(String, String)> = db
-            .conn
-            .prepare("SELECT namespace, record_hash FROM replay_records ORDER BY namespace")
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
+        let rows: Vec<(String, String)> = db.with_sql(|connection| {
+            let mut statement = connection.prepare("SELECT namespace, record_hash FROM replay_records ORDER BY namespace")?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        }).unwrap();
         assert_eq!(rows, vec![("provider.call".to_string(), "f".repeat(64),)]);
-        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
     #[test]
@@ -5233,12 +5462,11 @@ mod tests {
         ] {
             let record = replay_record(key_char, answer_char, object_char);
             publish_verified(&db, &namespace("provider.call"), &record);
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
                      WHERE namespace = ? AND cache_key = ?",
                     rusqlite::params![produced, replayed, "provider.call", record.cache_key],
-                )
+                )?))
                 .unwrap();
         }
         assert_eq!(
@@ -5266,12 +5494,11 @@ mod tests {
         ] {
             let record = replay_record(key_char, answer_char, object_char);
             publish_verified(&db, &namespace("dispatch.effect"), &record);
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "UPDATE replay_records SET last_replayed_at = ?
                      WHERE namespace = ? AND cache_key = ?",
                     rusqlite::params![at, "dispatch.effect", record.cache_key],
-                )
+                )?))
                 .unwrap();
         }
 
@@ -5334,12 +5561,11 @@ mod tests {
         ] {
             let record = replay_record(key_char, answer_char, object_char);
             publish_verified(&db, &namespace("dispatch.effect"), &record);
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
                      WHERE namespace = ? AND cache_key = ?",
                     rusqlite::params![produced, replayed, "dispatch.effect", record.cache_key],
-                )
+                )?))
                 .unwrap();
         }
 
@@ -5357,21 +5583,19 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         let db = OperationalDb::open(&path).unwrap();
-        db.conn
-            .execute_batch(
+        db.with_sql(|connection| Ok(connection.execute_batch(
                 "CREATE TABLE tx_parent (id INTEGER PRIMARY KEY);
                  CREATE TABLE tx_child (
                      parent_id INTEGER NOT NULL,
                      FOREIGN KEY (parent_id) REFERENCES tx_parent(id)
                          DEFERRABLE INITIALLY DEFERRED
                  );",
-            )
+            )?))
             .unwrap();
 
         let error = db
             .immediate_transaction("operational commit failure", || {
-                db.conn
-                    .execute("INSERT INTO tx_child (parent_id) VALUES (1)", [])?;
+                db.with_sql(|connection| Ok(connection.execute("INSERT INTO tx_child (parent_id) VALUES (1)", [])?))?;
                 Ok(())
             })
             .unwrap_err();
@@ -5380,10 +5604,8 @@ mod tests {
             format!("{error:#}")
                 .contains("failed to commit operational commit failure transaction")
         );
-        assert!(db.conn.is_autocommit());
-        let rows: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))
+        assert!(db.with_sql(|connection| Ok(connection.is_autocommit())).unwrap());
+        let rows: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(rows, 0);
     }
@@ -5398,7 +5620,7 @@ mod tests {
             .immediate_transaction(
                 "operational rollback reporting",
                 || -> anyhow::Result<()> {
-                    db.conn.execute_batch("ROLLBACK")?;
+                    db.with_sql(|connection| Ok(connection.execute_batch("ROLLBACK")?))?;
                     anyhow::bail!("operational operation failed")
                 },
             )
@@ -5482,7 +5704,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();
-        db.conn.execute_batch("PRAGMA user_version=0;").unwrap();
+        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=0;")?)).unwrap();
         drop(db);
 
         let error = OperationalDb::open_at_runtime_state_dir(tempdir.path())
@@ -5501,7 +5723,7 @@ mod tests {
         let weakened = SCHEMA_SQL.replace(" CHECK (bytes >= 0)", "");
         sqlite_schema::init_owned(&conn, &operational_schema_spec(), &weakened, &path).unwrap();
 
-        let error = assert_current(&conn, &path).unwrap_err();
+        let error = assert_current(&conn, &path, None).unwrap_err();
         assert!(error.to_string().contains("complete schema SQL mismatch"));
     }
 
@@ -5529,8 +5751,7 @@ mod tests {
         let db = OperationalDb::open(&path).unwrap();
 
         let insert_job = |job_id: &str, state: &str, ts: &str, finished_at: Option<&str>| {
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "INSERT INTO sync_jobs (job_id, operation_type, peer, state, phase,
                         roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
                         attempt_count, max_attempts, last_error, result_json,
@@ -5539,17 +5760,16 @@ mod tests {
                         x'5b5d',x'5b5d',x'5b5d',x'5b5d',
                         1,1,NULL,NULL,?3,?3,?4)",
                     rusqlite::params![job_id, state, ts, finished_at],
-                )
+                )?))
                 .unwrap();
         };
         let insert_attempt = |attempt_id: &str, job_id: &str, ts: &str| {
-            db.conn
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "INSERT INTO sync_job_attempts (attempt_id, job_id, attempt_number,
                         worker_id, state, phase, started_at, updated_at, finished_at, error, result_json)
                      VALUES (?1,?2,1,'w','completed','done',?3,?3,?3,NULL,NULL)",
                     rusqlite::params![attempt_id, job_id, ts],
-                )
+                )?))
                 .unwrap();
         };
 

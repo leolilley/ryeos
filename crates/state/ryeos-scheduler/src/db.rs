@@ -4,10 +4,23 @@
 //! schema validation and its own recovery-generation pointer).
 //! Own `application_id`, own schema, own rebuild path.
 
-use std::path::{Path, PathBuf};
+use lillux::PinnedDirectory;
+use lillux_sqlite::{
+    BoundSqliteOrigin, OriginalNativeBoundInputs, OriginalNativeConnection,
+    OriginalNativeConnectionTerminal, OriginalNativeDomain, OriginalNativeFactory,
+    OriginalNativeOpenFailure, OriginalNativeCloseFailure, OriginalNativeTransientInputs,
+    OriginalSchedulerRetirement, OriginalSchedulerRetirementFailure, OriginalSchedulerRetirementInputs, CapturedSqliteProjection, CapturedSqliteRoleFacts, DrainedSqliteProjection,
+    DrainedSqliteRoleFacts, NativeRetentionReason, SqliteProjectionRetirementFailure, SqliteRole,
+    SqliteRoleMutationError, SqliteRoleMutationOutcome,
+};
+use lillux_sqlite::{ReadonlySqliteCopy, SqliteCopyLease};
+use std::{mem::ManuallyDrop, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
+use ryeos_scheduler_contract::{
+    SchedulerFireHistoryAccounting, SchedulerFireHistoryDiscardReport, validate_schedule_id,
+};
 
 use super::planning;
 use super::types::{
@@ -418,31 +431,6 @@ fn prepare_owned_schema(
     sqlite_schema::assert_complete_schema_sql(conn, ddl, path)
 }
 
-fn scheduler_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
-}
-
-fn validate_scheduler_sidecar_types(path: &Path) -> Result<()> {
-    for sidecar in [
-        scheduler_sidecar_path(path, "-wal"),
-        scheduler_sidecar_path(path, "-shm"),
-    ] {
-        match std::fs::symlink_metadata(&sidecar) {
-            Ok(metadata)
-                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => anyhow::bail!(
-                "scheduler database sidecar must be a regular non-symlink file: {}",
-                sidecar.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
 fn assert_recognized_stale_scheduler_projection(conn: &Connection, path: &Path) -> Result<()> {
     let unsupported: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('view', 'trigger')",
@@ -506,293 +494,1439 @@ fn assert_recognized_stale_scheduler_projection(conn: &Connection, path: &Path) 
     Ok(())
 }
 
-fn reset_owned_scheduler_projection(conn: Connection, path: &Path) -> Result<()> {
-    let checkpoint: (i64, i64, i64) = conn
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .context("checkpoint stale scheduler projection before replacement")?;
-    if checkpoint.0 != 0 || checkpoint.1 != checkpoint.2 {
-        anyhow::bail!(
-            "scheduler WAL checkpoint incomplete before replacement: busy={}, log={}, checkpointed={}",
-            checkpoint.0,
-            checkpoint.1,
-            checkpoint.2
-        );
-    }
-    conn.close()
-        .map_err(|(_, error)| error)
-        .context("close stale scheduler projection before replacement")?;
-    for target in [
-        scheduler_sidecar_path(path, "-shm"),
-        scheduler_sidecar_path(path, "-wal"),
-        path.to_path_buf(),
-    ] {
-        lillux::remove_file_durable(&target).with_context(|| {
-            format!(
-                "remove stale scheduler projection file {}",
-                target.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
 // ── Database wrapper ────────────────────────────────────────────────
 
-pub struct SchedulerDb {
-    inner: std::sync::Mutex<Connection>,
-    outbox_drain: std::sync::Mutex<()>,
+enum InspectionCustody {
+    Open(lillux_sqlite::ReadonlySqliteOpenFailure),
+    Close(lillux_sqlite::ReadonlySqliteCloseFailure),
+    Released(SchedulerInspectionRelease),
 }
-
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct SchedulerFireHistoryDiscardReport {
-    pub fires: usize,
-    pub outbox_snapshots: usize,
-    pub cursors: usize,
+/// Terminal native release retained independently of original cleanup authority.
+pub enum SchedulerInspectionRelease {
+    Closed(lillux_sqlite::ClosedSqliteInspection),
+    Acquisition(lillux_sqlite::ReleasedSqliteInspection),
 }
-
-impl SchedulerFireHistoryDiscardReport {
-    pub fn total_rows(&self) -> usize {
-        self.fires + self.outbox_snapshots + self.cursors
+/// Failed host-owned copy acquisition/close. The native owner independently
+/// retains the actual snapshot lease even if this error is abandoned.
+pub struct SchedulerInspectionCloseFailure {
+    custody: std::sync::Mutex<Option<InspectionCustody>>,
+    error: String,
+    inspection_error: Option<anyhow::Error>,
+}
+impl SchedulerInspectionCloseFailure {
+    pub fn retry_close(&self) -> Result<()> {
+        let mut custody = self
+            .custody
+            .lock()
+            .map_err(|_| anyhow!("inspection close lock poisoned"))?;
+        let result = match custody.take() {
+            Some(InspectionCustody::Open(owner)) => owner
+                .retry_close()
+                .map(SchedulerInspectionRelease::Acquisition)
+                .map_err(InspectionCustody::Open),
+            Some(InspectionCustody::Close(owner)) => owner
+                .retry_close()
+                .map(SchedulerInspectionRelease::Closed)
+                .map_err(InspectionCustody::Close),
+            Some(InspectionCustody::Released(release)) => {
+                *custody = Some(InspectionCustody::Released(release));
+                return Ok(());
+            }
+            None => anyhow::bail!("inspection release already transferred"),
+        };
+        match result {
+            Ok(release) => {
+                *custody = Some(InspectionCustody::Released(release));
+                Ok(())
+            }
+            Err(owner) => {
+                let error = match &owner {
+                    InspectionCustody::Open(failure) => {
+                        format!("{}; close: {:?}", failure.error(), failure.close_error())
+                    }
+                    InspectionCustody::Close(failure) => format!("{:?}", failure.error()),
+                    InspectionCustody::Released(_) => unreachable!("only failure custody here"),
+                };
+                *custody = Some(owner);
+                anyhow::bail!("inspection still retains same native copy owner: {error}")
+            }
+        }
     }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum SchedulerFireHistoryAccounting {
-    Exact {
-        counts: SchedulerFireHistoryDiscardReport,
-    },
-    UnavailableIncompatibleSchema,
-}
-
-impl SchedulerFireHistoryAccounting {
-    pub fn total_rows(&self) -> Option<usize> {
-        match self {
-            Self::Exact { counts } => Some(counts.total_rows()),
-            Self::UnavailableIncompatibleSchema => None,
+    /// Transfer a real terminal release once, after explicit retry succeeds.
+    /// A failed extraction preserves the SAME pending native owner.
+    pub fn take_release(&self) -> Result<SchedulerInspectionRelease> {
+        let mut custody = self
+            .custody
+            .lock()
+            .map_err(|_| anyhow!("inspection close lock poisoned"))?;
+        match custody.take() {
+            Some(InspectionCustody::Released(release)) => Ok(release),
+            pending => {
+                *custody = pending;
+                anyhow::bail!("inspection has no retained terminal release")
+            }
         }
     }
 }
+impl std::fmt::Debug for SchedulerInspectionCloseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerInspectionCloseFailure")
+            .field("error", &self.error)
+            .field("inspection_error", &self.inspection_error)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for SchedulerInspectionCloseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "scheduler copy owner retained: {}", self.error)
+    }
+}
+impl std::error::Error for SchedulerInspectionCloseFailure {}
+fn inspect_history_reset_conn(
+    conn: &Connection,
+    path: &Path,
+) -> Result<SchedulerFireHistoryAccounting> {
+    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        anyhow::bail!("scheduler database integrity check failed: {integrity}");
+    }
+    let spec = scheduler_schema_spec();
+    let app_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+    if app_id != spec.application_id {
+        anyhow::bail!("foreign scheduler database application_id {app_id}");
+    }
+    let exact = sqlite_schema::assert_owned(conn, &spec, path)
+        .and_then(|_| sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path));
+    if exact.is_err() {
+        assert_recognized_stale_scheduler_projection(conn, path)?;
+        return Ok(SchedulerFireHistoryAccounting::UnavailableIncompatibleSchema {});
+    }
+    fn count(conn: &Connection, table: &str) -> Result<usize> {
+        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })?;
+        usize::try_from(count).context("scheduler fire-history row count is invalid")
+    }
+    Ok(SchedulerFireHistoryAccounting::Exact {
+        counts: SchedulerFireHistoryDiscardReport {
+            fires: count(conn, "schedule_fires")?,
+            outbox_snapshots: count(conn, "schedule_fire_outbox")?,
+            cursors: count(conn, "schedule_cursors")?,
+        },
+    })
+}
+
+enum RetirementPhase {
+    Captured(CapturedSqliteProjection),
+    Drained(DrainedSqliteProjection),
+    Failed(SqliteProjectionRetirementFailure),
+}
+enum NativeRetirementPhase {
+    Owned(OriginalSchedulerRetirement),
+    Failed(OriginalSchedulerRetirementFailure),
+}
+enum DbOwner {
+    // An effect has exclusive custody outside the slot; never disposal proof.
+    CheckedOut,
+    BeforeOpen(OriginalNativeBoundInputs),
+    NeverOpened(OriginalNativeBoundInputs),
+    Live(OriginalNativeConnection),
+    Stale(OriginalNativeConnection),
+    Opening(OriginalNativeOpenFailure),
+    Closing(OriginalNativeCloseFailure),
+    Terminal(OriginalNativeConnectionTerminal),
+    NativeRetirement { generation: [u8; 16], phase: NativeRetirementPhase },
+    // Explicit standalone/test route; never a native startup fallback.
+    Memory(Connection),
+    MemoryClosing(Connection),
+    // Authenticated SQL-free stopped/offline source; no live native ticket.
+    Retirement { generation: [u8; 16], phase: RetirementPhase },
+    Closed,
+}
+struct OriginalSchedulerContext {
+    factory: Arc<OriginalNativeFactory>,
+    reference: sqlite_schema::ClosedNativeSchemaSqlReference,
+}
+pub struct SchedulerDb {
+    inner: ManuallyDrop<std::sync::Mutex<DbOwner>>,
+    original: ManuallyDrop<Option<OriginalSchedulerContext>>,
+    original_process: u32,
+    outbox_drain: std::sync::Mutex<()>,
+}
+
+/// The exact stopped live Scheduler owner after its database terminal has
+/// joined the native acknowledgement. This transfers its real DB and schema
+/// owners to the node finalizer; dropping it does not close or settle them.
+pub struct SchedulerNativeFinalizationOwner {
+    inner: ManuallyDrop<DbOwner>,
+    factory: ManuallyDrop<Option<Arc<OriginalNativeFactory>>>,
+    schema_reference: ManuallyDrop<Option<sqlite_schema::ClosedNativeSchemaSqlReference>>,
+    database_outside: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    database_outside_custody: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    database_never_opened: ManuallyDrop<Option<OriginalNativeBoundInputs>>,
+    database_refusal: Option<lillux_sqlite::OriginalNativeOutsideCustodyFailure>,
+    schema_outside: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    schema_outside_custody: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    schema_refusal: Option<sqlite_schema::NativeSchemaSqlReferenceOutsideFailure>,
+    original_process: u32,
+    outside_handoff_id: Option<SchedulerNativeStoreHandoffId>,
+}
+
+/// Opaque identity shared by one Scheduler finalization owner and the exact
+/// Store source progress that accepts its database and schema owners.
+#[derive(Clone)]
+pub struct SchedulerNativeStoreHandoffId {
+    process: u32,
+    identity: Arc<()>,
+}
+
+impl SchedulerNativeStoreHandoffId {
+    fn new(process: u32) -> Self {
+        Self { process, identity: Arc::new(()) }
+    }
+
+    pub fn same_handoff(&self, other: &Self) -> bool {
+        self.process == other.process && Arc::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulerNativeStoreSourceRole {
+    Database,
+    Schema,
+}
+
+/// Store-issued proof that this owner's actual database and schema source
+/// frames were both accepted by the same retained Store outside graph.
+pub struct SchedulerNativeStoreHandoffReceipt<'store> {
+    id: SchedulerNativeStoreHandoffId,
+    _store: std::marker::PhantomData<&'store ()>,
+}
+
+impl<'store> SchedulerNativeStoreHandoffReceipt<'store> {
+    /// # Safety
+    /// The borrowed value must be the exact live Store outside owner whose
+    /// retained source graph was verified for this handoff. This lifetime
+    /// keeps that Store owner borrowed until the affine receipt is consumed by
+    /// `finish_outside_handoff`; the caller must also have verified that the
+    /// handoff id labels one retained database source (opened or never-opened)
+    /// and one retained schema source in that graph, with associated failed-
+    /// admission and unused schema inputs joined.
+    pub unsafe fn from_store_source_join<Store: ?Sized>(
+        _store: &'store Store,
+        id: SchedulerNativeStoreHandoffId,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(id.process == std::process::id(), "foreign Scheduler Store handoff proof");
+        Ok(SchedulerNativeStoreHandoffReceipt {
+            id,
+            _store: std::marker::PhantomData,
+        })
+    }
+}
+
+/// Exact outside source phases extracted from one selected Scheduler. These
+/// remain affine owners until the node finalizer joins them to the Store's
+/// original physical inventory.
+pub enum SchedulerNativeDatabaseSource {
+    Connection(ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>),
+    NeverOpened(ManuallyDrop<OriginalNativeBoundInputs>),
+}
+
+#[must_use = "Scheduler sources must remain in custody until Store acceptance is proved"]
+pub struct SchedulerNativeOutsideSources {
+    process: u32,
+    handoff_id: SchedulerNativeStoreHandoffId,
+    database: ManuallyDrop<Option<SchedulerNativeDatabaseSource>>,
+    schema: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+}
+
+impl SchedulerNativeOutsideSources {
+    pub fn handoff_id(&self) -> Result<&SchedulerNativeStoreHandoffId> {
+        anyhow::ensure!(self.process == std::process::id(),
+            "foreign Scheduler outside source owner");
+        Ok(&self.handoff_id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.process == std::process::id()
+            && (&*self.database).is_none() && (&*self.schema).is_none()
+    }
+
+    /// # Safety
+    /// The returned source must stay in live custody and must either be
+    /// accepted by this handoff's Store progress or restored to this wrapper.
+    pub unsafe fn take_database(&mut self) -> Result<Option<SchedulerNativeDatabaseSource>> {
+        anyhow::ensure!(self.process == std::process::id(),
+            "foreign Scheduler outside source owner");
+        Ok((&mut *self.database).take())
+    }
+
+    /// # Safety
+    /// `source` is the exact database owner previously returned by this
+    /// handoff wrapper, was not accepted by a Store source frame, and the
+    /// wrapper's database slot is still empty in this process.
+    pub unsafe fn restore_database(&mut self, source: SchedulerNativeDatabaseSource) {
+        *self.database = Some(source);
+    }
+
+    /// # Safety
+    /// The returned source must stay in live custody and must either be
+    /// accepted by this handoff's Store progress or restored to this wrapper.
+    pub unsafe fn take_schema(
+        &mut self,
+    ) -> Result<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>> {
+        anyhow::ensure!(self.process == std::process::id(),
+            "foreign Scheduler outside source owner");
+        Ok((&mut *self.schema).take())
+    }
+
+    /// # Safety
+    /// `source` is the exact schema owner previously returned by this
+    /// handoff wrapper, was not accepted by a Store source frame, and the
+    /// wrapper's schema slot is still empty in this process.
+    pub unsafe fn restore_schema(
+        &mut self,
+        source: lillux_sqlite::OriginalNativeOutsideConnectionParts,
+    ) {
+        *self.schema = Some(source);
+    }
+}
+
+impl SchedulerNativeFinalizationOwner {
+    pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
+        anyhow::ensure!(self.original_process == std::process::id(),
+            "foreign Scheduler finalization owner");
+        let original_factory = (&*self.factory).as_ref()
+            .context("Scheduler finalization factory has already transferred")?;
+        factory.require_original_process()?;
+        anyhow::ensure!(Arc::ptr_eq(factory, original_factory),
+            "Scheduler finalization changed its original factory");
+        if let Some(reference) = (&*self.schema_reference).as_ref() {
+            reference.terminal().require_original(factory)?;
+        }
+        Ok(())
+    }
+
+    /// Actual scheduler terminal receipts used in the same factory ACK. A
+    /// never-opened admission contributes no native receipt; its bound inputs
+    /// remain retained inside this owner for the later physical handoff.
+    pub fn retained_native_terminals(&self) -> Result<Vec<OriginalNativeConnectionTerminal>> {
+        let factory = (&*self.factory).as_ref()
+            .context("Scheduler finalization factory has already transferred")?;
+        self.require_original(factory)?;
+        anyhow::ensure!((&*self.database_outside).is_none() && (&*self.database_outside_custody).is_none()
+            && (&*self.database_never_opened).is_none()
+            && self.database_refusal.is_none() && (&*self.schema_outside).is_none()
+            && (&*self.schema_outside_custody).is_none()
+            && self.schema_refusal.is_none(),
+            "Scheduler native sources already entered outside finalization");
+        let reference = (&*self.schema_reference).as_ref()
+            .context("Scheduler schema reference has already transferred")?;
+        let mut terminals = vec![reference.terminal().clone()];
+        match &*self.inner {
+            DbOwner::Terminal(terminal) => {
+                terminal.require_original(factory)?;
+                if !matches!(terminal,
+                    OriginalNativeConnectionTerminal::Released(receipt)
+                        if receipt.native_ticket().is_none())
+                {
+                    terminals.push(terminal.clone());
+                }
+            }
+            DbOwner::NeverOpened(_) => {}
+            _ => anyhow::bail!("Scheduler finalization owner is not at a closed native phase"),
+        }
+        Ok(terminals)
+    }
+
+    /// After aggregate acknowledgement, consume the exact Scheduler DB and
+    /// schema terminals into outside source packets. Every refusal remains in
+    /// this owner for same-phase retry; success releases this owner's factory
+    /// alias while keeping the real directory/authority sources retained.
+    pub fn prepare_outside_sources(
+        &mut self,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> Result<()> {
+        anyhow::ensure!(self.original_process == std::process::id(),
+            "foreign Scheduler finalization owner");
+        let factory = (&*self.factory).as_ref()
+            .context("Scheduler finalization factory already transferred")?;
+        factory.require_original_process()?;
+        aggregate.require_original(factory)?;
+
+        if let Some(failure) = self.database_refusal.take() {
+            match failure.into_original() {
+                Ok(terminal) => *self.inner = DbOwner::Terminal(terminal),
+                Err(failure) => {
+                    self.database_refusal = Some(failure);
+                    anyhow::bail!("Scheduler database outside-custody refusal remains retained");
+                }
+            }
+        }
+        if let Some(custody) = (&mut *self.database_outside_custody).take() {
+            match custody.into_original_parts() {
+                Ok(parts) => *self.database_outside = Some(parts),
+                Err(custody) => {
+                    *self.database_outside_custody = Some(custody);
+                    anyhow::bail!("Scheduler database outside source extraction remains retained");
+                }
+            }
+        }
+        if (&*self.database_outside).is_none() && (&*self.database_never_opened).is_none() {
+            let previous = std::mem::replace(&mut *self.inner, DbOwner::CheckedOut);
+            match previous {
+                DbOwner::Terminal(terminal) => {
+                    match terminal.into_outside_custody(aggregate) {
+                        Ok(custody) => match custody.into_original_parts() {
+                            Ok(parts) => *self.database_outside = Some(parts),
+                            Err(custody) => {
+                                *self.database_outside_custody = Some(custody);
+                                anyhow::bail!("Scheduler database outside source extraction remains retained");
+                            }
+                        },
+                        Err(failure) => match failure.into_original() {
+                            Ok(terminal) => {
+                                *self.inner = DbOwner::Terminal(terminal);
+                                anyhow::bail!("Scheduler database outside transfer refused; terminal restored");
+                            }
+                            Err(failure) => {
+                                self.database_refusal = Some(failure);
+                                anyhow::bail!("Scheduler database outside refusal remains retained");
+                            }
+                        },
+                    }
+                }
+                DbOwner::NeverOpened(inputs) => {
+                    *self.database_never_opened = Some(inputs);
+                }
+                other => {
+                    *self.inner = other;
+                    anyhow::bail!("Scheduler database has not reached a finalizable native phase");
+                }
+            }
+        }
+
+        if let Some(failure) = self.schema_refusal.take() {
+            match failure.into_original() {
+                Ok(reference) => *self.schema_reference = Some(reference),
+                Err((failure, error)) => {
+                    self.schema_refusal = Some(failure);
+                    return Err(error.context("Scheduler schema-reference outside refusal remains retained"));
+                }
+            }
+        }
+        if let Some(custody) = (&mut *self.schema_outside_custody).take() {
+            match custody.into_original_parts() {
+                Ok(parts) => *self.schema_outside = Some(parts),
+                Err(custody) => {
+                    *self.schema_outside_custody = Some(custody);
+                    anyhow::bail!("Scheduler schema outside source extraction remains retained");
+                }
+            }
+        }
+        if (&*self.schema_outside).is_none() {
+            let reference = (&mut *self.schema_reference).take()
+                .context("Scheduler schema reference already transferred")?;
+            match reference.into_outside_custody(aggregate) {
+                Ok(custody) => match custody.into_original_parts() {
+                    Ok(parts) => *self.schema_outside = Some(parts),
+                    Err(custody) => {
+                        *self.schema_outside_custody = Some(custody);
+                        anyhow::bail!("Scheduler schema outside source extraction remains retained");
+                    }
+                },
+                Err(failure) => {
+                    let error = anyhow::anyhow!(failure.to_string());
+                    self.schema_refusal = Some(failure);
+                    return Err(error.context("Scheduler schema-reference outside transfer refused"));
+                }
+            }
+        }
+
+        anyhow::ensure!((&*self.database_outside).is_some() || (&*self.database_never_opened).is_some(),
+            "Scheduler database source was not retained outside");
+        anyhow::ensure!((&*self.schema_outside).is_some(),
+            "Scheduler schema-reference source was not retained outside");
+        // The exact terminals have moved into sources whose authority edges are
+        // weak. No later finalization stage may consult resident factory state.
+        drop((&mut *self.factory).take());
+        Ok(())
+    }
+
+    /// # Safety
+    /// The returned source owner must remain retained until the exact Store
+    /// progress accepts both source legs and issues its handoff receipt.
+    pub unsafe fn take_outside_sources(
+        &mut self,
+    ) -> Result<SchedulerNativeOutsideSources> {
+        anyhow::ensure!(self.original_process == std::process::id(),
+            "foreign Scheduler finalization owner");
+        anyhow::ensure!((&*self.factory).is_none()
+            && (&*self.database_outside_custody).is_none()
+            && (&*self.schema_outside_custody).is_none()
+            && self.database_refusal.is_none() && self.schema_refusal.is_none(),
+            "Scheduler outside sources have not completed their native handoff");
+        let handoff_id = self.outside_handoff_id.get_or_insert_with(||
+            SchedulerNativeStoreHandoffId::new(self.original_process)).clone();
+        let database = if let Some(parts) = (&mut *self.database_outside).take() {
+            SchedulerNativeDatabaseSource::Connection(ManuallyDrop::new(parts))
+        } else {
+            SchedulerNativeDatabaseSource::NeverOpened(ManuallyDrop::new(
+                (&mut *self.database_never_opened).take()
+                    .context("Scheduler database source absent after finalization")?,
+            ))
+        };
+        let schema = (&mut *self.schema_outside).take()
+            .context("Scheduler schema-reference source absent after finalization")?;
+        Ok(SchedulerNativeOutsideSources {
+            process: self.original_process,
+            handoff_id,
+            database: ManuallyDrop::new(Some(database)),
+            schema: ManuallyDrop::new(Some(schema)),
+        })
+    }
+
+    /// Retire this emptied wrapper only after the node finalizer accepted both
+    /// actual Scheduler sources into its retained Store inventory.
+    pub fn finish_outside_handoff(
+        self,
+        receipt: SchedulerNativeStoreHandoffReceipt<'_>,
+    ) -> std::result::Result<(), (Self, anyhow::Error)> {
+        let checked = (|| -> Result<()> {
+            anyhow::ensure!(self.original_process == std::process::id(),
+                "foreign Scheduler finalization owner");
+            let handoff_id = self.outside_handoff_id.as_ref()
+                .context("Scheduler Store handoff identity absent")?;
+            anyhow::ensure!(receipt.id.same_handoff(handoff_id),
+                "Scheduler Store handoff proof names another source set");
+            anyhow::ensure!((&*self.factory).is_none()
+            && (&*self.schema_reference).is_none()
+            && (&*self.database_outside).is_none()
+            && (&*self.database_outside_custody).is_none()
+            && (&*self.database_never_opened).is_none()
+            && self.database_refusal.is_none()
+            && (&*self.schema_outside).is_none()
+            && (&*self.schema_outside_custody).is_none()
+            && self.schema_refusal.is_none(),
+                "Scheduler finalization owner still retains outside sources");
+            anyhow::ensure!(matches!(&*self.inner, DbOwner::CheckedOut),
+                "Scheduler finalization owner still retains its database phase");
+            Ok(())
+        })();
+        if let Err(error) = checked { return Err((self, error)); }
+        let inner = ManuallyDrop::into_inner(self.inner);
+        drop(inner);
+        Ok(())
+    }
+}
+
+impl Drop for SchedulerDb {
+    fn drop(&mut self) {
+        // Forked copies must not traverse or dispose inherited SQL custody.
+        if self.original_process != std::process::id() { return; }
+        // Original native and stopped/offline owners remain inert. Their
+        // explicit close/release and exact census are the only disposition.
+        if self.original.is_some() { return; }
+        let owner = self.inner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(&*owner, DbOwner::Memory(_) | DbOwner::MemoryClosing(_)) {
+            // This explicit standalone route has ordinary Connection Drop,
+            // including a retained failed memory close. No native/offline
+            // owner is moved or destroyed through this branch.
+            let memory = std::mem::replace(owner, DbOwner::CheckedOut);
+            match memory {
+                DbOwner::Memory(connection) | DbOwner::MemoryClosing(connection) => drop(connection),
+                _ => unreachable!("exclusive checked standalone memory owner"),
+            }
+        }
+    }
+}
+#[derive(Debug)]
+pub enum SchedulerDbCloseError {
+    Connection(String),
+    NativeCustody(NativeRetentionReason),
+    Poisoned,
+    RetirementPending,
+    OriginalProcess,
+    Native(String),
+}
+impl std::fmt::Display for SchedulerDbCloseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for SchedulerDbCloseError {}
+/// Errors contain diagnostics; the actual owner remains in SchedulerDb.
+#[derive(Debug)]
+pub enum SchedulerDbRetirementError {
+    InvalidPhase,
+    GenerationMismatch,
+    Poisoned,
+    Host(String),
+    Role(SqliteRoleMutationError),
+    Resolution(lillux_sqlite::SqliteRoleResolutionError),
+    Unstarted(RetainedSchedulerRetirementInputs),
+}
+impl std::fmt::Display for SchedulerDbRetirementError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for SchedulerDbRetirementError {}
+/// Actual input custody on a refusal before the DB transfers its owner.
+/// Discarding this diagnostic cannot drop the original authority lifelines.
+pub struct RetainedSchedulerRetirementInputs {
+    inputs: ManuallyDrop<Option<OriginalSchedulerRetirementInputs>>,
+    original_process: u32,
+}
+impl std::fmt::Debug for RetainedSchedulerRetirementInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original scheduler retirement inputs retained before transfer")
+    }
+}
+impl RetainedSchedulerRetirementInputs {
+    pub fn into_inputs(mut self) -> std::result::Result<OriginalSchedulerRetirementInputs, Self> {
+        if self.original_process != std::process::id() { return Err(self); }
+        // SAFETY: exclusive original-process transfer, with no authority effect.
+        let inputs = unsafe { ManuallyDrop::take(&mut self.inputs) };
+        Ok(inputs.expect("actual retained retirement inputs"))
+    }
+}
+enum OpenCustody {
+    Database(SchedulerDb),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerDbOpenDisposition {
+    StoppedProjectionIntake,
+    Refused,
+    RecognizedStaleProjection,
+}
+pub struct SchedulerDbOpenFailure {
+    disposition: SchedulerDbOpenDisposition,
+    error: anyhow::Error,
+    custody: Option<OpenCustody>,
+    close_error: Option<SchedulerDbCloseError>,
+}
+impl SchedulerDbOpenFailure {
+    pub fn observe_stopped_projection(
+        &self,
+    ) -> std::result::Result<
+        lillux_sqlite::StoppedSqliteProjectionObservation,
+        SchedulerDbRetirementError,
+    > {
+        match &self.custody {
+            Some(OpenCustody::Database(db))
+                if self.disposition == SchedulerDbOpenDisposition::StoppedProjectionIntake =>
+            {
+                db.observe_stopped_projection()
+            }
+            _ => Err(SchedulerDbRetirementError::InvalidPhase),
+        }
+    }
+    /// Consume only this exact failed stopped DB, never normal-open fallback.
+    pub fn retry_stopped_projection(
+        mut self,
+        plan: &lillux_sqlite::StoppedSqliteProjectionPlan,
+    ) -> std::result::Result<SchedulerDb, Self> {
+        if self.disposition != SchedulerDbOpenDisposition::StoppedProjectionIntake {
+            return Err(self);
+        }
+        let db = match self.custody.take() {
+            Some(OpenCustody::Database(db)) => db,
+            other => {
+                self.custody = other;
+                return Err(self);
+            }
+        };
+        match db.retry_stopped_projection(plan) {
+            Ok(_) => Ok(db),
+            Err(error) => {
+                self.error = anyhow::Error::new(error);
+                self.custody = Some(OpenCustody::Database(db));
+                Err(self)
+            }
+        }
+    }
+    /// Explicit cleanup-only settlement; generic close never aborts retirement.
+    pub fn abort_stopped_projection(mut self) -> std::result::Result<(), Self> {
+        if self.disposition != SchedulerDbOpenDisposition::StoppedProjectionIntake {
+            return Err(self);
+        }
+        let db = match self.custody.take() {
+            Some(OpenCustody::Database(db)) => db,
+            other => {
+                self.custody = other;
+                return Err(self);
+            }
+        };
+        match db.abort_projection_retirement() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.error = anyhow::Error::new(error);
+                self.custody = Some(OpenCustody::Database(db));
+                Err(self)
+            }
+        }
+    }
+    pub fn disposition(&self) -> SchedulerDbOpenDisposition {
+        self.disposition
+    }
+    /// Transfer the original recognized stale owner to the stopped controller.
+    /// No SQL close, reopen, or reconstruction of physical authority occurs.
+    pub fn into_stale_projection(mut self) -> std::result::Result<SchedulerDb, Self> {
+        if self.disposition != SchedulerDbOpenDisposition::RecognizedStaleProjection {
+            return Err(self);
+        }
+        match self.custody.take() {
+            Some(OpenCustody::Database(db)) => Ok(db),
+            other => {
+                self.custody = other;
+                Err(self)
+            }
+        }
+    }
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
+    pub fn close_error(&self) -> Option<&SchedulerDbCloseError> {
+        self.close_error.as_ref()
+    }
+    pub fn has_retained_owner(&self) -> bool {
+        self.custody.is_some()
+    }
+    /// Successful cleanup preserves this owner and its actual receipts for
+    /// the original factory census; success never discards the paid reference.
+    pub fn retry_close(mut self) -> std::result::Result<Self, Self> {
+        let result = match self.custody.as_ref() {
+            Some(OpenCustody::Database(db)) => db.close(),
+            None => return Ok(self),
+        };
+        match result {
+            Ok(()) => Ok(self),
+            Err(error) => { self.close_error = Some(error); Err(self) }
+        }
+    }
+    /// Consume a live failed-open owner only after its caller has reached the
+    /// same typed terminal phase as an ordinary Scheduler shutdown. The
+    /// original open error has already been returned to the startup caller;
+    /// this transfer preserves the database and paid schema source, not a
+    /// second diagnostic owner.
+    pub fn into_native_finalization_owner(
+        mut self,
+    ) -> std::result::Result<SchedulerNativeFinalizationOwner, (Self, anyhow::Error)> {
+        let db = match self.custody.take() {
+            Some(OpenCustody::Database(db)) => db,
+            other => {
+                self.custody = other;
+                return Err((self, anyhow::anyhow!(
+                    "Scheduler open failure lacks its original database owner")));
+            }
+        };
+        match db.into_native_finalization() {
+            Ok(owner) => Ok(owner),
+            Err((db, error)) => {
+                self.custody = Some(OpenCustody::Database(db));
+                Err((self, error))
+            }
+        }
+    }
+    pub fn retained_native_terminals(&self) -> Result<Vec<OriginalNativeConnectionTerminal>> {
+        match self.custody.as_ref() {
+            Some(OpenCustody::Database(db)) => db.retained_native_terminals(),
+            None => anyhow::bail!("scheduler failure has no retained database custody"),
+        }
+    }
+
+}
+impl std::fmt::Debug for SchedulerDbOpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerDbOpenFailure")
+            .field("error", &self.error)
+            .field("retained_owner", &self.has_retained_owner())
+            .finish()
+    }
+}
+impl std::fmt::Display for SchedulerDbOpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+impl std::error::Error for SchedulerDbOpenFailure {}
 
 impl SchedulerDb {
+    /// Transfer a closed original Scheduler into its retained node-finalizer
+    /// owner. Callers must first consume every Arc alias (normally with
+    /// `Arc::try_unwrap`) after stopping the scheduler service. Refusal returns
+    /// the same complete Scheduler with no owner movement.
+    pub fn into_native_finalization(
+        self,
+    ) -> std::result::Result<SchedulerNativeFinalizationOwner, (Self, anyhow::Error)> {
+        let checked = (|| -> Result<()> {
+            self.require_process()?;
+            let original = self.original.as_ref()
+                .context("Scheduler has no original live native context")?;
+            original.factory.require_original_process()?;
+            original.reference.terminal().require_original(&original.factory)?;
+            let inner = self.inner.try_lock()
+                .map_err(|_| anyhow!("Scheduler finalization owner is busy or poisoned"))?;
+            match &*inner {
+                DbOwner::Terminal(terminal) => terminal.require_original(&original.factory)?,
+                DbOwner::NeverOpened(_) => {}
+                _ => anyhow::bail!("Scheduler close has not reached a consuming finalization phase"),
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            return Err((self, error));
+        }
+
+        // SAFETY: the complete original Scheduler value is consumed above;
+        // the validated Mutex state and schema context move together into the
+        // inert finalization owner. Its custom Drop is intentionally bypassed
+        // so the SchedulerDb Drop implementation cannot inspect moved fields.
+        let mut original = ManuallyDrop::new(self);
+        let owner = unsafe { ManuallyDrop::take(&mut original.inner) }
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let context = unsafe { ManuallyDrop::take(&mut original.original) }
+            .expect("validated original Scheduler context");
+        let process = original.original_process;
+        // The outbox mutex is ordinary coordination state, not a retained
+        // native owner; no outstanding guard can survive consumption of the
+        // Scheduler's unique owner.
+        unsafe { std::ptr::drop_in_place(&mut original.outbox_drain) };
+        let OriginalSchedulerContext { factory, reference } = context;
+        Ok(SchedulerNativeFinalizationOwner {
+            inner: ManuallyDrop::new(owner),
+            factory: ManuallyDrop::new(Some(factory)),
+            schema_reference: ManuallyDrop::new(Some(reference)),
+            database_outside: ManuallyDrop::new(None),
+            database_outside_custody: ManuallyDrop::new(None),
+            database_never_opened: ManuallyDrop::new(None),
+            database_refusal: None,
+            schema_outside: ManuallyDrop::new(None),
+            schema_outside_custody: ManuallyDrop::new(None),
+            schema_refusal: None,
+            original_process: process,
+            outside_handoff_id: None,
+        })
+    }
+
+    /// No SQL construction; signed stopped current-object intent precedes intake.
+    /// Original copied-source retirement and recovered remaining-source retirement
+    /// both use this owner. Complete original accounting/schema admission belongs
+    /// to the independently authenticated disposable-copy caller, not a live open.
+    /// Success retains verified current pins/barriers; failure retains the SAME
+    /// native intake owner for exact-plan retry rather than falling back to SQL.
+    pub fn capture_stopped_projection(
+        runtime: Arc<PinnedDirectory>,
+        plan: lillux_sqlite::StoppedSqliteProjectionPlan,
+    ) -> std::result::Result<Self, SchedulerDbOpenFailure> {
+        let generation = plan.generation;
+        let (phase, error) =
+            match DrainedSqliteProjection::capture_stopped_projection(runtime, plan) {
+                Ok(owner) => (RetirementPhase::Drained(owner), None),
+                Err(failure) => {
+                    let error = anyhow!("stopped scheduler intake retained: {failure}");
+                    (RetirementPhase::Failed(failure), Some(error))
+                }
+            };
+        let db = Self {
+            inner: ManuallyDrop::new(std::sync::Mutex::new(DbOwner::Retirement { generation, phase })),
+            original: ManuallyDrop::new(None), original_process: std::process::id(),
+            outbox_drain: std::sync::Mutex::new(()),
+        };
+        match error {
+            None => Ok(db),
+            Some(error) => Err(SchedulerDbOpenFailure {
+                disposition: SchedulerDbOpenDisposition::StoppedProjectionIntake,
+                error,
+                custody: Some(OpenCustody::Database(db)),
+                close_error: None,
+            }),
+        }
+    }
+    pub fn retry_stopped_projection(
+        &self,
+        plan: &lillux_sqlite::StoppedSqliteProjectionPlan,
+    ) -> std::result::Result<DrainedSqliteRoleFacts, SchedulerDbRetirementError> {
+        self.retirement_transition(|phase| {
+            let result = match phase {
+                RetirementPhase::Failed(failure) => failure.retry_stopped_projection(plan),
+                RetirementPhase::Drained(owner)
+                    if owner
+                        .observe_stopped_projection()
+                        .is_ok_and(|observed| observed.plan == *plan && observed.ready) =>
+                {
+                    let facts = owner.role_facts().clone();
+                    return Ok((Some(RetirementPhase::Drained(owner)), facts));
+                }
+                phase => return Err((phase, SchedulerDbRetirementError::InvalidPhase)),
+            };
+            match result {
+                Ok(owner) => {
+                    let facts = owner.role_facts().clone();
+                    Ok((Some(RetirementPhase::Drained(owner)), facts))
+                }
+                Err(failure) => {
+                    let error = SchedulerDbRetirementError::Host(failure.to_string());
+                    Err((RetirementPhase::Failed(failure), error))
+                }
+            }
+        })
+    }
+    /// Read-only stopped observations from the SAME partial or ready owner.
+    pub fn observe_stopped_projection(
+        &self,
+    ) -> std::result::Result<
+        lillux_sqlite::StoppedSqliteProjectionObservation,
+        SchedulerDbRetirementError,
+    > {
+        self.retirement_transition(|phase| {
+            let result = match &phase {
+                RetirementPhase::Drained(owner) => owner.observe_stopped_projection(),
+                RetirementPhase::Failed(failure) => match failure.owner() {
+                    lillux_sqlite::SqliteProjectionRetirementOwner::Drained(owner) => {
+                        owner.observe_stopped_projection()
+                    }
+                    _ => return Err((phase, SchedulerDbRetirementError::InvalidPhase)),
+                },
+                _ => return Err((phase, SchedulerDbRetirementError::InvalidPhase)),
+            };
+            match result {
+                Ok(observed) => Ok((Some(phase), observed)),
+                Err(error) => Err((phase, SchedulerDbRetirementError::Host(error.to_string()))),
+            }
+        })
+    }
     /// Inspect a disposable copy for explicit offline history retirement.
     /// Reuse the owning store's stale-projection recognition, but never rebuild
     /// the copy or decode predecessor rows to manufacture an empty count.
     /// Unlike retention reads, retirement does not require a complete fire
     /// projection: all fire history has been selected for discard.
-    pub fn inspect_history_reset(path: &Path) -> Result<SchedulerFireHistoryAccounting> {
-        let metadata = std::fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            anyhow::bail!("scheduler inspection requires a regular non-symlink file");
-        }
-        validate_scheduler_sidecar_types(path)?;
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            anyhow::bail!(
-                "scheduler database integrity check failed for {}: {integrity}",
-                path.display()
-            );
-        }
-        let spec = scheduler_schema_spec();
-        let app_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-        if app_id != spec.application_id {
-            anyhow::bail!(
-                "scheduler database application_id is {app_id}, expected {}; foreign database at {}",
-                spec.application_id,
-                path.display()
-            );
-        }
-        let exact = sqlite_schema::assert_owned(&conn, &spec, path)
-            .and_then(|_| sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path));
-        if exact.is_err() {
-            assert_recognized_stale_scheduler_projection(&conn, path)?;
-            return Ok(SchedulerFireHistoryAccounting::UnavailableIncompatibleSchema);
-        }
-        let db = Self {
-            inner: std::sync::Mutex::new(conn),
-            outbox_drain: std::sync::Mutex::new(()),
+    pub fn inspect_history_reset(
+        copy: Arc<PinnedDirectory>,
+        lease: SqliteCopyLease,
+        sql_work: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
+    ) -> Result<(
+        Result<SchedulerFireHistoryAccounting>,
+        lillux_sqlite::ClosedSqliteInspection,
+    )> {
+        let path = copy.path().join("scheduler.sqlite3");
+        let owner = match ReadonlySqliteCopy::open(
+            copy,
+            std::ffi::OsStr::new("scheduler.sqlite3"),
+            lease,
+            sql_work.clone(),
+        ) {
+            Ok(owner) => owner,
+            Err(failure) => {
+                return Err(anyhow::Error::new(SchedulerInspectionCloseFailure {
+                    error: format!("{}", failure.error()),
+                    inspection_error: None,
+                    custody: std::sync::Mutex::new(Some(InspectionCustody::Open(failure))),
+                }));
+            }
         };
-        Ok(SchedulerFireHistoryAccounting::Exact {
-            counts: db.discard_fire_history(true)?,
-        })
-    }
-
-    pub fn open(path: &Path) -> Result<Self> {
-        // `:memory:` is SQLite's process-local database identity, not a
-        // filesystem pathname. Keep the fresh-projection semantics of
-        // `open` while bypassing pathname ownership checks that cannot apply.
-        if path == Path::new(":memory:") {
-            let conn = Connection::open_in_memory()
-                .context("failed to open fresh in-memory scheduler db")?;
-            let spec = scheduler_schema_spec();
-            prepare_owned_schema(&conn, &spec, SCHEMA_SQL, path)?;
-            return Ok(Self {
-                inner: std::sync::Mutex::new(conn),
-                outbox_drain: std::sync::Mutex::new(()),
+        let accounting = sql_work
+            .checkpoint()
+            .and_then(|_| inspect_history_reset_conn(owner.connection(), &path))
+            .and_then(|value| {
+                sql_work.checkpoint()?;
+                Ok(value)
             });
+        match owner.close() {
+            Ok(proof) => Ok((accounting, proof)),
+            Err(failure) => Err(anyhow::Error::new(SchedulerInspectionCloseFailure {
+                error: format!("{:?}", failure.error()),
+                inspection_error: accounting.err(),
+                custody: std::sync::Mutex::new(Some(InspectionCustody::Close(failure))),
+            })),
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create scheduler db dir {}", parent.display())
-            })?;
-            let metadata = std::fs::symlink_metadata(parent)?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-                anyhow::bail!(
-                    "scheduler db parent must be a real directory: {}",
-                    parent.display()
-                );
-            }
-        }
-        let spec = scheduler_schema_spec();
-        let existed = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                    anyhow::bail!(
-                        "scheduler db must be a regular non-symlink file: {}",
-                        path.display()
-                    );
-                }
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        validate_scheduler_sidecar_types(path)?;
-        if !existed {
-            for sidecar in [
-                scheduler_sidecar_path(path, "-wal"),
-                scheduler_sidecar_path(path, "-shm"),
-            ] {
-                if std::fs::symlink_metadata(&sidecar).is_ok() {
-                    anyhow::bail!(
-                        "orphan scheduler sidecar exists without owned database: {}",
-                        sidecar.display()
-                    );
-                }
-            }
-        }
-        let mut conn = Connection::open(path)
-            .with_context(|| format!("failed to open scheduler db {}", path.display()))?;
-
-        if existed {
-            let integrity: String = conn
-                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-                .context("run scheduler database integrity check")?;
-            if integrity != "ok" {
-                anyhow::bail!(
-                    "scheduler database integrity check failed for {}: {integrity}",
-                    path.display()
-                );
-            }
-            let app_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-            if app_id == spec.application_id {
-                let exact = sqlite_schema::assert_owned(&conn, &spec, path).and_then(|_| {
-                    sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path)
-                });
-                if exact.is_err() {
-                    assert_recognized_stale_scheduler_projection(&conn, path)?;
-                    tracing::warn!(
-                        path = %path.display(),
-                        "replacing stale owned scheduler projection from signed specs and fire journals"
-                    );
-                    reset_owned_scheduler_projection(conn, path)?;
-                    conn = Connection::open(path)
-                        .with_context(|| format!("reopen reset scheduler db {}", path.display()))?;
-                }
-            } else if app_id != 0 {
-                anyhow::bail!(
-                    "scheduler database application_id is {app_id}, expected {}; foreign database at {}",
-                    spec.application_id,
-                    path.display()
-                );
-            }
-        }
-        prepare_owned_schema(&conn, &spec, SCHEMA_SQL, path)?;
-        Ok(Self {
-            inner: std::sync::Mutex::new(conn),
-            outbox_drain: std::sync::Mutex::new(()),
-        })
     }
 
+    /// Build only this module's declared schema in the SAME paid factory.
+    /// Every typed preparation failure must remain in composition custody.
+    pub fn prepare_scheduler_schema_reference(
+        factory: Arc<OriginalNativeFactory>, inputs: OriginalNativeTransientInputs,
+    ) -> std::result::Result<sqlite_schema::ClosedNativeSchemaSqlReference, sqlite_schema::NativeSchemaSqlReferenceFailure> {
+        sqlite_schema::prepare_native_schema_sql_reference(
+            factory, inputs, OriginalNativeDomain::NodeSchedulerSchemaReference, SCHEMA_SQL,
+        )
+    }
+    /// Genuine fixed-role inputs and actual paid closed reference are required.
+    /// No ordinary Bound or reference database fallback exists on this path.
+    pub fn open_original_scheduler(
+        factory: Arc<OriginalNativeFactory>, inputs: OriginalNativeBoundInputs,
+        reference: sqlite_schema::ClosedNativeSchemaSqlReference,
+    ) -> std::result::Result<Self, SchedulerDbOpenFailure> {
+        let db = Self {
+            inner: ManuallyDrop::new(std::sync::Mutex::new(DbOwner::BeforeOpen(inputs))),
+            original: ManuallyDrop::new(Some(OriginalSchedulerContext { factory, reference })),
+            original_process: std::process::id(), outbox_drain: std::sync::Mutex::new(()),
+        };
+        let mut disposition = SchedulerDbOpenDisposition::Refused;
+        let preparation = (|| -> Result<()> {
+            db.require_process()?;
+            let original = db.original.as_ref().context("original scheduler factory absent")?;
+            original.factory.require_ready()?;
+            original.reference.terminal().require_original(&original.factory)?;
+            anyhow::ensure!(matches!(original.reference.terminal(),
+                OriginalNativeConnectionTerminal::Closed(closed)
+                    if closed.domain() == OriginalNativeDomain::NodeSchedulerSchemaReference),
+                "scheduler reference has foreign actual purpose");
+            {
+                let mut guard = db.inner.try_lock().map_err(|_| anyhow!("scheduler open owner busy"))?;
+                let DbOwner::BeforeOpen(inputs) = &*guard else { anyhow::bail!("scheduler open already attempted") };
+                inputs.require_scheduler_coordinate()?;
+                let DbOwner::BeforeOpen(inputs) = std::mem::replace(&mut *guard, DbOwner::CheckedOut) else { unreachable!() };
+                match original.factory.open_bound(inputs) {
+                    Ok(owner) => *guard = DbOwner::Live(owner),
+                    Err(failure) => {
+                        // Actual partial owner precedes diagnostic allocation.
+                        *guard = DbOwner::Opening(failure);
+                        anyhow::bail!("original scheduler acquisition retained")
+                    }
+                }
+            }
+            let existed = db.with_live_owner(|owner| owner.scheduler_bound_origin())? == BoundSqliteOrigin::Existing;
+            db.with_sql(|conn| {
+                let path = Path::new("scheduler.sqlite3");
+                let spec = scheduler_schema_spec();
+                if existed {
+                    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+                    anyhow::ensure!(integrity == "ok", "scheduler database integrity check failed: {integrity}");
+                    let app_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+                    if app_id == spec.application_id {
+                        let exact = sqlite_schema::assert_owned(conn, &spec, path)
+                            .and_then(|_| original.reference.definition().require_matches(conn, path));
+                        if exact.is_err() {
+                            assert_recognized_stale_scheduler_projection(conn, path)?;
+                            disposition = SchedulerDbOpenDisposition::RecognizedStaleProjection;
+                            anyhow::bail!("recognized stale scheduler projection requires authenticated host retirement")
+                        }
+                    } else if app_id != 0 { anyhow::bail!("foreign scheduler database application_id {app_id}") }
+                }
+                sqlite_schema::prepare_owned(conn, &spec, SCHEMA_SQL, path, |_| Ok(()))?;
+                original.reference.definition().require_matches(conn, path)
+            })?;
+            db.with_live_owner(|owner| owner.establish_scheduler_wal_binding())
+        })();
+        match preparation {
+            Ok(()) => Ok(db),
+            Err(error) => {
+                if disposition == SchedulerDbOpenDisposition::RecognizedStaleProjection {
+                    let mut guard = db.inner.try_lock().expect("private scheduler constructor owner");
+                    if matches!(&*guard, DbOwner::Live(_)) {
+                        let DbOwner::Live(owner) = std::mem::replace(&mut *guard, DbOwner::CheckedOut) else { unreachable!() };
+                        *guard = DbOwner::Stale(owner);
+                    }
+                }
+                Err(SchedulerDbOpenFailure { disposition, error,
+                    custody: Some(OpenCustody::Database(db)), close_error: None })
+            }
+        }
+    }
+    /// Caller retains actual signed immutable intent and original authority.
+    /// Refusals before transfer return the actual input owner in Unstarted.
+    pub fn capture_projection_retirement(
+        &self, generation: [u8; 16], inputs: OriginalSchedulerRetirementInputs,
+    ) -> std::result::Result<CapturedSqliteRoleFacts, SchedulerDbRetirementError> {
+        let mut retained = RetainedSchedulerRetirementInputs {
+            inputs: ManuallyDrop::new(Some(inputs)), original_process: self.original_process,
+        };
+        if self.require_process().is_err()
+            || retained.inputs.as_ref().expect("actual input").generation() != generation {
+            return Err(SchedulerDbRetirementError::Unstarted(retained));
+        }
+        let mut guard = match self.inner.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(SchedulerDbRetirementError::Unstarted(retained)),
+        };
+        if !matches!(&*guard, DbOwner::Live(_) | DbOwner::Stale(_)) {
+            return Err(SchedulerDbRetirementError::Unstarted(retained));
+        }
+        let previous = std::mem::replace(&mut *guard, DbOwner::CheckedOut);
+        let owner = match previous { DbOwner::Live(owner) | DbOwner::Stale(owner) => owner, _ => unreachable!() };
+        // SAFETY: original-process input transfers exactly once to SAME owner.
+        let inputs = unsafe { ManuallyDrop::take(&mut retained.inputs) }.expect("actual input");
+        match owner.begin_scheduler_retirement(inputs) {
+            Ok((owner, facts)) => {
+                *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Owned(owner) };
+                Ok(facts)
+            }
+            Err(failure) => {
+                *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Failed(failure) };
+                Err(SchedulerDbRetirementError::Host("original native scheduler capture retained".into()))
+            }
+        }
+    }
+    pub fn retry_projection_capture(&self, generation: [u8; 16])
+        -> std::result::Result<CapturedSqliteRoleFacts, SchedulerDbRetirementError> {
+        self.native_retirement_transition(Some(generation), |owner| owner.capture())
+    }
+    fn has_native_retirement(&self) -> std::result::Result<bool, SchedulerDbRetirementError> {
+        self.require_process().map_err(|_| SchedulerDbRetirementError::InvalidPhase)?;
+        let guard = self.inner.try_lock().map_err(|_| SchedulerDbRetirementError::Poisoned)?;
+        Ok(matches!(&*guard, DbOwner::NativeRetirement { .. }))
+    }
+    fn native_retirement_transition<T>(&self, expected: Option<[u8; 16]>,
+        operation: impl FnOnce(OriginalSchedulerRetirement)
+            -> std::result::Result<(OriginalSchedulerRetirement, T), OriginalSchedulerRetirementFailure>,
+    ) -> std::result::Result<T, SchedulerDbRetirementError> {
+        self.require_process().map_err(|_| SchedulerDbRetirementError::InvalidPhase)?;
+        let mut guard = self.inner.try_lock().map_err(|_| SchedulerDbRetirementError::Poisoned)?;
+        let previous = std::mem::replace(&mut *guard, DbOwner::CheckedOut);
+        let DbOwner::NativeRetirement { generation, phase } = previous else {
+            *guard = previous; return Err(SchedulerDbRetirementError::InvalidPhase);
+        };
+        if expected.is_some_and(|expected| expected != generation) {
+            *guard = DbOwner::NativeRetirement { generation, phase };
+            return Err(SchedulerDbRetirementError::GenerationMismatch);
+        }
+        let owner = match phase {
+            NativeRetirementPhase::Owned(owner) => owner,
+            NativeRetirementPhase::Failed(failure) => match failure.into_owner() {
+                Ok(owner) => owner,
+                Err(failure) => {
+                    *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Failed(failure) };
+                    return Err(SchedulerDbRetirementError::Host("native retirement custody transfer refused".into()));
+                }
+            },
+        };
+        match operation(owner) {
+            Ok((owner, value)) => {
+                *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Owned(owner) }; Ok(value)
+            }
+            Err(failure) => {
+                *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Failed(failure) };
+                Err(SchedulerDbRetirementError::Host("native retirement effect retained".into()))
+            }
+        }
+    }
+    fn finish_native_retirement(&self, abort: bool) -> std::result::Result<(), SchedulerDbRetirementError> {
+        self.require_process().map_err(|_| SchedulerDbRetirementError::InvalidPhase)?;
+        let mut guard = self.inner.try_lock().map_err(|_| SchedulerDbRetirementError::Poisoned)?;
+        let previous = std::mem::replace(&mut *guard, DbOwner::CheckedOut);
+        let DbOwner::NativeRetirement { generation, phase } = previous else {
+            *guard = previous; return Err(SchedulerDbRetirementError::InvalidPhase);
+        };
+        let owner = match phase {
+            NativeRetirementPhase::Owned(owner) => owner,
+            NativeRetirementPhase::Failed(failure) => match failure.into_owner() {
+                Ok(owner) => owner,
+                Err(failure) => {
+                    *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Failed(failure) };
+                    return Err(SchedulerDbRetirementError::Host("native retirement custody transfer refused".into()));
+                }
+            },
+        };
+        match if abort { owner.abort() } else { owner.release() } {
+            Ok(receipt) => { *guard = DbOwner::Terminal(OriginalNativeConnectionTerminal::Closed(receipt)); Ok(()) }
+            Err(failure) => {
+                *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Failed(failure) };
+                Err(SchedulerDbRetirementError::Host("native retirement release retained".into()))
+            }
+        }
+    }
+    fn retirement_transition<T>(
+        &self,
+        transition: impl FnOnce(
+            RetirementPhase,
+        ) -> std::result::Result<
+            (Option<RetirementPhase>, T),
+            (RetirementPhase, SchedulerDbRetirementError),
+        >,
+    ) -> std::result::Result<T, SchedulerDbRetirementError> {
+        self.require_process().map_err(|_| SchedulerDbRetirementError::InvalidPhase)?;
+        let mut guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| SchedulerDbRetirementError::Poisoned)?;
+        let previous = std::mem::replace(&mut *guard, DbOwner::CheckedOut);
+        let DbOwner::Retirement { generation, phase } = previous else {
+            *guard = previous;
+            return Err(SchedulerDbRetirementError::InvalidPhase);
+        };
+        match transition(phase) {
+            Ok((phase, value)) => {
+                if let Some(phase) = phase {
+                    *guard = DbOwner::Retirement { generation, phase };
+                } else {
+                    // The stopped transition returned actual successful
+                    // release/abort; checkout itself never proves disposal.
+                    *guard = DbOwner::Closed;
+                }
+                Ok(value)
+            }
+            Err((phase, error)) => {
+                *guard = DbOwner::Retirement { generation, phase };
+                Err(error)
+            }
+        }
+    }
+    pub fn drain_projection_retirement(
+        &self,
+    ) -> std::result::Result<DrainedSqliteRoleFacts, SchedulerDbRetirementError> {
+        if self.has_native_retirement()? { return self.native_retirement_transition(None, |owner| owner.drain()); }
+        self.retirement_transition(|phase| {
+            let result = match phase {
+                RetirementPhase::Captured(owner) => owner.drain_sql(),
+                RetirementPhase::Failed(failure) => failure.retry_drain(),
+                RetirementPhase::Drained(owner) => {
+                    // Direct stopped intake is already SQL-free and barrier-held.
+                    // A drain acknowledgement retrieves this SAME owner snapshot.
+                    let facts = owner.role_facts().clone();
+                    return Ok((Some(RetirementPhase::Drained(owner)), facts));
+                }
+            };
+            match result {
+                Ok(owner) => {
+                    let facts = owner.role_facts().clone();
+                    Ok((Some(RetirementPhase::Drained(owner)), facts))
+                }
+                Err(failure) => {
+                    let error = SchedulerDbRetirementError::Host(failure.to_string());
+                    Err((RetirementPhase::Failed(failure), error))
+                }
+            }
+        })
+    }
+    /// Copied, non-authorizing observations; SAME native owner and barriers stay private.
+    pub fn observe_projection_role_resolution(
+        &self,
+        role: SqliteRole,
+    ) -> std::result::Result<
+        lillux_sqlite::SqliteRoleResolutionObservation,
+        SchedulerDbRetirementError,
+    > {
+        if self.has_native_retirement()? { return self.native_retirement_transition(None, |owner| owner.observe_role_resolution(role)); }
+        self.retirement_transition(|phase| {
+            let RetirementPhase::Drained(mut owner) = phase else {
+                return Err((phase, SchedulerDbRetirementError::InvalidPhase));
+            };
+            match owner.observe_role_resolution(role) {
+                Ok(observation) => Ok((Some(RetirementPhase::Drained(owner)), observation)),
+                Err(error) => Err((
+                    RetirementPhase::Drained(owner),
+                    SchedulerDbRetirementError::Host(error.to_string()),
+                )),
+            }
+        })
+    }
+    /// Domain must acknowledge signed resolution capacity and intent first.
+    pub fn resolve_projection_role(
+        &self,
+        request: lillux_sqlite::SqliteRoleResolutionRequest,
+    ) -> std::result::Result<lillux_sqlite::SqliteRoleResolutionOutcome, SchedulerDbRetirementError>
+    {
+        if self.has_native_retirement()? { return self.native_retirement_transition(None, |owner| owner.resolve(request)); }
+        self.retirement_transition(|phase| {
+            let RetirementPhase::Drained(mut owner) = phase else {
+                return Err((phase, SchedulerDbRetirementError::InvalidPhase));
+            };
+            match owner.resolve_role(request) {
+                Ok(outcome) => Ok((Some(RetirementPhase::Drained(owner)), outcome)),
+                Err(error) => Err((
+                    RetirementPhase::Drained(owner),
+                    SchedulerDbRetirementError::Resolution(error),
+                )),
+            }
+        })
+    }
+    pub fn quarantine_projection_role(
+        &self,
+        role: SqliteRole,
+    ) -> std::result::Result<SqliteRoleMutationOutcome, SchedulerDbRetirementError> {
+        self.mutate_projection_role(role, false)
+    }
+    pub fn purge_projection_role(
+        &self,
+        role: SqliteRole,
+    ) -> std::result::Result<SqliteRoleMutationOutcome, SchedulerDbRetirementError> {
+        self.mutate_projection_role(role, true)
+    }
+    fn mutate_projection_role(
+        &self,
+        role: SqliteRole,
+        purge: bool,
+    ) -> std::result::Result<SqliteRoleMutationOutcome, SchedulerDbRetirementError> {
+        if self.has_native_retirement()? {
+            return self.native_retirement_transition(None, |owner| if purge { owner.purge(role) } else { owner.quarantine(role) });
+        }
+        self.retirement_transition(|phase| {
+            let RetirementPhase::Drained(mut owner) = phase else {
+                return Err((phase, SchedulerDbRetirementError::InvalidPhase));
+            };
+            let result = if purge {
+                owner.purge_role(role)
+            } else {
+                owner.quarantine_role(role)
+            };
+            match result {
+                Ok(outcome) => Ok((Some(RetirementPhase::Drained(owner)), outcome)),
+                Err(error) => Err((
+                    RetirementPhase::Drained(owner),
+                    SchedulerDbRetirementError::Role(error),
+                )),
+            }
+        })
+    }
+    /// Native release remains separate from durable journal acknowledgement.
+    pub fn release_projection_retirement(
+        &self,
+    ) -> std::result::Result<(), SchedulerDbRetirementError> {
+        self.finish_projection_retirement(false)
+    }
+    /// Cleanup-only abort refuses any partially mutated namespace in the host.
+    pub fn abort_projection_retirement(
+        &self,
+    ) -> std::result::Result<(), SchedulerDbRetirementError> {
+        self.finish_projection_retirement(true)
+    }
+    fn finish_projection_retirement(
+        &self,
+        abort: bool,
+    ) -> std::result::Result<(), SchedulerDbRetirementError> {
+        if self.has_native_retirement()? { return self.finish_native_retirement(abort); }
+        self.retirement_transition(|phase| {
+            let result = match phase {
+                RetirementPhase::Captured(owner) if abort => owner.abort(),
+                RetirementPhase::Drained(owner) if abort => owner.abort(),
+                RetirementPhase::Drained(owner) => owner.release(),
+                RetirementPhase::Failed(failure) if abort => failure.abort(),
+                RetirementPhase::Failed(failure) => failure.retry_release(),
+                phase => return Err((phase, SchedulerDbRetirementError::InvalidPhase)),
+            };
+            match result {
+                Ok(()) => Ok((None, ())),
+                Err(failure) => {
+                    let error = SchedulerDbRetirementError::Host(failure.to_string());
+                    Err((RetirementPhase::Failed(failure), error))
+                }
+            }
+        })
+    }
+    pub fn require_runtime(&self, runtime: &PinnedDirectory) -> Result<()> {
+        self.with_live_owner(|owner| owner.require_scheduler_runtime(runtime))
+    }
+    /// Actual receipts stay cached for the original factory census, including
+    /// failed acquisition releases. Retry never reopens or restores admission.
+    pub fn close(&self) -> std::result::Result<(), SchedulerDbCloseError> {
+        self.require_process().map_err(|_| SchedulerDbCloseError::OriginalProcess)?;
+        let mut guard = self.inner.try_lock().map_err(|_| SchedulerDbCloseError::Poisoned)?;
+        let previous = std::mem::replace(&mut *guard, DbOwner::CheckedOut);
+        let result = match previous {
+            DbOwner::Live(owner) | DbOwner::Stale(owner) => owner.close(),
+            DbOwner::Closing(failure) => failure.retry(),
+            DbOwner::Opening(failure) => {
+                match failure.retry_close() {
+                    Ok(receipt) => *guard = DbOwner::Terminal(OriginalNativeConnectionTerminal::Released(receipt)),
+                    Err(failure) => {
+                        *guard = DbOwner::Opening(failure);
+                        return Err(SchedulerDbCloseError::Native("original scheduler acquisition release retained".into()));
+                    }
+                }
+                return Ok(());
+            }
+            terminal @ DbOwner::Terminal(_) | terminal @ DbOwner::NeverOpened(_) => {
+                *guard = terminal; return Ok(());
+            }
+            DbOwner::BeforeOpen(inputs) => { *guard = DbOwner::NeverOpened(inputs); return Ok(()); }
+            retirement @ DbOwner::Retirement { .. } | retirement @ DbOwner::NativeRetirement { .. } => {
+                *guard = retirement; return Err(SchedulerDbCloseError::RetirementPending);
+            }
+            DbOwner::CheckedOut => {
+                *guard = DbOwner::CheckedOut;
+                return Err(SchedulerDbCloseError::Native("scheduler effect custody remains checked out".into()));
+            }
+            DbOwner::Closed => { *guard = DbOwner::Closed; return Ok(()); }
+            DbOwner::Memory(connection) | DbOwner::MemoryClosing(connection) => {
+                match connection.close() {
+                    Ok(()) => { *guard = DbOwner::Closed; return Ok(()); },
+                    Err((connection, error)) => {
+                        *guard = DbOwner::MemoryClosing(connection);
+                        return Err(SchedulerDbCloseError::Connection(error.to_string()));
+                    }
+                }
+            }
+        };
+        match result {
+            Ok(receipt) => { *guard = DbOwner::Terminal(OriginalNativeConnectionTerminal::Closed(receipt)); Ok(()) }
+            Err(failure) => {
+                *guard = DbOwner::Closing(failure);
+                Err(SchedulerDbCloseError::Native("original scheduler close retained".into()))
+            }
+        }
+    }
+    /// Exact actual receipts only; an unissued acquisition disposition is
+    /// retained but excluded from the cumulative native ticket census.
+    pub fn retained_native_terminals(&self) -> Result<Vec<OriginalNativeConnectionTerminal>> {
+        self.require_process()?;
+        let original = self.original.as_ref().context("scheduler has no original native factory")?;
+        let guard = self.inner.try_lock().map_err(|_| anyhow!("scheduler terminal owner busy"))?;
+        let mut terminals = vec![original.reference.terminal().clone()];
+        match &*guard {
+            DbOwner::Terminal(terminal) => {
+                terminal.require_original(&original.factory)?;
+                if !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt) if receipt.native_ticket().is_none()) {
+                    terminals.push(terminal.clone());
+                }
+            }
+            DbOwner::NeverOpened(_) => {},
+            _ => anyhow::bail!("scheduler native owner is not terminal"),
+        }
+        original.reference.terminal().require_original(&original.factory)?;
+        Ok(terminals)
+    }
     /// Clear only execution-derived scheduler history. Signed schedule YAML
     /// remains authoritative, and `schedule_specs` is deliberately preserved.
     /// The projection marker is published current and empty in the same
     /// transaction so a crash cannot expose a partially cleared fire view.
     pub fn discard_fire_history(&self, dry_run: bool) -> Result<SchedulerFireHistoryDiscardReport> {
-        let mut conn = self.lock()?;
-        fn count(conn: &Connection, table: &str) -> Result<usize> {
-            let rows: i64 =
-                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })?;
-            usize::try_from(rows).context("scheduler fire-history row count is invalid")
-        }
-        if dry_run {
-            return Ok(SchedulerFireHistoryDiscardReport {
-                fires: count(&conn, "schedule_fires")?,
-                outbox_snapshots: count(&conn, "schedule_fire_outbox")?,
-                cursors: count(&conn, "schedule_cursors")?,
-            });
-        }
+        self.with_sql_mut(|conn| {
+            fn count(conn: &Connection, table: &str) -> Result<usize> {
+                let rows: i64 =
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+                usize::try_from(rows).context("scheduler fire-history row count is invalid")
+            }
+            if dry_run {
+                return Ok(SchedulerFireHistoryDiscardReport {
+                    fires: count(&conn, "schedule_fires")?,
+                    outbox_snapshots: count(&conn, "schedule_fire_outbox")?,
+                    cursors: count(&conn, "schedule_cursors")?,
+                });
+            }
 
-        let tx = conn.transaction()?;
-        let report = SchedulerFireHistoryDiscardReport {
-            outbox_snapshots: tx.execute("DELETE FROM schedule_fire_outbox", [])?,
-            fires: tx.execute("DELETE FROM schedule_fires", [])?,
-            cursors: tx.execute("DELETE FROM schedule_cursors", [])?,
-        };
-        tx.execute("DELETE FROM scheduler_projection_state", [])?;
-        tx.execute(
-            "INSERT INTO scheduler_projection_state
-                (projection_name, rebuild_complete) VALUES ('fires', 1)",
-            [],
-        )?;
-        tx.commit()?;
-        Ok(report)
+            let tx = conn.transaction()?;
+            let report = SchedulerFireHistoryDiscardReport {
+                outbox_snapshots: tx.execute("DELETE FROM schedule_fire_outbox", [])?,
+                fires: tx.execute("DELETE FROM schedule_fires", [])?,
+                cursors: tx.execute("DELETE FROM schedule_cursors", [])?,
+            };
+            tx.execute("DELETE FROM scheduler_projection_state", [])?;
+            tx.execute(
+                "INSERT INTO scheduler_projection_state
+                    (projection_name, rebuild_complete) VALUES ('fires', 1)",
+                [],
+            )?;
+            tx.commit()?;
+            Ok(report)
+        })
     }
 
-    /// Open an already-existing scheduler store without creating or migrating
-    /// it. Offline projection rebuild uses this fail-closed view when deciding
-    /// whether a pending terminal Remove is pinned by a durable scheduler fire;
-    /// an absent, foreign, stale, or corrupt store is never equivalent to an
-    /// empty store.
-    pub fn open_existing_current(path: &Path) -> Result<Self> {
-        let metadata = std::fs::symlink_metadata(path)
-            .with_context(|| format!("scheduler db must already exist at {}", path.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            anyhow::bail!(
-                "scheduler db must be a regular non-symlink file: {}",
-                path.display()
-            );
-        }
-        validate_scheduler_sidecar_types(path)?;
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("open existing scheduler db {}", path.display()))?;
-        let spec = scheduler_schema_spec();
-        sqlite_schema::assert_owned(&conn, &spec, path)
-            .with_context(|| format!("verify current scheduler db {}", path.display()))?;
-        sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path)
-            .with_context(|| format!("verify exact scheduler db {}", path.display()))?;
-        let integrity: String = conn
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .context("run scheduler database integrity check")?;
-        if integrity != "ok" {
-            anyhow::bail!(
-                "scheduler database integrity check failed for {}: {integrity}",
-                path.display()
-            );
-        }
-        if !fire_projection_is_current_conn(&conn)? {
-            anyhow::bail!(
-                "scheduler fire projection is incomplete at {}; complete scheduler recovery before offline use",
-                path.display()
-            );
-        }
+    pub fn new_fresh_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        prepare_owned_schema(
+            &conn,
+            &scheduler_schema_spec(),
+            SCHEMA_SQL,
+            Path::new(":memory:"),
+        )?;
         Ok(Self {
-            inner: std::sync::Mutex::new(conn),
+            inner: ManuallyDrop::new(std::sync::Mutex::new(DbOwner::Memory(conn))),
+            original: ManuallyDrop::new(None), original_process: std::process::id(),
             outbox_drain: std::sync::Mutex::new(()),
         })
     }
@@ -810,25 +1944,52 @@ impl SchedulerDb {
             [],
         )?;
         Ok(Self {
-            inner: std::sync::Mutex::new(conn),
+            inner: ManuallyDrop::new(std::sync::Mutex::new(DbOwner::Memory(conn))),
+            original: ManuallyDrop::new(None), original_process: std::process::id(),
             outbox_drain: std::sync::Mutex::new(()),
         })
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.inner
-            .lock()
-            .map_err(|e| anyhow!("scheduler db lock poisoned: {}", e))
+    fn require_process(&self) -> Result<()> {
+        anyhow::ensure!(self.original_process == std::process::id(), "inherited scheduler owner");
+        if let Some(original) = self.original.as_ref() { original.factory.require_original_process()?; }
+        Ok(())
     }
-
+    fn with_live_owner<T>(&self, operation: impl FnOnce(&OriginalNativeConnection) -> Result<T>) -> Result<T> {
+        self.require_process()?;
+        let guard = self.inner.try_lock().map_err(|_| anyhow!("scheduler owner busy"))?;
+        match &*guard {
+            DbOwner::Live(owner) => operation(owner),
+            _ => anyhow::bail!("scheduler SQL admission is closed"),
+        }
+    }
+    fn with_sql<T>(&self, operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>) -> Result<T> {
+        self.require_process()?;
+        let guard = self.inner.try_lock().map_err(|_| anyhow!("scheduler SQL owner busy"))?;
+        match &*guard {
+            DbOwner::Live(owner) => owner.with_sql(operation),
+            DbOwner::Memory(connection) => operation(connection),
+            _ => anyhow::bail!("scheduler SQL admission is closed"),
+        }
+    }
+    fn with_sql_mut<T>(&self, operation: impl for<'c> FnOnce(&'c mut Connection) -> Result<T>) -> Result<T> {
+        self.require_process()?;
+        let mut guard = self.inner.try_lock().map_err(|_| anyhow!("scheduler SQL owner busy"))?;
+        match &mut *guard {
+            DbOwner::Live(owner) => owner.with_sql_mut(operation),
+            DbOwner::Memory(connection) => operation(connection),
+            _ => anyhow::bail!("scheduler SQL admission is closed"),
+        }
+    }
     // ── schedule_specs ──────────────────────────────────────────
 
     pub fn upsert_spec(&self, rec: &ScheduleSpecRecord) -> Result<()> {
-        validate_schedule_spec_record(rec)?;
-        let conn = self.lock()?;
-        upsert_spec_conn(&conn, rec)
-            .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
-        Ok(())
+        self.with_sql(|conn| {
+            validate_schedule_spec_record(rec)?;
+            upsert_spec_conn(&conn, rec)
+                .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
+            Ok(())
+        })
     }
 
     /// Atomically replace the complete schedule-spec projection.
@@ -838,96 +1999,99 @@ impl SchedulerDb {
     /// complete projection untouched; a successful transaction publishes the
     /// whole new set and removes stale cursors/specs together.
     pub fn replace_specs(&self, records: &[ScheduleSpecRecord]) -> Result<usize> {
-        let mut ids = std::collections::HashSet::with_capacity(records.len());
-        for record in records {
-            validate_schedule_spec_record(record)?;
-            if !ids.insert(record.schedule_id.as_str()) {
-                anyhow::bail!(
-                    "duplicate schedule_id in replacement set: {}",
-                    record.schedule_id
-                );
+        self.with_sql_mut(|conn| {
+            let mut ids = std::collections::HashSet::with_capacity(records.len());
+            for record in records {
+                validate_schedule_spec_record(record)?;
+                if !ids.insert(record.schedule_id.as_str()) {
+                    anyhow::bail!(
+                        "duplicate schedule_id in replacement set: {}",
+                        record.schedule_id
+                    );
+                }
             }
-        }
-
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        tx.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS desired_schedule_specs (
-                 schedule_id TEXT PRIMARY KEY NOT NULL
-             ) WITHOUT ROWID;
-             DELETE FROM desired_schedule_specs;",
-        )?;
-        for record in records {
-            tx.execute(
-                "INSERT INTO desired_schedule_specs (schedule_id) VALUES (?1)",
-                params![record.schedule_id],
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS desired_schedule_specs (
+                     schedule_id TEXT PRIMARY KEY NOT NULL
+                 ) WITHOUT ROWID;
+                 DELETE FROM desired_schedule_specs;",
             )?;
-            upsert_spec_conn(&tx, record)
-                .with_context(|| format!("replace spec {}", record.schedule_id))?;
-        }
-        tx.execute(
-            "DELETE FROM schedule_cursors
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM desired_schedule_specs desired
-                 WHERE desired.schedule_id = schedule_cursors.schedule_id
-             )",
-            [],
-        )?;
-        let removed = tx.execute(
-            "DELETE FROM schedule_specs
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM desired_schedule_specs desired
-                 WHERE desired.schedule_id = schedule_specs.schedule_id
-             )",
-            [],
-        )?;
-        tx.execute("DELETE FROM desired_schedule_specs", [])?;
-        tx.commit()?;
-        Ok(removed)
+            for record in records {
+                tx.execute(
+                    "INSERT INTO desired_schedule_specs (schedule_id) VALUES (?1)",
+                    params![record.schedule_id],
+                )?;
+                upsert_spec_conn(&tx, record)
+                    .with_context(|| format!("replace spec {}", record.schedule_id))?;
+            }
+            tx.execute(
+                "DELETE FROM schedule_cursors
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM desired_schedule_specs desired
+                     WHERE desired.schedule_id = schedule_cursors.schedule_id
+                 )",
+                [],
+            )?;
+            let removed = tx.execute(
+                "DELETE FROM schedule_specs
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM desired_schedule_specs desired
+                     WHERE desired.schedule_id = schedule_specs.schedule_id
+                 )",
+                [],
+            )?;
+            tx.execute("DELETE FROM desired_schedule_specs", [])?;
+            tx.commit()?;
+            Ok(removed)
+        })
     }
 
     pub fn delete_spec(&self, schedule_id: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        conn.execute(
-            "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
-            params![schedule_id],
-        )?;
-        let n = conn.execute(
-            "DELETE FROM schedule_specs WHERE schedule_id = ?1",
-            params![schedule_id],
-        )?;
-        Ok(n > 0)
+        self.with_sql(|conn| {
+            conn.execute(
+                "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
+                params![schedule_id],
+            )?;
+            let n = conn.execute(
+                "DELETE FROM schedule_specs WHERE schedule_id = ?1",
+                params![schedule_id],
+            )?;
+            Ok(n > 0)
+        })
     }
 
     pub fn get_spec(&self, schedule_id: &str) -> Result<Option<ScheduleSpecRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
-                    timezone, misfire_policy, overlap_policy, enabled,
-                    project_root, signer_fingerprint, spec_hash, registered_at,
-                    execution, lateness_grace_secs
-             FROM schedule_specs WHERE schedule_id = ?1",
-        )?;
-        stmt.query_row(params![schedule_id], row_to_spec)
-            .optional()
-            .map_err(Into::into)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
+                        timezone, misfire_policy, overlap_policy, enabled,
+                        project_root, signer_fingerprint, spec_hash, registered_at,
+                        execution, lateness_grace_secs
+                 FROM schedule_specs WHERE schedule_id = ?1",
+            )?;
+            stmt.query_row(params![schedule_id], row_to_spec)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     pub fn load_enabled_specs(&self) -> Result<Vec<ScheduleSpecRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
-                    timezone, misfire_policy, overlap_policy, enabled,
-                    project_root, signer_fingerprint, spec_hash, registered_at,
-                    execution, lateness_grace_secs
-             FROM schedule_specs WHERE enabled = 1",
-        )?;
-        let rows = stmt.query_map([], row_to_spec)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
+                        timezone, misfire_policy, overlap_policy, enabled,
+                        project_root, signer_fingerprint, spec_hash, registered_at,
+                        execution, lateness_grace_secs
+                 FROM schedule_specs WHERE enabled = 1",
+            )?;
+            let rows = stmt.query_map([], row_to_spec)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
     }
 
     pub fn list_specs(
@@ -935,28 +2099,29 @@ impl SchedulerDb {
         enabled_only: bool,
         schedule_type: Option<&str>,
     ) -> Result<Vec<ScheduleSpecRecord>> {
-        let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
-                          timezone, misfire_policy, overlap_policy, enabled,
-                          project_root, signer_fingerprint, spec_hash, registered_at,
-                          execution, lateness_grace_secs";
-        let sql = match (enabled_only, schedule_type) {
-            (true, Some(_)) => {
-                format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?")
-            }
-            (true, None) => format!("{sel} FROM schedule_specs WHERE enabled = 1"),
-            (false, Some(_)) => format!("{sel} FROM schedule_specs WHERE schedule_type = ?"),
-            (false, None) => format!("{sel} FROM schedule_specs"),
-        };
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let rows: Vec<ScheduleSpecRecord> = if let Some(st) = schedule_type {
-            stmt.query_map(params![st], row_to_spec)?
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map([], row_to_spec)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(rows)
+        self.with_sql(|conn| {
+            let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
+                              timezone, misfire_policy, overlap_policy, enabled,
+                              project_root, signer_fingerprint, spec_hash, registered_at,
+                              execution, lateness_grace_secs";
+            let sql = match (enabled_only, schedule_type) {
+                (true, Some(_)) => {
+                    format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?")
+                }
+                (true, None) => format!("{sel} FROM schedule_specs WHERE enabled = 1"),
+                (false, Some(_)) => format!("{sel} FROM schedule_specs WHERE schedule_type = ?"),
+                (false, None) => format!("{sel} FROM schedule_specs"),
+            };
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows: Vec<ScheduleSpecRecord> = if let Some(st) = schedule_type {
+                stmt.query_map(params![st], row_to_spec)?
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                stmt.query_map([], row_to_spec)?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            Ok(rows)
+        })
     }
 
     /// List specs with optional acting-principal filtering.
@@ -970,122 +2135,128 @@ impl SchedulerDb {
         schedule_type: Option<&str>,
         filter_requester: Option<&str>,
     ) -> Result<Vec<ScheduleSpecRecord>> {
-        let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
-                          timezone, misfire_policy, overlap_policy, enabled,
-                          project_root, signer_fingerprint, spec_hash, registered_at,
-                          execution, lateness_grace_secs";
+        self.with_sql(|conn| {
+            let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
+                              timezone, misfire_policy, overlap_policy, enabled,
+                              project_root, signer_fingerprint, spec_hash, registered_at,
+                              execution, lateness_grace_secs";
 
-        // Build WHERE clause dynamically based on filters.
-        let mut conditions: Vec<String> = Vec::new();
-        let mut param_values: Vec<String> = Vec::new();
+            // Build WHERE clause dynamically based on filters.
+            let mut conditions: Vec<String> = Vec::new();
+            let mut param_values: Vec<String> = Vec::new();
 
-        if enabled_only {
-            conditions.push("enabled = 1".to_string());
-        }
-        if let Some(st) = schedule_type {
-            conditions.push("schedule_type = ?".to_string());
-            param_values.push(st.to_string());
-        }
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
-        let sql = format!("{sel} FROM schedule_specs{where_clause}");
+            if enabled_only {
+                conditions.push("enabled = 1".to_string());
+            }
+            if let Some(st) = schedule_type {
+                conditions.push("schedule_type = ?".to_string());
+                param_values.push(st.to_string());
+            }
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", conditions.join(" AND "))
+            };
+            let sql = format!("{sel} FROM schedule_specs{where_clause}");
+            let mut stmt = conn.prepare_cached(&sql)?;
 
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(&sql)?;
-
-        let params: Vec<&dyn rusqlite::ToSql> = param_values
-            .iter()
-            .map(|v| v as &dyn rusqlite::ToSql)
-            .collect();
-        let mut rows: Vec<ScheduleSpecRecord> = stmt
-            .query_map(params.as_slice(), row_to_spec)?
-            .collect::<Result<Vec<_>, _>>()?;
-        if let Some(fingerprint) = filter_requester {
-            rows.retain(|record| record.execution.authority.principal_id() == fingerprint);
-        }
-        Ok(rows)
+            let params: Vec<&dyn rusqlite::ToSql> = param_values
+                .iter()
+                .map(|v| v as &dyn rusqlite::ToSql)
+                .collect();
+            let mut rows: Vec<ScheduleSpecRecord> = stmt
+                .query_map(params.as_slice(), row_to_spec)?
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(fingerprint) = filter_requester {
+                rows.retain(|record| record.execution.authority.principal_id() == fingerprint);
+            }
+            Ok(rows)
+        })
     }
 
     // ── schedule_cursors ────────────────────────────────────────
 
     pub fn get_cursor(&self, schedule_id: &str) -> Result<Option<ScheduleCursorRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
-                    last_evaluated_at, updated_at
-             FROM schedule_cursors WHERE schedule_id = ?1",
-        )?;
-        stmt.query_row(params![schedule_id], row_to_cursor)
-            .optional()
-            .map_err(Into::into)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+                        last_evaluated_at, updated_at
+                 FROM schedule_cursors WHERE schedule_id = ?1",
+            )?;
+            stmt.query_row(params![schedule_id], row_to_cursor)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     pub fn get_cursors_batch(
         &self,
         schedule_ids: &[String],
     ) -> Result<std::collections::HashMap<String, ScheduleCursorRecord>> {
-        if schedule_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let placeholders: Vec<String> = schedule_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect();
-        let sql = format!(
-            "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
-                    last_evaluated_at, updated_at
-             FROM schedule_cursors WHERE schedule_id IN ({})",
-            placeholders.join(","),
-        );
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = schedule_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-        let rows = stmt.query_map(params.as_slice(), row_to_cursor)?;
-        let mut map = std::collections::HashMap::new();
-        for row in rows {
-            let rec = row?;
-            map.insert(rec.schedule_id.clone(), rec);
-        }
-        Ok(map)
+        self.with_sql(|conn| {
+            if schedule_ids.is_empty() {
+                return Ok(std::collections::HashMap::new());
+            }
+            let placeholders: Vec<String> = schedule_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            let sql = format!(
+                "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+                        last_evaluated_at, updated_at
+                 FROM schedule_cursors WHERE schedule_id IN ({})",
+                placeholders.join(","),
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = schedule_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt.query_map(params.as_slice(), row_to_cursor)?;
+            let mut map = std::collections::HashMap::new();
+            for row in rows {
+                let rec = row?;
+                map.insert(rec.schedule_id.clone(), rec);
+            }
+            Ok(map)
+        })
     }
 
     pub fn upsert_cursor(&self, rec: &ScheduleCursorRecord) -> Result<()> {
-        self.lock()?.execute(
-            "INSERT INTO schedule_cursors
-                (schedule_id, spec_hash, last_scheduled_at, next_fire_at,
-                 last_evaluated_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(schedule_id) DO UPDATE SET
-                spec_hash=excluded.spec_hash,
-                last_scheduled_at=excluded.last_scheduled_at,
-                next_fire_at=excluded.next_fire_at,
-                last_evaluated_at=excluded.last_evaluated_at,
-                updated_at=excluded.updated_at",
-            params![
-                rec.schedule_id,
-                rec.spec_hash,
-                rec.last_scheduled_at,
-                rec.next_fire_at,
-                rec.last_evaluated_at,
-                rec.updated_at,
-            ],
-        )?;
-        Ok(())
+        self.with_sql(|conn| {
+            conn.execute(
+                "INSERT INTO schedule_cursors
+                    (schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+                     last_evaluated_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(schedule_id) DO UPDATE SET
+                    spec_hash=excluded.spec_hash,
+                    last_scheduled_at=excluded.last_scheduled_at,
+                    next_fire_at=excluded.next_fire_at,
+                    last_evaluated_at=excluded.last_evaluated_at,
+                    updated_at=excluded.updated_at",
+                params![
+                    rec.schedule_id,
+                    rec.spec_hash,
+                    rec.last_scheduled_at,
+                    rec.next_fire_at,
+                    rec.last_evaluated_at,
+                    rec.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn delete_cursor(&self, schedule_id: &str) -> Result<bool> {
-        let n = self.lock()?.execute(
-            "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
-            params![schedule_id],
-        )?;
-        Ok(n > 0)
+        self.with_sql(|conn| {
+            let n = conn.execute(
+                "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
+                params![schedule_id],
+            )?;
+            Ok(n > 0)
+        })
     }
 
     /// Whether the persisted fire projection completed its last full replay.
@@ -1093,55 +2264,59 @@ impl SchedulerDb {
     /// this marker is set. A missing, duplicate, or non-boolean marker fails
     /// closed and routes startup through the explicit full replay path.
     pub fn fire_projection_is_current(&self) -> Result<bool> {
-        let conn = self.lock()?;
-        fire_projection_is_current_conn(&conn)
+        self.with_sql(|conn| {
+            fire_projection_is_current_conn(&conn)
+        })
     }
 
     /// Invalidate the fire projection before a destructive full replay.
     /// Committing the invalid marker and clear together ensures a crash can
     /// never leave a partial replay looking current on the next startup.
     pub fn begin_fire_projection_rebuild(&self) -> Result<()> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let pending_outbox: i64 =
-            tx.query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
-                row.get(0)
-            })?;
-        if pending_outbox != 0 {
-            anyhow::bail!(
-                "cannot rebuild scheduler fire projection with {pending_outbox} undrained journal snapshot(s)"
-            );
-        }
-        // Normalize invalid marker contents as part of entering rebuild. The
-        // schema itself has already been ownership-verified by open().
-        tx.execute("DELETE FROM scheduler_projection_state", [])?;
-        tx.execute(
-            "INSERT INTO scheduler_projection_state
-                (projection_name, rebuild_complete) VALUES ('fires', 0)",
-            [],
-        )?;
-        tx.execute("DELETE FROM schedule_fires", [])?;
-        tx.execute("DELETE FROM schedule_cursors", [])?;
-        tx.commit()?;
-        Ok(())
+        self.with_sql_mut(|conn| {
+            let tx = conn.transaction()?;
+            let pending_outbox: i64 =
+                tx.query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
+                    row.get(0)
+                })?;
+            if pending_outbox != 0 {
+                anyhow::bail!(
+                    "cannot rebuild scheduler fire projection with {pending_outbox} undrained journal snapshot(s)"
+                );
+            }
+            // Normalize invalid marker contents as part of entering rebuild. The
+            // schema itself has already been ownership-verified by open().
+            tx.execute("DELETE FROM scheduler_projection_state", [])?;
+            tx.execute(
+                "INSERT INTO scheduler_projection_state
+                    (projection_name, rebuild_complete) VALUES ('fires', 0)",
+                [],
+            )?;
+            tx.execute("DELETE FROM schedule_fires", [])?;
+            tx.execute("DELETE FROM schedule_cursors", [])?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Publish a successfully replayed fire projection. Cursor repair remains
     /// incremental: missing/stale schedule cursors are reconstructed from the
     /// indexed latest fire and do not require another JSONL walk.
     pub fn finish_fire_projection_rebuild(&self) -> Result<()> {
-        let changed = self.lock()?.execute(
-            "UPDATE scheduler_projection_state
-             SET rebuild_complete = 1
-             WHERE projection_name = 'fires' AND rebuild_complete = 0",
-            [],
-        )?;
-        if changed != 1 {
-            anyhow::bail!(
-                "scheduler fire projection rebuild marker is missing or already published"
-            );
-        }
-        Ok(())
+        self.with_sql(|conn| {
+            let changed = conn.execute(
+                "UPDATE scheduler_projection_state
+                 SET rebuild_complete = 1
+                 WHERE projection_name = 'fires' AND rebuild_complete = 0",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!(
+                    "scheduler fire projection rebuild marker is missing or already published"
+                );
+            }
+            Ok(())
+        })
     }
 
     /// Repair only absent, spec-stale, or fire-stale cursors from indexed
@@ -1203,92 +2378,95 @@ impl SchedulerDb {
     /// Mutate a fire and enqueue its complete post-mutation snapshot for the
     /// append-only JSONL authority in one SQLite transaction.
     pub(crate) fn upsert_fire(&self, rec: &FireRecord) -> Result<()> {
-        validate_fire_record(rec)?;
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        require_current_fire_projection_conn(&tx)?;
-        if let Some(previous) = get_fire_conn(&tx, &rec.fire_id)? {
-            // The completion hook and repair sweep can observe the same
-            // dispatched fire. Preserve the first terminal snapshot atomically
-            // when a repeated finalizer differs only in completion time.
-            // Identity, authority, status and outcome must still match exactly.
-            if matches!(
-                previous.status.as_str(),
-                "completed" | "failed" | "cancelled"
-            ) {
-                let mut repeated = rec.clone();
-                repeated.completed_at = previous.completed_at;
-                if repeated == previous {
-                    return Ok(());
+        self.with_sql_mut(|conn| {
+            validate_fire_record(rec)?;
+            let tx = conn.transaction()?;
+            require_current_fire_projection_conn(&tx)?;
+            if let Some(previous) = get_fire_conn(&tx, &rec.fire_id)? {
+                // The completion hook and repair sweep can observe the same
+                // dispatched fire. Preserve the first terminal snapshot atomically
+                // when a repeated finalizer differs only in completion time.
+                // Identity, authority, status and outcome must still match exactly.
+                if matches!(
+                    previous.status.as_str(),
+                    "completed" | "failed" | "cancelled"
+                ) {
+                    let mut repeated = rec.clone();
+                    repeated.completed_at = previous.completed_at;
+                    if repeated == previous {
+                        return Ok(());
+                    }
                 }
+                rec.validate_transition_from(&previous)?;
             }
-            rec.validate_transition_from(&previous)?;
-        }
-        upsert_fire_conn(&tx, rec)
-            .with_context(|| format!("upsert_fire failed for {}", rec.fire_id))?;
-        enqueue_current_fire_snapshot_conn(&tx, &rec.fire_id)?;
-        refresh_cursor_for_schedule_conn(&tx, &rec.schedule_id, lillux::time::timestamp_millis())?;
-        tx.commit()?;
-        Ok(())
+            upsert_fire_conn(&tx, rec)
+                .with_context(|| format!("upsert_fire failed for {}", rec.fire_id))?;
+            enqueue_current_fire_snapshot_conn(&tx, &rec.fire_id)?;
+            refresh_cursor_for_schedule_conn(&tx, &rec.schedule_id, lillux::time::timestamp_millis())?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Apply one already-durable JSONL snapshot during a full projection
     /// replay. Rebuild must not enqueue the authority back into its own outbox.
     pub(crate) fn project_fire_from_journal(&self, rec: &FireRecord) -> Result<()> {
-        validate_fire_record(rec)?;
-        let conn = self.lock()?;
-        upsert_fire_conn(&conn, rec)
-            .with_context(|| format!("project fire from journal failed for {}", rec.fire_id))
+        self.with_sql(|conn| {
+            validate_fire_record(rec)?;
+            upsert_fire_conn(&conn, rec)
+                .with_context(|| format!("project fire from journal failed for {}", rec.fire_id))
+        })
     }
 
     /// Atomic claim: INSERT if absent. Returns true if the insert succeeded
     /// (fire was claimed), false if it already existed.
     pub(crate) fn claim_fire(&self, rec: &FireRecord) -> Result<bool> {
-        validate_fire_record(rec)?;
-        let project_authority = rec
-            .project_authority
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        require_current_fire_projection_conn(&tx)?;
-        let changed = tx
-            .execute(
-                "INSERT OR IGNORE INTO schedule_fires
-                (fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                 completed_at, thread_id, status, trigger_reason, outcome,
-                 signer_fingerprint, schedule_spec_hash, project_authority,
-                 admitted_capsule_hash)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                params![
-                    rec.fire_id,
-                    rec.schedule_id,
-                    rec.scheduled_at,
-                    rec.reserved_at,
-                    rec.dispatched_at,
-                    rec.completed_at,
-                    rec.thread_id,
-                    rec.status,
-                    rec.trigger_reason,
-                    rec.outcome,
-                    rec.signer_fingerprint,
-                    rec.schedule_spec_hash,
-                    project_authority,
-                    rec.admitted_capsule_hash,
-                ],
-            )
-            .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
-        if changed > 0 {
-            enqueue_current_fire_snapshot_conn(&tx, &rec.fire_id)?;
-            refresh_cursor_for_schedule_conn(
-                &tx,
-                &rec.schedule_id,
-                lillux::time::timestamp_millis(),
-            )?;
-        }
-        tx.commit()?;
-        Ok(changed > 0)
+        self.with_sql_mut(|conn| {
+            validate_fire_record(rec)?;
+            let project_authority = rec
+                .project_authority
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            let tx = conn.transaction()?;
+            require_current_fire_projection_conn(&tx)?;
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO schedule_fires
+                    (fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                     completed_at, thread_id, status, trigger_reason, outcome,
+                     signer_fingerprint, schedule_spec_hash, project_authority,
+                     admitted_capsule_hash)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    params![
+                        rec.fire_id,
+                        rec.schedule_id,
+                        rec.scheduled_at,
+                        rec.reserved_at,
+                        rec.dispatched_at,
+                        rec.completed_at,
+                        rec.thread_id,
+                        rec.status,
+                        rec.trigger_reason,
+                        rec.outcome,
+                        rec.signer_fingerprint,
+                        rec.schedule_spec_hash,
+                        project_authority,
+                        rec.admitted_capsule_hash,
+                    ],
+                )
+                .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
+            if changed > 0 {
+                enqueue_current_fire_snapshot_conn(&tx, &rec.fire_id)?;
+                refresh_cursor_for_schedule_conn(
+                    &tx,
+                    &rec.schedule_id,
+                    lillux::time::timestamp_millis(),
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed > 0)
+        })
     }
 
     /// Reclaim a fire that was persisted but never got a running thread.
@@ -1296,23 +2474,26 @@ impl SchedulerDb {
     /// dispatch identity is immutable, so reclaim is an eligibility check; it
     /// never rewrites reservation identity, thread id, trigger reason, or the journal.
     pub(crate) fn reclaim_fire(&self, fire_id: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        require_current_fire_projection_conn(&conn)?;
-        let Some(record) = get_fire_conn(&conn, fire_id)? else {
-            return Ok(false);
-        };
-        record.validate()?;
-        Ok(matches!(record.status.as_str(), "reserved" | "dispatched"))
+        self.with_sql(|conn| {
+            require_current_fire_projection_conn(&conn)?;
+            let Some(record) = get_fire_conn(&conn, fire_id)? else {
+                return Ok(false);
+            };
+            record.validate()?;
+            Ok(matches!(record.status.as_str(), "reserved" | "dispatched"))
+        })
     }
 
     /// Number of committed fire snapshots not yet synced into JSONL.
     pub fn pending_fire_outbox(&self) -> Result<usize> {
-        let count: i64 =
-            self.lock()?
-                .query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
-                    row.get(0)
-                })?;
-        usize::try_from(count).context("negative scheduler fire outbox count")
+        self.with_sql(|conn| {
+            let count: i64 =
+                conn
+                    .query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
+                        row.get(0)
+                    })?;
+            usize::try_from(count).context("negative scheduler fire outbox count")
+        })
     }
 
     /// Sync every committed outbox snapshot to its schedule journal, then
@@ -1334,9 +2515,10 @@ impl SchedulerDb {
         &self,
         runtime_directory: &lillux::PinnedDirectory,
     ) -> Result<usize> {
+        self.require_process()?;
         let _drain = self
             .outbox_drain
-            .lock()
+            .try_lock()
             .map_err(|error| anyhow!("scheduler outbox drain lock poisoned: {error}"))?;
         let schedules_directory =
             runtime_directory.open_or_create_child(std::ffi::OsStr::new("schedules"), 0o700)?;
@@ -1344,9 +2526,8 @@ impl SchedulerDb {
         let mut drained = 0usize;
 
         loop {
-            let next: Option<(i64, String, String, String)> = {
-                let conn = self.lock()?;
-                conn.query_row(
+            let next: Option<(i64, String, String, String)> = self.with_sql(|conn| {
+                Ok(conn.query_row(
                     "SELECT sequence, fire_id, schedule_id, snapshot_json
                      FROM schedule_fire_outbox
                      ORDER BY sequence ASC
@@ -1354,13 +2535,13 @@ impl SchedulerDb {
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
-                .optional()?
-            };
+                .optional()?)
+            })?;
             let Some((sequence, fire_id, schedule_id, snapshot_json)) = next else {
                 break;
             };
 
-            super::crontab::validate_schedule_id(&schedule_id).with_context(|| {
+            validate_schedule_id(&schedule_id).with_context(|| {
                 format!("invalid schedule id in fire outbox sequence {sequence}")
             })?;
             let snapshot: FireRecord = serde_json::from_str(&snapshot_json)
@@ -1389,12 +2570,12 @@ impl SchedulerDb {
             )
             .with_context(|| format!("sync scheduler fire outbox sequence {sequence}"))?;
 
-            let changed = self.lock()?.execute(
+            let changed = self.with_sql(|conn| Ok(conn.execute(
                 "DELETE FROM schedule_fire_outbox
                  WHERE sequence = ?1 AND fire_id = ?2 AND schedule_id = ?3
                    AND snapshot_json = ?4",
                 params![sequence, fire_id, schedule_id, snapshot_json],
-            )?;
+            )?))?;
             if changed != 1 {
                 anyhow::bail!("scheduler fire outbox acknowledgement lost sequence {sequence}");
             }
@@ -1407,17 +2588,18 @@ impl SchedulerDb {
     }
 
     pub fn get_fire(&self, fire_id: &str) -> Result<Option<FireRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires WHERE fire_id = ?1",
-        )?;
-        stmt.query_row(params![fire_id], row_to_fire)
-            .optional()
-            .map_err(Into::into)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires WHERE fire_id = ?1",
+            )?;
+            stmt.query_row(params![fire_id], row_to_fire)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     /// Batch-get last fire for multiple schedules. Returns a map from
@@ -1426,76 +2608,79 @@ impl SchedulerDb {
         &self,
         schedule_ids: &[String],
     ) -> Result<std::collections::HashMap<String, FireRecord>> {
-        if schedule_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let placeholders: Vec<String> = schedule_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect();
-        let sql = format!(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires
-             WHERE schedule_id IN ({})
-               AND fire_id = (
-                   SELECT candidate.fire_id
-                   FROM schedule_fires AS candidate
-                   WHERE candidate.schedule_id = schedule_fires.schedule_id
-                   ORDER BY candidate.scheduled_at DESC, candidate.fire_id DESC
-                   LIMIT 1
-               )",
-            placeholders.join(","),
-        );
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = schedule_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-        let rows = stmt.query_map(params.as_slice(), row_to_fire)?;
-        let mut map = std::collections::HashMap::new();
-        for row in rows {
-            let rec = row?;
-            map.insert(rec.schedule_id.clone(), rec);
-        }
-        Ok(map)
+        self.with_sql(|conn| {
+            if schedule_ids.is_empty() {
+                return Ok(std::collections::HashMap::new());
+            }
+            let placeholders: Vec<String> = schedule_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            let sql = format!(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires
+                 WHERE schedule_id IN ({})
+                   AND fire_id = (
+                       SELECT candidate.fire_id
+                       FROM schedule_fires AS candidate
+                       WHERE candidate.schedule_id = schedule_fires.schedule_id
+                       ORDER BY candidate.scheduled_at DESC, candidate.fire_id DESC
+                       LIMIT 1
+                   )",
+                placeholders.join(","),
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = schedule_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt.query_map(params.as_slice(), row_to_fire)?;
+            let mut map = std::collections::HashMap::new();
+            for row in rows {
+                let rec = row?;
+                map.insert(rec.schedule_id.clone(), rec);
+            }
+            Ok(map)
+        })
     }
 
     pub fn get_last_fire(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires
-             WHERE schedule_id = ?1
-             ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
-        )?;
-        stmt.query_row(params![schedule_id], row_to_fire)
-            .optional()
-            .map_err(Into::into)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires
+                 WHERE schedule_id = ?1
+                 ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
+            )?;
+            stmt.query_row(params![schedule_id], row_to_fire)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     pub fn get_inflight_fires(&self) -> Result<Vec<FireRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires WHERE status IN ('reserved', 'dispatched')",
-        )?;
-        let rows = stmt.query_map([], row_to_fire)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires WHERE status IN ('reserved', 'dispatched')",
+            )?;
+            let rows = stmt.query_map([], row_to_fire)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
     }
 
     /// Immutable generations referenced only by scheduler policy or by a
@@ -1533,73 +2718,77 @@ impl SchedulerDb {
     }
 
     pub fn get_inflight_for_schedule(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires
-             WHERE schedule_id = ?1 AND status IN ('reserved', 'dispatched')
-             ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
-        )?;
-        stmt.query_row(params![schedule_id], row_to_fire)
-            .optional()
-            .map_err(Into::into)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires
+                 WHERE schedule_id = ?1 AND status IN ('reserved', 'dispatched')
+                 ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
+            )?;
+            stmt.query_row(params![schedule_id], row_to_fire)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     pub fn find_fire_by_thread(&self, thread_id: &str) -> Result<Option<FireRecord>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires
-             WHERE thread_id = ?1 AND status IN ('reserved', 'dispatched')",
-        )?;
-        stmt.query_row(params![thread_id], row_to_fire)
-            .optional()
-            .map_err(Into::into)
+        self.with_sql(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires
+                 WHERE thread_id = ?1 AND status IN ('reserved', 'dispatched')",
+            )?;
+            stmt.query_row(params![thread_id], row_to_fire)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     /// Find dispatched fires older than `threshold_secs` that may need repair.
     /// Used by the periodic repair sweep to finalize stale fires.
     pub fn find_stale_dispatched_fires(&self, threshold_secs: i64) -> Result<Vec<FireRecord>> {
-        let cutoff = lillux::time::timestamp_millis() - (threshold_secs * 1000);
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                    completed_at, thread_id, status, trigger_reason, outcome,
-                    signer_fingerprint, schedule_spec_hash, project_authority,
-                    admitted_capsule_hash
-             FROM schedule_fires
-             WHERE status = 'dispatched' AND dispatched_at IS NOT NULL AND dispatched_at < ?1",
-        )?;
-        let rows = stmt.query_map(params![cutoff], row_to_fire)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        self.with_sql(|conn| {
+            let cutoff = lillux::time::timestamp_millis() - (threshold_secs * 1000);
+            let mut stmt = conn.prepare_cached(
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                        completed_at, thread_id, status, trigger_reason, outcome,
+                        signer_fingerprint, schedule_spec_hash, project_authority,
+                        admitted_capsule_hash
+                 FROM schedule_fires
+                 WHERE status = 'dispatched' AND dispatched_at IS NOT NULL AND dispatched_at < ?1",
+            )?;
+            let rows = stmt.query_map(params![cutoff], row_to_fire)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
     }
 
     /// Count fires for a schedule (optionally filtered by status).
     pub fn count_fires(&self, schedule_id: &str, status_filter: Option<&str>) -> Result<usize> {
-        let conn = self.lock()?;
-        let total: usize = match status_filter {
-            Some(s) => conn.query_row(
-                "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1 AND status = ?2",
-                params![schedule_id, s],
-                |row| row.get::<_, i64>(0),
-            )? as usize,
-            None => conn.query_row(
-                "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
-                params![schedule_id],
-                |row| row.get::<_, i64>(0),
-            )? as usize,
-        };
-        Ok(total)
+        self.with_sql(|conn| {
+            let total: usize = match status_filter {
+                Some(s) => conn.query_row(
+                    "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1 AND status = ?2",
+                    params![schedule_id, s],
+                    |row| row.get::<_, i64>(0),
+                )? as usize,
+                None => conn.query_row(
+                    "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
+                    params![schedule_id],
+                    |row| row.get::<_, i64>(0),
+                )? as usize,
+            };
+            Ok(total)
+        })
     }
 
     /// Commit an invalid projection marker before a non-dry fire-journal
@@ -1607,31 +2796,32 @@ impl SchedulerDb {
     /// startup sees this marker and rebuilds SQLite from exactly the retained
     /// journals.
     pub fn begin_fire_retention(&self) -> Result<()> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        if !fire_projection_is_current_conn(&tx)? {
-            anyhow::bail!("cannot begin retention on an incomplete scheduler fire projection");
-        }
-        let pending_outbox: i64 =
-            tx.query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
-                row.get(0)
-            })?;
-        if pending_outbox != 0 {
-            anyhow::bail!(
-                "cannot retain scheduler fire journals with {pending_outbox} undrained snapshot(s)"
-            );
-        }
-        let changed = tx.execute(
-            "UPDATE scheduler_projection_state
-             SET rebuild_complete = 0
-             WHERE projection_name = 'fires' AND rebuild_complete = 1",
-            [],
-        )?;
-        if changed != 1 {
-            anyhow::bail!("scheduler fire projection marker changed before retention");
-        }
-        tx.commit()?;
-        Ok(())
+        self.with_sql_mut(|conn| {
+            let tx = conn.transaction()?;
+            if !fire_projection_is_current_conn(&tx)? {
+                anyhow::bail!("cannot begin retention on an incomplete scheduler fire projection");
+            }
+            let pending_outbox: i64 =
+                tx.query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
+                    row.get(0)
+                })?;
+            if pending_outbox != 0 {
+                anyhow::bail!(
+                    "cannot retain scheduler fire journals with {pending_outbox} undrained snapshot(s)"
+                );
+            }
+            let changed = tx.execute(
+                "UPDATE scheduler_projection_state
+                 SET rebuild_complete = 0
+                 WHERE projection_name = 'fires' AND rebuild_complete = 1",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("scheduler fire projection marker changed before retention");
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Read-only proof that the exact portable-journal retention selection can
@@ -1642,23 +2832,24 @@ impl SchedulerDb {
         &self,
         targets: &[ryeos_state::gc::retention::FireRetentionTarget],
     ) -> Result<()> {
-        let conn = self.lock()?;
-        if !fire_projection_is_current_conn(&conn)? {
-            anyhow::bail!(
-                "cannot verify retention against an incomplete scheduler fire projection"
-            );
-        }
-        let pending_outbox: i64 =
-            conn.query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
-                row.get(0)
-            })?;
-        if pending_outbox != 0 {
-            anyhow::bail!(
-                "cannot verify scheduler fire retention with {pending_outbox} undrained snapshot(s)"
-            );
-        }
-        validate_fire_retention_targets_conn(&conn, targets)?;
-        Ok(())
+        self.with_sql(|conn| {
+            if !fire_projection_is_current_conn(&conn)? {
+                anyhow::bail!(
+                    "cannot verify retention against an incomplete scheduler fire projection"
+                );
+            }
+            let pending_outbox: i64 =
+                conn.query_row("SELECT COUNT(*) FROM schedule_fire_outbox", [], |row| {
+                    row.get(0)
+                })?;
+            if pending_outbox != 0 {
+                anyhow::bail!(
+                    "cannot verify scheduler fire retention with {pending_outbox} undrained snapshot(s)"
+                );
+            }
+            validate_fire_retention_targets_conn(&conn, targets)?;
+            Ok(())
+        })
     }
 
     /// Delete exactly the identities chosen by the journal retention planner,
@@ -1668,42 +2859,43 @@ impl SchedulerDb {
         &self,
         targets: &[ryeos_state::gc::retention::FireRetentionTarget],
     ) -> Result<usize> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        if fire_projection_is_current_conn(&tx)? {
-            anyhow::bail!("scheduler fire retention marker was not invalidated");
-        }
+        self.with_sql_mut(|conn| {
+            let tx = conn.transaction()?;
+            if fire_projection_is_current_conn(&tx)? {
+                anyhow::bail!("scheduler fire retention marker was not invalidated");
+            }
 
-        let affected_schedules = validate_fire_retention_targets_conn(&tx, targets)?;
-        for target in targets {
+            let affected_schedules = validate_fire_retention_targets_conn(&tx, targets)?;
+            for target in targets {
+                let changed = tx.execute(
+                    "DELETE FROM schedule_fires WHERE fire_id = ?1 AND schedule_id = ?2",
+                    params![target.fire_id, target.schedule_id],
+                )?;
+                if changed != 1 {
+                    anyhow::bail!(
+                        "scheduler fire changed during retention: {}",
+                        target.fire_id
+                    );
+                }
+            }
+
+            let now = lillux::time::timestamp_millis();
+            for schedule_id in affected_schedules {
+                refresh_cursor_for_schedule_conn(&tx, &schedule_id, now)
+                    .with_context(|| format!("refresh cursor after retaining {schedule_id}"))?;
+            }
             let changed = tx.execute(
-                "DELETE FROM schedule_fires WHERE fire_id = ?1 AND schedule_id = ?2",
-                params![target.fire_id, target.schedule_id],
+                "UPDATE scheduler_projection_state
+                 SET rebuild_complete = 1
+                 WHERE projection_name = 'fires' AND rebuild_complete = 0",
+                [],
             )?;
             if changed != 1 {
-                anyhow::bail!(
-                    "scheduler fire changed during retention: {}",
-                    target.fire_id
-                );
+                anyhow::bail!("scheduler fire retention marker disappeared before publication");
             }
-        }
-
-        let now = lillux::time::timestamp_millis();
-        for schedule_id in affected_schedules {
-            refresh_cursor_for_schedule_conn(&tx, &schedule_id, now)
-                .with_context(|| format!("refresh cursor after retaining {schedule_id}"))?;
-        }
-        let changed = tx.execute(
-            "UPDATE scheduler_projection_state
-             SET rebuild_complete = 1
-             WHERE projection_name = 'fires' AND rebuild_complete = 0",
-            [],
-        )?;
-        if changed != 1 {
-            anyhow::bail!("scheduler fire retention marker disappeared before publication");
-        }
-        tx.commit()?;
-        Ok(targets.len())
+            tx.commit()?;
+            Ok(targets.len())
+        })
     }
 
     /// Finish an explicit schedule-history purge after its directory has been
@@ -1712,27 +2904,28 @@ impl SchedulerDb {
     /// marker established by [`Self::begin_fire_retention`] still makes a crash
     /// between filesystem removal and this transaction rebuild-safe.
     pub fn finish_schedule_fire_purge(&self, schedule_id: &str) -> Result<usize> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        if fire_projection_is_current_conn(&tx)? {
-            anyhow::bail!("scheduler fire purge marker was not invalidated");
-        }
-        let deleted = tx.execute(
-            "DELETE FROM schedule_fires WHERE schedule_id = ?1",
-            params![schedule_id],
-        )?;
-        refresh_cursor_for_schedule_conn(&tx, schedule_id, lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE scheduler_projection_state
-             SET rebuild_complete = 1
-             WHERE projection_name = 'fires' AND rebuild_complete = 0",
-            [],
-        )?;
-        if changed != 1 {
-            anyhow::bail!("scheduler fire purge marker disappeared before publication");
-        }
-        tx.commit()?;
-        Ok(deleted)
+        self.with_sql_mut(|conn| {
+            let tx = conn.transaction()?;
+            if fire_projection_is_current_conn(&tx)? {
+                anyhow::bail!("scheduler fire purge marker was not invalidated");
+            }
+            let deleted = tx.execute(
+                "DELETE FROM schedule_fires WHERE schedule_id = ?1",
+                params![schedule_id],
+            )?;
+            refresh_cursor_for_schedule_conn(&tx, schedule_id, lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE scheduler_projection_state
+                 SET rebuild_complete = 1
+                 WHERE projection_name = 'fires' AND rebuild_complete = 0",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("scheduler fire purge marker disappeared before publication");
+            }
+            tx.commit()?;
+            Ok(deleted)
+        })
     }
 
     pub fn list_fires(
@@ -1741,52 +2934,53 @@ impl SchedulerDb {
         status_filter: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<FireRecord>, usize)> {
-        let conn = self.lock()?;
+        self.with_sql(|conn| {
 
-        let total: usize = match status_filter {
-            Some(s) => conn.query_row(
-                "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1 AND status = ?2",
-                params![schedule_id, s],
-                |row| row.get::<_, i64>(0),
-            )? as usize,
-            None => conn.query_row(
-                "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
-                params![schedule_id],
-                |row| row.get::<_, i64>(0),
-            )? as usize,
-        };
+            let total: usize = match status_filter {
+                Some(s) => conn.query_row(
+                    "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1 AND status = ?2",
+                    params![schedule_id, s],
+                    |row| row.get::<_, i64>(0),
+                )? as usize,
+                None => conn.query_row(
+                    "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
+                    params![schedule_id],
+                    |row| row.get::<_, i64>(0),
+                )? as usize,
+            };
 
-        let sql = match status_filter {
-            Some(_) => {
-                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                               completed_at, thread_id, status, trigger_reason, outcome,
-                               signer_fingerprint, schedule_spec_hash, project_authority,
-                               admitted_capsule_hash
-                        FROM schedule_fires
-                        WHERE schedule_id = ?1 AND status = ?2
-                        ORDER BY scheduled_at DESC, fire_id DESC LIMIT ?3"
-            }
-            None => {
-                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
-                            completed_at, thread_id, status, trigger_reason, outcome,
-                            signer_fingerprint, schedule_spec_hash, project_authority,
-                            admitted_capsule_hash
-                     FROM schedule_fires
-                     WHERE schedule_id = ?1
-                     ORDER BY scheduled_at DESC, fire_id DESC LIMIT ?2"
-            }
-        };
-        let mut stmt = conn.prepare_cached(sql)?;
-        let fires: Vec<FireRecord> = if let Some(sf) = status_filter {
-            stmt.query_map(params![schedule_id, sf, limit as i64], |row| {
-                row_to_fire(row)
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(params![schedule_id, limit as i64], row_to_fire)?
+            let sql = match status_filter {
+                Some(_) => {
+                    "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                                   completed_at, thread_id, status, trigger_reason, outcome,
+                                   signer_fingerprint, schedule_spec_hash, project_authority,
+                                   admitted_capsule_hash
+                            FROM schedule_fires
+                            WHERE schedule_id = ?1 AND status = ?2
+                            ORDER BY scheduled_at DESC, fire_id DESC LIMIT ?3"
+                }
+                None => {
+                    "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                                completed_at, thread_id, status, trigger_reason, outcome,
+                                signer_fingerprint, schedule_spec_hash, project_authority,
+                                admitted_capsule_hash
+                         FROM schedule_fires
+                         WHERE schedule_id = ?1
+                         ORDER BY scheduled_at DESC, fire_id DESC LIMIT ?2"
+                }
+            };
+            let mut stmt = conn.prepare_cached(sql)?;
+            let fires: Vec<FireRecord> = if let Some(sf) = status_filter {
+                stmt.query_map(params![schedule_id, sf, limit as i64], |row| {
+                    row_to_fire(row)
+                })?
                 .collect::<Result<Vec<_>, _>>()?
-        };
-        Ok((fires, total))
+            } else {
+                stmt.query_map(params![schedule_id, limit as i64], row_to_fire)?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            Ok((fires, total))
+        })
     }
 }
 
@@ -2135,70 +3329,457 @@ fn refresh_cursor_for_schedule_conn(conn: &Connection, schedule_id: &str, now: i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    fn open_test_path(path: &Path) -> std::result::Result<SchedulerDb, SchedulerDbOpenFailure> {
+        let runtime = Arc::new(
+            PinnedDirectory::open(path.parent().unwrap())
+                .unwrap()
+                .unwrap(),
+        );
+        SchedulerDb::open_bound(runtime)
+    }
+
+    fn inspect_test_path(path: &Path) -> Result<SchedulerFireHistoryAccounting> {
+        let snapshot = Arc::new(tempfile::tempdir()?);
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let source = path.with_file_name(format!("scheduler.sqlite3{suffix}"));
+            if source.exists() {
+                std::fs::copy(&source, snapshot.path().join(source.file_name().unwrap()))?;
+            }
+        }
+        let pin = Arc::new(PinnedDirectory::open(snapshot.path())?.unwrap());
+        // Explicit bounded mechanism fixture, not platform quota authority.
+        struct FixtureProduction(std::sync::atomic::AtomicU8);
+        impl lillux_sqlite::SqliteInspectionProductionControl for FixtureProduction {
+            fn checkpoint(&self) -> Result<()> {
+                ensure!(
+                    self.0.load(std::sync::atomic::Ordering::SeqCst) == 1,
+                    "standalone fixture native interval inactive"
+                );
+                Ok(())
+            }
+            fn complete(&self) -> Result<()> {
+                match self.0.compare_exchange(
+                    1,
+                    2,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) {
+                    Ok(_) | Err(2) => Ok(()),
+                    _ => anyhow::bail!("standalone fixture native interval unresolved"),
+                }
+            }
+            fn abandoned(&self) {
+                let _ = self.0.compare_exchange(
+                    1,
+                    3,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
+        }
+        struct FixtureSqlWork {
+            root: Arc<PinnedDirectory>,
+            steps: std::sync::atomic::AtomicU64,
+            production: Arc<FixtureProduction>,
+        }
+        impl lillux_sqlite::SqliteInspectionSqlWork for FixtureSqlWork {
+            fn begin_native_production(
+                &self,
+                root: &PinnedDirectory,
+                name: &std::ffi::OsStr,
+            ) -> Result<lillux_sqlite::SqliteInspectionProductionPermit> {
+                self.require_destination(root)?;
+                ensure!(
+                    name == std::ffi::OsStr::new("scheduler.sqlite3"),
+                    "fixture native production selects another basename"
+                );
+                self.production
+                    .0
+                    .compare_exchange(
+                        0,
+                        1,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .map_err(|_| anyhow!("standalone fixture native interval already admitted"))?;
+                Ok(lillux_sqlite::SqliteInspectionProductionPermit::issued(
+                    lillux_sqlite::SqliteInspectionProductionKind::Native,
+                    self.production.clone(),
+                ))
+            }
+            fn require_copy_work(
+                &self,
+                _work: &Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+            ) -> Result<()> {
+                anyhow::bail!("standalone SQL fixture has no attested original copy-work owner")
+            }
+            fn require_destination(&self, root: &PinnedDirectory) -> Result<()> {
+                self.root.ensure_path_binding()?;
+                ensure!(
+                    self.root.is_same_directory(root)?,
+                    "fixture selects another copy"
+                );
+                Ok(())
+            }
+            fn checkpoint(&self) -> Result<()> {
+                self.root.ensure_path_binding()
+            }
+            fn debit_vm_steps(&self, steps: u64) -> Result<()> {
+                self.steps
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |prior| prior.checked_add(steps).filter(|total| *total <= 1_000_000),
+                    )
+                    .map_err(|_| anyhow!("bounded fixture SQL work exhausted"))?;
+                Ok(())
+            }
+        }
+        let work: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork> = Arc::new(FixtureSqlWork {
+            root: pin.clone(),
+            steps: std::sync::atomic::AtomicU64::new(0),
+            production: Arc::new(FixtureProduction(std::sync::atomic::AtomicU8::new(0))),
+        });
+        let lease: SqliteCopyLease = snapshot;
+        let (accounting, closed) =
+            SchedulerDb::inspect_history_reset(pin.clone(), lease.clone(), work.clone())?;
+        closed.acknowledge_producer_terminal()?;
+        closed.require_original(
+            &pin,
+            std::ffi::OsStr::new("scheduler.sqlite3"),
+            &lease,
+            &work,
+        )?;
+        accounting
+    }
 
     fn test_db() -> SchedulerDb {
         SchedulerDb::new_in_memory().expect("open current in-memory scheduler db")
     }
 
     fn fresh_test_db() -> SchedulerDb {
-        SchedulerDb::open(&PathBuf::from(":memory:")).expect("open fresh scheduler db")
+        SchedulerDb::new_fresh_in_memory().expect("open fresh scheduler db")
     }
 
     #[test]
-    fn existing_current_open_never_creates_a_missing_scheduler_store() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("scheduler.sqlite3");
-        assert!(SchedulerDb::open_existing_current(&path).is_err());
+    #[cfg(target_os = "linux")]
+    fn retirement_closes_all_clone_admission_and_preserves_before_commit_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler.sqlite3");
+        let db = Arc::new(open_test_path(&path).unwrap());
+        let other = db.clone();
+        assert!(!other.fire_projection_is_current().unwrap());
+        let captured = db.capture_projection_retirement([0x81; 16]).unwrap();
+        assert!(other.fire_projection_is_current().is_err());
+        assert!(matches!(
+            other.close(),
+            Err(SchedulerDbCloseError::RetirementPending)
+        ));
+        assert!(matches!(
+            other.capture_projection_retirement([0x82; 16]),
+            Err(SchedulerDbRetirementError::GenerationMismatch)
+        ));
+        let drained = other.drain_projection_retirement().unwrap();
+        assert_eq!(drained.generation, captured.generation);
+        let quarantine = dir
+            .path()
+            .join(&drained.roles[SqliteRole::Main as usize].quarantine_name);
+        std::fs::write(&quarantine, b"foreign quarantine occupant").unwrap();
+        let error = db.quarantine_projection_role(SqliteRole::Main).unwrap_err();
+        assert!(matches!(error, SchedulerDbRetirementError::Role(ref error)
+            if error.disposition == lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit
+                && error.stage == lillux::secure_fs::PlannedQuarantineStage::Unchanged));
+        assert_eq!(
+            std::fs::read(&quarantine).unwrap(),
+            b"foreign quarantine occupant"
+        );
+        assert!(path.exists());
+        assert!(db.release_projection_retirement().is_err());
+        // Release refusal retains Drained in the failure owner; drain retries
+        // observations/barriers on that same owner, never native recapture.
+        other.drain_projection_retirement().unwrap();
+        std::fs::remove_file(quarantine).unwrap(); // fixture-owned foreign control artifact
+        for role in [SqliteRole::Main, SqliteRole::Wal, SqliteRole::Shm] {
+            let expected = if drained.roles[role as usize].original.is_some() {
+                SqliteRoleMutationOutcome::QuarantinedDurable
+            } else {
+                SqliteRoleMutationOutcome::OriginallyAbsent
+            };
+            assert_eq!(db.quarantine_projection_role(role).unwrap(), expected);
+            let expected = if drained.roles[role as usize].original.is_some() {
+                SqliteRoleMutationOutcome::RemovedDurable
+            } else {
+                SqliteRoleMutationOutcome::OriginallyAbsent
+            };
+            assert_eq!(other.purge_projection_role(role).unwrap(), expected);
+        }
+        other.release_projection_retirement().unwrap();
+        db.close().unwrap();
+        assert!(db.fire_projection_is_current().is_err());
+        for role in &drained.roles {
+            assert!(!dir.path().join(&role.quarantine_name).exists());
+            assert!(!dir.path().join(&role.purge_name).exists());
+        }
         assert!(!path.exists());
     }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn typed_stale_transfer_preserves_owner_and_denies_ordinary_sql() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler.sqlite3");
+        open_test_path(&path).unwrap().close().unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("ALTER TABLE schedule_specs ADD COLUMN retired_field TEXT;")
+            .unwrap();
+        connection.close().unwrap();
+        let failure = open_test_path(&path)
+            .err()
+            .expect("recognized stale source");
+        assert_eq!(
+            failure.disposition(),
+            SchedulerDbOpenDisposition::RecognizedStaleProjection
+        );
+        let db = failure.into_stale_projection().unwrap();
+        assert!(db.fire_projection_is_current().is_err());
+        let captured = db.capture_projection_retirement([0x91; 16]).unwrap();
+        assert!(captured.roles[SqliteRole::Main as usize].original.is_some());
+        db.abort_projection_retirement().unwrap();
+        assert!(path.exists()); // cleanup-only abort never removes stale projection
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn resolution_refusal_keeps_same_db_owner_and_all_clone_admission_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler.sqlite3");
+        let db = Arc::new(open_test_path(&path).unwrap());
+        let peer = Arc::clone(&db);
+        db.capture_projection_retirement([0xd1; 16]).unwrap();
+        db.drain_projection_retirement().unwrap();
+        let mut expected = peer
+            .observe_projection_role_resolution(SqliteRole::Main)
+            .unwrap();
+        let original = expected.original.clone();
+        expected.generation = [0xd2; 16];
+        let request = lillux_sqlite::SqliteRoleResolutionRequest {
+            expected,
+            ordinal: 0,
+            action: lillux_sqlite::SqliteRoleResolutionAction::SyncRemoved,
+        };
+        assert!(matches!(
+            db.resolve_projection_role(request),
+            Err(SchedulerDbRetirementError::Resolution(
+                lillux_sqlite::SqliteRoleResolutionError::Refused(_)
+            ))
+        ));
+        assert!(peer.fire_projection_is_current().is_err());
+        assert!(matches!(
+            peer.close(),
+            Err(SchedulerDbCloseError::RetirementPending)
+        ));
+        let after = db
+            .observe_projection_role_resolution(SqliteRole::Main)
+            .unwrap();
+        assert_eq!(after.original, original);
+        assert!(after.resolutions.is_empty());
+        assert!(after.barriers_held);
+        db.abort_projection_retirement().unwrap();
+        assert!(path.exists());
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn original_canonical_stopped_owner_drains_without_sql_and_retires_all_roles() {
+        use lillux_sqlite::{
+            SqliteRoleMutationOutcome, StoppedSqliteProjectionPlan, StoppedSqliteRolePlan,
+            StoppedSqliteRoleSource,
+        };
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().join("scheduler.sqlite3");
+        open_test_path(&canonical).unwrap().close().unwrap(); // setup only, before retirement intake
+        let file = std::fs::File::open(&canonical).unwrap();
+        let metadata = file.metadata().unwrap();
+        let (digest, metadata) =
+            lillux::digest_open_regular_file_stable_exact(&file, metadata.len()).unwrap();
+        drop(file);
+        let runtime = Arc::new(PinnedDirectory::open(directory.path()).unwrap().unwrap());
+        let original = lillux_sqlite::SqliteRoleIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            byte_length: metadata.len(),
+            content_sha256: Some(digest),
+        };
+        let plan = StoppedSqliteProjectionPlan {
+            generation: [4; 16],
+            generations: vec![[1; 16], [2; 16], [3; 16], [4; 16]],
+            runtime_identity: runtime.identity().unwrap(),
+            roles: [
+                StoppedSqliteRolePlan {
+                    source: StoppedSqliteRoleSource::Canonical,
+                    current: Some(original.clone()),
+                },
+                StoppedSqliteRolePlan {
+                    source: StoppedSqliteRoleSource::Absent,
+                    current: None,
+                },
+                StoppedSqliteRolePlan {
+                    source: StoppedSqliteRoleSource::Absent,
+                    current: None,
+                },
+            ],
+        };
+        let db = SchedulerDb::capture_stopped_projection(runtime, plan.clone()).unwrap();
+        assert!(db.fire_projection_is_current().is_err()); // no live SQL handle
+        let before = db.observe_stopped_projection().unwrap();
+        assert!(before.ready);
+        assert_eq!(before.coordinates.len(), 100);
+        assert_eq!(before.roles[0], Some(original.clone()));
+        let drained = db.drain_projection_retirement().unwrap();
+        assert_eq!(drained.roles[0].original, Some(original));
+        let after = db.observe_stopped_projection().unwrap();
+        assert_eq!(after.roles, before.roles);
+        assert!(!directory.path().join("scheduler.sqlite3-wal").exists());
+        assert!(!directory.path().join("scheduler.sqlite3-shm").exists());
+        for role in [SqliteRole::Main, SqliteRole::Wal, SqliteRole::Shm] {
+            let quarantine = db.quarantine_projection_role(role).unwrap();
+            let purge = db.purge_projection_role(role).unwrap();
+            if role != SqliteRole::Main {
+                assert_eq!(quarantine, SqliteRoleMutationOutcome::OriginallyAbsent);
+                assert_eq!(purge, SqliteRoleMutationOutcome::OriginallyAbsent);
+            }
+        }
+        db.release_projection_retirement().unwrap();
+        assert!(!canonical.exists());
+    }
 
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stopped_db_partial_owner_retry_never_opens_sql_or_constructs_main() {
+        use lillux_sqlite::{
+            StoppedSqliteProjectionPlan, StoppedSqliteRolePlan, StoppedSqliteRoleSource,
+        };
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("scheduler.sqlite3");
+        open_test_path(&canonical).unwrap().close().unwrap();
+        let selected = "scheduler-retirement.role.01010101010101010101010101010101.main.quarantine";
+        std::fs::rename(&canonical, dir.path().join(selected)).unwrap();
+        let runtime = Arc::new(PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let file = std::fs::File::open(dir.path().join(selected)).unwrap();
+        let metadata = file.metadata().unwrap();
+        let (digest, metadata) =
+            lillux::digest_open_regular_file_stable_exact(&file, metadata.len()).unwrap();
+        drop(file); // fixture sampling BEFORE any peer/retirement barrier
+        let plan = StoppedSqliteProjectionPlan {
+            generation: [4; 16],
+            generations: vec![[1; 16], [2; 16], [3; 16], [4; 16]],
+            runtime_identity: runtime.identity().unwrap(),
+            roles: [
+                StoppedSqliteRolePlan {
+                    source: StoppedSqliteRoleSource::Quarantine {
+                        generation: [1; 16],
+                    },
+                    current: Some(lillux_sqlite::SqliteRoleIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                        byte_length: metadata.len(),
+                        content_sha256: Some(digest),
+                    }),
+                },
+                StoppedSqliteRolePlan {
+                    source: StoppedSqliteRoleSource::Absent,
+                    current: None,
+                },
+                StoppedSqliteRolePlan {
+                    source: StoppedSqliteRoleSource::Absent,
+                    current: None,
+                },
+            ],
+        };
+        let peer_path = dir.path().join("peer.sqlite3");
+        std::fs::hard_link(dir.path().join(selected), &peer_path).unwrap();
+        let peer = Connection::open(&peer_path).unwrap();
+        peer.execute_batch("BEGIN; SELECT * FROM schedule_specs;")
+            .unwrap();
+        let failure = SchedulerDb::capture_stopped_projection(runtime, plan.clone())
+            .err()
+            .expect("same stopped failed DB");
+        assert_eq!(
+            failure.disposition(),
+            SchedulerDbOpenDisposition::StoppedProjectionIntake
+        );
+        let before = failure.observe_stopped_projection().unwrap();
+        assert!(!before.ready);
+        let failure = failure.retry_close().unwrap_err(); // no implicit abort/reopen
+        assert!(failure.has_retained_owner());
+        let mut wrong = plan.clone();
+        wrong.generation = [3; 16];
+        let failure = failure
+            .retry_stopped_projection(&wrong)
+            .err()
+            .expect("wrong plan preserves failed DB");
+        assert!(!canonical.exists());
+        peer.execute_batch("ROLLBACK;").unwrap();
+        peer.close().unwrap();
+        let db = Arc::new(failure.retry_stopped_projection(&plan).unwrap());
+        let clone = Arc::clone(&db);
+        assert!(clone.fire_projection_is_current().is_err());
+        assert!(matches!(
+            clone.close(),
+            Err(SchedulerDbCloseError::RetirementPending)
+        ));
+        let after = db.observe_stopped_projection().unwrap();
+        assert!(after.ready);
+        assert_eq!(after.roles[0], plan.roles[0].current);
+        assert_eq!(after.coordinates.len(), 100);
+        assert!(!canonical.exists());
+        db.abort_projection_retirement().unwrap();
+        assert!(dir.path().join(selected).exists());
+        assert!(!canonical.exists());
+    }
+    #[test]
+    fn retirement_refusal_preserves_in_memory_database() {
+        let db = test_db();
+        assert!(matches!(
+            db.capture_projection_retirement([0xa1; 16]),
+            Err(SchedulerDbRetirementError::InvalidPhase)
+        ));
+        assert!(db.fire_projection_is_current().unwrap());
+        db.close().unwrap();
+    }
     #[test]
     fn history_reset_inspection_accepts_incomplete_current_projection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scheduler.sqlite3");
-        let db = SchedulerDb::open(&path).unwrap();
+        let db = open_test_path(&path).unwrap();
         assert!(!db.fire_projection_is_current().unwrap());
         drop(db);
-        assert_eq!(
-            SchedulerDb::inspect_history_reset(&path)
-                .unwrap()
-                .total_rows(),
-            Some(0)
-        );
-        assert!(
-            SchedulerDb::open_existing_current(&path).is_err(),
-            "retention must still fail closed"
-        );
+        assert_eq!(inspect_test_path(&path).unwrap().total_rows(), Some(0));
     }
 
     #[test]
     fn history_reset_inspection_keeps_stale_projection_opaque() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scheduler.sqlite3");
-        drop(SchedulerDb::open(&path).unwrap());
+        drop(open_test_path(&path).unwrap());
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("ALTER TABLE schedule_specs ADD COLUMN retired_field TEXT;")
             .unwrap();
         drop(conn);
         let before = std::fs::read(&path).unwrap();
-        assert_eq!(
-            SchedulerDb::inspect_history_reset(&path)
-                .unwrap()
-                .total_rows(),
-            None
-        );
+        assert_eq!(inspect_test_path(&path).unwrap().total_rows(), None);
         assert_eq!(std::fs::read(&path).unwrap(), before);
-        // The same owned layout remains eligible for the confirmed rebuild.
-        let rebuilt = SchedulerDb::open(&path).unwrap();
-        rebuilt.discard_fire_history(false).unwrap();
-        drop(rebuilt);
-        assert_eq!(
-            SchedulerDb::inspect_history_reset(&path)
-                .unwrap()
-                .total_rows(),
-            Some(0)
+        // Retirement mutations are held pending authenticated durable recovery.
+        let failure = open_test_path(&path)
+            .err()
+            .expect("stale retirement must refuse");
+        assert!(
+            failure
+                .error()
+                .to_string()
+                .contains("authenticated host retirement")
         );
+        failure.retry_close().unwrap();
     }
 
     #[test]
@@ -2212,36 +3793,14 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("scheduler.sqlite3");
-            drop(SchedulerDb::open(&path).unwrap());
+            drop(open_test_path(&path).unwrap());
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(mutation).unwrap();
             drop(conn);
             let before = std::fs::read(&path).unwrap();
-            assert!(
-                SchedulerDb::inspect_history_reset(&path).is_err(),
-                "{mutation}"
-            );
+            assert!(inspect_test_path(&path).is_err(), "{mutation}");
             assert_eq!(std::fs::read(&path).unwrap(), before);
         }
-    }
-
-    #[test]
-    fn existing_current_open_accepts_an_exact_owned_store() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("scheduler.sqlite3");
-        let db = SchedulerDb::open(&path).unwrap();
-        db.begin_fire_projection_rebuild().unwrap();
-        db.finish_fire_projection_rebuild().unwrap();
-        drop(db);
-        SchedulerDb::open_existing_current(&path).unwrap();
-    }
-
-    #[test]
-    fn existing_current_open_rejects_an_incomplete_fire_projection() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("scheduler.sqlite3");
-        drop(SchedulerDb::open(&path).unwrap());
-        assert!(SchedulerDb::open_existing_current(&path).is_err());
     }
 
     #[test]
@@ -2456,8 +4015,8 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 1000,
-            execution: crate::types::ScheduleExecution {
-                authority: crate::types::ScheduleExecutionAuthority::Node {
+            execution: ryeos_scheduler_contract::ScheduleExecution {
+                authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                     principal_id: format!("fp:{}", "33".repeat(32)),
                     effective_origin_site_id: "site:test".to_string(),
                 },
@@ -2504,7 +4063,7 @@ mod tests {
     }
 
     #[test]
-    fn open_replaces_recognized_stale_owned_projection_without_reading_rows() {
+    fn open_retains_recognized_stale_owned_projection_without_reading_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scheduler.sqlite3");
         {
@@ -2578,9 +4137,11 @@ mod tests {
             .unwrap();
         }
 
-        let db = SchedulerDb::open(&path).unwrap();
-        assert!(db.get_spec("old-sched").unwrap().is_none());
-        assert!(!db.fire_projection_is_current().unwrap());
+        let failure = open_test_path(&path)
+            .err()
+            .expect("stale retirement must refuse");
+        assert!(failure.has_retained_owner());
+        failure.retry_close().unwrap();
     }
 
     // ── Spec CRUD ──────────────────────────────────────────────

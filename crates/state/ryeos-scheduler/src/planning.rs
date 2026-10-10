@@ -4,6 +4,7 @@
 //! diagnostics and, later, grace-aware dispatch/cursor rebuild. It does
 //! not mutate scheduler state and does not make idempotency decisions.
 
+use ryeos_scheduler_contract::parse_iso_ts;
 use serde::Serialize;
 
 use super::crontab;
@@ -120,7 +121,7 @@ fn compute_current_due_at(
     now_ms: i64,
 ) -> Option<i64> {
     if spec.schedule_type == "at" {
-        return crontab::parse_iso_ts(&spec.expression).and_then(|target| {
+        return parse_iso_ts(&spec.expression).and_then(|target| {
             let already_recorded = last_scheduled_at.is_some_and(|last| last >= target);
             if !already_recorded && target <= now_ms {
                 Some(target)
@@ -165,7 +166,7 @@ fn compute_next_planned_fire(
         )
         .ok()
         .flatten(),
-        "at" => crontab::parse_iso_ts(&spec.expression).and_then(|target| {
+        "at" => parse_iso_ts(&spec.expression).and_then(|target| {
             let already_recorded = last_scheduled_at.is_some_and(|last| last >= target);
             if !already_recorded && target > now_ms {
                 Some(target)
@@ -233,9 +234,9 @@ fn within_lateness_grace(spec: &ScheduleSpecRecord, scheduled_at: i64, now_ms: i
 mod tests {
     use super::*;
 
-    fn projectless_execution() -> crate::types::ScheduleExecution {
-        crate::types::ScheduleExecution {
-            authority: crate::types::ScheduleExecutionAuthority::Node {
+    fn projectless_execution() -> ryeos_scheduler_contract::ScheduleExecution {
+        ryeos_scheduler_contract::ScheduleExecution {
+            authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                 principal_id: format!("fp:{}", "33".repeat(32)),
                 effective_origin_site_id: "site:test".to_string(),
             },
@@ -351,7 +352,7 @@ mod tests {
     #[test]
     fn at_future_schedule_waits() {
         let spec = make_spec("at", "2028-01-01T00:00:00Z", 1_000);
-        let target = crontab::parse_iso_ts("2028-01-01T00:00:00Z").unwrap();
+        let target = parse_iso_ts("2028-01-01T00:00:00Z").unwrap();
         let plan = plan_schedule(&spec, None, target - 1_000);
         assert_eq!(plan.current_due_at, None);
         assert_eq!(plan.next_fire_at, Some(target));
@@ -361,7 +362,7 @@ mod tests {
     #[test]
     fn at_recorded_schedule_is_exhausted() {
         let spec = make_spec("at", "2028-01-01T00:00:00Z", 1_000);
-        let target = crontab::parse_iso_ts("2028-01-01T00:00:00Z").unwrap();
+        let target = parse_iso_ts("2028-01-01T00:00:00Z").unwrap();
         let fire = make_fire(target);
         let plan = plan_schedule(&spec, Some(&fire), target + 1_000);
         assert_eq!(plan.current_due_at, None);

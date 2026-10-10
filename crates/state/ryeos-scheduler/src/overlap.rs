@@ -8,23 +8,7 @@ use anyhow::{Context, Result};
 
 use super::types::ScheduleSpecRecord;
 use crate::SchedulerContext;
-
-/// All three overlap policies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlapPolicy {
-    Allow,
-    Skip,
-    CancelPrevious,
-}
-
-pub fn parse_overlap_policy(raw: &str) -> Result<OverlapPolicy> {
-    match raw {
-        "allow" => Ok(OverlapPolicy::Allow),
-        "cancel_previous" => Ok(OverlapPolicy::CancelPrevious),
-        "skip" => Ok(OverlapPolicy::Skip),
-        _ => anyhow::bail!("invalid overlap_policy: {raw}"),
-    }
-}
+use ryeos_scheduler_contract::{OverlapPolicy, parse_overlap_policy};
 
 pub fn resolve_overlap_policy(spec: &ScheduleSpecRecord) -> Result<OverlapPolicy> {
     parse_overlap_policy(&spec.overlap_policy)
@@ -141,8 +125,8 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 0,
-            execution: crate::types::ScheduleExecution {
-                authority: crate::types::ScheduleExecutionAuthority::Node {
+            execution: ryeos_scheduler_contract::ScheduleExecution {
+                authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                     principal_id: format!("fp:{}", "33".repeat(32)),
                     effective_origin_site_id: "site:test".to_string(),
                 },

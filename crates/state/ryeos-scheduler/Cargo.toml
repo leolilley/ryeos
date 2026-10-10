@@ -12,7 +12,9 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 cron = { workspace = true }
 lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-scheduler-contract = { workspace = true }
 ryeos-state = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

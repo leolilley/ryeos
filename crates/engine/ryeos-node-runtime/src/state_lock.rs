@@ -38,6 +38,20 @@ impl std::fmt::Debug for StateLock {
 }
 
 impl StateLock {
+    /// Transfer the SAME concrete lock allocation to an outside owner census.
+    /// The target's fork-child-close registration, parent and target semantics
+    /// remain inside the returned owner; no descriptor is closed or duplicated.
+    /// This supplies neither stopped-node mutation authority nor close evidence.
+    /// A foreign process retains the whole original wrapper on refusal.
+    pub fn into_original_owner(
+        self,
+    ) -> std::result::Result<Arc<lillux::ExactExclusiveFileLock>, (Self, anyhow::Error)> {
+        if let Err(error) = self.inner.require_original_process() {
+            return Err((self, error));
+        }
+        Ok(self.inner)
+    }
+
     /// Attempt to acquire an exclusive, non-blocking lock on `lock_path`.
     ///
     /// Creates the file and parent directories if they don't exist.
@@ -91,6 +105,29 @@ impl std::fmt::Debug for StateLockLease {
 }
 
 impl StateLockLease {
+    /// Retain the SAME concrete exclusion owner for an outside inventory while
+    /// this lease still protects admitted work and durable account settlement.
+    /// This supplies no stopped-node mutation authority or retirement evidence.
+    /// The caller funds counted-alias work before calling this method.
+    pub fn original_owner_alias(&self) -> Result<Arc<lillux::ExactExclusiveFileLock>> {
+        self.inner.require_original_process()?;
+        Ok(Arc::clone(&self.inner))
+    }
+
+    /// Transfer the SAME concrete lock allocation to an outside owner census.
+    /// The target's fork-child-close registration, parent and target semantics
+    /// remain inside the returned owner; no descriptor is closed or duplicated.
+    /// This supplies neither stopped-node mutation authority nor close evidence.
+    /// A foreign process retains the whole original wrapper on refusal.
+    pub fn into_original_owner(
+        self,
+    ) -> std::result::Result<Arc<lillux::ExactExclusiveFileLock>, (Self, anyhow::Error)> {
+        if let Err(error) = self.inner.require_original_process() {
+            return Err((self, error));
+        }
+        Ok(self.inner)
+    }
+
     /// Require this retained lease to protect the exact operational lock of
     /// `app_root` before it is attached to admitted blocking work.
     pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
@@ -222,6 +259,65 @@ mod tests {
 
         drop(lease);
         StateLock::acquire(&lock_path).expect("replacement remained excluded after final lease");
+    }
+
+    #[test]
+    fn consuming_owner_handoff_preserves_same_lock_and_alias_refusal() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = default_lock_path(tmpdir.path());
+        let primary = StateLock::acquire(&path).unwrap();
+        let lease = primary.retain();
+        let primary = primary.into_original_owner().unwrap();
+        let lease = lease.into_original_owner().unwrap();
+        assert!(Arc::ptr_eq(&primary, &lease));
+        let primary = match Arc::try_unwrap(primary) {
+            Err(original) => original,
+            Ok(_) => panic!("retained lease lost the actual exclusion owner"),
+        };
+        assert!(StateLock::acquire(&path).is_err());
+        primary.ensure_path_binding(&path).unwrap();
+        drop(lease);
+        let unique = match Arc::try_unwrap(primary) {
+            Ok(original) => original,
+            Err(_) => panic!("whole-owner refusal failed to preserve the consuming source"),
+        };
+        unique.ensure_path_binding(&path).unwrap();
+        assert!(StateLock::acquire(&path).is_err());
+        // Ordinary RAII semantics remain available here; this is not an
+        // account-settlement or explicit registered-close receipt assertion.
+        drop(unique);
+        StateLock::acquire(&path).expect("final original owner did not release exclusion");
+    }
+
+    #[test]
+    fn inventory_alias_preserves_shared_admission_exclusion_until_final_holder() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = default_lock_path(tmpdir.path());
+        let primary = StateLock::acquire(&path).unwrap();
+        let store_lease = Arc::new(primary.retain());
+        let admission_lease = Arc::clone(&store_lease);
+        // Inventory registration happens before the admission inputs settle.
+        // It must work without consuming or replacing this shared lease.
+        let inventory_owner = store_lease.original_owner_alias().unwrap();
+        let primary_owner = primary.into_original_owner().unwrap();
+        assert!(Arc::ptr_eq(&inventory_owner, &primary_owner));
+        assert!(Arc::ptr_eq(&store_lease, &admission_lease));
+        admission_lease.ensure_protects_app_root(tmpdir.path()).unwrap();
+        let other_path = tmpdir.path().join("other.lock");
+        let other_owner = StateLock::acquire(&other_path).unwrap().into_original_owner().unwrap();
+        assert!(!Arc::ptr_eq(&inventory_owner, &other_owner));
+        drop(other_owner);
+        drop(primary_owner);
+        drop(store_lease);
+        assert!(StateLock::acquire(&path).is_err());
+        // Ending only the inventory alias must not release account protection.
+        drop(inventory_owner);
+        assert!(StateLock::acquire(&path).is_err());
+        admission_lease.ensure_protects_app_root(tmpdir.path()).unwrap();
+        drop(admission_lease);
+        StateLock::acquire(&path).expect("final admission lease did not release exclusion");
+        // This control exercises holder lifetime, not durable settlement or an
+        // original registered descriptor-close receipt.
     }
 
     #[test]

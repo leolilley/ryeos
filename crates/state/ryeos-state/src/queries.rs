@@ -420,11 +420,13 @@ const THREAD_COLUMNS: &str = r#"
 "#;
 
 pub fn get_thread(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Option<ThreadRow>> {
-    let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id = ?");
-    let mut stmt = db.connection().prepare(sql).context("prepare get_thread")?;
-    stmt.query_row([thread_id], ThreadRow::from_row)
-        .optional()
-        .context("query get_thread")
+    db.with_sql(|connection| {
+        let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id = ?");
+        let mut stmt = connection.prepare(sql).context("prepare get_thread")?;
+        stmt.query_row([thread_id], ThreadRow::from_row)
+            .optional()
+            .context("query get_thread")
+    })
 }
 
 /// Fetch selected projected thread rows in bounded batches.
@@ -432,87 +434,91 @@ pub fn get_threads_many(
     db: &ProjectionDb,
     thread_ids: &[String],
 ) -> anyhow::Result<Vec<ThreadRow>> {
-    let mut threads = Vec::new();
-    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat_n("?", batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        if placeholders.is_empty() {
-            continue;
+    db.with_sql(|connection| {
+        let mut threads = Vec::new();
+        for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            if placeholders.is_empty() {
+                continue;
+            }
+            let sql =
+                format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id IN ({placeholders})");
+            let mut stmt = connection
+                .prepare(&sql)
+                .context("prepare get_threads_many")?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(batch.iter()),
+                    ThreadRow::from_row,
+                )
+                .context("query get_threads_many")?;
+            threads.extend(
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("read get_threads_many rows")?,
+            );
         }
-        let sql =
-            format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id IN ({placeholders})");
-        let mut stmt = db
-            .connection()
-            .prepare(&sql)
-            .context("prepare get_threads_many")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params_from_iter(batch.iter()),
-                ThreadRow::from_row,
-            )
-            .context("query get_threads_many")?;
-        threads.extend(
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .context("read get_threads_many rows")?,
-        );
-    }
-    Ok(threads)
+        Ok(threads)
+    })
 }
 
 pub fn list_threads_by_chain(
     db: &ProjectionDb,
     chain_root_id: &str,
 ) -> anyhow::Result<Vec<ThreadRow>> {
-    let sql = &format!(
-        "SELECT {THREAD_COLUMNS} FROM threads WHERE chain_root_id = ? ORDER BY created_at"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare list_threads_by_chain")?;
-    let rows = stmt
-        .query_map([chain_root_id], ThreadRow::from_row)
-        .context("query list_threads_by_chain")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        let sql = &format!(
+            "SELECT {THREAD_COLUMNS} FROM threads WHERE chain_root_id = ? ORDER BY created_at"
+        );
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare list_threads_by_chain")?;
+        let rows = stmt
+            .query_map([chain_root_id], ThreadRow::from_row)
+            .context("query list_threads_by_chain")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 pub fn list_threads_by_status(
     db: &ProjectionDb,
     statuses: &[&str],
 ) -> anyhow::Result<Vec<ThreadRow>> {
-    if statuses.is_empty() {
-        return Ok(vec![]);
-    }
-    let placeholders: Vec<&str> = statuses.iter().map(|_| "?").collect();
-    let sql = &format!(
-        "SELECT {THREAD_COLUMNS} FROM threads WHERE status IN ({}) ORDER BY created_at",
-        placeholders.join(", ")
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare list_threads_by_status")?;
-    let params: Vec<&dyn rusqlite::types::ToSql> = statuses
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-    let rows = stmt
-        .query_map(params.as_slice(), ThreadRow::from_row)
-        .context("query list_threads_by_status")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        if statuses.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders: Vec<&str> = statuses.iter().map(|_| "?").collect();
+        let sql = &format!(
+            "SELECT {THREAD_COLUMNS} FROM threads WHERE status IN ({}) ORDER BY created_at",
+            placeholders.join(", ")
+        );
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare list_threads_by_status")?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = statuses
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), ThreadRow::from_row)
+            .context("query list_threads_by_status")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<ThreadRow>> {
-    let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?");
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare list_threads")?;
-    let rows = stmt
-        .query_map([limit], ThreadRow::from_row)
-        .context("query list_threads")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?");
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare list_threads")?;
+        let rows = stmt
+            .query_map([limit], ThreadRow::from_row)
+            .context("query list_threads")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 /// List threads with optional principal filtering.
@@ -596,98 +602,99 @@ pub fn list_threads_query(
     filter: &ThreadListFilter,
     sort: ThreadSort,
 ) -> anyhow::Result<Vec<ThreadRow>> {
-    // Terminal statuses inlined from the shared constant (stable substrate
-    // vocabulary, not user input), so `active` = status NOT terminal.
-    let order = match sort {
-        ThreadSort::Default => "ORDER BY created_at".to_string(),
-        ThreadSort::Newest => "ORDER BY created_at DESC".to_string(),
-        ThreadSort::Watch => {
-            let terminal_in = TERMINAL_STATUSES
-                .iter()
-                .map(|s| format!("'{s}'"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "ORDER BY CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END, created_at DESC"
-            )
+    db.with_sql(|connection| {
+        // Terminal statuses inlined from the shared constant (stable substrate
+        // vocabulary, not user input), so `active` = status NOT terminal.
+        let order = match sort {
+            ThreadSort::Default => "ORDER BY created_at".to_string(),
+            ThreadSort::Newest => "ORDER BY created_at DESC".to_string(),
+            ThreadSort::Watch => {
+                let terminal_in = TERMINAL_STATUSES
+                    .iter()
+                    .map(|s| format!("'{s}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "ORDER BY CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END, created_at DESC"
+                )
+            }
+        };
+        // Build the WHERE from the present filters only; each contributes one bound
+        // parameter, so there is no injection surface and an absent filter widens.
+        // The owner-scope `principal` is EXACT (an authorization boundary must not
+        // widen by substring); the dashboard facets are substring (contains) so a
+        // type-to-filter box narrows as the operator types.
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+        // `thread_facets.value` is a BLOB, so bind the facet value as bytes to match
+        // (a TEXT param would compare unequal to the stored BLOB). Precomputed here so
+        // the owned Vec outlives the borrowed params slice.
+        let facet_value_bytes: Option<Vec<u8>> =
+            filter.facet.as_ref().map(|(_, v)| v.as_bytes().to_vec());
+        if let Some(principal) = &filter.principal {
+            conditions.push("requested_by = ?");
+            params.push(principal);
         }
-    };
-    // Build the WHERE from the present filters only; each contributes one bound
-    // parameter, so there is no injection surface and an absent filter widens.
-    // The owner-scope `principal` is EXACT (an authorization boundary must not
-    // widen by substring); the dashboard facets are substring (contains) so a
-    // type-to-filter box narrows as the operator types.
-    let mut conditions: Vec<&str> = Vec::new();
-    let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
-    // `thread_facets.value` is a BLOB, so bind the facet value as bytes to match
-    // (a TEXT param would compare unequal to the stored BLOB). Precomputed here so
-    // the owned Vec outlives the borrowed params slice.
-    let facet_value_bytes: Option<Vec<u8>> =
-        filter.facet.as_ref().map(|(_, v)| v.as_bytes().to_vec());
-    if let Some(principal) = &filter.principal {
-        conditions.push("requested_by = ?");
-        params.push(principal);
-    }
-    if let Some(status) = &filter.status {
-        conditions.push("status LIKE '%' || ? || '%'");
-        params.push(status);
-    }
-    if let Some(kind) = &filter.kind {
-        conditions.push("kind LIKE '%' || ? || '%'");
-        params.push(kind);
-    }
-    if let Some(requested_by) = &filter.requested_by {
-        conditions.push("requested_by LIKE '%' || ? || '%'");
-        params.push(requested_by);
-    }
-    if let (Some((key, _)), Some(value_bytes)) = (&filter.facet, &facet_value_bytes) {
-        conditions
-            .push("thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)");
-        params.push(key);
-        params.push(value_bytes);
-    }
-    if filter.active_only {
-        // Active = not terminal. The six terminal statuses are stable substrate
-        // vocabulary (see TERMINAL_STATUSES), inlined as a fixed placeholder
-        // list so this stays a borrowed &str condition.
-        conditions.push("status NOT IN (?, ?, ?, ?, ?, ?)");
-        for status in TERMINAL_STATUSES.iter() {
+        if let Some(status) = &filter.status {
+            conditions.push("status LIKE '%' || ? || '%'");
             params.push(status);
         }
-    }
-    for prefix in &filter.exclude_item_prefixes {
-        if prefix.is_empty() {
-            continue;
+        if let Some(kind) = &filter.kind {
+            conditions.push("kind LIKE '%' || ? || '%'");
+            params.push(kind);
         }
-        // Keep the literal, case-sensitive semantics of Rust starts_with;
-        // LIKE would interpret '%' and '_' in an authored prefix as wildcards.
-        conditions.push("substr(item_ref, 1, length(?)) != ?");
-        params.push(prefix);
-        params.push(prefix);
-    }
-    let project_root = filter
-        .project_root
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
-    if let Some(project_root) = &project_root {
-        conditions.push("project_root = ?");
-        params.push(project_root);
-    }
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-    let sql = format!("SELECT {THREAD_COLUMNS} FROM threads {where_clause} {order} LIMIT ?");
-    params.push(&limit);
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare list_threads_query")?;
-    let rows = stmt
-        .query_map(params.as_slice(), ThreadRow::from_row)
-        .context("query list_threads_query")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+        if let Some(requested_by) = &filter.requested_by {
+            conditions.push("requested_by LIKE '%' || ? || '%'");
+            params.push(requested_by);
+        }
+        if let (Some((key, _)), Some(value_bytes)) = (&filter.facet, &facet_value_bytes) {
+            conditions
+                .push("thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)");
+            params.push(key);
+            params.push(value_bytes);
+        }
+        if filter.active_only {
+            // Active = not terminal. The six terminal statuses are stable substrate
+            // vocabulary (see TERMINAL_STATUSES), inlined as a fixed placeholder
+            // list so this stays a borrowed &str condition.
+            conditions.push("status NOT IN (?, ?, ?, ?, ?, ?)");
+            for status in TERMINAL_STATUSES.iter() {
+                params.push(status);
+            }
+        }
+        for prefix in &filter.exclude_item_prefixes {
+            if prefix.is_empty() {
+                continue;
+            }
+            // Keep the literal, case-sensitive semantics of Rust starts_with;
+            // LIKE would interpret '%' and '_' in an authored prefix as wildcards.
+            conditions.push("substr(item_ref, 1, length(?)) != ?");
+            params.push(prefix);
+            params.push(prefix);
+        }
+        let project_root = filter
+            .project_root
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        if let Some(project_root) = &project_root {
+            conditions.push("project_root = ?");
+            params.push(project_root);
+        }
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+        let sql = format!("SELECT {THREAD_COLUMNS} FROM threads {where_clause} {order} LIMIT ?");
+        params.push(&limit);
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare list_threads_query")?;
+        let rows = stmt
+            .query_map(params.as_slice(), ThreadRow::from_row)
+            .context("query list_threads_query")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 const TERMINAL_STATUSES: [&str; 6] = [
@@ -700,123 +707,124 @@ const TERMINAL_STATUSES: [&str; 6] = [
 ];
 
 pub fn active_thread_count(db: &ProjectionDb) -> anyhow::Result<i64> {
-    let placeholders: Vec<&str> = TERMINAL_STATUSES.iter().map(|_| "?").collect();
-    let sql = &format!(
-        "SELECT COUNT(*) FROM threads WHERE status NOT IN ({})",
-        placeholders.join(", ")
-    );
-    let params: Vec<&dyn rusqlite::types::ToSql> = TERMINAL_STATUSES
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-    let count: i64 = db
-        .connection()
-        .query_row(sql, params.as_slice(), |row| row.get(0))
-        .context("query active_thread_count")?;
-    Ok(count)
+    db.with_sql(|connection| {
+        let placeholders: Vec<&str> = TERMINAL_STATUSES.iter().map(|_| "?").collect();
+        let sql = &format!(
+            "SELECT COUNT(*) FROM threads WHERE status NOT IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = TERMINAL_STATUSES
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let count: i64 = connection
+            .query_row(sql, params.as_slice(), |row| row.get(0))
+            .context("query active_thread_count")?;
+        Ok(count)
+    })
 }
 
 pub fn get_thread_result(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<ThreadResultRow>> {
-    let max_content_bytes = crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES;
-    // Current thread/result identity columns are much smaller than this
-    // allowance. Keeping a separate overhead budget avoids rejecting a result
-    // exactly at its content ceiling while still bounding the complete SQLite
-    // row before materialization.
-    let max_row_bytes = max_content_bytes
-        .checked_add(64 * 1024)
-        .context("thread result row byte maximum overflow")?;
-    let lengths = db
-        .connection()
-        .query_row(
-            "SELECT length(result), length(CAST(error AS BLOB)), \
-                    COALESCE(length(CAST(thread_id AS BLOB)), 0) \
-                  + COALESCE(length(CAST(chain_root_id AS BLOB)), 0) \
-                  + COALESCE(length(CAST(status AS BLOB)), 0) \
-                  + COALESCE(length(result), 0) \
-                  + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
-                  + COALESCE(length(CAST(error AS BLOB)), 0) \
-                  + COALESCE(length(CAST(updated_at AS BLOB)), 0) \
-             FROM thread_results WHERE thread_id = ?1",
-            [thread_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<i64>>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .context("query get_thread_result lengths")?;
-    let Some((result_bytes, error_bytes, row_bytes)) = lengths else {
-        return Ok(None);
-    };
-    let result_bytes = usize::try_from(result_bytes.unwrap_or(0))
-        .context("thread result has an invalid byte length")?;
-    let error_bytes = usize::try_from(error_bytes.unwrap_or(0))
-        .context("thread error has an invalid byte length")?;
-    let row_bytes =
-        usize::try_from(row_bytes).context("thread result row has an invalid length")?;
-    if result_bytes > max_content_bytes {
-        anyhow::bail!(
-            "thread {thread_id} result is {result_bytes} bytes; maximum is {max_content_bytes}"
-        );
-    }
-    if error_bytes > max_content_bytes {
-        anyhow::bail!(
-            "thread {thread_id} error is {error_bytes} bytes; maximum is {max_content_bytes}"
-        );
-    }
-    let total_bytes = result_bytes
-        .checked_add(error_bytes)
-        .context("thread result content byte count overflow")?;
-    if total_bytes > max_content_bytes {
-        anyhow::bail!(
-            "thread {thread_id} result and error total {total_bytes} bytes; maximum is {max_content_bytes}"
-        );
-    }
-    if row_bytes > max_row_bytes {
-        anyhow::bail!(
-            "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_row_bytes}"
-        );
-    }
+    db.with_sql(|connection| {
+        let max_content_bytes = crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES;
+        // Current thread/result identity columns are much smaller than this
+        // allowance. Keeping a separate overhead budget avoids rejecting a result
+        // exactly at its content ceiling while still bounding the complete SQLite
+        // row before materialization.
+        let max_row_bytes = max_content_bytes
+            .checked_add(64 * 1024)
+            .context("thread result row byte maximum overflow")?;
+        let lengths = connection
+            .query_row(
+                "SELECT length(result), length(CAST(error AS BLOB)), \
+                        COALESCE(length(CAST(thread_id AS BLOB)), 0) \
+                      + COALESCE(length(CAST(chain_root_id AS BLOB)), 0) \
+                      + COALESCE(length(CAST(status AS BLOB)), 0) \
+                      + COALESCE(length(result), 0) \
+                      + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
+                      + COALESCE(length(CAST(error AS BLOB)), 0) \
+                      + COALESCE(length(CAST(updated_at AS BLOB)), 0) \
+                 FROM thread_results WHERE thread_id = ?1",
+                [thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("query get_thread_result lengths")?;
+        let Some((result_bytes, error_bytes, row_bytes)) = lengths else {
+            return Ok(None);
+        };
+        let result_bytes = usize::try_from(result_bytes.unwrap_or(0))
+            .context("thread result has an invalid byte length")?;
+        let error_bytes = usize::try_from(error_bytes.unwrap_or(0))
+            .context("thread error has an invalid byte length")?;
+        let row_bytes =
+            usize::try_from(row_bytes).context("thread result row has an invalid length")?;
+        if result_bytes > max_content_bytes {
+            anyhow::bail!(
+                "thread {thread_id} result is {result_bytes} bytes; maximum is {max_content_bytes}"
+            );
+        }
+        if error_bytes > max_content_bytes {
+            anyhow::bail!(
+                "thread {thread_id} error is {error_bytes} bytes; maximum is {max_content_bytes}"
+            );
+        }
+        let total_bytes = result_bytes
+            .checked_add(error_bytes)
+            .context("thread result content byte count overflow")?;
+        if total_bytes > max_content_bytes {
+            anyhow::bail!(
+                "thread {thread_id} result and error total {total_bytes} bytes; maximum is {max_content_bytes}"
+            );
+        }
+        if row_bytes > max_row_bytes {
+            anyhow::bail!(
+                "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_row_bytes}"
+            );
+        }
 
-    let max_content_bytes_sql = i64::try_from(max_content_bytes)
-        .context("thread result byte maximum exceeds SQLite i64")?;
-    let max_row_bytes_sql =
-        i64::try_from(max_row_bytes).context("thread result row maximum exceeds SQLite i64")?;
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT thread_id, chain_root_id, status, result, outcome_code, error, updated_at \
-             FROM thread_results WHERE thread_id = ?1 \
-               AND (result IS NULL OR length(result) <= ?2) \
-               AND (error IS NULL OR length(CAST(error AS BLOB)) <= ?2) \
-               AND COALESCE(length(result), 0) \
-                   + COALESCE(length(CAST(error AS BLOB)), 0) <= ?2 \
-               AND COALESCE(length(CAST(thread_id AS BLOB)), 0) \
-                   + COALESCE(length(CAST(chain_root_id AS BLOB)), 0) \
-                   + COALESCE(length(CAST(status AS BLOB)), 0) \
-                   + COALESCE(length(result), 0) \
-                   + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
-                   + COALESCE(length(CAST(error AS BLOB)), 0) \
-                   + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?3",
-        )
-        .context("prepare get_thread_result")?;
-    let row = stmt
-        .query_row(
-            rusqlite::params![thread_id, max_content_bytes_sql, max_row_bytes_sql],
-            ThreadResultRow::from_row,
-        )
-        .optional()
-        .context("query get_thread_result")?;
-    row.map(Some).ok_or_else(|| {
-        anyhow::anyhow!(
-            "thread {thread_id} result changed after its bounded length preflight or exceeds the byte maximum"
-        )
+        let max_content_bytes_sql = i64::try_from(max_content_bytes)
+            .context("thread result byte maximum exceeds SQLite i64")?;
+        let max_row_bytes_sql =
+            i64::try_from(max_row_bytes).context("thread result row maximum exceeds SQLite i64")?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT thread_id, chain_root_id, status, result, outcome_code, error, updated_at \
+                 FROM thread_results WHERE thread_id = ?1 \
+                   AND (result IS NULL OR length(result) <= ?2) \
+                   AND (error IS NULL OR length(CAST(error AS BLOB)) <= ?2) \
+                   AND COALESCE(length(result), 0) \
+                       + COALESCE(length(CAST(error AS BLOB)), 0) <= ?2 \
+                   AND COALESCE(length(CAST(thread_id AS BLOB)), 0) \
+                       + COALESCE(length(CAST(chain_root_id AS BLOB)), 0) \
+                       + COALESCE(length(CAST(status AS BLOB)), 0) \
+                       + COALESCE(length(result), 0) \
+                       + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
+                       + COALESCE(length(CAST(error AS BLOB)), 0) \
+                       + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?3",
+            )
+            .context("prepare get_thread_result")?;
+        let row = stmt
+            .query_row(
+                rusqlite::params![thread_id, max_content_bytes_sql, max_row_bytes_sql],
+                ThreadResultRow::from_row,
+            )
+            .optional()
+            .context("query get_thread_result")?;
+        row.map(Some).ok_or_else(|| {
+            anyhow::anyhow!(
+                "thread {thread_id} result changed after its bounded length preflight or exceeds the byte maximum"
+            )
+        })
     })
 }
 
@@ -828,115 +836,120 @@ pub fn list_thread_artifacts_bounded(
     max_metadata_bytes: usize,
     max_total_metadata_bytes: usize,
 ) -> anyhow::Result<Vec<ArtifactRow>> {
-    if limit == 0 {
-        anyhow::bail!("thread artifact limit must be positive");
-    }
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT chain_root_id, thread_id, \
-                    CASE WHEN length(CAST(kind AS BLOB)) <= ?3 THEN kind ELSE NULL END AS kind, \
-                    CASE WHEN metadata IS NULL OR length(metadata) <= ?4 THEN metadata ELSE NULL END AS metadata, \
-                    created_at, length(CAST(kind AS BLOB)) AS kind_len, \
-                    length(metadata) AS metadata_len \
-             FROM thread_artifacts WHERE thread_id = ?1 \
-             ORDER BY created_at, artifact_id LIMIT ?2",
-        )
-        .context("prepare bounded thread artifacts")?;
-    let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
-    let mut rows = stmt
-        .query(rusqlite::params![
-            thread_id,
-            sql_limit,
-            i64::try_from(max_kind_bytes).unwrap_or(i64::MAX),
-            i64::try_from(max_metadata_bytes).unwrap_or(i64::MAX),
-        ])
-        .context("query bounded thread artifacts")?;
-    let mut artifacts = Vec::with_capacity(limit.min(32));
-    let mut total_metadata_bytes = 0usize;
-    while let Some(row) = rows.next().context("read bounded thread artifact row")? {
-        if artifacts.len() == limit {
-            anyhow::bail!("thread {thread_id} exceeds the {limit}-artifact maximum");
+    db.with_sql(|connection| {
+        if limit == 0 {
+            anyhow::bail!("thread artifact limit must be positive");
         }
-        let kind_len = usize::try_from(row.get::<_, i64>("kind_len")?)
-            .context("thread artifact kind has an invalid length")?;
-        if kind_len == 0 || kind_len > max_kind_bytes {
-            anyhow::bail!(
-                "thread {thread_id} artifact kind is {kind_len} bytes; maximum is {max_kind_bytes}"
-            );
+        let mut stmt = connection
+            .prepare(
+                "SELECT chain_root_id, thread_id, \
+                        CASE WHEN length(CAST(kind AS BLOB)) <= ?3 THEN kind ELSE NULL END AS kind, \
+                        CASE WHEN metadata IS NULL OR length(metadata) <= ?4 THEN metadata ELSE NULL END AS metadata, \
+                        created_at, length(CAST(kind AS BLOB)) AS kind_len, \
+                        length(metadata) AS metadata_len \
+                 FROM thread_artifacts WHERE thread_id = ?1 \
+                 ORDER BY created_at, artifact_id LIMIT ?2",
+            )
+            .context("prepare bounded thread artifacts")?;
+        let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut rows = stmt
+            .query(rusqlite::params![
+                thread_id,
+                sql_limit,
+                i64::try_from(max_kind_bytes).unwrap_or(i64::MAX),
+                i64::try_from(max_metadata_bytes).unwrap_or(i64::MAX),
+            ])
+            .context("query bounded thread artifacts")?;
+        let mut artifacts = Vec::with_capacity(limit.min(32));
+        let mut total_metadata_bytes = 0usize;
+        while let Some(row) = rows.next().context("read bounded thread artifact row")? {
+            if artifacts.len() == limit {
+                anyhow::bail!("thread {thread_id} exceeds the {limit}-artifact maximum");
+            }
+            let kind_len = usize::try_from(row.get::<_, i64>("kind_len")?)
+                .context("thread artifact kind has an invalid length")?;
+            if kind_len == 0 || kind_len > max_kind_bytes {
+                anyhow::bail!(
+                    "thread {thread_id} artifact kind is {kind_len} bytes; maximum is {max_kind_bytes}"
+                );
+            }
+            let metadata_len = row.get::<_, Option<i64>>("metadata_len")?.unwrap_or(0);
+            let metadata_len = usize::try_from(metadata_len)
+                .context("thread artifact metadata has an invalid negative/oversized length")?;
+            if metadata_len > max_metadata_bytes {
+                anyhow::bail!(
+                    "thread {thread_id} artifact metadata is {metadata_len} bytes; maximum is {max_metadata_bytes}"
+                );
+            }
+            total_metadata_bytes = total_metadata_bytes
+                .checked_add(metadata_len)
+                .context("thread artifact metadata total overflow")?;
+            if total_metadata_bytes > max_total_metadata_bytes {
+                anyhow::bail!(
+                    "thread {thread_id} artifact metadata exceeds the {max_total_metadata_bytes}-byte total"
+                );
+            }
+            // Read the BLOB only after its SQLite length has passed the bound.
+            artifacts.push(ArtifactRow::from_row(row)?);
         }
-        let metadata_len = row.get::<_, Option<i64>>("metadata_len")?.unwrap_or(0);
-        let metadata_len = usize::try_from(metadata_len)
-            .context("thread artifact metadata has an invalid negative/oversized length")?;
-        if metadata_len > max_metadata_bytes {
-            anyhow::bail!(
-                "thread {thread_id} artifact metadata is {metadata_len} bytes; maximum is {max_metadata_bytes}"
-            );
-        }
-        total_metadata_bytes = total_metadata_bytes
-            .checked_add(metadata_len)
-            .context("thread artifact metadata total overflow")?;
-        if total_metadata_bytes > max_total_metadata_bytes {
-            anyhow::bail!(
-                "thread {thread_id} artifact metadata exceeds the {max_total_metadata_bytes}-byte total"
-            );
-        }
-        // Read the BLOB only after its SQLite length has passed the bound.
-        artifacts.push(ArtifactRow::from_row(row)?);
-    }
-    Ok(artifacts)
+        Ok(artifacts)
+    })
 }
 
 pub fn thread_artifact_stats(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<(usize, usize, usize)> {
-    let (count, kind_bytes, metadata_bytes): (i64, i64, i64) = db.connection().query_row(
-        "SELECT COUNT(*), COALESCE(SUM(length(CAST(kind AS BLOB))), 0), \
-                COALESCE(SUM(COALESCE(length(metadata), 0)), 0) \
-         FROM thread_artifacts WHERE thread_id = ?",
-        [thread_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    Ok((
-        usize::try_from(count).context("thread artifact count is invalid")?,
-        usize::try_from(kind_bytes).context("thread artifact kind byte total is invalid")?,
-        usize::try_from(metadata_bytes).context("thread artifact byte total is invalid")?,
-    ))
+    db.with_sql(|connection| {
+        let (count, kind_bytes, metadata_bytes): (i64, i64, i64) = connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(kind AS BLOB))), 0), \
+                    COALESCE(SUM(COALESCE(length(metadata), 0)), 0) \
+             FROM thread_artifacts WHERE thread_id = ?",
+            [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok((
+            usize::try_from(count).context("thread artifact count is invalid")?,
+            usize::try_from(kind_bytes).context("thread artifact kind byte total is invalid")?,
+            usize::try_from(metadata_bytes).context("thread artifact byte total is invalid")?,
+        ))
+    })
 }
 
 pub fn list_thread_children(db: &ProjectionDb, parent_id: &str) -> anyhow::Result<Vec<ThreadRow>> {
-    let sql = &format!(
-        "SELECT {THREAD_COLUMNS} FROM threads \
-         WHERE thread_id IN (\
-             SELECT child_thread_id FROM thread_edges WHERE parent_thread_id = ?\
-         ) ORDER BY created_at"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare list_thread_children")?;
-    let rows = stmt
-        .query_map([parent_id], ThreadRow::from_row)
-        .context("query list_thread_children")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        let sql = &format!(
+            "SELECT {THREAD_COLUMNS} FROM threads \
+             WHERE thread_id IN (\
+                 SELECT child_thread_id FROM thread_edges WHERE parent_thread_id = ?\
+             ) ORDER BY created_at"
+        );
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare list_thread_children")?;
+        let rows = stmt
+            .query_map([parent_id], ThreadRow::from_row)
+            .context("query list_thread_children")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 pub fn list_thread_edges(
     db: &ProjectionDb,
     chain_root_id: &str,
 ) -> anyhow::Result<Vec<ThreadEdgeRow>> {
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason \
-             FROM thread_edges WHERE chain_root_id = ? ORDER BY spawn_seq IS NULL, spawn_seq, rowid",
-        )
-        .context("prepare list_thread_edges")?;
-    let rows = stmt
-        .query_map([chain_root_id], ThreadEdgeRow::from_row)
-        .context("query list_thread_edges")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        let mut stmt = connection
+            .prepare(
+                "SELECT chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason \
+                 FROM thread_edges WHERE chain_root_id = ? ORDER BY spawn_seq IS NULL, spawn_seq, rowid",
+            )
+            .context("prepare list_thread_edges")?;
+        let rows = stmt
+            .query_map([chain_root_id], ThreadEdgeRow::from_row)
+            .context("query list_thread_edges")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 pub fn thread_edge_exists(
@@ -944,16 +957,18 @@ pub fn thread_edge_exists(
     parent_thread_id: &str,
     child_thread_id: &str,
 ) -> anyhow::Result<bool> {
-    db.connection()
-        .query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM thread_edges
-                WHERE parent_thread_id = ?1 AND child_thread_id = ?2
-            )",
-            rusqlite::params![parent_thread_id, child_thread_id],
-            |row| row.get(0),
-        )
-        .context("query thread_edge_exists")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM thread_edges
+                    WHERE parent_thread_id = ?1 AND child_thread_id = ?2
+                )",
+                rusqlite::params![parent_thread_id, child_thread_id],
+                |row| row.get(0),
+            )
+            .context("query thread_edge_exists")
+    })
 }
 
 /// Resolve `selected_thread_id` to the oldest reachable execution ancestor,
@@ -967,99 +982,100 @@ pub fn execution_tree(
     max_depth: usize,
     row_limit: usize,
 ) -> anyhow::Result<Vec<ExecutionTreeRow>> {
-    let sql = r#"
-        WITH RECURSIVE
-        edges(parent_thread_id, child_thread_id, relation, created_at) AS (
+    db.with_sql(|connection| {
+        let sql = r#"
+            WITH RECURSIVE
+            edges(parent_thread_id, child_thread_id, relation, created_at) AS (
+                SELECT
+                    e.parent_thread_id,
+                    e.child_thread_id,
+                    CASE
+                        WHEN MAX(
+                            CASE WHEN child.upstream_thread_id = e.parent_thread_id THEN 1 ELSE 0 END
+                        ) = 1 THEN 'continued'
+                        WHEN MAX(CASE WHEN e.spawn_reason = 'follow' THEN 1 ELSE 0 END) = 1
+                            THEN 'follow'
+                        ELSE 'spawned'
+                    END,
+                    MIN(COALESCE(NULLIF(e.created_at, ''), child.created_at))
+                FROM thread_edges e
+                JOIN threads child ON child.thread_id = e.child_thread_id
+                GROUP BY e.parent_thread_id, e.child_thread_id
+            ),
+            ancestors(thread_id, depth, path) AS (
+                SELECT ?1, 0, ',' || ?1 || ','
+                WHERE EXISTS (SELECT 1 FROM threads WHERE thread_id = ?1)
+                UNION ALL
+                SELECT e.parent_thread_id,
+                       a.depth + 1,
+                       a.path || e.parent_thread_id || ','
+                FROM ancestors a
+                JOIN edges e ON e.child_thread_id = a.thread_id
+                WHERE a.depth < ?2
+                  AND instr(a.path, ',' || e.parent_thread_id || ',') = 0
+            ),
+            root(thread_id) AS (
+                SELECT thread_id
+                FROM ancestors
+                ORDER BY depth DESC, thread_id
+                LIMIT 1
+            ),
+            walk(thread_id, parent_thread_id, relation, depth, path, sort_path) AS (
+                SELECT root.thread_id,
+                       NULL,
+                       'root',
+                       0,
+                       ',' || root.thread_id || ',',
+                       (SELECT created_at FROM threads WHERE thread_id = root.thread_id)
+                           || ':' || root.thread_id
+                FROM root
+                UNION ALL
+                SELECT e.child_thread_id,
+                       e.parent_thread_id,
+                       e.relation,
+                       w.depth + 1,
+                       w.path || e.child_thread_id || ',',
+                       w.sort_path || '/' || e.created_at || ':' || e.child_thread_id
+                FROM walk w
+                JOIN edges e ON e.parent_thread_id = w.thread_id
+                WHERE w.depth < ?2
+                  AND instr(w.path, ',' || e.child_thread_id || ',') = 0
+            )
             SELECT
-                e.parent_thread_id,
-                e.child_thread_id,
-                CASE
-                    WHEN MAX(
-                        CASE WHEN child.upstream_thread_id = e.parent_thread_id THEN 1 ELSE 0 END
-                    ) = 1 THEN 'continued'
-                    WHEN MAX(CASE WHEN e.spawn_reason = 'follow' THEN 1 ELSE 0 END) = 1
-                        THEN 'follow'
-                    ELSE 'spawned'
-                END,
-                MIN(COALESCE(NULLIF(e.created_at, ''), child.created_at))
-            FROM thread_edges e
-            JOIN threads child ON child.thread_id = e.child_thread_id
-            GROUP BY e.parent_thread_id, e.child_thread_id
-        ),
-        ancestors(thread_id, depth, path) AS (
-            SELECT ?1, 0, ',' || ?1 || ','
-            WHERE EXISTS (SELECT 1 FROM threads WHERE thread_id = ?1)
-            UNION ALL
-            SELECT e.parent_thread_id,
-                   a.depth + 1,
-                   a.path || e.parent_thread_id || ','
-            FROM ancestors a
-            JOIN edges e ON e.child_thread_id = a.thread_id
-            WHERE a.depth < ?2
-              AND instr(a.path, ',' || e.parent_thread_id || ',') = 0
-        ),
-        root(thread_id) AS (
-            SELECT thread_id
-            FROM ancestors
-            ORDER BY depth DESC, thread_id
-            LIMIT 1
-        ),
-        walk(thread_id, parent_thread_id, relation, depth, path, sort_path) AS (
-            SELECT root.thread_id,
-                   NULL,
-                   'root',
-                   0,
-                   ',' || root.thread_id || ',',
-                   (SELECT created_at FROM threads WHERE thread_id = root.thread_id)
-                       || ':' || root.thread_id
-            FROM root
-            UNION ALL
-            SELECT e.child_thread_id,
-                   e.parent_thread_id,
-                   e.relation,
-                   w.depth + 1,
-                   w.path || e.child_thread_id || ',',
-                   w.sort_path || '/' || e.created_at || ':' || e.child_thread_id
-            FROM walk w
-            JOIN edges e ON e.parent_thread_id = w.thread_id
-            WHERE w.depth < ?2
-              AND instr(w.path, ',' || e.child_thread_id || ',') = 0
-        )
-        SELECT
-            t.thread_id, t.chain_root_id, t.kind, t.status,
-            t.item_ref, t.executor_ref, t.launch_mode,
-            t.current_site_id, t.origin_site_id, t.upstream_thread_id,
-            t.requested_by, t.project_root, t.project_authority_json,
-            t.admitted_launch_capsule_hash,
-            t.base_project_snapshot_hash, t.result_project_snapshot_hash, t.result_workspace_output_capture_hash,
-            t.captured_history_policy_json,
-            t.created_at, t.updated_at, t.started_at, t.finished_at,
-            walk.parent_thread_id AS tree_parent_thread_id,
-            walk.relation AS tree_relation,
-            walk.depth AS tree_depth,
-            EXISTS (
-                SELECT 1 FROM edges child_edge
-                WHERE child_edge.parent_thread_id = walk.thread_id
-            ) AS tree_has_children
-        FROM walk
-        JOIN threads t ON t.thread_id = walk.thread_id
-        ORDER BY walk.sort_path
-        LIMIT ?3
-    "#;
-    let max_depth = i64::try_from(max_depth).context("execution tree depth is too large")?;
-    let row_limit = i64::try_from(row_limit).context("execution tree row limit is too large")?;
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare execution_tree")?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![selected_thread_id, max_depth, row_limit],
-            ExecutionTreeRow::from_row,
-        )
-        .context("query execution_tree")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("read execution_tree rows")
+                t.thread_id, t.chain_root_id, t.kind, t.status,
+                t.item_ref, t.executor_ref, t.launch_mode,
+                t.current_site_id, t.origin_site_id, t.upstream_thread_id,
+                t.requested_by, t.project_root, t.project_authority_json,
+                t.admitted_launch_capsule_hash,
+                t.base_project_snapshot_hash, t.result_project_snapshot_hash, t.result_workspace_output_capture_hash,
+                t.captured_history_policy_json,
+                t.created_at, t.updated_at, t.started_at, t.finished_at,
+                walk.parent_thread_id AS tree_parent_thread_id,
+                walk.relation AS tree_relation,
+                walk.depth AS tree_depth,
+                EXISTS (
+                    SELECT 1 FROM edges child_edge
+                    WHERE child_edge.parent_thread_id = walk.thread_id
+                ) AS tree_has_children
+            FROM walk
+            JOIN threads t ON t.thread_id = walk.thread_id
+            ORDER BY walk.sort_path
+            LIMIT ?3
+        "#;
+        let max_depth = i64::try_from(max_depth).context("execution tree depth is too large")?;
+        let row_limit = i64::try_from(row_limit).context("execution tree row limit is too large")?;
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare execution_tree")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![selected_thread_id, max_depth, row_limit],
+                ExecutionTreeRow::from_row,
+            )
+            .context("query execution_tree")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read execution_tree rows")
+    })
 }
 
 pub fn replay_events(
@@ -1069,38 +1085,39 @@ pub fn replay_events(
     after_seq: Option<i64>,
     limit: usize,
 ) -> anyhow::Result<Vec<EventRow>> {
-    let mut sql = String::from(
-        "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                event_type, durability, ts, prev_chain_event_hash, \
-                prev_thread_event_hash, payload \
-         FROM events WHERE chain_root_id = ?",
-    );
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-        vec![Box::new(chain_root_id.to_string())];
+    db.with_sql(|connection| {
+        let mut sql = String::from(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events WHERE chain_root_id = ?",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(chain_root_id.to_string())];
 
-    if let Some(tid) = thread_id {
-        sql.push_str(" AND thread_id = ?");
-        params.push(Box::new(tid.to_string()));
-    }
-    if let Some(seq) = after_seq {
-        sql.push_str(" AND chain_seq > ?");
-        params.push(Box::new(seq));
-    }
+        if let Some(tid) = thread_id {
+            sql.push_str(" AND thread_id = ?");
+            params.push(Box::new(tid.to_string()));
+        }
+        if let Some(seq) = after_seq {
+            sql.push_str(" AND chain_seq > ?");
+            params.push(Box::new(seq));
+        }
 
-    sql.push_str(" ORDER BY chain_seq LIMIT ?");
-    let sql_limit = i64::try_from(limit).context("replay_events limit exceeds SQLite i64")?;
-    params.push(Box::new(sql_limit));
+        sql.push_str(" ORDER BY chain_seq LIMIT ?");
+        let sql_limit = i64::try_from(limit).context("replay_events limit exceeds SQLite i64")?;
+        params.push(Box::new(sql_limit));
 
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare replay_events")?;
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare replay_events")?;
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let rows = stmt
-        .query_map(param_refs.as_slice(), EventRow::from_row)
-        .context("query replay_events")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), EventRow::from_row)
+            .context("query replay_events")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 /// Replay a bounded page without materializing an unbounded event history.
@@ -1160,109 +1177,110 @@ fn replay_events_range_bounded(
     limit: usize,
     max_serialized_bytes: usize,
 ) -> anyhow::Result<ReplayEventRowsPage> {
-    if limit == 0 {
-        anyhow::bail!("replay_events_bounded limit must be greater than zero");
-    }
-    if max_serialized_bytes == 0 {
-        anyhow::bail!("replay_events_bounded byte budget must be greater than zero");
-    }
-
-    // Returning NULL for an oversized legacy payload lets us reject it before
-    // rusqlite allocates the BLOB. Current writers cannot create such a row
-    // because the complete ThreadEvent object has the same or smaller ceiling.
-    let mut sql = String::from(
-        "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                event_type, durability, ts, prev_chain_event_hash, \
-                prev_thread_event_hash, \
-                CASE WHEN length(payload) <= ? THEN payload ELSE NULL END AS payload, \
-                length(payload) AS payload_bytes \
-         FROM events WHERE chain_root_id = ?",
-    );
-    let max_event_payload_bytes = crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES;
-    let sql_max_event_payload_bytes = i64::try_from(max_event_payload_bytes)
-        .context("thread event byte limit exceeds SQLite i64")?;
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-        Box::new(sql_max_event_payload_bytes),
-        Box::new(chain_root_id.to_string()),
-    ];
-
-    if let Some(tid) = thread_id {
-        sql.push_str(" AND thread_id = ?");
-        params.push(Box::new(tid.to_string()));
-    }
-    if let Some(seq) = after_seq {
-        sql.push_str(" AND chain_seq > ?");
-        params.push(Box::new(seq));
-    }
-    if let Some(seq) = through_seq {
-        sql.push_str(" AND chain_seq <= ?");
-        params.push(Box::new(seq));
-    }
-
-    sql.push_str(" ORDER BY chain_seq LIMIT ?");
-    let query_limit = limit
-        .checked_add(1)
-        .context("replay_events_bounded limit overflow")?;
-    let sql_limit =
-        i64::try_from(query_limit).context("replay_events_bounded limit exceeds SQLite i64")?;
-    params.push(Box::new(sql_limit));
-
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare replay_events_bounded")?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let mut query_rows = stmt
-        .query(param_refs.as_slice())
-        .context("query replay_events_bounded")?;
-
-    let mut rows = Vec::with_capacity(limit.min(64));
-    let mut serialized_bytes = 0usize;
-    let mut has_more = false;
-    while let Some(row) = query_rows
-        .next()
-        .context("read replay_events_bounded row")?
-    {
-        if rows.len() == limit {
-            has_more = true;
-            break;
+    db.with_sql(|connection| {
+        if limit == 0 {
+            anyhow::bail!("replay_events_bounded limit must be greater than zero");
+        }
+        if max_serialized_bytes == 0 {
+            anyhow::bail!("replay_events_bounded byte budget must be greater than zero");
         }
 
-        let payload_bytes_i64: i64 = row
-            .get("payload_bytes")
-            .context("read replay event payload byte count")?;
-        let payload_bytes = usize::try_from(payload_bytes_i64)
-            .context("replay event payload has invalid byte count")?;
-        if payload_bytes > max_event_payload_bytes {
-            anyhow::bail!(
-                "replay event payload is {} bytes (max {})",
-                payload_bytes,
-                max_event_payload_bytes
-            );
+        // Returning NULL for an oversized legacy payload lets us reject it before
+        // rusqlite allocates the BLOB. Current writers cannot create such a row
+        // because the complete ThreadEvent object has the same or smaller ceiling.
+        let mut sql = String::from(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, \
+                    CASE WHEN length(payload) <= ? THEN payload ELSE NULL END AS payload, \
+                    length(payload) AS payload_bytes \
+             FROM events WHERE chain_root_id = ?",
+        );
+        let max_event_payload_bytes = crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES;
+        let sql_max_event_payload_bytes = i64::try_from(max_event_payload_bytes)
+            .context("thread event byte limit exceeds SQLite i64")?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(sql_max_event_payload_bytes),
+            Box::new(chain_root_id.to_string()),
+        ];
+
+        if let Some(tid) = thread_id {
+            sql.push_str(" AND thread_id = ?");
+            params.push(Box::new(tid.to_string()));
+        }
+        if let Some(seq) = after_seq {
+            sql.push_str(" AND chain_seq > ?");
+            params.push(Box::new(seq));
+        }
+        if let Some(seq) = through_seq {
+            sql.push_str(" AND chain_seq <= ?");
+            params.push(Box::new(seq));
         }
 
-        let event = EventRow::from_row(row).context("decode replay_events_bounded row")?;
-        let event_bytes = event.replay_serialized_size_upper_bound()?;
-        let next_serialized_bytes = serialized_bytes
-            .checked_add(event_bytes)
-            .context("replay page serialized byte count overflow")?;
-        if next_serialized_bytes > max_serialized_bytes {
-            if rows.is_empty() {
+        sql.push_str(" ORDER BY chain_seq LIMIT ?");
+        let query_limit = limit
+            .checked_add(1)
+            .context("replay_events_bounded limit overflow")?;
+        let sql_limit =
+            i64::try_from(query_limit).context("replay_events_bounded limit exceeds SQLite i64")?;
+        params.push(Box::new(sql_limit));
+
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare replay_events_bounded")?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut query_rows = stmt
+            .query(param_refs.as_slice())
+            .context("query replay_events_bounded")?;
+
+        let mut rows = Vec::with_capacity(limit.min(64));
+        let mut serialized_bytes = 0usize;
+        let mut has_more = false;
+        while let Some(row) = query_rows
+            .next()
+            .context("read replay_events_bounded row")?
+        {
+            if rows.len() == limit {
+                has_more = true;
+                break;
+            }
+
+            let payload_bytes_i64: i64 = row
+                .get("payload_bytes")
+                .context("read replay event payload byte count")?;
+            let payload_bytes = usize::try_from(payload_bytes_i64)
+                .context("replay event payload has invalid byte count")?;
+            if payload_bytes > max_event_payload_bytes {
                 anyhow::bail!(
-                    "single replay event requires {} serialized bytes (page budget {})",
-                    event_bytes,
-                    max_serialized_bytes
+                    "replay event payload is {} bytes (max {})",
+                    payload_bytes,
+                    max_event_payload_bytes
                 );
             }
-            has_more = true;
-            break;
+
+            let event = EventRow::from_row(row).context("decode replay_events_bounded row")?;
+            let event_bytes = event.replay_serialized_size_upper_bound()?;
+            let next_serialized_bytes = serialized_bytes
+                .checked_add(event_bytes)
+                .context("replay page serialized byte count overflow")?;
+            if next_serialized_bytes > max_serialized_bytes {
+                if rows.is_empty() {
+                    anyhow::bail!(
+                        "single replay event requires {} serialized bytes (page budget {})",
+                        event_bytes,
+                        max_serialized_bytes
+                    );
+                }
+                has_more = true;
+                break;
+            }
+
+            serialized_bytes = next_serialized_bytes;
+            rows.push(event);
         }
 
-        serialized_bytes = next_serialized_bytes;
-        rows.push(event);
-    }
-
-    Ok(ReplayEventRowsPage { rows, has_more })
+        Ok(ReplayEventRowsPage { rows, has_more })
+    })
 }
 
 /// Return source-authoritative navigation around one event in a single braid.
@@ -1278,25 +1296,25 @@ pub fn chain_event_navigation(
         chain_root_id: &str,
         chain_seq: Option<i64>,
     ) -> anyhow::Result<Option<ChainEventRefRow>> {
-        let map = |row: &rusqlite::Row<'_>| {
-            Ok(ChainEventRefRow {
-                chain_root_id: row.get(0)?,
-                chain_seq: row.get(1)?,
-                event_hash: row.get(2)?,
-            })
-        };
-        match chain_seq {
-            Some(chain_seq) => db
-                .connection()
-                .query_row(sql, rusqlite::params![chain_root_id, chain_seq], map)
-                .optional()
-                .context("query chain event navigation"),
-            None => db
-                .connection()
-                .query_row(sql, [chain_root_id], map)
-                .optional()
-                .context("query chain event live head"),
-        }
+        db.with_sql(|connection| {
+            let map = |row: &rusqlite::Row<'_>| {
+                Ok(ChainEventRefRow {
+                    chain_root_id: row.get(0)?,
+                    chain_seq: row.get(1)?,
+                    event_hash: row.get(2)?,
+                })
+            };
+            match chain_seq {
+                Some(chain_seq) => connection
+                    .query_row(sql, rusqlite::params![chain_root_id, chain_seq], map)
+                    .optional()
+                    .context("query chain event navigation"),
+                None => connection
+                    .query_row(sql, [chain_root_id], map)
+                    .optional()
+                    .context("query chain event live head"),
+            }
+        })
     }
 
     Ok(ChainEventNavigationRows {
@@ -1336,15 +1354,17 @@ pub fn chain_event_navigation(
 /// so this is collision-free (unlike ordering threads by `created_at`).
 /// Returns `None` when the chain has no events yet.
 pub fn chain_head_thread(db: &ProjectionDb, chain_root_id: &str) -> anyhow::Result<Option<String>> {
-    db.connection()
-        .query_row(
-            "SELECT thread_id FROM events WHERE chain_root_id = ? \
-             ORDER BY chain_seq DESC LIMIT 1",
-            [chain_root_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .context("query chain_head_thread")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT thread_id FROM events WHERE chain_root_id = ? \
+                 ORDER BY chain_seq DESC LIMIT 1",
+                [chain_root_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("query chain_head_thread")
+    })
 }
 
 /// The continuation successor of `thread_id`, if one exists. Reads the
@@ -1357,26 +1377,27 @@ pub fn continuation_successor(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let payload: Option<Vec<u8>> = db
-        .connection()
-        .query_row(
-            "SELECT payload FROM events \
-             WHERE thread_id = ? AND event_type = 'thread_continued' \
-             ORDER BY chain_seq DESC LIMIT 1",
-            [thread_id],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .context("query continuation_successor")?;
-    let Some(bytes) = payload else {
-        return Ok(None);
-    };
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
-    Ok(value
-        .get("successor_thread_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
+    db.with_sql(|connection| {
+        let payload: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT payload FROM events \
+                 WHERE thread_id = ? AND event_type = 'thread_continued' \
+                 ORDER BY chain_seq DESC LIMIT 1",
+                [thread_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .context("query continuation_successor")?;
+        let Some(bytes) = payload else {
+            return Ok(None);
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
+        Ok(value
+            .get("successor_thread_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
+    })
 }
 
 /// Raw batch counterpart to [`continuation_successor`]. JSON decoding is left
@@ -1409,48 +1430,49 @@ pub fn thread_result_error_previews(
     max_items: usize,
     max_error_bytes: usize,
 ) -> anyhow::Result<HashMap<String, String>> {
-    if thread_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    if thread_ids.len() > max_items {
-        anyhow::bail!(
-            "thread error preview requested {} threads; maximum is {max_items}",
-            thread_ids.len()
-        );
-    }
-    let sql_max = i64::try_from(max_error_bytes)
-        .context("thread error preview byte maximum exceeds SQLite i64")?;
-    let mut previews = HashMap::new();
-    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat_n("?", batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT thread_id, CASE \
-                 WHEN length(CAST(error AS BLOB)) <= ? THEN error \
-                 ELSE '\"terminal error exceeds list preview limit; inspect thread for full error\"' \
-             END \
-             FROM thread_results \
-             WHERE error IS NOT NULL AND thread_id IN ({placeholders})"
-        );
-        let mut params = Vec::with_capacity(batch.len() + 1);
-        params.push(rusqlite::types::Value::Integer(sql_max));
-        params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
-        let mut stmt = db
-            .connection()
-            .prepare(&sql)
-            .context("prepare bounded thread error previews")?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .context("query bounded thread error previews")?;
-        for row in rows {
-            let (thread_id, error) = row.context("read bounded thread error preview")?;
-            previews.insert(thread_id, error);
+    db.with_sql(|connection| {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
         }
-    }
-    Ok(previews)
+        if thread_ids.len() > max_items {
+            anyhow::bail!(
+                "thread error preview requested {} threads; maximum is {max_items}",
+                thread_ids.len()
+            );
+        }
+        let sql_max = i64::try_from(max_error_bytes)
+            .context("thread error preview byte maximum exceeds SQLite i64")?;
+        let mut previews = HashMap::new();
+        for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT thread_id, CASE \
+                     WHEN length(CAST(error AS BLOB)) <= ? THEN error \
+                     ELSE '\"terminal error exceeds list preview limit; inspect thread for full error\"' \
+                 END \
+                 FROM thread_results \
+                 WHERE error IS NOT NULL AND thread_id IN ({placeholders})"
+            );
+            let mut params = Vec::with_capacity(batch.len() + 1);
+            params.push(rusqlite::types::Value::Integer(sql_max));
+            params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
+            let mut stmt = connection
+                .prepare(&sql)
+                .context("prepare bounded thread error previews")?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .context("query bounded thread error previews")?;
+            for row in rows {
+                let (thread_id, error) = row.context("read bounded thread error preview")?;
+                previews.insert(thread_id, error);
+            }
+        }
+        Ok(previews)
+    })
 }
 
 /// Return the latest payload of one event type for each selected thread.
@@ -1465,119 +1487,120 @@ fn latest_event_payloads_bounded(
     max_payload_bytes: usize,
     max_total_bytes: usize,
 ) -> anyhow::Result<HashMap<String, Vec<u8>>> {
-    if thread_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    if max_items == 0 {
-        anyhow::bail!("latest event payload item budget must be positive");
-    }
+    db.with_sql(|connection| {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        if max_items == 0 {
+            anyhow::bail!("latest event payload item budget must be positive");
+        }
 
-    let mut total_items = 0usize;
-    let mut total_bytes = 0usize;
-    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat_n("?", batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT COUNT(*), COALESCE(SUM(length(e.payload)), 0), \
-                    COALESCE(MAX(length(e.payload)), 0) \
-             FROM events e INNER JOIN ( \
-                 SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
-                 WHERE event_type = ? AND thread_id IN ({placeholders}) \
-                 GROUP BY thread_id \
-             ) latest ON latest.thread_id = e.thread_id \
-                     AND latest.thread_seq = e.thread_seq \
-             WHERE e.event_type = ?"
-        );
-        let mut params = Vec::with_capacity(batch.len() + 2);
-        params.push(rusqlite::types::Value::Text(event_type.to_string()));
-        params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
-        params.push(rusqlite::types::Value::Text(event_type.to_string()));
-        let (items, bytes, largest): (i64, i64, i64) =
-            db.connection()
-                .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?;
-        let items = usize::try_from(items).context("latest event payload count is invalid")?;
-        let bytes = usize::try_from(bytes).context("latest event payload total is invalid")?;
-        let largest = usize::try_from(largest).context("latest event payload length is invalid")?;
-        if largest > max_payload_bytes {
-            anyhow::bail!(
-                "latest {event_type} payload is {largest} bytes; maximum is {max_payload_bytes}"
+        let mut total_items = 0usize;
+        let mut total_bytes = 0usize;
+        for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT COUNT(*), COALESCE(SUM(length(e.payload)), 0), \
+                        COALESCE(MAX(length(e.payload)), 0) \
+                 FROM events e INNER JOIN ( \
+                     SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
+                     WHERE event_type = ? AND thread_id IN ({placeholders}) \
+                     GROUP BY thread_id \
+                 ) latest ON latest.thread_id = e.thread_id \
+                         AND latest.thread_seq = e.thread_seq \
+                 WHERE e.event_type = ?"
             );
-        }
-        total_items = total_items
-            .checked_add(items)
-            .context("latest event payload count overflow")?;
-        total_bytes = total_bytes
-            .checked_add(bytes)
-            .context("latest event payload byte total overflow")?;
-        if total_items > max_items {
-            anyhow::bail!(
-                "latest {event_type} payloads contain {total_items} items; maximum is {max_items}"
-            );
-        }
-        if total_bytes > max_total_bytes {
-            anyhow::bail!(
-                "latest {event_type} payloads total {total_bytes} bytes; maximum is {max_total_bytes}"
-            );
-        }
-    }
-
-    let mut payloads = HashMap::with_capacity(total_items);
-    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat_n("?", batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT e.thread_id, \
-                    CASE WHEN length(e.payload) <= ? THEN e.payload ELSE NULL END, \
-                    length(e.payload) \
-             FROM events e INNER JOIN ( \
-                 SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
-                 WHERE event_type = ? AND thread_id IN ({placeholders}) \
-                 GROUP BY thread_id \
-             ) latest ON latest.thread_id = e.thread_id \
-                     AND latest.thread_seq = e.thread_seq \
-             WHERE e.event_type = ?"
-        );
-        let mut params = Vec::with_capacity(batch.len() + 3);
-        params.push(rusqlite::types::Value::Integer(
-            i64::try_from(max_payload_bytes).unwrap_or(i64::MAX),
-        ));
-        params.push(rusqlite::types::Value::Text(event_type.to_string()));
-        params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
-        params.push(rusqlite::types::Value::Text(event_type.to_string()));
-        let mut stmt = db
-            .connection()
-            .prepare(&sql)
-            .context("prepare bounded latest event payloads")?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<Vec<u8>>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .context("query bounded latest event payloads")?;
-        for row in rows {
-            let (thread_id, payload, payload_len) =
-                row.context("read bounded latest event payload row")?;
-            let payload_len = usize::try_from(payload_len)
-                .context("latest event payload has an invalid length")?;
-            if payload_len > max_payload_bytes {
+            let mut params = Vec::with_capacity(batch.len() + 2);
+            params.push(rusqlite::types::Value::Text(event_type.to_string()));
+            params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
+            params.push(rusqlite::types::Value::Text(event_type.to_string()));
+            let (items, bytes, largest): (i64, i64, i64) =
+                connection
+                    .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
+            let items = usize::try_from(items).context("latest event payload count is invalid")?;
+            let bytes = usize::try_from(bytes).context("latest event payload total is invalid")?;
+            let largest = usize::try_from(largest).context("latest event payload length is invalid")?;
+            if largest > max_payload_bytes {
                 anyhow::bail!(
-                    "latest {event_type} payload is {payload_len} bytes; maximum is {max_payload_bytes}"
+                    "latest {event_type} payload is {largest} bytes; maximum is {max_payload_bytes}"
                 );
             }
-            let payload = payload.ok_or_else(|| {
-                anyhow::anyhow!("bounded latest {event_type} payload unexpectedly returned NULL")
-            })?;
-            payloads.insert(thread_id, payload);
+            total_items = total_items
+                .checked_add(items)
+                .context("latest event payload count overflow")?;
+            total_bytes = total_bytes
+                .checked_add(bytes)
+                .context("latest event payload byte total overflow")?;
+            if total_items > max_items {
+                anyhow::bail!(
+                    "latest {event_type} payloads contain {total_items} items; maximum is {max_items}"
+                );
+            }
+            if total_bytes > max_total_bytes {
+                anyhow::bail!(
+                    "latest {event_type} payloads total {total_bytes} bytes; maximum is {max_total_bytes}"
+                );
+            }
         }
-    }
-    Ok(payloads)
+
+        let mut payloads = HashMap::with_capacity(total_items);
+        for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT e.thread_id, \
+                        CASE WHEN length(e.payload) <= ? THEN e.payload ELSE NULL END, \
+                        length(e.payload) \
+                 FROM events e INNER JOIN ( \
+                     SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
+                     WHERE event_type = ? AND thread_id IN ({placeholders}) \
+                     GROUP BY thread_id \
+                 ) latest ON latest.thread_id = e.thread_id \
+                         AND latest.thread_seq = e.thread_seq \
+                 WHERE e.event_type = ?"
+            );
+            let mut params = Vec::with_capacity(batch.len() + 3);
+            params.push(rusqlite::types::Value::Integer(
+                i64::try_from(max_payload_bytes).unwrap_or(i64::MAX),
+            ));
+            params.push(rusqlite::types::Value::Text(event_type.to_string()));
+            params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
+            params.push(rusqlite::types::Value::Text(event_type.to_string()));
+            let mut stmt = connection
+                .prepare(&sql)
+                .context("prepare bounded latest event payloads")?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .context("query bounded latest event payloads")?;
+            for row in rows {
+                let (thread_id, payload, payload_len) =
+                    row.context("read bounded latest event payload row")?;
+                let payload_len = usize::try_from(payload_len)
+                    .context("latest event payload has an invalid length")?;
+                if payload_len > max_payload_bytes {
+                    anyhow::bail!(
+                        "latest {event_type} payload is {payload_len} bytes; maximum is {max_payload_bytes}"
+                    );
+                }
+                let payload = payload.ok_or_else(|| {
+                    anyhow::anyhow!("bounded latest {event_type} payload unexpectedly returned NULL")
+                })?;
+                payloads.insert(thread_id, payload);
+            }
+        }
+        Ok(payloads)
+    })
 }
 
 /// The `successor_request_fingerprint` recorded in the source's `thread_continued`
@@ -1590,26 +1613,27 @@ pub fn continuation_fingerprint(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let payload: Option<Vec<u8>> = db
-        .connection()
-        .query_row(
-            "SELECT payload FROM events \
-             WHERE thread_id = ? AND event_type = 'thread_continued' \
-             ORDER BY chain_seq DESC LIMIT 1",
-            [thread_id],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .context("query continuation_fingerprint")?;
-    let Some(bytes) = payload else {
-        return Ok(None);
-    };
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
-    Ok(value
-        .get("successor_request_fingerprint")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
+    db.with_sql(|connection| {
+        let payload: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT payload FROM events \
+                 WHERE thread_id = ? AND event_type = 'thread_continued' \
+                 ORDER BY chain_seq DESC LIMIT 1",
+                [thread_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .context("query continuation_fingerprint")?;
+        let Some(bytes) = payload else {
+            return Ok(None);
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
+        Ok(value
+            .get("successor_request_fingerprint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
+    })
 }
 
 /// # Follow lineage: the two projected edge kinds
@@ -1688,38 +1712,39 @@ pub fn continuation_edge(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<ContinuationEdge>> {
-    let payload: Option<Vec<u8>> = db
-        .connection()
-        .query_row(
-            "SELECT payload FROM events \
-             WHERE thread_id = ? AND event_type = 'thread_continued' \
-             ORDER BY chain_seq DESC LIMIT 1",
-            [thread_id],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .context("query continuation_edge")?;
-    let Some(bytes) = payload else {
-        return Ok(None);
-    };
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
-    let Some(successor) = value
-        .get("successor_thread_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-    else {
-        return Ok(None);
-    };
-    let reason = value
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let fingerprint = value
-        .get("successor_request_fingerprint")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    Ok(Some((successor, reason, fingerprint)))
+    db.with_sql(|connection| {
+        let payload: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT payload FROM events \
+                 WHERE thread_id = ? AND event_type = 'thread_continued' \
+                 ORDER BY chain_seq DESC LIMIT 1",
+                [thread_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .context("query continuation_edge")?;
+        let Some(bytes) = payload else {
+            return Ok(None);
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
+        let Some(successor) = value
+            .get("successor_thread_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+        let reason = value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let fingerprint = value
+            .get("successor_request_fingerprint")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Ok(Some((successor, reason, fingerprint)))
+    })
 }
 
 /// Count CONSECUTIVE MACHINE continuations ending at `thread_id`, walking
@@ -1780,21 +1805,22 @@ pub fn latest_thread_events(
     thread_id: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<EventRow>> {
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                event_type, durability, ts, prev_chain_event_hash, \
-                prev_thread_event_hash, payload \
-         FROM events WHERE thread_id = ? ORDER BY chain_seq DESC LIMIT ?",
-        )
-        .context("prepare latest_thread_events")?;
-    let rows = stmt
-        .query_map((thread_id, limit as i64), EventRow::from_row)
-        .context("query latest_thread_events")?;
-    let mut events: Vec<EventRow> = rows.filter_map(|r| r.ok()).collect();
-    events.reverse();
-    Ok(events)
+    db.with_sql(|connection| {
+        let mut stmt = connection
+            .prepare(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events WHERE thread_id = ? ORDER BY chain_seq DESC LIMIT ?",
+            )
+            .context("prepare latest_thread_events")?;
+        let rows = stmt
+            .query_map((thread_id, limit as i64), EventRow::from_row)
+            .context("query latest_thread_events")?;
+        let mut events: Vec<EventRow> = rows.filter_map(|r| r.ok()).collect();
+        events.reverse();
+        Ok(events)
+    })
 }
 
 /// Return the newest event of one exact type on a thread. The event chain is
@@ -1804,19 +1830,21 @@ pub fn latest_thread_event_by_type(
     thread_id: &str,
     event_type: &str,
 ) -> anyhow::Result<Option<EventRow>> {
-    db.connection()
-        .query_row(
-            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                    event_type, durability, ts, prev_chain_event_hash, \
-                    prev_thread_event_hash, payload \
-             FROM events \
-             WHERE thread_id = ?1 AND event_type = ?2 \
-             ORDER BY thread_seq DESC LIMIT 1",
-            rusqlite::params![thread_id, event_type],
-            EventRow::from_row,
-        )
-        .optional()
-        .context("query latest thread event by type")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                        event_type, durability, ts, prev_chain_event_hash, \
+                        prev_thread_event_hash, payload \
+                 FROM events \
+                 WHERE thread_id = ?1 AND event_type = ?2 \
+                 ORDER BY thread_seq DESC LIMIT 1",
+                rusqlite::params![thread_id, event_type],
+                EventRow::from_row,
+            )
+            .optional()
+            .context("query latest thread event by type")
+    })
 }
 
 pub fn latest_thread_event_by_type_prefix(
@@ -1824,19 +1852,21 @@ pub fn latest_thread_event_by_type_prefix(
     thread_id: &str,
     event_type_prefix: &str,
 ) -> anyhow::Result<Option<EventRow>> {
-    db.connection()
-        .query_row(
-            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                    event_type, durability, ts, prev_chain_event_hash, \
-                    prev_thread_event_hash, payload \
-             FROM events \
-             WHERE thread_id = ?1 AND substr(event_type, 1, length(?2)) = ?2 \
-             ORDER BY thread_seq DESC LIMIT 1",
-            rusqlite::params![thread_id, event_type_prefix],
-            EventRow::from_row,
-        )
-        .optional()
-        .context("query latest thread event by type prefix")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                        event_type, durability, ts, prev_chain_event_hash, \
+                        prev_thread_event_hash, payload \
+                 FROM events \
+                 WHERE thread_id = ?1 AND substr(event_type, 1, length(?2)) = ?2 \
+                 ORDER BY thread_seq DESC LIMIT 1",
+                rusqlite::params![thread_id, event_type_prefix],
+                EventRow::from_row,
+            )
+            .optional()
+            .context("query latest thread event by type prefix")
+    })
 }
 
 /// Look up at most three operation-addressed control events. Single-receipt
@@ -1848,27 +1878,28 @@ pub fn thread_events_by_type_operation_id(
     event_type: &str,
     operation_id: &str,
 ) -> anyhow::Result<Vec<EventRow>> {
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT e.event_id, e.event_hash, e.chain_root_id, e.chain_seq, e.thread_id, \
-                    e.thread_seq, e.event_type, e.durability, e.ts, \
-                    e.prev_chain_event_hash, e.prev_thread_event_hash, e.payload \
-             FROM event_operation_index AS operation \
-             JOIN events AS e ON e.event_hash = operation.event_hash \
-             WHERE operation.thread_id = ?1 AND operation.event_type = ?2 \
-               AND operation.operation_id = ?3 \
-             ORDER BY operation.chain_seq LIMIT 3",
-        )
-        .context("prepare thread operation event lookup")?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![thread_id, event_type, operation_id],
-            EventRow::from_row,
-        )
-        .context("query thread operation event lookup")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("decode thread operation event lookup")
+    db.with_sql(|connection| {
+        let mut stmt = connection
+            .prepare(
+                "SELECT e.event_id, e.event_hash, e.chain_root_id, e.chain_seq, e.thread_id, \
+                        e.thread_seq, e.event_type, e.durability, e.ts, \
+                        e.prev_chain_event_hash, e.prev_thread_event_hash, e.payload \
+                 FROM event_operation_index AS operation \
+                 JOIN events AS e ON e.event_hash = operation.event_hash \
+                 WHERE operation.thread_id = ?1 AND operation.event_type = ?2 \
+                   AND operation.operation_id = ?3 \
+                 ORDER BY operation.chain_seq LIMIT 3",
+            )
+            .context("prepare thread operation event lookup")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![thread_id, event_type, operation_id],
+                EventRow::from_row,
+            )
+            .context("query thread operation event lookup")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("decode thread operation event lookup")
+    })
 }
 
 /// Return the newest generic state-anchor milestone on one placement thread.
@@ -1881,22 +1912,24 @@ pub fn latest_state_anchor_event(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<EventRow>> {
-    db.connection()
-        .query_row(
-            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                    event_type, durability, ts, prev_chain_event_hash, \
-                    prev_thread_event_hash, payload \
-             FROM events \
-             WHERE thread_id = ?1 \
-               AND event_type = 'milestone' \
-               AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
-             ORDER BY thread_seq DESC \
-             LIMIT 1",
-            [thread_id],
-            EventRow::from_row,
-        )
-        .optional()
-        .context("query latest_state_anchor_event")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                        event_type, durability, ts, prev_chain_event_hash, \
+                        prev_thread_event_hash, payload \
+                 FROM events \
+                 WHERE thread_id = ?1 \
+                   AND event_type = 'milestone' \
+                   AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
+                 ORDER BY thread_seq DESC \
+                 LIMIT 1",
+                [thread_id],
+                EventRow::from_row,
+            )
+            .optional()
+            .context("query latest_state_anchor_event")
+    })
 }
 
 /// Newest generic state anchor across all continuation placements of one
@@ -1905,22 +1938,24 @@ pub fn latest_chain_state_anchor_event(
     db: &ProjectionDb,
     chain_root_id: &str,
 ) -> anyhow::Result<Option<EventRow>> {
-    db.connection()
-        .query_row(
-            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-                    event_type, durability, ts, prev_chain_event_hash, \
-                    prev_thread_event_hash, payload \
-             FROM events \
-             WHERE chain_root_id = ?1 \
-               AND event_type = 'milestone' \
-               AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
-             ORDER BY chain_seq DESC \
-             LIMIT 1",
-            [chain_root_id],
-            EventRow::from_row,
-        )
-        .optional()
-        .context("query latest_chain_state_anchor_event")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                        event_type, durability, ts, prev_chain_event_hash, \
+                        prev_thread_event_hash, payload \
+                 FROM events \
+                 WHERE chain_root_id = ?1 \
+                   AND event_type = 'milestone' \
+                   AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
+                 ORDER BY chain_seq DESC \
+                 LIMIT 1",
+                [chain_root_id],
+                EventRow::from_row,
+            )
+            .optional()
+            .context("query latest_chain_state_anchor_event")
+    })
 }
 
 /// Latest durable events across every thread on the node — the node-wide
@@ -1934,33 +1969,34 @@ pub fn latest_node_events(
     limit: usize,
     exclude_types: &[String],
 ) -> anyhow::Result<Vec<EventRow>> {
-    let mut sql = String::from(
-        "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
-            event_type, durability, ts, prev_chain_event_hash, \
-            prev_thread_event_hash, payload \
-         FROM events",
-    );
-    if !exclude_types.is_empty() {
-        sql.push_str(" WHERE event_type NOT IN (");
-        sql.push_str(&vec!["?"; exclude_types.len()].join(","));
-        sql.push(')');
-    }
-    sql.push_str(" ORDER BY event_id DESC LIMIT ?");
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare latest_node_events")?;
-    let mut params: Vec<rusqlite::types::Value> = exclude_types
-        .iter()
-        .map(|t| rusqlite::types::Value::Text(t.clone()))
-        .collect();
-    params.push(rusqlite::types::Value::Integer(limit as i64));
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(params), EventRow::from_row)
-        .context("query latest_node_events")?;
-    let mut events: Vec<EventRow> = rows.filter_map(|r| r.ok()).collect();
-    events.reverse();
-    Ok(events)
+    db.with_sql(|connection| {
+        let mut sql = String::from(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                event_type, durability, ts, prev_chain_event_hash, \
+                prev_thread_event_hash, payload \
+             FROM events",
+        );
+        if !exclude_types.is_empty() {
+            sql.push_str(" WHERE event_type NOT IN (");
+            sql.push_str(&vec!["?"; exclude_types.len()].join(","));
+            sql.push(')');
+        }
+        sql.push_str(" ORDER BY event_id DESC LIMIT ?");
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare latest_node_events")?;
+        let mut params: Vec<rusqlite::types::Value> = exclude_types
+            .iter()
+            .map(|t| rusqlite::types::Value::Text(t.clone()))
+            .collect();
+        params.push(rusqlite::types::Value::Integer(limit as i64));
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), EventRow::from_row)
+            .context("query latest_node_events")?;
+        let mut events: Vec<EventRow> = rows.filter_map(|r| r.ok()).collect();
+        events.reverse();
+        Ok(events)
+    })
 }
 
 /// Per-status thread counts for the node pulse: non-terminal statuses
@@ -1971,18 +2007,19 @@ pub fn thread_status_counts(
     db: &ProjectionDb,
     since_iso: &str,
 ) -> anyhow::Result<Vec<(String, i64)>> {
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT status, COUNT(*) AS n FROM threads \
-             WHERE status IN ('created', 'running') OR updated_at >= ? \
-             GROUP BY status ORDER BY status",
-        )
-        .context("prepare thread_status_counts")?;
-    let rows = stmt
-        .query_map([since_iso], |row| Ok((row.get(0)?, row.get(1)?)))
-        .context("query thread_status_counts")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        let mut stmt = connection
+            .prepare(
+                "SELECT status, COUNT(*) AS n FROM threads \
+                 WHERE status IN ('created', 'running') OR updated_at >= ? \
+                 GROUP BY status ORDER BY status",
+            )
+            .context("prepare thread_status_counts")?;
+        let rows = stmt
+            .query_map([since_iso], |row| Ok((row.get(0)?, row.get(1)?)))
+            .context("query thread_status_counts")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 pub fn get_facets_bounded(
@@ -1993,71 +2030,74 @@ pub fn get_facets_bounded(
     max_value_bytes: usize,
     max_content_bytes: usize,
 ) -> anyhow::Result<Vec<FacetRow>> {
-    if limit == 0 {
-        anyhow::bail!("thread facet limit must be positive");
-    }
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT thread_id, \
-                    CASE WHEN length(CAST(key AS BLOB)) <= ?3 THEN key ELSE NULL END AS key, \
-                    CASE WHEN length(value) <= ?4 THEN value ELSE NULL END AS value, \
-                    length(CAST(key AS BLOB)) AS key_len, \
-                    length(value) AS value_len \
-             FROM thread_facets WHERE thread_id = ?1 ORDER BY key LIMIT ?2",
-        )
-        .context("prepare bounded thread facets")?;
-    let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
-    let mut rows = stmt
-        .query(rusqlite::params![
-            thread_id,
-            sql_limit,
-            i64::try_from(max_key_bytes).unwrap_or(i64::MAX),
-            i64::try_from(max_value_bytes).unwrap_or(i64::MAX),
-        ])
-        .context("query bounded thread facets")?;
-    let mut facets = Vec::with_capacity(limit.min(32));
-    let mut content_bytes = 0usize;
-    while let Some(row) = rows.next().context("read bounded thread facet row")? {
-        if facets.len() == limit {
-            anyhow::bail!("thread {thread_id} exceeds the {limit}-facet maximum");
+    db.with_sql(|connection| {
+        if limit == 0 {
+            anyhow::bail!("thread facet limit must be positive");
         }
-        let key_len = usize::try_from(row.get::<_, i64>("key_len")?)
-            .context("thread facet key has an invalid length")?;
-        let value_len = usize::try_from(row.get::<_, i64>("value_len")?)
-            .context("thread facet value has an invalid length")?;
-        if key_len > max_key_bytes || value_len > max_value_bytes {
-            anyhow::bail!(
-                "thread {thread_id} facet exceeds bounds (key={key_len}/{max_key_bytes}, value={value_len}/{max_value_bytes})"
-            );
+        let mut stmt = connection
+            .prepare(
+                "SELECT thread_id, \
+                        CASE WHEN length(CAST(key AS BLOB)) <= ?3 THEN key ELSE NULL END AS key, \
+                        CASE WHEN length(value) <= ?4 THEN value ELSE NULL END AS value, \
+                        length(CAST(key AS BLOB)) AS key_len, \
+                        length(value) AS value_len \
+                 FROM thread_facets WHERE thread_id = ?1 ORDER BY key LIMIT ?2",
+            )
+            .context("prepare bounded thread facets")?;
+        let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut rows = stmt
+            .query(rusqlite::params![
+                thread_id,
+                sql_limit,
+                i64::try_from(max_key_bytes).unwrap_or(i64::MAX),
+                i64::try_from(max_value_bytes).unwrap_or(i64::MAX),
+            ])
+            .context("query bounded thread facets")?;
+        let mut facets = Vec::with_capacity(limit.min(32));
+        let mut content_bytes = 0usize;
+        while let Some(row) = rows.next().context("read bounded thread facet row")? {
+            if facets.len() == limit {
+                anyhow::bail!("thread {thread_id} exceeds the {limit}-facet maximum");
+            }
+            let key_len = usize::try_from(row.get::<_, i64>("key_len")?)
+                .context("thread facet key has an invalid length")?;
+            let value_len = usize::try_from(row.get::<_, i64>("value_len")?)
+                .context("thread facet value has an invalid length")?;
+            if key_len > max_key_bytes || value_len > max_value_bytes {
+                anyhow::bail!(
+                    "thread {thread_id} facet exceeds bounds (key={key_len}/{max_key_bytes}, value={value_len}/{max_value_bytes})"
+                );
+            }
+            content_bytes = content_bytes
+                .checked_add(key_len)
+                .and_then(|bytes| bytes.checked_add(value_len))
+                .context("thread facet content total overflow")?;
+            if content_bytes > max_content_bytes {
+                anyhow::bail!(
+                    "thread {thread_id} facet content exceeds the {max_content_bytes}-byte total"
+                );
+            }
+            // Read the BLOB only after SQLite's length has passed the bound.
+            facets.push(FacetRow::from_row(row)?);
         }
-        content_bytes = content_bytes
-            .checked_add(key_len)
-            .and_then(|bytes| bytes.checked_add(value_len))
-            .context("thread facet content total overflow")?;
-        if content_bytes > max_content_bytes {
-            anyhow::bail!(
-                "thread {thread_id} facet content exceeds the {max_content_bytes}-byte total"
-            );
-        }
-        // Read the BLOB only after SQLite's length has passed the bound.
-        facets.push(FacetRow::from_row(row)?);
-    }
-    Ok(facets)
+        Ok(facets)
+    })
 }
 
 pub fn thread_facet_stats(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<(usize, usize)> {
-    let (count, content_bytes): (i64, i64) = db.connection().query_row(
-        "SELECT COUNT(*), \
-                COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0) \
-         FROM thread_facets WHERE thread_id = ?",
-        [thread_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok((
-        usize::try_from(count).context("thread facet count is invalid")?,
-        usize::try_from(content_bytes).context("thread facet byte total is invalid")?,
-    ))
+    db.with_sql(|connection| {
+        let (count, content_bytes): (i64, i64) = connection.query_row(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0) \
+             FROM thread_facets WHERE thread_id = ?",
+            [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((
+            usize::try_from(count).context("thread facet count is invalid")?,
+            usize::try_from(content_bytes).context("thread facet byte total is invalid")?,
+        ))
+    })
 }
 
 pub fn thread_facet_value_bytes(
@@ -2065,17 +2105,18 @@ pub fn thread_facet_value_bytes(
     thread_id: &str,
     key: &str,
 ) -> anyhow::Result<Option<usize>> {
-    let value_bytes = db
-        .connection()
-        .query_row(
-            "SELECT length(value) FROM thread_facets WHERE thread_id = ?1 AND key = ?2",
-            rusqlite::params![thread_id, key],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    value_bytes
-        .map(|bytes| usize::try_from(bytes).context("thread facet value length is invalid"))
-        .transpose()
+    db.with_sql(|connection| {
+        let value_bytes = connection
+            .query_row(
+                "SELECT length(value) FROM thread_facets WHERE thread_id = ?1 AND key = ?2",
+                rusqlite::params![thread_id, key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        value_bytes
+            .map(|bytes| usize::try_from(bytes).context("thread facet value length is invalid"))
+            .transpose()
+    })
 }
 
 /// Aggregate facet cardinality/content for selected threads without selecting
@@ -2084,42 +2125,43 @@ pub fn thread_facet_stats_many(
     db: &ProjectionDb,
     thread_ids: &[String],
 ) -> anyhow::Result<Vec<(String, usize, usize)>> {
-    if thread_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut stats = Vec::new();
-    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat_n("?", batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT thread_id, COUNT(*), \
-                    COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0) \
-             FROM thread_facets WHERE thread_id IN ({placeholders}) GROUP BY thread_id"
-        );
-        let mut stmt = db
-            .connection()
-            .prepare(&sql)
-            .context("prepare many-facet stats")?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .context("query many-facet stats")?;
-        for row in rows {
-            let (thread_id, items, content_bytes) = row?;
-            stats.push((
-                thread_id,
-                usize::try_from(items).context("many-facet count is invalid")?,
-                usize::try_from(content_bytes).context("many-facet byte total is invalid")?,
-            ));
+    db.with_sql(|connection| {
+        if thread_ids.is_empty() {
+            return Ok(Vec::new());
         }
-    }
-    Ok(stats)
+        let mut stats = Vec::new();
+        for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT thread_id, COUNT(*), \
+                        COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0) \
+                 FROM thread_facets WHERE thread_id IN ({placeholders}) GROUP BY thread_id"
+            );
+            let mut stmt = connection
+                .prepare(&sql)
+                .context("prepare many-facet stats")?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .context("query many-facet stats")?;
+            for row in rows {
+                let (thread_id, items, content_bytes) = row?;
+                stats.push((
+                    thread_id,
+                    usize::try_from(items).context("many-facet count is invalid")?,
+                    usize::try_from(content_bytes).context("many-facet byte total is invalid")?,
+                ));
+            }
+        }
+        Ok(stats)
+    })
 }
 
 /// Fetch facets for a selected thread page with global item/content budgets and
@@ -2133,83 +2175,84 @@ pub fn get_facets_many_bounded(
     max_value_bytes: usize,
     max_content_bytes: usize,
 ) -> anyhow::Result<Vec<FacetRow>> {
-    if thread_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    if max_items == 0 {
-        anyhow::bail!("many-facet item budget must be positive");
-    }
-    let mut facets = Vec::new();
-    let mut content_bytes = 0usize;
-    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        // The CASE guards appear before the IN list in SQL text. Use explicit
-        // parameter numbers for the ids: if these were anonymous `?` slots,
-        // SQLite would number them after the earlier ?N guards and the actual
-        // parameter count would exceed the values supplied for every batch
-        // containing more than one thread.
-        let placeholders = (1..=batch.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let key_bound_param = batch.len() + 1;
-        let value_bound_param = batch.len() + 2;
-        let limit_param = batch.len() + 3;
-        let sql = format!(
-            "SELECT thread_id, \
-                    CASE WHEN length(CAST(key AS BLOB)) <= ?{key_bound_param} THEN key ELSE NULL END AS key, \
-                    CASE WHEN length(value) <= ?{value_bound_param} THEN value ELSE NULL END AS value, \
-                    length(CAST(key AS BLOB)) AS key_len, length(value) AS value_len \
-             FROM thread_facets WHERE thread_id IN ({placeholders}) \
-             ORDER BY thread_id, key LIMIT ?{limit_param}"
-        );
-        let remaining = max_items.saturating_sub(facets.len());
-        let mut params = batch
-            .iter()
-            .cloned()
-            .map(rusqlite::types::Value::Text)
-            .collect::<Vec<_>>();
-        params.push(rusqlite::types::Value::Integer(
-            i64::try_from(max_key_bytes).unwrap_or(i64::MAX),
-        ));
-        params.push(rusqlite::types::Value::Integer(
-            i64::try_from(max_value_bytes).unwrap_or(i64::MAX),
-        ));
-        params.push(rusqlite::types::Value::Integer(
-            i64::try_from(remaining.saturating_add(1)).unwrap_or(i64::MAX),
-        ));
-        let mut stmt = db
-            .connection()
-            .prepare(&sql)
-            .context("prepare bounded many-facet query")?;
-        let mut rows = stmt
-            .query(rusqlite::params_from_iter(params.iter()))
-            .context("query bounded many-facet rows")?;
-        while let Some(row) = rows.next().context("read bounded many-facet row")? {
-            if facets.len() == max_items {
-                anyhow::bail!("selected thread facets exceed the {max_items}-item maximum");
-            }
-            let key_len = usize::try_from(row.get::<_, i64>("key_len")?)
-                .context("many-facet key has an invalid length")?;
-            let value_len = usize::try_from(row.get::<_, i64>("value_len")?)
-                .context("many-facet value has an invalid length")?;
-            if key_len > max_key_bytes || value_len > max_value_bytes {
-                anyhow::bail!(
-                    "selected thread facet exceeds per-entry bounds (key={key_len}/{max_key_bytes}, value={value_len}/{max_value_bytes})"
-                );
-            }
-            content_bytes = content_bytes
-                .checked_add(key_len)
-                .and_then(|bytes| bytes.checked_add(value_len))
-                .context("many-facet content total overflow")?;
-            if content_bytes > max_content_bytes {
-                anyhow::bail!(
-                    "selected thread facet content exceeds the {max_content_bytes}-byte maximum"
-                );
-            }
-            facets.push(FacetRow::from_row(row)?);
+    db.with_sql(|connection| {
+        if thread_ids.is_empty() {
+            return Ok(Vec::new());
         }
-    }
-    Ok(facets)
+        if max_items == 0 {
+            anyhow::bail!("many-facet item budget must be positive");
+        }
+        let mut facets = Vec::new();
+        let mut content_bytes = 0usize;
+        for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+            // The CASE guards appear before the IN list in SQL text. Use explicit
+            // parameter numbers for the ids: if these were anonymous `?` slots,
+            // SQLite would number them after the earlier ?N guards and the actual
+            // parameter count would exceed the values supplied for every batch
+            // containing more than one thread.
+            let placeholders = (1..=batch.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let key_bound_param = batch.len() + 1;
+            let value_bound_param = batch.len() + 2;
+            let limit_param = batch.len() + 3;
+            let sql = format!(
+                "SELECT thread_id, \
+                        CASE WHEN length(CAST(key AS BLOB)) <= ?{key_bound_param} THEN key ELSE NULL END AS key, \
+                        CASE WHEN length(value) <= ?{value_bound_param} THEN value ELSE NULL END AS value, \
+                        length(CAST(key AS BLOB)) AS key_len, length(value) AS value_len \
+                 FROM thread_facets WHERE thread_id IN ({placeholders}) \
+                 ORDER BY thread_id, key LIMIT ?{limit_param}"
+            );
+            let remaining = max_items.saturating_sub(facets.len());
+            let mut params = batch
+                .iter()
+                .cloned()
+                .map(rusqlite::types::Value::Text)
+                .collect::<Vec<_>>();
+            params.push(rusqlite::types::Value::Integer(
+                i64::try_from(max_key_bytes).unwrap_or(i64::MAX),
+            ));
+            params.push(rusqlite::types::Value::Integer(
+                i64::try_from(max_value_bytes).unwrap_or(i64::MAX),
+            ));
+            params.push(rusqlite::types::Value::Integer(
+                i64::try_from(remaining.saturating_add(1)).unwrap_or(i64::MAX),
+            ));
+            let mut stmt = connection
+                .prepare(&sql)
+                .context("prepare bounded many-facet query")?;
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(params.iter()))
+                .context("query bounded many-facet rows")?;
+            while let Some(row) = rows.next().context("read bounded many-facet row")? {
+                if facets.len() == max_items {
+                    anyhow::bail!("selected thread facets exceed the {max_items}-item maximum");
+                }
+                let key_len = usize::try_from(row.get::<_, i64>("key_len")?)
+                    .context("many-facet key has an invalid length")?;
+                let value_len = usize::try_from(row.get::<_, i64>("value_len")?)
+                    .context("many-facet value has an invalid length")?;
+                if key_len > max_key_bytes || value_len > max_value_bytes {
+                    anyhow::bail!(
+                        "selected thread facet exceeds per-entry bounds (key={key_len}/{max_key_bytes}, value={value_len}/{max_value_bytes})"
+                    );
+                }
+                content_bytes = content_bytes
+                    .checked_add(key_len)
+                    .and_then(|bytes| bytes.checked_add(value_len))
+                    .context("many-facet content total overflow")?;
+                if content_bytes > max_content_bytes {
+                    anyhow::bail!(
+                        "selected thread facet content exceeds the {max_content_bytes}-byte maximum"
+                    );
+                }
+                facets.push(FacetRow::from_row(row)?);
+            }
+        }
+        Ok(facets)
+    })
 }
 
 /// A graph thread's current node: the `(node, step)` of its latest
@@ -2221,34 +2264,36 @@ pub fn current_graph_node(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<(String, u32)>> {
-    let conn = db.connection();
-    let mut stmt = conn
-        .prepare(
-            "SELECT payload FROM events
-             WHERE thread_id = ?1 AND event_type = ?2
-             ORDER BY thread_seq DESC LIMIT 1",
-        )
-        .context("prepare current_graph_node")?;
-    let mut rows = stmt
-        .query_map(
-            rusqlite::params![thread_id, crate::event_types::GRAPH_STEP_STARTED],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .context("query current_graph_node")?;
-    let Some(row) = rows.next() else {
-        return Ok(None);
-    };
-    let payload: serde_json::Value = serde_json::from_slice(&row.context("read step payload")?)
-        .context("decode graph_step_started payload")?;
-    let node = payload
-        .get("node")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let step = payload
-        .get("step")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as u32;
-    Ok(node.map(|n| (n, step)))
+    db.with_sql(|connection| {
+        let conn = connection;
+        let mut stmt = conn
+            .prepare(
+                "SELECT payload FROM events
+                 WHERE thread_id = ?1 AND event_type = ?2
+                 ORDER BY thread_seq DESC LIMIT 1",
+            )
+            .context("prepare current_graph_node")?;
+        let mut rows = stmt
+            .query_map(
+                rusqlite::params![thread_id, crate::event_types::GRAPH_STEP_STARTED],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .context("query current_graph_node")?;
+        let Some(row) = rows.next() else {
+            return Ok(None);
+        };
+        let payload: serde_json::Value = serde_json::from_slice(&row.context("read step payload")?)
+            .context("decode graph_step_started payload")?;
+        let node = payload
+            .get("node")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let step = payload
+            .get("step")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        Ok(node.map(|n| (n, step)))
+    })
 }
 
 /// Latest graph-step payload per selected thread, fetched in bounded grouped
@@ -2334,44 +2379,47 @@ pub fn get_thread_usage_latest(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<ThreadUsageLatestRow>> {
-    let sql = &format!(
-        "SELECT {THREAD_USAGE_LATEST_COLUMNS} FROM thread_usage_latest WHERE thread_id = ?"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare get_thread_usage_latest")?;
-    stmt.query_row([thread_id], ThreadUsageLatestRow::from_row)
-        .optional()
-        .context("query get_thread_usage_latest")
+    db.with_sql(|connection| {
+        let sql = &format!(
+            "SELECT {THREAD_USAGE_LATEST_COLUMNS} FROM thread_usage_latest WHERE thread_id = ?"
+        );
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare get_thread_usage_latest")?;
+        stmt.query_row([thread_id], ThreadUsageLatestRow::from_row)
+            .optional()
+            .context("query get_thread_usage_latest")
+    })
 }
 
 pub fn sum_thread_usage_latest_by_chain(
     db: &ProjectionDb,
     chain_root_id: &str,
 ) -> anyhow::Result<ThreadUsageTotals> {
-    let sql = format!(
-        "{EFFECTIVE_USAGE_CTE}
-         SELECT
-            COUNT(DISTINCT u.thread_id) AS thread_count,
-            COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
-            COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
-            COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
-            COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
-         FROM effective_usage u
-         WHERE u.chain_root_id = ?"
-    );
-    db.connection()
-        .query_row(&sql, [chain_root_id], |row| {
-            Ok(ThreadUsageTotals {
-                thread_count: row.get("thread_count")?,
-                completed_turns: row.get("completed_turns")?,
-                input_tokens: row.get("input_tokens")?,
-                output_tokens: row.get("output_tokens")?,
-                spend_usd: row.get("spend_usd")?,
+    db.with_sql(|connection| {
+        let sql = format!(
+            "{EFFECTIVE_USAGE_CTE}
+             SELECT
+                COUNT(DISTINCT u.thread_id) AS thread_count,
+                COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+                COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+             FROM effective_usage u
+             WHERE u.chain_root_id = ?"
+        );
+        connection
+            .query_row(&sql, [chain_root_id], |row| {
+                Ok(ThreadUsageTotals {
+                    thread_count: row.get("thread_count")?,
+                    completed_turns: row.get("completed_turns")?,
+                    input_tokens: row.get("input_tokens")?,
+                    output_tokens: row.get("output_tokens")?,
+                    spend_usd: row.get("spend_usd")?,
+                })
             })
-        })
-        .context("query sum_thread_usage_latest_by_chain")
+            .context("query sum_thread_usage_latest_by_chain")
+    })
 }
 
 /// Node-wide usage settled inside the window (`since_iso`, inclusive) —
@@ -2383,91 +2431,95 @@ pub fn sum_thread_usage_latest_since(
     db: &ProjectionDb,
     since_iso: &str,
 ) -> anyhow::Result<ThreadUsageTotals> {
-    let sql = format!(
-        "{EFFECTIVE_USAGE_CTE}
-         SELECT
-            COUNT(DISTINCT u.thread_id) AS thread_count,
-            COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
-            COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
-            COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
-            COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
-         FROM effective_usage u
-         WHERE u.settled_at >= ?"
-    );
-    db.connection()
-        .query_row(&sql, [since_iso], |row| {
-            Ok(ThreadUsageTotals {
-                thread_count: row.get("thread_count")?,
-                completed_turns: row.get("completed_turns")?,
-                input_tokens: row.get("input_tokens")?,
-                output_tokens: row.get("output_tokens")?,
-                spend_usd: row.get("spend_usd")?,
+    db.with_sql(|connection| {
+        let sql = format!(
+            "{EFFECTIVE_USAGE_CTE}
+             SELECT
+                COUNT(DISTINCT u.thread_id) AS thread_count,
+                COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+                COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+             FROM effective_usage u
+             WHERE u.settled_at >= ?"
+        );
+        connection
+            .query_row(&sql, [since_iso], |row| {
+                Ok(ThreadUsageTotals {
+                    thread_count: row.get("thread_count")?,
+                    completed_turns: row.get("completed_turns")?,
+                    input_tokens: row.get("input_tokens")?,
+                    output_tokens: row.get("output_tokens")?,
+                    spend_usd: row.get("spend_usd")?,
+                })
             })
-        })
-        .context("query sum_thread_usage_latest_since")
+            .context("query sum_thread_usage_latest_since")
+    })
 }
 
 pub fn get_thread_usage_subject(
     db: &ProjectionDb,
     chain_root_id: &str,
 ) -> anyhow::Result<Option<ThreadUsageSubjectRow>> {
-    let mut stmt = db
-        .connection()
-        .prepare(
-            "SELECT chain_root_id, namespace, subject, asserted_by, created_at \
-             FROM thread_usage_subjects WHERE chain_root_id = ?",
-        )
-        .context("prepare get_thread_usage_subject")?;
-    stmt.query_row([chain_root_id], ThreadUsageSubjectRow::from_row)
-        .optional()
-        .context("query get_thread_usage_subject")
+    db.with_sql(|connection| {
+        let mut stmt = connection
+            .prepare(
+                "SELECT chain_root_id, namespace, subject, asserted_by, created_at \
+                 FROM thread_usage_subjects WHERE chain_root_id = ?",
+            )
+            .context("prepare get_thread_usage_subject")?;
+        stmt.query_row([chain_root_id], ThreadUsageSubjectRow::from_row)
+            .optional()
+            .context("query get_thread_usage_subject")
+    })
 }
 
 pub fn summarize_usage_by_subject(
     db: &ProjectionDb,
     filter: UsageSummaryFilter<'_>,
 ) -> anyhow::Result<Vec<UsageSummaryRow>> {
-    let sql = format!(
-        "{EFFECTIVE_USAGE_CTE}
-         SELECT
-            s.namespace AS namespace,
-            s.subject AS subject,
-            u.provider_id AS provider_id,
-            u.model AS model,
-            u.profile AS profile,
-            COUNT(DISTINCT s.chain_root_id) AS chain_count,
-            COUNT(DISTINCT u.thread_id) AS thread_count,
-            COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
-            COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
-            COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
-            COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
-         FROM thread_usage_subjects s
-         JOIN effective_usage u ON u.chain_root_id = s.chain_root_id
-         WHERE (?1 IS NULL OR s.namespace = ?1)
-           AND (?2 IS NULL OR s.subject = ?2)
-           AND (?3 IS NULL OR s.asserted_by = ?3)
-           AND (?4 IS NULL OR u.settled_at >= ?4)
-           AND (?5 IS NULL OR u.settled_at < ?5)
-         GROUP BY s.namespace, s.subject, u.provider_id, u.model, u.profile
-         ORDER BY s.namespace, s.subject, u.provider_id, u.model, u.profile"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare summarize_usage_by_subject")?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![
-                filter.namespace,
-                filter.subject,
-                filter.asserted_by,
-                filter.settled_at_gte,
-                filter.settled_at_lt,
-            ],
-            UsageSummaryRow::from_row,
-        )
-        .context("query summarize_usage_by_subject")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    db.with_sql(|connection| {
+        let sql = format!(
+            "{EFFECTIVE_USAGE_CTE}
+             SELECT
+                s.namespace AS namespace,
+                s.subject AS subject,
+                u.provider_id AS provider_id,
+                u.model AS model,
+                u.profile AS profile,
+                COUNT(DISTINCT s.chain_root_id) AS chain_count,
+                COUNT(DISTINCT u.thread_id) AS thread_count,
+                COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+                COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+             FROM thread_usage_subjects s
+             JOIN effective_usage u ON u.chain_root_id = s.chain_root_id
+             WHERE (?1 IS NULL OR s.namespace = ?1)
+               AND (?2 IS NULL OR s.subject = ?2)
+               AND (?3 IS NULL OR s.asserted_by = ?3)
+               AND (?4 IS NULL OR u.settled_at >= ?4)
+               AND (?5 IS NULL OR u.settled_at < ?5)
+             GROUP BY s.namespace, s.subject, u.provider_id, u.model, u.profile
+             ORDER BY s.namespace, s.subject, u.provider_id, u.model, u.profile"
+        );
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare summarize_usage_by_subject")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    filter.namespace,
+                    filter.subject,
+                    filter.asserted_by,
+                    filter.settled_at_gte,
+                    filter.settled_at_lt,
+                ],
+                UsageSummaryRow::from_row,
+            )
+            .context("query summarize_usage_by_subject")?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
 }
 
 // ============= Provider attempt budget projection =============
@@ -2546,17 +2598,18 @@ pub fn get_provider_attempt_budget_latest(
     db: &ProjectionDb,
     attempt_id: &str,
 ) -> anyhow::Result<Option<ProviderAttemptBudgetRow>> {
-    let sql = format!(
-        "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest \
-         WHERE attempt_id = ?"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare get_provider_attempt_budget_latest")?;
-    stmt.query_row([attempt_id], ProviderAttemptBudgetRow::from_row)
-        .optional()
-        .context("query get_provider_attempt_budget_latest")
+    db.with_sql(|connection| {
+        let sql = format!(
+            "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest \
+             WHERE attempt_id = ?"
+        );
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare get_provider_attempt_budget_latest")?;
+        stmt.query_row([attempt_id], ProviderAttemptBudgetRow::from_row)
+            .optional()
+            .context("query get_provider_attempt_budget_latest")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2572,25 +2625,27 @@ pub fn get_provider_attempt_budget_transition_identity(
     db: &ProjectionDb,
     transition_id: &str,
 ) -> anyhow::Result<Option<ProviderAttemptBudgetTransitionIdentity>> {
-    db.connection()
-        .query_row(
-            "SELECT transition_id, attempt_id, transition_sequence,
-                    payload_fingerprint, chain_seq
-             FROM provider_attempt_budget_transition_once
-             WHERE transition_id = ?1",
-            [transition_id],
-            |row| {
-                Ok(ProviderAttemptBudgetTransitionIdentity {
-                    transition_id: row.get(0)?,
-                    attempt_id: row.get(1)?,
-                    transition_sequence: row.get(2)?,
-                    payload_fingerprint: row.get(3)?,
-                    chain_seq: row.get(4)?,
-                })
-            },
-        )
-        .optional()
-        .context("query provider attempt budget transition identity")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT transition_id, attempt_id, transition_sequence,
+                        payload_fingerprint, chain_seq
+                 FROM provider_attempt_budget_transition_once
+                 WHERE transition_id = ?1",
+                [transition_id],
+                |row| {
+                    Ok(ProviderAttemptBudgetTransitionIdentity {
+                        transition_id: row.get(0)?,
+                        attempt_id: row.get(1)?,
+                        transition_sequence: row.get(2)?,
+                        payload_fingerprint: row.get(3)?,
+                        chain_seq: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query provider attempt budget transition identity")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2606,24 +2661,26 @@ pub fn get_resource_budget_transition_identity(
     db: &ProjectionDb,
     transition_id: &str,
 ) -> anyhow::Result<Option<ResourceBudgetTransitionIdentity>> {
-    db.connection()
-        .query_row(
-            "SELECT transition_id, operation_id, transition_sequence,
-                    payload_fingerprint, chain_seq
-             FROM resource_budget_transition_once WHERE transition_id=?1",
-            [transition_id],
-            |row| {
-                Ok(ResourceBudgetTransitionIdentity {
-                    transition_id: row.get(0)?,
-                    operation_id: row.get(1)?,
-                    transition_sequence: row.get(2)?,
-                    payload_fingerprint: row.get(3)?,
-                    chain_seq: row.get(4)?,
-                })
-            },
-        )
-        .optional()
-        .context("query resource budget transition identity")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT transition_id, operation_id, transition_sequence,
+                        payload_fingerprint, chain_seq
+                 FROM resource_budget_transition_once WHERE transition_id=?1",
+                [transition_id],
+                |row| {
+                    Ok(ResourceBudgetTransitionIdentity {
+                        transition_id: row.get(0)?,
+                        operation_id: row.get(1)?,
+                        transition_sequence: row.get(2)?,
+                        payload_fingerprint: row.get(3)?,
+                        chain_seq: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query resource budget transition identity")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2644,31 +2701,33 @@ pub fn get_project_observation_identity(
     db: &ProjectionDb,
     observation_id: &str,
 ) -> anyhow::Result<Option<ProjectObservationIdentity>> {
-    db.connection()
-        .query_row(
-            "SELECT observation_id, chain_root_id, thread_id,
-                    source_definition_ref, source_effective_definition_digest,
-                    namespace, stable_id, payload_fingerprint, event_hash, chain_seq
-             FROM project_observation_once
-             WHERE observation_id = ?1",
-            [observation_id],
-            |row| {
-                Ok(ProjectObservationIdentity {
-                    observation_id: row.get(0)?,
-                    chain_root_id: row.get(1)?,
-                    thread_id: row.get(2)?,
-                    source_definition_ref: row.get(3)?,
-                    source_effective_definition_digest: row.get(4)?,
-                    namespace: row.get(5)?,
-                    stable_id: row.get(6)?,
-                    payload_fingerprint: row.get(7)?,
-                    event_hash: row.get(8)?,
-                    chain_seq: row.get(9)?,
-                })
-            },
-        )
-        .optional()
-        .context("query project observation identity")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT observation_id, chain_root_id, thread_id,
+                        source_definition_ref, source_effective_definition_digest,
+                        namespace, stable_id, payload_fingerprint, event_hash, chain_seq
+                 FROM project_observation_once
+                 WHERE observation_id = ?1",
+                [observation_id],
+                |row| {
+                    Ok(ProjectObservationIdentity {
+                        observation_id: row.get(0)?,
+                        chain_root_id: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        source_definition_ref: row.get(3)?,
+                        source_effective_definition_digest: row.get(4)?,
+                        namespace: row.get(5)?,
+                        stable_id: row.get(6)?,
+                        payload_fingerprint: row.get(7)?,
+                        event_hash: row.get(8)?,
+                        chain_seq: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query project observation identity")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2691,53 +2750,57 @@ pub fn get_provider_call_observation_identity(
     db: &ProjectionDb,
     observation_id: &str,
 ) -> anyhow::Result<Option<ProviderCallObservationIdentity>> {
-    db.connection()
-        .query_row(
-            "SELECT observation_id, chain_root_id, thread_id, turn,
-                    attempt_number, effect_coordinate_digest, source,
-                    answer_digest, record_hash, publication, event_hash, chain_seq
-             FROM provider_call_observation_once
-            WHERE observation_id = ?1",
-            [observation_id],
-            |row| {
-                let raw_turn = row.get::<_, i64>(3)?;
-                let turn = u32::try_from(raw_turn)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, raw_turn))?;
-                let raw_attempt_number = row.get::<_, i64>(4)?;
-                let attempt_number = u32::try_from(raw_attempt_number)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_attempt_number))?;
-                Ok(ProviderCallObservationIdentity {
-                    observation_id: row.get(0)?,
-                    chain_root_id: row.get(1)?,
-                    thread_id: row.get(2)?,
-                    turn,
-                    attempt_number,
-                    effect_coordinate_digest: row.get(5)?,
-                    source: row.get(6)?,
-                    answer_digest: row.get(7)?,
-                    record_hash: row.get(8)?,
-                    publication: row.get(9)?,
-                    event_hash: row.get(10)?,
-                    chain_seq: row.get(11)?,
-                })
-            },
-        )
-        .optional()
-        .context("query provider-call observation identity")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT observation_id, chain_root_id, thread_id, turn,
+                        attempt_number, effect_coordinate_digest, source,
+                        answer_digest, record_hash, publication, event_hash, chain_seq
+                 FROM provider_call_observation_once
+                WHERE observation_id = ?1",
+                [observation_id],
+                |row| {
+                    let raw_turn = row.get::<_, i64>(3)?;
+                    let turn = u32::try_from(raw_turn)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, raw_turn))?;
+                    let raw_attempt_number = row.get::<_, i64>(4)?;
+                    let attempt_number = u32::try_from(raw_attempt_number)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_attempt_number))?;
+                    Ok(ProviderCallObservationIdentity {
+                        observation_id: row.get(0)?,
+                        chain_root_id: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        turn,
+                        attempt_number,
+                        effect_coordinate_digest: row.get(5)?,
+                        source: row.get(6)?,
+                        answer_digest: row.get(7)?,
+                        record_hash: row.get(8)?,
+                        publication: row.get(9)?,
+                        event_hash: row.get(10)?,
+                        chain_seq: row.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query provider-call observation identity")
+    })
 }
 
 pub fn get_event_by_hash(db: &ProjectionDb, event_hash: &str) -> anyhow::Result<Option<EventRow>> {
-    db.connection()
-        .query_row(
-            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
-                    event_type, durability, ts, prev_chain_event_hash,
-                    prev_thread_event_hash, payload
-             FROM events WHERE event_hash = ?1",
-            [event_hash],
-            EventRow::from_row,
-        )
-        .optional()
-        .context("query event by hash")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
+                        event_type, durability, ts, prev_chain_event_hash,
+                        prev_thread_event_hash, payload
+                 FROM events WHERE event_hash = ?1",
+                [event_hash],
+                EventRow::from_row,
+            )
+            .optional()
+            .context("query event by hash")
+    })
 }
 
 /// Bounded filter for the accounting summary/drill-down service. Money is
@@ -2777,20 +2840,22 @@ pub struct AccountingProjectionBounds {
 pub fn provider_attempt_budget_projection_bounds(
     db: &ProjectionDb,
 ) -> anyhow::Result<AccountingProjectionBounds> {
-    db.connection()
-        .query_row(
-            "SELECT COUNT(*), MIN(occurred_at_ms), MAX(occurred_at_ms)
-             FROM provider_attempt_budget_latest",
-            [],
-            |row| {
-                Ok(AccountingProjectionBounds {
-                    retained_attempt_count: row.get(0)?,
-                    oldest_occurred_at_ms: row.get(1)?,
-                    newest_occurred_at_ms: row.get(2)?,
-                })
-            },
-        )
-        .context("query provider attempt budget projection bounds")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT COUNT(*), MIN(occurred_at_ms), MAX(occurred_at_ms)
+                 FROM provider_attempt_budget_latest",
+                [],
+                |row| {
+                    Ok(AccountingProjectionBounds {
+                        retained_attempt_count: row.get(0)?,
+                        oldest_occurred_at_ms: row.get(1)?,
+                        newest_occurred_at_ms: row.get(2)?,
+                    })
+                },
+            )
+            .context("query provider attempt budget projection bounds")
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2808,86 +2873,89 @@ pub fn summarize_direct_resource_cost(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<ResourceCostSummary> {
-    db.connection()
-        .query_row(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(transition IN (
-                        'reconciled', 'charged_reserved_maximum',
-                        'reservation_bound_violated', 'advisory_reconciled',
-                        'released_unissued', 'advisory_released_unissued',
-                        'reservation_denied'
-                    )), 0),
-                    COALESCE(SUM(transition IN (
-                        'reserved', 'issued', 'advisory_pending', 'advisory_issued'
-                    )), 0),
-                    COALESCE(SUM(COALESCE(budget_charge_usd_nanos, 0)), 0)
-             FROM resource_budget_latest WHERE thread_id=?1",
-            [thread_id],
-            |row| {
-                Ok(ResourceCostSummary {
-                    operation_count: row.get(0)?,
-                    settled_operation_count: row.get(1)?,
-                    unresolved_operation_count: row.get(2)?,
-                    budget_charge_usd_nanos: row.get(3)?,
-                })
-            },
-        )
-        .context("query direct resource cost summary")
+    db.with_sql(|connection| {
+        connection
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(transition IN (
+                            'reconciled', 'charged_reserved_maximum',
+                            'reservation_bound_violated', 'advisory_reconciled',
+                            'released_unissued', 'advisory_released_unissued',
+                            'reservation_denied'
+                        )), 0),
+                        COALESCE(SUM(transition IN (
+                            'reserved', 'issued', 'advisory_pending', 'advisory_issued'
+                        )), 0),
+                        COALESCE(SUM(COALESCE(budget_charge_usd_nanos, 0)), 0)
+                 FROM resource_budget_latest WHERE thread_id=?1",
+                [thread_id],
+                |row| {
+                    Ok(ResourceCostSummary {
+                        operation_count: row.get(0)?,
+                        settled_operation_count: row.get(1)?,
+                        unresolved_operation_count: row.get(2)?,
+                        budget_charge_usd_nanos: row.get(3)?,
+                    })
+                },
+            )
+            .context("query direct resource cost summary")
+    })
 }
 
 pub fn summarize_provider_attempt_budget(
     db: &ProjectionDb,
     filter: &AccountingSummaryFilter<'_>,
 ) -> anyhow::Result<AccountingSummaryTotals> {
-    let sql = "SELECT
-            COUNT(*) AS attempt_count,
-            COALESCE(SUM(reserved_usd_nanos), 0) AS reserved,
-            COALESCE(SUM(COALESCE(budget_charge_usd_nanos, 0)), 0) AS charged,
-            COALESCE(SUM(COALESCE(provider_actual_usd_nanos, 0)), 0) AS actual,
-            COALESCE(SUM(COALESCE(released_usd_nanos, 0)), 0) AS released,
-            COALESCE(SUM(transition = 'reservation_denied'), 0) AS denied,
-            COALESCE(SUM(transition = 'charged_reserved_maximum'), 0) AS charged_max,
-            COALESCE(SUM(transition = 'reservation_bound_violated'), 0) AS violated,
-            COALESCE(SUM(transition IN ('reserved', 'issued')), 0) AS unresolved
-         FROM provider_attempt_budget_latest
-         WHERE (?1 IS NULL OR occurred_at_ms >= ?1)
-           AND (?2 IS NULL OR occurred_at_ms < ?2)
-           AND (?3 IS NULL OR provider_id = ?3)
-           AND (?4 IS NULL OR model = ?4)
-           AND (?5 IS NULL OR profile = ?5)
-           AND (?6 IS NULL OR transition = ?6)
-           AND (?7 IS NULL OR execution_budget_id = ?7)
-           AND (NOT ?8 OR transition IN ('reserved', 'issued'))";
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare summarize_provider_attempt_budget")?;
-    stmt.query_row(
-        rusqlite::params![
-            filter.occurred_at_gte_ms,
-            filter.occurred_at_lt_ms,
-            filter.provider_id,
-            filter.model,
-            filter.profile,
-            filter.transition,
-            filter.execution_budget_id,
-            filter.unresolved_only,
-        ],
-        |row| {
-            Ok(AccountingSummaryTotals {
-                attempt_count: row.get("attempt_count")?,
-                reserved_usd_nanos: row.get("reserved")?,
-                budget_charge_usd_nanos: row.get("charged")?,
-                provider_actual_usd_nanos: row.get("actual")?,
-                released_usd_nanos: row.get("released")?,
-                reservation_denied_count: row.get("denied")?,
-                charged_reserved_maximum_count: row.get("charged_max")?,
-                bound_violation_count: row.get("violated")?,
-                unresolved_count: row.get("unresolved")?,
-            })
-        },
-    )
-    .context("query summarize_provider_attempt_budget")
+    db.with_sql(|connection| {
+        let sql = "SELECT
+                COUNT(*) AS attempt_count,
+                COALESCE(SUM(reserved_usd_nanos), 0) AS reserved,
+                COALESCE(SUM(COALESCE(budget_charge_usd_nanos, 0)), 0) AS charged,
+                COALESCE(SUM(COALESCE(provider_actual_usd_nanos, 0)), 0) AS actual,
+                COALESCE(SUM(COALESCE(released_usd_nanos, 0)), 0) AS released,
+                COALESCE(SUM(transition = 'reservation_denied'), 0) AS denied,
+                COALESCE(SUM(transition = 'charged_reserved_maximum'), 0) AS charged_max,
+                COALESCE(SUM(transition = 'reservation_bound_violated'), 0) AS violated,
+                COALESCE(SUM(transition IN ('reserved', 'issued')), 0) AS unresolved
+             FROM provider_attempt_budget_latest
+             WHERE (?1 IS NULL OR occurred_at_ms >= ?1)
+               AND (?2 IS NULL OR occurred_at_ms < ?2)
+               AND (?3 IS NULL OR provider_id = ?3)
+               AND (?4 IS NULL OR model = ?4)
+               AND (?5 IS NULL OR profile = ?5)
+               AND (?6 IS NULL OR transition = ?6)
+               AND (?7 IS NULL OR execution_budget_id = ?7)
+               AND (NOT ?8 OR transition IN ('reserved', 'issued'))";
+        let mut stmt = connection
+            .prepare(sql)
+            .context("prepare summarize_provider_attempt_budget")?;
+        stmt.query_row(
+            rusqlite::params![
+                filter.occurred_at_gte_ms,
+                filter.occurred_at_lt_ms,
+                filter.provider_id,
+                filter.model,
+                filter.profile,
+                filter.transition,
+                filter.execution_budget_id,
+                filter.unresolved_only,
+            ],
+            |row| {
+                Ok(AccountingSummaryTotals {
+                    attempt_count: row.get("attempt_count")?,
+                    reserved_usd_nanos: row.get("reserved")?,
+                    budget_charge_usd_nanos: row.get("charged")?,
+                    provider_actual_usd_nanos: row.get("actual")?,
+                    released_usd_nanos: row.get("released")?,
+                    reservation_denied_count: row.get("denied")?,
+                    charged_reserved_maximum_count: row.get("charged_max")?,
+                    bound_violation_count: row.get("violated")?,
+                    unresolved_count: row.get("unresolved")?,
+                })
+            },
+        )
+        .context("query summarize_provider_attempt_budget")
+    })
 }
 
 /// Bounded drill-down page over the latest-transition projection.
@@ -2904,43 +2972,44 @@ pub fn list_provider_attempt_budget(
     limit: u32,
     after_attempt_id: Option<&str>,
 ) -> anyhow::Result<Vec<ProviderAttemptBudgetRow>> {
-    let sql = format!(
-        "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest
-         WHERE (?1 IS NULL OR occurred_at_ms >= ?1)
-           AND (?2 IS NULL OR occurred_at_ms < ?2)
-           AND (?3 IS NULL OR provider_id = ?3)
-           AND (?4 IS NULL OR model = ?4)
-           AND (?5 IS NULL OR profile = ?5)
-           AND (?6 IS NULL OR transition = ?6)
-           AND (?7 IS NULL OR execution_budget_id = ?7)
-           AND (NOT ?8 OR transition IN ('reserved', 'issued'))
-           AND (?9 IS NULL OR attempt_id > ?9)
-         ORDER BY attempt_id
-         LIMIT ?10"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(&sql)
-        .context("prepare list_provider_attempt_budget")?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![
-                filter.occurred_at_gte_ms,
-                filter.occurred_at_lt_ms,
-                filter.provider_id,
-                filter.model,
-                filter.profile,
-                filter.transition,
-                filter.execution_budget_id,
-                filter.unresolved_only,
-                after_attempt_id,
-                limit,
-            ],
-            ProviderAttemptBudgetRow::from_row,
-        )
-        .context("query list_provider_attempt_budget")?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .context("collect list_provider_attempt_budget")
+    db.with_sql(|connection| {
+        let sql = format!(
+            "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest
+             WHERE (?1 IS NULL OR occurred_at_ms >= ?1)
+               AND (?2 IS NULL OR occurred_at_ms < ?2)
+               AND (?3 IS NULL OR provider_id = ?3)
+               AND (?4 IS NULL OR model = ?4)
+               AND (?5 IS NULL OR profile = ?5)
+               AND (?6 IS NULL OR transition = ?6)
+               AND (?7 IS NULL OR execution_budget_id = ?7)
+               AND (NOT ?8 OR transition IN ('reserved', 'issued'))
+               AND (?9 IS NULL OR attempt_id > ?9)
+             ORDER BY attempt_id
+             LIMIT ?10"
+        );
+        let mut stmt = connection
+            .prepare(&sql)
+            .context("prepare list_provider_attempt_budget")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    filter.occurred_at_gte_ms,
+                    filter.occurred_at_lt_ms,
+                    filter.provider_id,
+                    filter.model,
+                    filter.profile,
+                    filter.transition,
+                    filter.execution_budget_id,
+                    filter.unresolved_only,
+                    after_attempt_id,
+                    limit,
+                ],
+                ProviderAttemptBudgetRow::from_row,
+            )
+            .context("query list_provider_attempt_budget")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("collect list_provider_attempt_budget")
+    })
 }
 
 // ============= Tests =============
@@ -3651,13 +3720,12 @@ mod tests {
     fn get_thread_result_rejects_oversized_blob_before_reading_it() {
         let db = test_db();
         let oversized = i64::try_from(crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 1).unwrap();
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO thread_results \
                  (thread_id, chain_root_id, status, result, updated_at) \
                  VALUES ('T-large', 'chain-A', 'completed', zeroblob(?1), 'now')",
                 [oversized],
-            )
+            )?))
             .unwrap();
 
         let error = get_thread_result(&db, "T-large").unwrap_err();
@@ -3669,13 +3737,12 @@ mod tests {
     fn get_thread_result_accepts_content_larger_than_one_event() {
         let db = test_db();
         let content = vec![b'x'; crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1];
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO thread_results \
                  (thread_id, chain_root_id, status, result, updated_at) \
                  VALUES ('T-result', 'chain-A', 'completed', ?1, 'now')",
                 [&content],
-            )
+            )?))
             .unwrap();
 
         let row = get_thread_result(&db, "T-result")
@@ -3687,8 +3754,7 @@ mod tests {
     #[test]
     fn thread_result_error_previews_bound_oversized_errors() {
         let db = test_db();
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO thread_results \
                  (thread_id, chain_root_id, status, error, updated_at) \
                  VALUES ('T-small', 'T-small', 'failed', ?1, 'now'), \
@@ -3697,7 +3763,7 @@ mod tests {
                     r#"{"result":"use ?? for fallback"}"#,
                     serde_json::json!({ "result": "x".repeat(128) }).to_string(),
                 ],
-            )
+            )?))
             .unwrap();
 
         let previews = thread_result_error_previews(
@@ -3758,11 +3824,10 @@ mod tests {
         insert_thread(&db, "T-child", "T-child", ThreadStatus::Running);
         insert_thread(&db, "T-resume", "T-root", ThreadStatus::Created);
         insert_thread(&db, "T-sub", "T-sub", ThreadStatus::Created);
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "UPDATE threads SET upstream_thread_id = 'T-root' WHERE thread_id = 'T-resume'",
                 [],
-            )
+            )?))
             .unwrap();
         project_thread_edge(&db, "T-root", "T-root", "T-child", Some(1), Some("follow")).unwrap();
         project_thread_edge(
@@ -3803,22 +3868,21 @@ mod tests {
     #[test]
     fn replay_events_filters_by_thread_and_seq() {
         let db = test_db();
-        let conn = db.connection();
-        conn.execute(
+        db.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
              VALUES (?, 'chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
             ["a".repeat(64)],
-        ).unwrap();
-        conn.execute(
+        )?)).unwrap();
+        db.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
              VALUES (?, 'chain-A', 2, 'T-1', 1, 'step', 'durable', '2026-01-01T00:01:00Z', X'01')",
             ["b".repeat(64)],
-        ).unwrap();
-        conn.execute(
+        )?)).unwrap();
+        db.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
              VALUES (?, 'chain-A', 3, 'T-2', 0, 'start', 'durable', '2026-01-01T00:02:00Z', X'02')",
             ["c".repeat(64)],
-        ).unwrap();
+        )?)).unwrap();
 
         let all = replay_events(&db, "chain-A", None, None, 10).unwrap();
         assert_eq!(all.len(), 3);
@@ -3835,15 +3899,14 @@ mod tests {
     #[test]
     fn chain_head_thread_is_owner_of_highest_chain_seq_event() {
         let db = test_db();
-        let conn = db.connection();
         // No events yet -> no head.
         assert_eq!(chain_head_thread(&db, "chain-A").unwrap(), None);
 
-        conn.execute(
+        db.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
              VALUES (?, 'chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
             ["d".repeat(64)],
-        ).unwrap();
+        )?)).unwrap();
         assert_eq!(
             chain_head_thread(&db, "chain-A").unwrap(),
             Some("T-1".to_string())
@@ -3851,11 +3914,11 @@ mod tests {
 
         // Chain advances to a successor: the head follows the latest event,
         // independent of insertion timestamps.
-        conn.execute(
+        db.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
              VALUES (?, 'chain-A', 2, 'T-2', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'01')",
             ["e".repeat(64)],
-        ).unwrap();
+        )?)).unwrap();
         assert_eq!(
             chain_head_thread(&db, "chain-A").unwrap(),
             Some("T-2".to_string())
@@ -3868,17 +3931,16 @@ mod tests {
     #[test]
     fn bounded_chain_cut_and_navigation_use_chain_sequence_only() {
         let db = test_db();
-        let conn = db.connection();
         for seq in 1..=4_i64 {
             let event_hash = format!("{seq:064x}");
             // Deliberately reverse timestamps: navigation must remain braid-ordered.
             let timestamp = format!("2026-01-01T00:00:0{}Z", 5 - seq);
-            conn.execute(
+            db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, \
                  thread_seq, event_type, durability, ts, payload) \
                  VALUES (?, 'chain-cut', ?, 'T-cut', ?, 'step', 'durable', ?, X'7B7D')",
                 rusqlite::params![event_hash, seq, seq, timestamp],
-            )
+            )?))
             .unwrap();
         }
 
@@ -3906,14 +3968,13 @@ mod tests {
     #[test]
     fn latest_thread_events_returns_last_n_in_chronological_order() {
         let db = test_db();
-        let conn = db.connection();
         for seq in 1..=4 {
             let event_hash = format!("{seq:064x}");
-            conn.execute(
+            db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
                  VALUES (?, 'chain-A', ?, 'T-1', ?, 'step', 'durable', '2026-01-01T00:00:00Z', X'00')",
                 (&event_hash, seq, seq),
-            )
+            )?))
             .unwrap();
         }
 
@@ -3926,7 +3987,6 @@ mod tests {
     #[test]
     fn seat_control_queries_keep_thread_type_prefix_and_operation_filters_exact() {
         let db = test_db();
-        let conn = db.connection();
         for (seq, thread_id, event_type, operation_id) in [
             (1_i64, "T-1", "seat.facet", "op-one"),
             (2, "T-1", "ui_seat.append_receipt.v1", "op-one"),
@@ -3935,18 +3995,18 @@ mod tests {
         ] {
             let event_hash = format!("{seq:064x}");
             let payload = serde_json::to_vec(&json!({ "operation_id": operation_id })).unwrap();
-            conn.execute(
+            db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
                  VALUES (?, 'chain-A', ?, ?, ?, ?, 'durable', '2026-01-01T00:00:00Z', ?)",
                 rusqlite::params![&event_hash, seq, thread_id, seq, event_type, payload],
-            )
+            )?))
             .unwrap();
-            conn.execute(
+            db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO event_operation_index (
                     event_hash, thread_id, event_type, operation_id, chain_seq
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![event_hash, thread_id, event_type, operation_id, seq],
-            )
+            )?))
             .unwrap();
         }
 
@@ -3968,7 +4028,6 @@ mod tests {
     #[test]
     fn latest_state_anchor_uses_the_existing_milestone_event_index() {
         let db = test_db();
-        let conn = db.connection();
         for (seq, kind) in [
             (1_i64, "state_anchor"),
             (2, "ordinary_milestone"),
@@ -3976,18 +4035,18 @@ mod tests {
         ] {
             let event_hash = format!("{seq:064x}");
             let payload = serde_json::to_vec(&serde_json::json!({"kind":kind})).unwrap();
-            conn.execute(
+            db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
                  VALUES (?, 'chain-A', ?, 'T-1', ?, 'milestone', 'durable', '2026-01-01T00:00:00Z', ?)",
                 rusqlite::params![event_hash, seq, seq, payload],
-            )
+            )?))
             .unwrap();
         }
-        conn.execute(
+        db.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
              VALUES (?, 'chain-A', 4, 'T-2', 1, 'milestone', 'durable', '2026-01-01T00:00:00Z', ?)",
             rusqlite::params!["f".repeat(64), serde_json::to_vec(&serde_json::json!({"kind":"state_anchor"})).unwrap()],
-        )
+        )?))
         .unwrap();
 
         let latest = latest_state_anchor_event(&db, "T-1")
@@ -4023,12 +4082,11 @@ mod tests {
             ("T-1", "fleet", b"alpha".as_slice()),
             ("T-2", "team", b"beta".as_slice()),
         ] {
-            db.connection()
-                .execute(
+            db.with_sql(|connection| Ok(connection.execute(
                     "INSERT INTO thread_facets (thread_id, key, value, updated_at)
                      VALUES (?1, ?2, ?3, '2026-01-01T00:00:00Z')",
                     rusqlite::params![thread_id, key, value],
-                )
+                )?))
                 .unwrap();
         }
 
@@ -4365,8 +4423,7 @@ mod tests {
     /// Raw insert with a controlled `created_at`, so watch ordering (which lives
     /// in SQL) can be asserted deterministically across timestamps.
     fn insert_thread_at(db: &ProjectionDb, id: &str, status: &str, created_at: &str) {
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO threads \
                  (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
                   launch_mode, current_site_id, origin_site_id, project_authority_json, created_at, updated_at) \
@@ -4378,7 +4435,7 @@ mod tests {
                     created_at,
                     r#"{"kind":"projectless","environment":{"kind":"none"}}"#
                 ],
-            )
+            )?))
             .unwrap();
     }
 
@@ -4427,8 +4484,7 @@ mod tests {
         kind: &str,
         requested_by: &str,
     ) {
-        db.connection()
-            .execute(
+        db.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO threads \
                  (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
                   launch_mode, current_site_id, origin_site_id, requested_by, project_authority_json, created_at, updated_at) \
@@ -4441,7 +4497,7 @@ mod tests {
                     requested_by,
                     r#"{"kind":"projectless","environment":{"kind":"none"}}"#
                 ],
-            )
+            )?))
             .unwrap();
     }
 
