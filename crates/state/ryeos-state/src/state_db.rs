@@ -76,12 +76,6 @@ pub use original_close::{
     quote_state_root_transfer,
 };
 
-mod legacy_qualification_retirement;
-pub use legacy_qualification_retirement::{
-    LegacyQualificationArchiveReceipt, LegacyQualificationHead,
-    LegacyQualificationRetirementPreview,
-};
-
 /// State of the rebuildable projection after an authoritative CAS write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionStatus {
@@ -1995,8 +1989,8 @@ pub struct StateDb {
 /// Full descriptor-bound State preparation for an offline projection rebuild.
 ///
 /// Capturing this owner opens no SQLite connection. It retains the required
-/// locators and recovery roots, the exact trust snapshot and the legacy
-/// retirement fence; GC's optional-recovery authority is not a substitute.
+/// locators and recovery roots and the exact trust snapshot; GC's
+/// optional-recovery authority is not a substitute.
 /// The reset caller can authenticate its active operation and publish the
 /// original quota claim before admitting a native projection connection.
 pub struct PreparedOfflineProjection {
@@ -2011,7 +2005,6 @@ pub struct PreparedOfflineProjection {
     locators_root: PathBuf,
     recovery: RecoveryStore,
     trust_store: Arc<TrustStore>,
-    allow_legacy_retirement: bool,
 }
 
 impl PreparedOfflineProjection {
@@ -2021,7 +2014,7 @@ impl PreparedOfflineProjection {
         namespace: &lillux::PinnedDirectoryLock,
     ) -> anyhow::Result<Self> {
         namespace.ensure_protects(&runtime_state_directory)?;
-        let prepared = Self::capture_inner(runtime_state_directory, trust_store, false)?;
+        let prepared = Self::capture_inner(runtime_state_directory, trust_store)?;
         let prepared = Self {
             namespace_lock: Some(namespace.clone()),
             ..prepared
@@ -2033,7 +2026,6 @@ impl PreparedOfflineProjection {
     fn capture_inner(
         runtime_state_directory: lillux::PinnedDirectory,
         trust_store: Arc<TrustStore>,
-        allow_legacy_retirement: bool,
     ) -> anyhow::Result<Self> {
         runtime_state_directory.ensure_path_binding()?;
         let runtime_state_dir = runtime_state_directory.path();
@@ -2055,23 +2047,10 @@ impl PreparedOfflineProjection {
         let recovery_directory = recovery_parent
             .open_child_directory(std::ffi::OsStr::new("thread-projection"))?
             .ok_or_else(|| anyhow::anyhow!("projection recovery directory is absent"))?;
-        if !allow_legacy_retirement
-            && legacy_qualification_retirement::retirement_in_progress(&recovery_directory)?
-        {
-            anyhow::bail!(
-                "offline legacy product-qualification retirement is incomplete; resume the exact stopped-node retirement before another reset or rebuild"
-            );
-        }
         let recovery = RecoveryStore::from_pinned_directories(
             runtime_state_directory.try_clone()?,
             recovery_directory.try_clone()?,
         )?;
-        if allow_legacy_retirement && recovery.thread_history_discard_in_progress()? {
-            anyhow::bail!(
-                "offline execution-history reset is incomplete; finish that exact reset before qualification-head retirement"
-            );
-        }
-
         let prepared = Self {
             runtime_state_directory,
             cas_directory,
@@ -2084,7 +2063,6 @@ impl PreparedOfflineProjection {
             locators_root,
             recovery,
             trust_store,
-            allow_legacy_retirement,
         };
         prepared.require_custody()?;
         Ok(prepared)
@@ -2099,14 +2077,6 @@ impl PreparedOfflineProjection {
         self.refs_directory.ensure_path_binding()?;
         self.locators_directory.ensure_path_binding()?;
         self.recovery_directory.ensure_path_binding()?;
-        if !self.allow_legacy_retirement
-            && legacy_qualification_retirement::retirement_in_progress(&self.recovery_directory)?
-        {
-            anyhow::bail!("offline legacy product-qualification retirement is incomplete");
-        }
-        if self.allow_legacy_retirement && self.recovery.thread_history_discard_in_progress()? {
-            anyhow::bail!("offline execution-history reset is incomplete");
-        }
         Ok(())
     }
 
@@ -2138,7 +2108,6 @@ impl PreparedOfflineProjection {
             locators_root: self.locators_root.clone(),
             recovery: self.recovery.clone(),
             trust_store: Arc::clone(&self.trust_store),
-            allow_legacy_retirement: self.allow_legacy_retirement,
         })
     }
 
@@ -2160,7 +2129,6 @@ impl PreparedOfflineProjection {
         lease_authority.require_original(&factory, false)?;
         self.require_custody()?;
         anyhow::ensure!(self.namespace_lock.is_some(), "original projection needs retained namespace exclusion");
-        anyhow::ensure!(!self.allow_legacy_retirement, "original reset projection cannot bypass the legacy retirement fence");
         anyhow::ensure!(guard.is_exclusive(), "original projection needs the actual exclusive CAS guard");
         guard.ensure_protects_pinned_runtime(&self.runtime_state_directory)?;
         factory.require_runtime_binding(&self.runtime_state_directory)?;
@@ -3268,30 +3236,9 @@ impl StateDb {
         runtime_state_dir: &Path,
         trust_store: Arc<TrustStore>,
     ) -> anyhow::Result<Self> {
-        Self::open_for_projection_rebuild_inner(runtime_state_dir, trust_store, false)
-    }
-
-    /// Recovery-only opener for the exact legacy qualification retirement
-    /// owner. Every other projection-rebuild caller is fenced by its intent.
-    pub fn open_for_legacy_qualification_retirement(
-        runtime_state_dir: &Path,
-        trust_store: Arc<TrustStore>,
-    ) -> anyhow::Result<Self> {
-        Self::open_for_projection_rebuild_inner(runtime_state_dir, trust_store, true)
-    }
-
-    fn open_for_projection_rebuild_inner(
-        runtime_state_dir: &Path,
-        trust_store: Arc<TrustStore>,
-        allow_legacy_retirement: bool,
-    ) -> anyhow::Result<Self> {
         let runtime_state_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
             .ok_or_else(|| anyhow::anyhow!("runtime state directory is absent"))?;
-        let prepared = PreparedOfflineProjection::capture_inner(
-            runtime_state_directory,
-            trust_store,
-            allow_legacy_retirement,
-        )?;
+        let prepared = PreparedOfflineProjection::capture_inner(runtime_state_directory, trust_store)?;
         let projection = ProjectionDb::open_transient()?;
         Ok(prepared.into_state(projection, None))
     }
@@ -3377,11 +3324,6 @@ impl StateDb {
         if recovery.thread_history_discard_in_progress()? {
             anyhow::bail!(
                 "offline execution-history reset is incomplete; rerun `ryeos node reset execution-history --confirm` while the daemon is stopped"
-            );
-        }
-        if legacy_qualification_retirement::retirement_in_progress(&recovery_directory)? {
-            anyhow::bail!(
-                "offline legacy product-qualification retirement is incomplete; resume the exact stopped-node retirement before startup"
             );
         }
 
@@ -7397,16 +7339,13 @@ mod tests {
     }
 
     #[test]
-    fn offline_preparation_rechecks_root_binding_and_retirement_fence() {
+    fn offline_preparation_rechecks_root_binding() {
         let dir = tempfile::tempdir().unwrap();
         offline_preparation_roots(dir.path());
         let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let namespace = root.lock_exclusive().unwrap();
         let prepared = PreparedOfflineProjection::capture(root, test_trust_store(), &namespace).unwrap();
-        let marker = dir.path().join("recovery/thread-projection/legacy-product-qualification-retirement.json");
-        std::fs::write(&marker, b"invalid-retirement-intent").unwrap();
-        assert!(prepared.authority().is_err(), "a new uncertain retirement cannot be ignored");
-        std::fs::remove_file(marker).unwrap();
+        prepared.authority().unwrap();
         std::fs::rename(dir.path().join("locators"), dir.path().join("old-locators")).unwrap();
         std::fs::create_dir(dir.path().join("locators")).unwrap();
         assert!(prepared.authority().is_err(), "a replacement cannot rebind captured authority");

@@ -37,6 +37,7 @@ use ryeos_scheduler_contract::{NodeMaintenancePolicy, NodeMaintenanceSchedulePol
 /// Both fields must match before reconciliation may mutate or remove a spec.
 const MANAGED_BY_TYPE: &str = "node_maintenance_policy";
 const MANAGED_BY_SOURCE: &str = ryeos_scheduler::types::NODE_MAINTENANCE_POLICY_SOURCE;
+const MANAGED_SPEC_VERSION: u32 = 2;
 
 /// Materialize the mandatory node maintenance policy as signed schedule specs.
 pub fn ensure_maintenance_schedule(state: &AppState) -> Result<()> {
@@ -305,10 +306,13 @@ fn load_managed_spec_file(
     }
     let ownership: MaintenanceScheduleOwnership = serde_json::from_value(body.clone())
         .context("decode maintenance schedule ownership metadata")?;
-    if ownership.spec_version == 0 || ownership.spec_version > 2 {
+    if ownership.spec_version != MANAGED_SPEC_VERSION {
         bail!(
-            "unsupported managed schedule source version {}",
-            ownership.spec_version
+            "managed maintenance schedule {} has spec_version {}, not {}; \
+             remove that file and restart the node to regenerate it from node policy",
+            path.display(),
+            ownership.spec_version,
+            MANAGED_SPEC_VERSION
         );
     }
     let schedule_id = loaded_id(&body, path)?;
@@ -377,7 +381,7 @@ fn maintenance_spec_body(
 ) -> Value {
     // The node is both signer and acting principal for its own maintenance.
     serde_json::json!({
-        "spec_version": 2,
+        "spec_version": MANAGED_SPEC_VERSION,
         "schedule_id": decl.schedule_id,
         "item_ref": decl.item_ref,
         "ref_bindings": decl.ref_bindings,
@@ -619,43 +623,29 @@ schedules:
     }
 
     #[test]
-    fn regenerates_owned_schedule_without_reusing_predecessor_execution() {
+    fn refuses_owned_schedule_with_other_spec_version_without_replacement() {
         let tmp = tempfile::tempdir().unwrap();
         let node_dir = tmp.path().join(".ai/node");
         let id = identity();
         let trust = trust_store(&id);
         let policy = policy(POLICY);
-        let mut predecessor = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
-        predecessor["spec_version"] = serde_json::json!(1);
-        predecessor["execution"] = serde_json::json!({
-            "requester_fingerprint": id.fingerprint(),
-            "capabilities": ["ryeos.execute.service.unwanted/task"],
-        });
+        let mut body = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
+        body["spec_version"] = serde_json::json!(1);
         let path = node_document::write_signed_item(
             &node_dir,
             "schedules",
             "maintenance-gc",
-            &predecessor,
+            &body,
             &id,
         )
         .unwrap();
-        assert!(ryeos_scheduler::projection::load_verified_schedule_source(&path, &trust).is_err());
+        let before = std::fs::read(&path).unwrap();
 
-        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
-        let verified =
-            ryeos_scheduler::projection::load_verified_schedule_source(&path, &trust).unwrap();
-        assert!(
-            !verified.record.enabled,
-            "operator pause must survive regeneration"
-        );
-        assert_eq!(verified.record.registered_at, 1234);
-        assert_eq!(
-            serde_json::to_value(verified.record).unwrap(),
-            maintenance_spec_body(&policy.schedules[0], false, 1234, &id)
-        );
-        let regenerated = std::fs::read(&path).unwrap();
-        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), regenerated);
+        let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("remove that file and restart the node"), "{message}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

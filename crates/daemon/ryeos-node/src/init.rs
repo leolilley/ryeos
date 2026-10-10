@@ -468,8 +468,6 @@ fn run_init_internal(
             )?;
         }
     }
-    ryeos_node_runtime::config::retire_pre_node_policy_config(&opts.app_root)
-        .context("retire predecessor daemon policy fields")?;
     let bootstrap_config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: Some(opts.app_root.clone()),
         bind: opts.bind,

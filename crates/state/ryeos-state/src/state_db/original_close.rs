@@ -491,7 +491,6 @@ struct StatePreparationRemaining {
     cas_root: PathBuf,
     refs_root: PathBuf,
     locators_root: PathBuf,
-    allow_legacy_retirement: bool,
 }
 impl OriginalStateFinalizer {
     /// # Safety
@@ -577,7 +576,6 @@ impl OriginalStateFinalizer {
             locators_root,
             recovery,
             trust_store,
-            allow_legacy_retirement,
         } = actual;
         for (slot, directory) in roots.directories.iter_mut().skip(5).zip([
             runtime_state_directory,
@@ -599,7 +597,6 @@ impl OriginalStateFinalizer {
             cas_root,
             refs_root,
             locators_root,
-            allow_legacy_retirement,
         });
         Ok(())
     }
@@ -740,7 +737,6 @@ struct OutsideStateSemantics {
     _cas_root: PathBuf,
     _refs_root: PathBuf,
     _locators_root: PathBuf,
-    _allow_legacy_retirement: bool,
 }
 impl OriginalStatePhysicalCustody {
     /// # Safety
@@ -1353,7 +1349,6 @@ impl OriginalOutsideStateFinalizer {
             cas_root,
             refs_root,
             locators_root,
-            allow_legacy_retirement,
         } = preparation;
         let mut namespaces = vec![namespace];
         if let Some(actual) = prepared_namespace {
@@ -1407,7 +1402,6 @@ impl OriginalOutsideStateFinalizer {
                 _cas_root: cas_root,
                 _refs_root: refs_root,
                 _locators_root: locators_root,
-                _allow_legacy_retirement: allow_legacy_retirement,
             },
         })
     }

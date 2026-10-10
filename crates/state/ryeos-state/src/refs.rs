@@ -1967,45 +1967,6 @@ pub(crate) fn remove_generic_head_ref_in_directory(
     remove_ref_in_directory(&head_directory, std::ffi::OsStr::new("head"))
 }
 
-/// Retire one exact signed head by moving its inode out of the authoritative
-/// refs tree. The caller's durable row intent and destination directory make
-/// an interrupted rename directly observable on retry; unlike unlink's
-/// private quarantine, no unrecognized file is left in the refs namespace.
-pub(crate) fn move_generic_head_ref_to_retirement_directory(
-    refs_directory: &lillux::PinnedDirectory,
-    namespace: &str,
-    name: &str,
-    head_lock: &GenericHeadLock,
-    destination: &lillux::PinnedDirectory,
-    expected_sha256: &str,
-    max_bytes: u64,
-) -> anyhow::Result<bool> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    generic_head_ref_path(namespace, name)?;
-    let head_directory = head_lock.protected_directory_in_refs(refs_directory, namespace, name)?;
-    let head_name = std::ffi::OsStr::new("head");
-    let Some(pinned) = head_directory.open_pinned_regular(head_name, false)? else {
-        return Ok(false);
-    };
-    anyhow::ensure!(
-        lillux::sha256_hex(&pinned.read_bounded(max_bytes)?) == expected_sha256,
-        "retiring signed head changed its exact bytes"
-    );
-    let entry = head_directory
-        .entry_no_follow(head_name)?
-        .ok_or_else(|| anyhow::anyhow!("retiring signed head disappeared"))?;
-    let metadata = pinned.try_clone_descriptor()?.metadata()?;
-    anyhow::ensure!(
-        entry.entry_type == lillux::PinnedEntryType::Regular
-            && entry.containing_device == metadata.dev()
-            && entry.inode == metadata.ino()
-            && entry.mode == metadata.mode(),
-        "retiring signed head changed inode before move"
-    );
-    Ok(head_directory.move_child_if_same_noreplace_to(&entry, destination)?)
-}
-
 /// Advance a namespace-neutral signed head with compare-and-swap semantics.
 ///
 /// `expected_current_hash = None` means the head must not exist yet.
