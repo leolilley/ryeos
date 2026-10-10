@@ -344,7 +344,7 @@ fn create_listener() -> Result<(
         listener_mount.mount_entry_kind()? == lillux::OpenMountEntryKind::UnixSocket,
         "external connector listener mount source is not a Unix socket"
     );
-    let guard = Arc::new(TempDirGuard::new_pinned(parent, name, root));
+    let guard = Arc::new(TempDirGuard::new_pinned(parent, name, Arc::new(root)));
     Ok((listener, listener_mount, guard))
 }
 

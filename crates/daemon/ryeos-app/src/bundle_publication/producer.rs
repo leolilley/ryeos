@@ -4,6 +4,7 @@
 //! independent authorities. The daemon composition root must install an
 //! adapter that implements these exact operations; absence fails closed.
 
+use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM};
 use std::{ffi::OsStr, io::Read as _};
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
@@ -865,7 +866,7 @@ impl super::consumer::ConsumerPublicationPolicy for CatalogSigningPolicy<'_> {
         attestation: &Attestation,
         expected_claim: &str,
     ) -> anyhow::Result<()> {
-        use super::attestation::*;
+        use super::attestation::{ReleaseSubjectKind, verify_release_attestation};
         let kind = match expected_claim {
             BUNDLE_GENERATION_RELEASE_CLAIM => ReleaseSubjectKind::BundleGeneration,
             BUNDLE_SET_RELEASE_CLAIM => ReleaseSubjectKind::BundleSet,
@@ -897,7 +898,7 @@ fn verify_catalog_substrate(
         &set.substrate_release_attestation_hash,
     )?)?;
     policy
-        .verify_publisher_attestation(&attestation, super::attestation::SUBSTRATE_RELEASE_CLAIM)?;
+        .verify_publisher_attestation(&attestation, ryeos_bundle_publication_contract::SUBSTRATE_RELEASE_CLAIM)?;
     let release = ryeos_bundle_publication_contract::SubstrateRelease::from_current_value(
         &super::read_exact(objects, &attestation.subject_hash)?,
     )?;
@@ -1169,9 +1170,6 @@ impl BundlePublisherAuthority for LocalConstrainedPublisherAuthority {
         request: CatalogRequestPublicationRequest,
     ) -> ProducerFuture<'a> {
         Box::pin(async move {
-            use super::attestation::{
-                BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, BUNDLE_SET_RELEASE_CLAIM,
-            };
 
             let cas = self.cas()?;
             let set =
@@ -1846,14 +1844,14 @@ impl BundleReleaseAuthorityRouter {
 /// outcome is persisted before it is returned.
 pub struct PersistentBundleReleaseAdapter {
     operation_root: PathBuf,
-    policy: crate::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+    policy: ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
     authorities: BundleReleaseAuthorityRouter,
 }
 
 impl PersistentBundleReleaseAdapter {
     pub fn new(
         app_root: PathBuf,
-        policy: crate::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+        policy: ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         authorities: BundleReleaseAuthorityRouter,
     ) -> Self {
         Self {

@@ -2123,8 +2123,9 @@ fn require_contactable_session(conn: &Connection, placement: &str) -> Result<()>
 
 impl RuntimeDb {
     pub(super) fn unsettled_external_chain_count(&self, chain_root_id: &str) -> Result<u64> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM external_execution_allocation a
+        self.conn.with_sql(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM external_execution_allocation a
              LEFT JOIN dedicated_session s ON s.placement_thread_id=a.placement_thread_id
              WHERE a.phase NOT IN ('no_contact','contacted_no_occurrence','terminated')
                AND ((json_extract(a.reservation_json,'$.owner.kind')='direct_thread'
@@ -2133,39 +2134,46 @@ impl RuntimeDb {
                      AND s.chain_root_id=?1)
                  OR (json_extract(a.reservation_json,'$.owner.kind')='qualification_candidate'
                      AND json_extract(a.reservation_json,'$.owner.coordinate.accepted_root_id')=?1))",
-            [chain_root_id],
-            |row| row.get(0),
-        )?;
-        u64::try_from(count).context("negative external allocation retention count")
+                [chain_root_id],
+                |row| row.get(0),
+            )?;
+            u64::try_from(count).context("negative external allocation retention count")
+        })
     }
 
     pub fn external_allocation(&self, placement: &str) -> Result<Option<ExternalAllocationRecord>> {
-        read(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            read(&conn, placement)
+        })
     }
 
     pub(crate) fn unsettled_external_allocation_placements(&self) -> Result<Vec<String>> {
-        validate_current(&self.conn)?;
-        let mut statement = self.conn.prepare(
-            "SELECT placement_thread_id FROM external_execution_allocation
+        self.conn.with_sql(|conn| {
+            validate_current(&conn)?;
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_execution_allocation
              WHERE phase NOT IN ('no_contact','contacted_no_occurrence','terminated')
              ORDER BY placement_thread_id",
-        )?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        })
     }
 
     pub(crate) fn recoverable_external_cleanup_placements(&self) -> Result<Vec<String>> {
-        validate_current(&self.conn)?;
-        let mut statement = self.conn.prepare(
-            "SELECT placement_thread_id FROM external_execution_allocation
+        self.conn.with_sql(|conn| {
+            validate_current(&conn)?;
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_execution_allocation
              WHERE phase='quarantined' ORDER BY placement_thread_id",
-        )?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        })
     }
 
     pub(crate) fn retained_external_binding(
@@ -2174,7 +2182,9 @@ impl RuntimeDb {
     ) -> Result<
         Option<crate::node_config::sections::external_execution::RetainedExternalExecutionBinding>,
     > {
-        read_retained_binding(&self.conn, binding_hash)
+        self.conn.with_sql(|conn| {
+            read_retained_binding(&conn, binding_hash)
+        })
     }
 
     /// Idempotent reservation; no allocator may be contacted here. Unknown
@@ -2222,86 +2232,88 @@ impl RuntimeDb {
         direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<ExternalAllocationRecord> {
-        reservation.validate()?;
-        retained_binding.validate()?;
-        retained_binding
-            .check_reservation_limits(reservation.max_active, reservation.timeout_seconds)?;
-        if retained_binding.digest() != reservation.binding_hash
-            || retained_binding.capacity_owner() != reservation.capacity_owner
-        {
-            bail!("external allocation contradicts its retained binding generation");
-        }
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        validate_current(&tx)?;
-        let binding_json = retained_binding.canonical_json()?;
-        let prior: Option<(String, String)> = tx.query_row(
-            "SELECT capacity_owner,binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
-            [retained_binding.digest()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-        match prior {
-            Some((capacity, json))
-                if capacity == retained_binding.capacity_owner() && json == binding_json => {}
-            Some(_) => bail!("retained external binding generation replay changed"),
-            None => {
-                tx.execute(
-                    "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,?4)",
-                    params![
-                        retained_binding.digest(),
-                        retained_binding.capacity_owner(),
-                        binding_json,
-                        i64::try_from(lillux::time::timestamp_millis())?
-                    ],
-                )?;
+        self.conn.with_sql(|conn| {
+            reservation.validate()?;
+            retained_binding.validate()?;
+            retained_binding
+                .check_reservation_limits(reservation.max_active, reservation.timeout_seconds)?;
+            if retained_binding.digest() != reservation.binding_hash
+                || retained_binding.capacity_owner() != reservation.capacity_owner
+            {
+                bail!("external allocation contradicts its retained binding generation");
             }
-        }
-        if let Some(existing) = read(&tx, &reservation.placement_thread_id)? {
-            if existing.reservation != *reservation {
-                bail!("external allocation replay changed its exact reservation");
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            validate_current(&tx)?;
+            let binding_json = retained_binding.canonical_json()?;
+            let prior: Option<(String, String)> = tx.query_row(
+                "SELECT capacity_owner,binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
+                [retained_binding.digest()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            match prior {
+                Some((capacity, json))
+                    if capacity == retained_binding.capacity_owner() && json == binding_json => {}
+                Some(_) => bail!("retained external binding generation replay changed"),
+                None => {
+                    tx.execute(
+                        "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,?4)",
+                        params![
+                            retained_binding.digest(),
+                            retained_binding.capacity_owner(),
+                            binding_json,
+                            i64::try_from(lillux::time::timestamp_millis())?
+                        ],
+                    )?;
+                }
             }
-            tx.commit()?;
-            return Ok(existing);
-        }
-        require_new_owner(&tx, reservation, direct_proof, qualification_proof)?;
-        if matches!(
-            &reservation.owner,
-            ExternalAllocationOwner::QualificationCandidate(_)
-        ) {
-            qualification_guest_scratch::require_created_for_allocation(&tx, reservation)?;
-            reserved_runtime_manifest(reservation, &retained_binding.backend_contract())?;
-        }
-        if read_guard(&tx)? >= 256 {
-            bail!("node external allocation ceiling reached");
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        reservation.require_startup_time(now)?;
-        if now >= reservation.contact_deadline_ms
-            || reservation.contact_deadline_ms.saturating_sub(now) > 300_000
-        {
-            bail!("external allocation contact deadline has expired");
-        }
-        let (count, prior_limit): (i64, Option<i64>) = tx.query_row(
-            "SELECT COUNT(*),MIN(json_extract(reservation_json,'$.max_active'))
+            if let Some(existing) = read(&tx, &reservation.placement_thread_id)? {
+                if existing.reservation != *reservation {
+                    bail!("external allocation replay changed its exact reservation");
+                }
+                tx.commit()?;
+                return Ok(existing);
+            }
+            require_new_owner(&tx, reservation, direct_proof, qualification_proof)?;
+            if matches!(
+                &reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ) {
+                qualification_guest_scratch::require_created_for_allocation(&tx, reservation)?;
+                reserved_runtime_manifest(reservation, &retained_binding.backend_contract())?;
+            }
+            if read_guard(&tx)? >= 256 {
+                bail!("node external allocation ceiling reached");
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            reservation.require_startup_time(now)?;
+            if now >= reservation.contact_deadline_ms
+                || reservation.contact_deadline_ms.saturating_sub(now) > 300_000
+            {
+                bail!("external allocation contact deadline has expired");
+            }
+            let (count, prior_limit): (i64, Option<i64>) = tx.query_row(
+                "SELECT COUNT(*),MIN(json_extract(reservation_json,'$.max_active'))
              FROM external_execution_allocation WHERE capacity_owner=?1
                AND phase NOT IN ('no_contact','contacted_no_occurrence','terminated')",
-            [&reservation.capacity_owner],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let limit = i64::from(reservation.max_active).min(prior_limit.unwrap_or(64));
-        if count >= limit {
-            bail!("external execution capacity remains reserved");
-        }
-        tx.execute(
-            "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
-            params![
-                reservation.placement_thread_id,
-                reservation.capacity_owner,
-                lillux::canonical_json(&serde_json::to_value(reservation)?)?,
-                now
-            ],
-        )?;
-        let record =
-            read(&tx, &reservation.placement_thread_id)?.context("reserved allocation missing")?;
-        tx.commit()?;
-        Ok(record)
+                [&reservation.capacity_owner],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let limit = i64::from(reservation.max_active).min(prior_limit.unwrap_or(64));
+            if count >= limit {
+                bail!("external execution capacity remains reserved");
+            }
+            tx.execute(
+                "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
+                params![
+                    reservation.placement_thread_id,
+                    reservation.capacity_owner,
+                    lillux::canonical_json(&serde_json::to_value(reservation)?)?,
+                    now
+                ],
+            )?;
+            let record =
+                read(&tx, &reservation.placement_thread_id)?.context("reserved allocation missing")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     /// Only the winner of this durable CAS may contact the allocator.  The
@@ -2347,52 +2359,54 @@ impl RuntimeDb {
         direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<ExternalAllocationContactClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation was not reserved")?;
-        if record.reservation.request_digest != request_digest {
-            bail!("external allocation contact changed its request identity");
-        }
-        match record.phase {
-            ExternalAllocationPhase::NoContact
-            | ExternalAllocationPhase::ContactedNoOccurrence
-            | ExternalAllocationPhase::Terminated => {
-                tx.commit()?;
-                return Ok(ExternalAllocationContactClaim::Settled(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation was not reserved")?;
+            if record.reservation.request_digest != request_digest {
+                bail!("external allocation contact changed its request identity");
             }
-            _ => {}
-        }
-        require_retained_owner(&tx, &record.reservation)?;
-        match record.phase {
-            ExternalAllocationPhase::ContactPending
-            | ExternalAllocationPhase::Bound
-            | ExternalAllocationPhase::Quarantined => {
-                tx.commit()?;
-                return Ok(ExternalAllocationContactClaim::Reconcile(record));
+            match record.phase {
+                ExternalAllocationPhase::NoContact
+                | ExternalAllocationPhase::ContactedNoOccurrence
+                | ExternalAllocationPhase::Terminated => {
+                    tx.commit()?;
+                    return Ok(ExternalAllocationContactClaim::Settled(record));
+                }
+                _ => {}
             }
-            ExternalAllocationPhase::Reserved => {}
-            _ => unreachable!("settled external phase returned before owner validation"),
-        }
-        require_new_owner(&tx, &record.reservation, direct_proof, qualification_proof)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        record.reservation.require_startup_time(now)?;
-        if now >= record.reservation.contact_deadline_ms {
-            bail!("external allocation contact deadline expired");
-        }
-        let changed = tx.execute(
-            "UPDATE external_execution_allocation SET phase='contact_pending',updated_at_ms=?2
+            require_retained_owner(&tx, &record.reservation)?;
+            match record.phase {
+                ExternalAllocationPhase::ContactPending
+                | ExternalAllocationPhase::Bound
+                | ExternalAllocationPhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(ExternalAllocationContactClaim::Reconcile(record));
+                }
+                ExternalAllocationPhase::Reserved => {}
+                _ => unreachable!("settled external phase returned before owner validation"),
+            }
+            require_new_owner(&tx, &record.reservation, direct_proof, qualification_proof)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            record.reservation.require_startup_time(now)?;
+            if now >= record.reservation.contact_deadline_ms {
+                bail!("external allocation contact deadline expired");
+            }
+            let changed = tx.execute(
+                "UPDATE external_execution_allocation SET phase='contact_pending',updated_at_ms=?2
              WHERE placement_thread_id=?1 AND phase='reserved'",
-            params![placement, now],
-        )?;
-        if changed != 1 {
-            bail!("external allocation contact claim lost its durable CAS");
-        }
-        let current = read(&tx, placement)?
-            .context("external allocation disappeared after its contact claim")?;
-        if current.phase != ExternalAllocationPhase::ContactPending {
-            bail!("external allocation contact claim did not retain its current phase");
-        }
-        tx.commit()?;
-        Ok(ExternalAllocationContactClaim::Contact(current))
+                params![placement, now],
+            )?;
+            if changed != 1 {
+                bail!("external allocation contact claim lost its durable CAS");
+            }
+            let current = read(&tx, placement)?
+                .context("external allocation disappeared after its contact claim")?;
+            if current.phase != ExternalAllocationPhase::ContactPending {
+                bail!("external allocation contact claim did not retain its current phase");
+            }
+            tx.commit()?;
+            Ok(ExternalAllocationContactClaim::Contact(current))
+        })
     }
 
     /// Bind the exact returned occurrence to the original pending contact.
@@ -2403,49 +2417,51 @@ impl RuntimeDb {
         occurrence: &ExternalAllocationOccurrence,
         timing: ExternalObservationTiming,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        occurrence.validate(&record.reservation)?;
-        if let Some(prior) = &record.occurrence {
-            if prior != occurrence {
-                bail!("external allocation occurrence changed");
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            occurrence.validate(&record.reservation)?;
+            if let Some(prior) = &record.occurrence {
+                if prior != occurrence {
+                    bail!("external allocation occurrence changed");
+                }
+                fence_external_observation_timing(&tx, &record, timing)?;
+                tx.commit()?;
+                return Ok(());
             }
-            fence_external_observation_timing(&tx, &record, timing)?;
-            tx.commit()?;
-            return Ok(());
-        }
-        if !matches!(
-            record.phase,
-            ExternalAllocationPhase::ContactPending | ExternalAllocationPhase::Quarantined
-        ) {
-            bail!("external occurrence arrived outside its durable contact");
-        }
-        let already_owned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_allocation
+            if !matches!(
+                record.phase,
+                ExternalAllocationPhase::ContactPending | ExternalAllocationPhase::Quarantined
+            ) {
+                bail!("external occurrence arrived outside its durable contact");
+            }
+            let already_owned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_allocation
              WHERE placement_thread_id!=?1 AND capacity_owner=?2
                AND json_extract(occurrence_json,'$.occurrence_id')=?3)",
-            params![
-                placement,
-                record.reservation.capacity_owner,
-                occurrence.occurrence_id
-            ],
-            |row| row.get(0),
-        )?;
-        if already_owned {
-            bail!("external occurrence already belongs to another placement");
-        }
-        // Late exact responses may identify cleanup after quarantine, but may
-        // never reverse quarantine into execution permission.
-        tx.execute(
-            "UPDATE external_execution_allocation
+                params![
+                    placement,
+                    record.reservation.capacity_owner,
+                    occurrence.occurrence_id
+                ],
+                |row| row.get(0),
+            )?;
+            if already_owned {
+                bail!("external occurrence already belongs to another placement");
+            }
+            // Late exact responses may identify cleanup after quarantine, but may
+            // never reverse quarantine into execution permission.
+            tx.execute(
+                "UPDATE external_execution_allocation
              SET occurrence_json=?2,phase=CASE WHEN phase='quarantined' THEN phase ELSE 'bound' END,updated_at_ms=?3
              WHERE placement_thread_id=?1",
-            params![placement, lillux::canonical_json(&serde_json::to_value(occurrence)?)?,
-                i64::try_from(lillux::time::timestamp_millis())?],
-        )?;
-        fence_external_observation_timing(&tx, &record, timing)?;
-        tx.commit()?;
-        Ok(())
+                params![placement, lillux::canonical_json(&serde_json::to_value(occurrence)?)?,
+                    i64::try_from(lillux::time::timestamp_millis())?],
+            )?;
+            fence_external_observation_timing(&tx, &record, timing)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     pub(crate) fn observe_external_lifecycle_pending(
@@ -2453,21 +2469,23 @@ impl RuntimeDb {
         placement: &str,
         timing: ExternalObservationTiming,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record =
-            read(&tx, placement)?.context("external pending observation lost its allocation")?;
-        ensure!(
-            matches!(
-                record.phase,
-                ExternalAllocationPhase::ContactPending
-                    | ExternalAllocationPhase::Bound
-                    | ExternalAllocationPhase::Quarantined
-            ),
-            "external pending observation arrived outside contacted lifecycle"
-        );
-        fence_external_observation_timing(&tx, &record, timing)?;
-        tx.commit()?;
-        Ok(())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, placement)?.context("external pending observation lost its allocation")?;
+            ensure!(
+                matches!(
+                    record.phase,
+                    ExternalAllocationPhase::ContactPending
+                        | ExternalAllocationPhase::Bound
+                        | ExternalAllocationPhase::Quarantined
+                ),
+                "external pending observation arrived outside contacted lifecycle"
+            );
+            fence_external_observation_timing(&tx, &record, timing)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Settle a contacted allocation only from exact adapter testimony that
@@ -2478,47 +2496,49 @@ impl RuntimeDb {
         placement: &str,
         evidence: &ExternalNoOccurrenceEvidence,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        evidence.validate(&record.reservation)?;
-        if record.phase == ExternalAllocationPhase::ContactedNoOccurrence {
-            let prior: Option<ExternalNoOccurrenceEvidence> = read_canonical_evidence(
-                &tx,
-                "external_execution_no_occurrence",
-                "evidence_json",
-                placement,
-            )?;
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            evidence.validate(&record.reservation)?;
+            if record.phase == ExternalAllocationPhase::ContactedNoOccurrence {
+                let prior: Option<ExternalNoOccurrenceEvidence> = read_canonical_evidence(
+                    &tx,
+                    "external_execution_no_occurrence",
+                    "evidence_json",
+                    placement,
+                )?;
+                ensure!(
+                    prior.as_ref() == Some(evidence),
+                    "external no-occurrence evidence changed"
+                );
+                tx.commit()?;
+                return Ok(());
+            }
             ensure!(
-                prior.as_ref() == Some(evidence),
-                "external no-occurrence evidence changed"
+                matches!(
+                    record.phase,
+                    ExternalAllocationPhase::ContactPending | ExternalAllocationPhase::Quarantined
+                ) && record.occurrence.is_none(),
+                "external no-occurrence evidence arrived outside unresolved contact"
             );
-            tx.commit()?;
-            return Ok(());
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                ExternalAllocationPhase::ContactPending | ExternalAllocationPhase::Quarantined
-            ) && record.occurrence.is_none(),
-            "external no-occurrence evidence arrived outside unresolved contact"
-        );
-        tx.execute(
-            "INSERT INTO external_execution_no_occurrence VALUES(?1,?2)",
-            params![
-                placement,
-                lillux::canonical_json(&serde_json::to_value(evidence)?)?
-            ],
-        )?;
-        tx.execute(
-            "UPDATE external_execution_allocation
+            tx.execute(
+                "INSERT INTO external_execution_no_occurrence VALUES(?1,?2)",
+                params![
+                    placement,
+                    lillux::canonical_json(&serde_json::to_value(evidence)?)?
+                ],
+            )?;
+            tx.execute(
+                "UPDATE external_execution_allocation
              SET phase='contacted_no_occurrence',updated_at_ms=?2
              WHERE placement_thread_id=?1",
-            params![placement, i64::try_from(lillux::time::timestamp_millis())?],
-        )?;
-        let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
-        validate_lifecycle_evidence(&tx, &settled)?;
-        tx.commit()?;
-        Ok(())
+                params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+            )?;
+            let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
+            validate_lifecycle_evidence(&tx, &settled)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Persist the exact supervisor-start mutation before adapter contact.
@@ -2568,149 +2588,153 @@ impl RuntimeDb {
         relay_bootstrap: Option<&ExternalRelayBootstrapCommitment>,
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<bool> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        let occurrence = record
-            .occurrence
-            .as_ref()
-            .context("external supervisor activation requires an exact occurrence")?;
-        intent.validate(&record.reservation, occurrence)?;
-        let retained = read_retained_binding(&tx, &record.reservation.binding_hash)?
-            .context("external supervisor activation lost its binding generation")?;
-        intent.validate_contract(
-            &record.reservation,
-            occurrence,
-            &retained.backend_contract(),
-        )?;
-        match (&retained.backend_contract().controller_transport, relay_bootstrap) {
-            (
-                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_),
-                Some(commitment),
-            ) => commitment.validate_for(
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            let occurrence = record
+                .occurrence
+                .as_ref()
+                .context("external supervisor activation requires an exact occurrence")?;
+            intent.validate(&record.reservation, occurrence)?;
+            let retained = read_retained_binding(&tx, &record.reservation.binding_hash)?
+                .context("external supervisor activation lost its binding generation")?;
+            intent.validate_contract(
                 &record.reservation,
                 occurrence,
-                intent,
                 &retained.backend_contract(),
-            )?,
-            (
-                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_),
-                None,
-            ) => {}
-            _ => bail!("external activation changed its original relay bootstrap custody"),
-        }
-        let prior: Option<ExternalSupervisorActivationIntent> = read_canonical_evidence(
-            &tx,
-            "external_execution_supervisor_activation_intent",
-            "intent_json",
-            placement,
-        )?;
-        if let Some(prior) = prior {
-            ensure!(
-                prior == *intent,
-                "external supervisor activation intent changed"
-            );
-            ensure!(
-                relay_bootstrap::read_commitment(
-                    &tx,
+            )?;
+            match (&retained.backend_contract().controller_transport, relay_bootstrap) {
+                (
+                    ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_),
+                    Some(commitment),
+                ) => commitment.validate_for(
                     &record.reservation,
                     occurrence,
-                    &prior,
+                    intent,
                     &retained.backend_contract(),
-                )?
-                .as_ref()
-                    == relay_bootstrap,
-                "external supervisor activation changed its original relay bootstrap"
-            );
-            tx.commit()?;
-            return Ok(false);
-        }
-        ensure!(
-            record.phase == ExternalAllocationPhase::Bound,
-            "new external supervisor activation requires an executable bound occurrence"
-        );
-        match &record.reservation.owner {
-            ExternalAllocationOwner::QualificationCandidate(_) => {
-                require_new_owner(&tx, &record.reservation, None, qualification_proof)?;
+                )?,
+                (
+                    ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_),
+                    None,
+                ) => {}
+                _ => bail!("external activation changed its original relay bootstrap custody"),
             }
-            _ => ensure!(
-                qualification_proof.is_none(),
-                "Q supervisor activation changed its allocation owner kind"
-            ),
-        }
-        channel::require_current_execution_owner(&tx, &record.reservation)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        record.reservation.require_startup_time(now)?;
-        ensure!(
-            now < intent.attachment_deadline_ms,
-            "external supervisor activation deadline expired before contact"
-        );
-        tx.execute(
-            "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
-            params![
+            let prior: Option<ExternalSupervisorActivationIntent> = read_canonical_evidence(
+                &tx,
+                "external_execution_supervisor_activation_intent",
+                "intent_json",
                 placement,
-                lillux::canonical_json(&serde_json::to_value(intent)?)?
-            ],
-        )?;
-        if let Some(commitment) = relay_bootstrap {
+            )?;
+            if let Some(prior) = prior {
+                ensure!(
+                    prior == *intent,
+                    "external supervisor activation intent changed"
+                );
+                ensure!(
+                    relay_bootstrap::read_commitment(
+                        &tx,
+                        &record.reservation,
+                        occurrence,
+                        &prior,
+                        &retained.backend_contract(),
+                    )?
+                    .as_ref()
+                        == relay_bootstrap,
+                    "external supervisor activation changed its original relay bootstrap"
+                );
+                tx.commit()?;
+                return Ok(false);
+            }
+            ensure!(
+                record.phase == ExternalAllocationPhase::Bound,
+                "new external supervisor activation requires an executable bound occurrence"
+            );
+            match &record.reservation.owner {
+                ExternalAllocationOwner::QualificationCandidate(_) => {
+                    require_new_owner(&tx, &record.reservation, None, qualification_proof)?;
+                }
+                _ => ensure!(
+                    qualification_proof.is_none(),
+                    "Q supervisor activation changed its allocation owner kind"
+                ),
+            }
+            channel::require_current_execution_owner(&tx, &record.reservation)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            record.reservation.require_startup_time(now)?;
+            ensure!(
+                now < intent.attachment_deadline_ms,
+                "external supervisor activation deadline expired before contact"
+            );
             tx.execute(
-                "INSERT INTO external_execution_relay_bootstrap VALUES(?1,?2)",
+                "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
                 params![
                     placement,
-                    lillux::canonical_json(&serde_json::to_value(commitment)?)?
+                    lillux::canonical_json(&serde_json::to_value(intent)?)?
                 ],
             )?;
-        }
-        tx.commit()?;
-        Ok(true)
+            if let Some(commitment) = relay_bootstrap {
+                tx.execute(
+                    "INSERT INTO external_execution_relay_bootstrap VALUES(?1,?2)",
+                    params![
+                        placement,
+                        lillux::canonical_json(&serde_json::to_value(commitment)?)?
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
     }
 
     pub(crate) fn external_supervisor_activation(
         &self,
         placement: &str,
     ) -> Result<Option<ExternalSupervisorActivationRecord>> {
-        let record = read(&self.conn, placement)?.context("external allocation is absent")?;
-        let Some(intent) = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
-            &self.conn,
-            "external_execution_supervisor_activation_intent",
-            "intent_json",
-            placement,
-        )?
-        else {
-            return Ok(None);
-        };
-        let occurrence = record
-            .occurrence
-            .as_ref()
-            .context("external supervisor activation has no occurrence")?;
-        intent.validate(&record.reservation, occurrence)?;
-        let retained = read_retained_binding(&self.conn, &record.reservation.binding_hash)?
-            .context("external supervisor activation lost its binding generation")?;
-        intent.validate_contract(
-            &record.reservation,
-            occurrence,
-            &retained.backend_contract(),
-        )?;
-        let relay_bootstrap = relay_bootstrap::read_commitment(
-            &self.conn,
-            &record.reservation,
-            occurrence,
-            &intent,
-            &retained.backend_contract(),
-        )?;
-        let observation = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
-            &self.conn,
-            "external_execution_supervisor_activation_observation",
-            "observation_json",
-            placement,
-        )?;
-        if let Some(observation) = &observation {
-            observation.validate(&record.reservation, occurrence, &intent)?;
-        }
-        Ok(Some(ExternalSupervisorActivationRecord {
-            intent,
-            observation,
-            relay_bootstrap,
-        }))
+        self.conn.with_sql(|conn| {
+            let record = read(&conn, placement)?.context("external allocation is absent")?;
+            let Some(intent) = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
+                &conn,
+                "external_execution_supervisor_activation_intent",
+                "intent_json",
+                placement,
+            )?
+            else {
+                return Ok(None);
+            };
+            let occurrence = record
+                .occurrence
+                .as_ref()
+                .context("external supervisor activation has no occurrence")?;
+            intent.validate(&record.reservation, occurrence)?;
+            let retained = read_retained_binding(&conn, &record.reservation.binding_hash)?
+                .context("external supervisor activation lost its binding generation")?;
+            intent.validate_contract(
+                &record.reservation,
+                occurrence,
+                &retained.backend_contract(),
+            )?;
+            let relay_bootstrap = relay_bootstrap::read_commitment(
+                &conn,
+                &record.reservation,
+                occurrence,
+                &intent,
+                &retained.backend_contract(),
+            )?;
+            let observation = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
+                &conn,
+                "external_execution_supervisor_activation_observation",
+                "observation_json",
+                placement,
+            )?;
+            if let Some(observation) = &observation {
+                observation.validate(&record.reservation, occurrence, &intent)?;
+            }
+            Ok(Some(ExternalSupervisorActivationRecord {
+                intent,
+                observation,
+                relay_bootstrap,
+            }))
+        })
     }
 
     pub(crate) fn settle_external_supervisor_activation(
@@ -2719,70 +2743,72 @@ impl RuntimeDb {
         observation: &ExternalSupervisorActivationObservation,
         timing: ExternalObservationTiming,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        let occurrence = record
-            .occurrence
-            .as_ref()
-            .context("external supervisor activation observation has no occurrence")?;
-        let intent: ExternalSupervisorActivationIntent = read_canonical_evidence(
-            &tx,
-            "external_execution_supervisor_activation_intent",
-            "intent_json",
-            placement,
-        )?
-        .context("external supervisor activation observation has no durable intent")?;
-        let retained = read_retained_binding(&tx, &record.reservation.binding_hash)?
-            .context("external supervisor activation lost its binding generation")?;
-        intent.validate_contract(
-            &record.reservation,
-            occurrence,
-            &retained.backend_contract(),
-        )?;
-        observation.validate(&record.reservation, occurrence, &intent)?;
-        ensure!(
-            matches!(
-                record.phase,
-                ExternalAllocationPhase::Bound | ExternalAllocationPhase::Quarantined
-            ),
-            "external supervisor activation observation arrived after occurrence settlement"
-        );
-        let prior: Option<ExternalSupervisorActivationObservation> = read_canonical_evidence(
-            &tx,
-            "external_execution_supervisor_activation_observation",
-            "observation_json",
-            placement,
-        )?;
-        if let Some(prior) = prior {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            let occurrence = record
+                .occurrence
+                .as_ref()
+                .context("external supervisor activation observation has no occurrence")?;
+            let intent: ExternalSupervisorActivationIntent = read_canonical_evidence(
+                &tx,
+                "external_execution_supervisor_activation_intent",
+                "intent_json",
+                placement,
+            )?
+            .context("external supervisor activation observation has no durable intent")?;
+            let retained = read_retained_binding(&tx, &record.reservation.binding_hash)?
+                .context("external supervisor activation lost its binding generation")?;
+            intent.validate_contract(
+                &record.reservation,
+                occurrence,
+                &retained.backend_contract(),
+            )?;
+            observation.validate(&record.reservation, occurrence, &intent)?;
             ensure!(
-                prior == *observation,
-                "external supervisor activation observation changed"
+                matches!(
+                    record.phase,
+                    ExternalAllocationPhase::Bound | ExternalAllocationPhase::Quarantined
+                ),
+                "external supervisor activation observation arrived after occurrence settlement"
             );
+            let prior: Option<ExternalSupervisorActivationObservation> = read_canonical_evidence(
+                &tx,
+                "external_execution_supervisor_activation_observation",
+                "observation_json",
+                placement,
+            )?;
+            if let Some(prior) = prior {
+                ensure!(
+                    prior == *observation,
+                    "external supervisor activation observation changed"
+                );
+                fence_external_observation_timing(&tx, &record, timing)?;
+                tx.commit()?;
+                return Ok(());
+            }
+            if observation.activation_state == "not_started" {
+                let attached: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
+                    [placement],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    !attached,
+                    "external supervisor cannot be observed not started after channel attachment"
+                );
+            }
+            tx.execute(
+                "INSERT INTO external_execution_supervisor_activation_observation VALUES(?1,?2)",
+                params![
+                    placement,
+                    lillux::canonical_json(&serde_json::to_value(observation)?)?
+                ],
+            )?;
             fence_external_observation_timing(&tx, &record, timing)?;
             tx.commit()?;
-            return Ok(());
-        }
-        if observation.activation_state == "not_started" {
-            let attached: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
-                [placement],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                !attached,
-                "external supervisor cannot be observed not started after channel attachment"
-            );
-        }
-        tx.execute(
-            "INSERT INTO external_execution_supervisor_activation_observation VALUES(?1,?2)",
-            params![
-                placement,
-                lillux::canonical_json(&serde_json::to_value(observation)?)?
-            ],
-        )?;
-        fence_external_observation_timing(&tx, &record, timing)?;
-        tx.commit()?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Persist the exact termination mutation intent. `true` is the unique
@@ -2793,103 +2819,105 @@ impl RuntimeDb {
         placement: &str,
         intent: &ExternalTerminationIntent,
     ) -> Result<bool> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        let occurrence = record
-            .occurrence
-            .as_ref()
-            .context("external termination requires an exact occurrence")?;
-        intent.validate(&record.reservation, occurrence)?;
-        ensure!(
-            matches!(
-                record.phase,
-                ExternalAllocationPhase::Bound
-                    | ExternalAllocationPhase::Quarantined
-                    | ExternalAllocationPhase::Terminated
-            ),
-            "external termination intent arrived outside a bound occurrence"
-        );
-        let prior: Option<ExternalTerminationIntent> = read_canonical_evidence(
-            &tx,
-            "external_execution_termination_intent",
-            "intent_json",
-            placement,
-        )?;
-        if let Some(prior) = prior {
-            ensure!(prior == *intent, "external termination intent changed");
-            tx.commit()?;
-            return Ok(false);
-        }
-        ensure!(
-            record.phase != ExternalAllocationPhase::Terminated,
-            "settled external occurrence cannot gain a new termination intent"
-        );
-        let channel: Option<String> = tx
-            .query_row(
-                "SELECT binding_digest FROM external_execution_channel
-                 WHERE placement_thread_id=?1",
-                [placement],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if matches!(
-            &record.reservation.owner,
-            ExternalAllocationOwner::QualificationCandidate(_)
-        ) && channel.is_none()
-        {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            let occurrence = record
+                .occurrence
+                .as_ref()
+                .context("external termination requires an exact occurrence")?;
+            intent.validate(&record.reservation, occurrence)?;
             ensure!(
-                record.phase == ExternalAllocationPhase::Quarantined,
-                "bound Q normal termination lost its required channel"
+                matches!(
+                    record.phase,
+                    ExternalAllocationPhase::Bound
+                        | ExternalAllocationPhase::Quarantined
+                        | ExternalAllocationPhase::Terminated
+                ),
+                "external termination intent arrived outside a bound occurrence"
             );
-        }
-        if let Some(binding_digest) = channel {
-            let revoked: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM external_execution_revocation
-                 WHERE binding_digest=?1)",
-                [binding_digest],
-                |row| row.get(0),
+            let prior: Option<ExternalTerminationIntent> = read_canonical_evidence(
+                &tx,
+                "external_execution_termination_intent",
+                "intent_json",
+                placement,
             )?;
-            if !revoked {
+            if let Some(prior) = prior {
+                ensure!(prior == *intent, "external termination intent changed");
+                tx.commit()?;
+                return Ok(false);
+            }
+            ensure!(
+                record.phase != ExternalAllocationPhase::Terminated,
+                "settled external occurrence cannot gain a new termination intent"
+            );
+            let channel: Option<String> = tx
+                .query_row(
+                    "SELECT binding_digest FROM external_execution_channel
+                 WHERE placement_thread_id=?1",
+                    [placement],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if matches!(
+                &record.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ) && channel.is_none()
+            {
                 ensure!(
-                    record.phase == ExternalAllocationPhase::Bound,
-                    "quarantined external execution cannot acquire a new normal settlement intent"
+                    record.phase == ExternalAllocationPhase::Quarantined,
+                    "bound Q normal termination lost its required channel"
                 );
-                match &record.reservation.owner {
-                    ExternalAllocationOwner::DirectThread { .. } => {
-                        require_contactable_direct_owner(&tx, &record.reservation)?;
-                        ensure!(
-                            channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
-                            "normal external termination requires complete applied target observations"
-                        );
-                    }
-                    ExternalAllocationOwner::QualificationCandidate(_) => {
-                        channel::require_applied_qualification_normal_settlement_tx(
-                            &tx,
-                            &record.reservation,
-                        )?;
-                    }
-                    ExternalAllocationOwner::DedicatedSession(_) => {
-                        bail!("external termination requires durable channel revocation")
+            }
+            if let Some(binding_digest) = channel {
+                let revoked: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM external_execution_revocation
+                 WHERE binding_digest=?1)",
+                    [binding_digest],
+                    |row| row.get(0),
+                )?;
+                if !revoked {
+                    ensure!(
+                        record.phase == ExternalAllocationPhase::Bound,
+                        "quarantined external execution cannot acquire a new normal settlement intent"
+                    );
+                    match &record.reservation.owner {
+                        ExternalAllocationOwner::DirectThread { .. } => {
+                            require_contactable_direct_owner(&tx, &record.reservation)?;
+                            ensure!(
+                                channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
+                                "normal external termination requires complete applied target observations"
+                            );
+                        }
+                        ExternalAllocationOwner::QualificationCandidate(_) => {
+                            channel::require_applied_qualification_normal_settlement_tx(
+                                &tx,
+                                &record.reservation,
+                            )?;
+                        }
+                        ExternalAllocationOwner::DedicatedSession(_) => {
+                            bail!("external termination requires durable channel revocation")
+                        }
                     }
                 }
             }
-        }
-        tx.execute(
-            "INSERT INTO external_execution_termination_intent VALUES(?1,?2)",
-            params![
-                placement,
-                lillux::canonical_json(&serde_json::to_value(intent)?)?
-            ],
-        )?;
-        if record.phase == ExternalAllocationPhase::Bound {
             tx.execute(
-                "UPDATE external_execution_allocation
-                 SET phase='quarantined',updated_at_ms=?2 WHERE placement_thread_id=?1",
-                params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+                "INSERT INTO external_execution_termination_intent VALUES(?1,?2)",
+                params![
+                    placement,
+                    lillux::canonical_json(&serde_json::to_value(intent)?)?
+                ],
             )?;
-        }
-        tx.commit()?;
-        Ok(true)
+            if record.phase == ExternalAllocationPhase::Bound {
+                tx.execute(
+                    "UPDATE external_execution_allocation
+                 SET phase='quarantined',updated_at_ms=?2 WHERE placement_thread_id=?1",
+                    params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+                )?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
     }
 
     /// Release external capacity only after exact terminal testimony joins the
@@ -2899,144 +2927,149 @@ impl RuntimeDb {
         placement: &str,
         observation: &ExternalTerminalObservation,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        let occurrence = record
-            .occurrence
-            .as_ref()
-            .context("external terminal observation has no occurrence")?;
-        let intent: ExternalTerminationIntent = read_canonical_evidence(
-            &tx,
-            "external_execution_termination_intent",
-            "intent_json",
-            placement,
-        )?
-        .context("external terminal observation has no durable termination intent")?;
-        observation.validate(&record.reservation, occurrence, &intent)?;
-        if matches!(
-            &record.reservation.owner,
-            ExternalAllocationOwner::QualificationCandidate(_)
-        ) {
-            let channel_digest: Option<String> = tx
-                .query_row(
-                    "SELECT binding_digest FROM external_execution_channel
-                     WHERE placement_thread_id=?1",
-                    [placement],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(channel_digest) = channel_digest {
-                if !ryeos_state::external_execution::journal::revoked(&tx, &channel_digest)? {
-                    channel::require_applied_qualification_normal_settlement_tx(
-                        &tx,
-                        &record.reservation,
-                    )?;
-                }
-            } else {
-                ensure!(
-                    record.phase == ExternalAllocationPhase::Quarantined
-                        || record.phase == ExternalAllocationPhase::Terminated,
-                    "bound Q provider terminal lost its required channel"
-                );
-            }
-        }
-        if record.phase == ExternalAllocationPhase::Terminated {
-            let prior: Option<ExternalTerminalObservation> = read_canonical_evidence(
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            let occurrence = record
+                .occurrence
+                .as_ref()
+                .context("external terminal observation has no occurrence")?;
+            let intent: ExternalTerminationIntent = read_canonical_evidence(
                 &tx,
-                "external_execution_terminal_observation",
-                "observation_json",
+                "external_execution_termination_intent",
+                "intent_json",
                 placement,
-            )?;
+            )?
+            .context("external terminal observation has no durable termination intent")?;
+            observation.validate(&record.reservation, occurrence, &intent)?;
+            if matches!(
+                &record.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(_)
+            ) {
+                let channel_digest: Option<String> = tx
+                    .query_row(
+                        "SELECT binding_digest FROM external_execution_channel
+                     WHERE placement_thread_id=?1",
+                        [placement],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(channel_digest) = channel_digest {
+                    if !ryeos_state::external_execution::journal::revoked(&tx, &channel_digest)? {
+                        channel::require_applied_qualification_normal_settlement_tx(
+                            &tx,
+                            &record.reservation,
+                        )?;
+                    }
+                } else {
+                    ensure!(
+                        record.phase == ExternalAllocationPhase::Quarantined
+                            || record.phase == ExternalAllocationPhase::Terminated,
+                        "bound Q provider terminal lost its required channel"
+                    );
+                }
+            }
+            if record.phase == ExternalAllocationPhase::Terminated {
+                let prior: Option<ExternalTerminalObservation> = read_canonical_evidence(
+                    &tx,
+                    "external_execution_terminal_observation",
+                    "observation_json",
+                    placement,
+                )?;
+                ensure!(
+                    prior.as_ref() == Some(observation),
+                    "external terminal observation changed"
+                );
+                relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
+                tx.commit()?;
+                return Ok(());
+            }
             ensure!(
-                prior.as_ref() == Some(observation),
-                "external terminal observation changed"
+                matches!(
+                    record.phase,
+                    ExternalAllocationPhase::Bound | ExternalAllocationPhase::Quarantined
+                ),
+                "external terminal observation arrived outside a bound occurrence"
             );
+            tx.execute(
+                "INSERT INTO external_execution_terminal_observation VALUES(?1,?2)",
+                params![
+                    placement,
+                    lillux::canonical_json(&serde_json::to_value(observation)?)?
+                ],
+            )?;
+            tx.execute(
+                "UPDATE external_execution_allocation
+             SET phase='terminated',updated_at_ms=?2 WHERE placement_thread_id=?1",
+                params![placement, i64::try_from(lillux::time::timestamp_millis())?],
+            )?;
+            let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
+            validate_lifecycle_evidence(&tx, &settled)?;
             relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
             tx.commit()?;
-            return Ok(());
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                ExternalAllocationPhase::Bound | ExternalAllocationPhase::Quarantined
-            ),
-            "external terminal observation arrived outside a bound occurrence"
-        );
-        tx.execute(
-            "INSERT INTO external_execution_terminal_observation VALUES(?1,?2)",
-            params![
-                placement,
-                lillux::canonical_json(&serde_json::to_value(observation)?)?
-            ],
-        )?;
-        tx.execute(
-            "UPDATE external_execution_allocation
-             SET phase='terminated',updated_at_ms=?2 WHERE placement_thread_id=?1",
-            params![placement, i64::try_from(lillux::time::timestamp_millis())?],
-        )?;
-        let settled = read(&tx, placement)?.context("settled allocation disappeared")?;
-        validate_lifecycle_evidence(&tx, &settled)?;
-        relay_transfer::close_placement_after_terminal_tx(&tx, placement)?;
-        tx.commit()?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Cancel without external contact, or conservatively quarantine a call
     /// that may have been accepted. No contacted phase can become no-contact.
     pub fn cancel_external_allocation(&self, placement: &str) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, placement)?.context("external allocation is absent")?;
-        if record.phase.is_settled() {
-            return Ok(());
-        }
-        tx.execute(
-            "UPDATE external_execution_allocation SET phase=?2,updated_at_ms=?3 WHERE placement_thread_id=?1",
-            params![placement, if record.phase == ExternalAllocationPhase::Reserved {"no_contact"} else {"quarantined"},
-                i64::try_from(lillux::time::timestamp_millis())?],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, placement)?.context("external allocation is absent")?;
+            if record.phase.is_settled() {
+                return Ok(());
+            }
+            tx.execute(
+                "UPDATE external_execution_allocation SET phase=?2,updated_at_ms=?3 WHERE placement_thread_id=?1",
+                params![placement, if record.phase == ExternalAllocationPhase::Reserved {"no_contact"} else {"quarantined"},
+                    i64::try_from(lillux::time::timestamp_millis())?],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     pub fn external_execution_cas_roots(&self) -> Result<Vec<String>> {
-        validate_current(&self.conn)?;
-        let mut statement = self.conn.prepare(
-            "SELECT placement_thread_id FROM external_execution_allocation
+        self.conn.with_sql(|conn| {
+            validate_current(&conn)?;
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_execution_allocation
              WHERE phase NOT IN ('no_contact','contacted_no_occurrence','terminated')",
-        )?;
-        let placements = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut roots = BTreeSet::new();
-        for placement in placements {
-            let record =
-                read(&self.conn, &placement)?.context("external allocation root is absent")?;
-            roots.insert(record.reservation.admitted_capsule_hash);
-            roots.insert(record.reservation.base_snapshot_hash);
-        }
-        let mut statement = self
-            .conn
-            .prepare("SELECT snapshot_hash FROM external_execution_import")?;
-        for root in statement.query_map([], |row| row.get::<_, String>(0))? {
-            roots.insert(root?);
-        }
-        let mut statement = self
-            .conn
-            .prepare("SELECT manifest_hash FROM external_qualification_worker_transcript")?;
-        for root in statement.query_map([], |row| row.get::<_, String>(0))? {
-            roots.insert(root?);
-        }
-        Ok(roots.into_iter().collect())
+            )?;
+            let placements = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut roots = BTreeSet::new();
+            for placement in placements {
+                let record =
+                    read(&conn, &placement)?.context("external allocation root is absent")?;
+                roots.insert(record.reservation.admitted_capsule_hash);
+                roots.insert(record.reservation.base_snapshot_hash);
+            }
+            let mut statement = conn
+                .prepare("SELECT snapshot_hash FROM external_execution_import")?;
+            for root in statement.query_map([], |row| row.get::<_, String>(0))? {
+                roots.insert(root?);
+            }
+            let mut statement = conn
+                .prepare("SELECT manifest_hash FROM external_qualification_worker_transcript")?;
+            for root in statement.query_map([], |row| row.get::<_, String>(0))? {
+                roots.insert(root?);
+            }
+            Ok(roots.into_iter().collect())
+        })
     }
 
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {
-        validate_current(&self.conn)?;
-        let mut statement = self
-            .conn
-            .prepare("SELECT evidence_blob_hash FROM external_execution_import")?;
-        Ok(statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
+        self.conn.with_sql(|conn| {
+            validate_current(&conn)?;
+            let mut statement = conn
+                .prepare("SELECT evidence_blob_hash FROM external_execution_import")?;
+            Ok(statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
     }
 }
 
@@ -3128,18 +3161,16 @@ pub(crate) mod tests {
         phase: &str,
     ) {
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,1)",
                 params![
                     binding.digest(),
                     binding.capacity_owner(),
                     binding.canonical_json().unwrap()
                 ],
-            )
+            )?))
             .unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,?4,NULL,1,1)",
                 params![
                     reservation.placement_thread_id,
@@ -3147,7 +3178,7 @@ pub(crate) mod tests {
                     lillux::canonical_json(&serde_json::to_value(reservation).unwrap()).unwrap(),
                     phase
                 ],
-            )
+            )?))
             .unwrap();
     }
 
@@ -3157,17 +3188,16 @@ pub(crate) mod tests {
         let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
         let reservation = direct_owner_reservation(&db);
         reservation.validate().unwrap();
-        require_contactable_direct_owner(&db.conn, &reservation).unwrap();
+        db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &reservation)?)).unwrap();
         for table in [
             "dedicated_session",
             "execution_workspace",
             "credential_profile",
         ] {
             let count: i64 = db
-                .conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                .conn.with_sql(|connection| Ok(connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                     row.get(0)
-                })
+                })?))
                 .unwrap();
             assert_eq!(count, 0);
         }
@@ -3195,7 +3225,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(read_guard(&db.conn).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
     }
 
     #[test]
@@ -3203,7 +3233,7 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
         let original = direct_owner_reservation(&db);
-        assert!(direct_owner_is_contactable(&db.conn, &original).unwrap());
+        assert!(db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &original)?)).unwrap());
         for mutation in ["chain", "nonce", "epoch", "daemon"] {
             let mut changed = original.clone();
             let ExternalAllocationOwner::DirectThread {
@@ -3221,13 +3251,13 @@ pub(crate) mod tests {
                 "daemon" => launch_owner.daemon_generation_id = "daemon:other".into(),
                 _ => unreachable!(),
             }
-            assert!(require_contactable_direct_owner(&db.conn, &changed).is_err());
-            assert!(!direct_owner_is_contactable(&db.conn, &changed).unwrap());
+            assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &changed)?)).is_err());
+            assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &changed)?)).unwrap());
         }
         db.request_thread_stop(&original.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        assert!(require_contactable_direct_owner(&db.conn, &original).is_err());
-        assert!(!direct_owner_is_contactable(&db.conn, &original).unwrap());
+        assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &original)?)).is_err());
+        assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &original)?)).unwrap());
         // A failed authority query is not an ordinary closed transport gate.
         let missing_schema = Connection::open_in_memory().unwrap();
         assert!(direct_owner_is_contactable(&missing_schema, &original).is_err());
@@ -3245,8 +3275,8 @@ pub(crate) mod tests {
             .unwrap();
         db.request_thread_stop(&reservation.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        validate_current(&db.conn).unwrap();
-        assert!(require_contactable_direct_owner(&db.conn, &reservation).is_err());
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
+        assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &reservation)?)).is_err());
         let ExternalAllocationContactClaim::Reconcile(retained) = db
             .claim_external_allocation_contact(
                 &reservation.placement_thread_id,
@@ -3268,19 +3298,17 @@ pub(crate) mod tests {
         assert_eq!(pins.external_allocation_obligations, 1);
         assert!(!pins.is_empty());
         assert!(
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "DELETE FROM thread_runtime WHERE thread_id=?1",
                     [&reservation.placement_thread_id]
-                )
+                )?))
                 .is_err()
         );
         assert!(
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "UPDATE thread_runtime SET chain_root_id='T-other' WHERE thread_id=?1",
                     [&reservation.placement_thread_id]
-                )
+                )?))
                 .is_err()
         );
         assert_eq!(
@@ -3321,11 +3349,10 @@ pub(crate) mod tests {
         );
         assert!(db.external_execution_cas_roots().unwrap().is_empty());
         assert_eq!(
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "DELETE FROM thread_runtime WHERE thread_id=?1",
                     [&reservation.placement_thread_id]
-                )
+                )?))
                 .unwrap(),
             1
         );
@@ -3389,13 +3416,12 @@ pub(crate) mod tests {
             .unwrap()
             .expect("external execution fixture launch claim")
             .claimed_by;
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO execution_workspace(workspace_id,thread_id,launch_owner,backend_id,
              base_snapshot,root_path,state,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,'fixture',?4,'/fixture','ready',1,1)",
                 params![workspace, placement, launch_owner, base_snapshot_hash],
-            )
+            )?))
             .unwrap();
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
@@ -3571,8 +3597,8 @@ pub(crate) mod tests {
             // Deliberately fail the quarantine write. Its observation insert
             // must roll back too: there is no separately committed Bound or
             // Started state to recover after this transaction failure.
-            db.conn.execute_batch("CREATE TRIGGER test_refuse_late_fence BEFORE UPDATE OF phase ON external_execution_allocation
-                WHEN NEW.phase='quarantined' BEGIN SELECT RAISE(ABORT,'fixture quarantine failure'); END;").unwrap();
+            db.conn.with_sql(|connection| Ok(connection.execute_batch("CREATE TRIGGER test_refuse_late_fence BEFORE UPDATE OF phase ON external_execution_allocation
+                WHEN NEW.phase='quarantined' BEGIN SELECT RAISE(ABORT,'fixture quarantine failure'); END;")?)).unwrap();
             assert!(settle(&db).is_err());
             let record = db.external_allocation(placement).unwrap().unwrap();
             assert_ne!(record.phase, ExternalAllocationPhase::Quarantined);
@@ -3588,8 +3614,7 @@ pub(crate) mod tests {
                         .is_none()
                 );
             }
-            db.conn
-                .execute_batch("DROP TRIGGER test_refuse_late_fence")
+            db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER test_refuse_late_fence")?))
                 .unwrap();
             reservation.startup_deadline().unwrap();
             settle(&db).unwrap();
@@ -3785,11 +3810,10 @@ pub(crate) mod tests {
         let active_db = RuntimeDb::open(&active_dir.path().join("runtime.sqlite3")).unwrap();
         let active = reservation(&active_db, "active");
         active_db
-            .conn
-            .execute(
+            .conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE execution_workspace SET state='active' WHERE workspace_id=?1",
                 [&active.owner.dedicated_session().unwrap().workspace_id],
-            )
+            )?))
             .unwrap();
         assert_eq!(
             reserve(&active_db, &active).unwrap().phase,
@@ -3800,11 +3824,10 @@ pub(crate) mod tests {
         let frozen_db = RuntimeDb::open(&frozen_dir.path().join("runtime.sqlite3")).unwrap();
         let frozen = reservation(&frozen_db, "frozen");
         frozen_db
-            .conn
-            .execute(
+            .conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE execution_workspace SET state='freezing' WHERE workspace_id=?1",
                 [&frozen.owner.dedicated_session().unwrap().workspace_id],
-            )
+            )?))
             .unwrap();
         assert!(reserve(&frozen_db, &frozen).is_err());
         assert!(frozen_db.external_allocation("T-frozen").unwrap().is_none());
@@ -3921,9 +3944,9 @@ pub(crate) mod tests {
         assert!(db.inspect_thread_history_discard().is_err());
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
-        let retained_json: String = db.conn.query_row(
+        let retained_json: String = db.conn.with_sql(|connection| Ok(connection.query_row(
             "SELECT binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
-            [&reserved.binding_hash], |row| row.get(0)).unwrap();
+            [&reserved.binding_hash], |row| row.get(0))?)).unwrap();
         let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
             serde_json::from_str(&retained_json).unwrap();
         retained.validate().unwrap();
@@ -3940,7 +3963,7 @@ pub(crate) mod tests {
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::Quarantined
         );
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-one", "worker-one")
                 .is_err()
@@ -4129,11 +4152,10 @@ pub(crate) mod tests {
             test_observation_timing(),
         )
         .unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE execution_workspace SET state='orphaned' WHERE workspace_id=?1",
                 [&reservation.owner.dedicated_session().unwrap().workspace_id],
-            )
+            )?))
             .unwrap();
         let intent = activation_intent(&reservation, &occurrence);
         assert!(
@@ -4141,12 +4163,11 @@ pub(crate) mod tests {
                 .is_err()
         );
         let retained: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_supervisor_activation_intent WHERE placement_thread_id=?1",
                 [&reservation.placement_thread_id],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(retained, 0);
     }
@@ -4196,7 +4217,7 @@ pub(crate) mod tests {
             test_observation_timing(),
         )
         .unwrap();
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
         let mut replaced_intent = intent;
         replaced_intent.activation_request_digest = "6".repeat(64);
         // Keep the nested package commitment consistent with the forged row
@@ -4204,32 +4225,29 @@ pub(crate) mod tests {
         replaced_intent.delivery.activation_request_digest = "6".repeat(64);
         let mut replaced_observation = observation;
         replaced_observation.activation_request_digest = "6".repeat(64);
-        db.conn
-            .execute_batch(
+        db.conn.with_sql(|connection| Ok(connection.execute_batch(
                 "DROP TRIGGER external_execution_supervisor_activation_intent_immutable;
                  DROP TRIGGER external_execution_supervisor_activation_observation_immutable;",
-            )
+            )?))
             .unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE external_execution_supervisor_activation_intent SET intent_json=?2 WHERE placement_thread_id=?1",
                 params![
                     reservation.placement_thread_id,
                     lillux::canonical_json(&serde_json::to_value(&replaced_intent).unwrap()).unwrap()
                 ],
-            )
+            )?))
             .unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE external_execution_supervisor_activation_observation SET observation_json=?2 WHERE placement_thread_id=?1",
                 params![
                     reservation.placement_thread_id,
                     lillux::canonical_json(&serde_json::to_value(&replaced_observation).unwrap())
                         .unwrap()
                 ],
-            )
+            )?))
             .unwrap();
-        let error = validate_current(&db.conn).unwrap_err();
+        let error = db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap_err();
         assert!(
             format!("{error:#}")
                 .contains("external supervisor activation request identity changed")
@@ -4260,7 +4278,7 @@ pub(crate) mod tests {
             .unwrap();
         db.settle_external_no_occurrence("T-one", &evidence)
             .unwrap();
-        assert_eq!(read_guard(&db.conn).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::ContactedNoOccurrence
@@ -4312,7 +4330,7 @@ pub(crate) mod tests {
         assert!(db.settle_external_terminal("T-one", &observation).is_err());
         assert!(db.begin_external_termination("T-one", &intent).unwrap());
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
         let mut mismatches = Vec::new();
         let mut changed = observation.clone();
         changed.binding_hash = "3".repeat(64);
@@ -4331,14 +4349,13 @@ pub(crate) mod tests {
         mismatches.push(changed);
         for changed in mismatches {
             assert!(db.settle_external_terminal("T-one", &changed).is_err());
-            assert_eq!(read_guard(&db.conn).unwrap(), 1);
+            assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
             assert_eq!(
-                db.conn
-                    .query_row(
+                db.conn.with_sql(|connection| Ok(connection.query_row(
                         "SELECT COUNT(*) FROM external_execution_terminal_observation",
                         [],
                         |row| row.get::<_, i64>(0),
-                    )
+                    )?))
                     .unwrap(),
                 0
             );
@@ -4349,7 +4366,7 @@ pub(crate) mod tests {
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
         db.settle_external_terminal("T-one", &observation).unwrap();
         db.settle_external_terminal("T-one", &observation).unwrap();
-        assert_eq!(read_guard(&db.conn).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::Terminated
@@ -4477,20 +4494,18 @@ pub(crate) mod tests {
             .unwrap()
             .remove("max_guest_package_framed_bytes");
         let predecessor = lillux::canonical_json(&predecessor).unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_binding_generation
                  (binding_hash,capacity_owner,binding_json,retained_at_ms)
                  VALUES (?1,?2,?3,1)",
                 params![retained.digest(), retained.capacity_owner(), predecessor],
-            )
+            )?))
             .unwrap();
-        db.conn
-            .pragma_update(
+        db.conn.with_sql(|connection| Ok(connection.pragma_update(
                 None,
                 "application_id",
                 RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )
+            )?))
             .unwrap();
         drop(db);
 
@@ -4650,26 +4665,23 @@ pub(crate) mod tests {
                 .is_err()
         );
         let count: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_binding_generation",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(count, 0);
         reserve(&db, &reservation).unwrap();
         assert!(
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "UPDATE external_execution_binding_generation SET binding_json='{}'",
                     []
-                )
+                )?))
                 .is_err()
         );
         assert!(
-            db.conn
-                .execute("DELETE FROM external_execution_binding_generation", [])
+            db.conn.with_sql(|connection| Ok(connection.execute("DELETE FROM external_execution_binding_generation", [])?))
                 .is_err()
         );
     }
@@ -4684,20 +4696,18 @@ pub(crate) mod tests {
         // Model structural storage corruption after reservation. Startup must
         // not accept a wider allocation merely because both rows remain
         // individually well-formed and the binding identity still exists.
-        db.conn
-            .execute("DROP TRIGGER external_execution_transition_guard", [])
+        db.conn.with_sql(|connection| Ok(connection.execute("DROP TRIGGER external_execution_transition_guard", [])?))
             .unwrap();
         let mut widened = reservation;
         widened.max_active = 2;
         let widened = lillux::canonical_json(&serde_json::to_value(widened).unwrap()).unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE external_execution_allocation SET reservation_json=?1
                  WHERE placement_thread_id='T-one'",
                 [widened],
-            )
+            )?))
             .unwrap();
-        assert!(validate_current(&db.conn).is_err());
+        assert!(db.conn.with_sql(|connection| Ok(validate_current(connection)?)).is_err());
     }
 
     #[test]
@@ -4716,7 +4726,7 @@ pub(crate) mod tests {
                 ..
             })
         ));
-        assert_eq!(read_guard(&db.conn).unwrap(), 0);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 0);
         db.release_credential_profile("P-one", "worker-one")
             .unwrap();
         assert_eq!(
@@ -4731,11 +4741,10 @@ pub(crate) mod tests {
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
         let reserved = reservation(&db, "one");
         reserve(&db, &reserved).unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE execution_workspace SET state='orphaned' WHERE workspace_id='W-one'",
                 [],
-            )
+            )?))
             .unwrap();
         assert!(
             db.claim_external_allocation_contact("T-one", &reserved.request_digest)
@@ -4779,7 +4788,7 @@ pub(crate) mod tests {
             db.bind_external_allocation("T-one", &wrong, test_observation_timing())
                 .is_err()
         );
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
     }
 
     #[test]
@@ -4813,11 +4822,10 @@ pub(crate) mod tests {
             RuntimeDb::open(&missing_claim.path().join("runtime.sqlite3")).unwrap();
         let missing_claim_reservation = reservation(&missing_claim_db, "missing-claim");
         missing_claim_db
-            .conn
-            .execute(
+            .conn.with_sql(|connection| Ok(connection.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id=?1",
                 [&missing_claim_reservation.placement_thread_id],
-            )
+            )?))
             .unwrap();
         assert!(reserve(&missing_claim_db, &missing_claim_reservation).is_err());
 
@@ -4825,15 +4833,14 @@ pub(crate) mod tests {
         let stale_owner_db = RuntimeDb::open(&stale_owner.path().join("runtime.sqlite3")).unwrap();
         let stale_owner_reservation = reservation(&stale_owner_db, "stale-owner");
         stale_owner_db
-            .conn
-            .execute(
+            .conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE execution_workspace SET launch_owner='stale-owner' WHERE workspace_id=?1",
                 [&stale_owner_reservation
                     .owner
                     .dedicated_session()
                     .unwrap()
                     .workspace_id],
-            )
+            )?))
             .unwrap();
         assert!(reserve(&stale_owner_db, &stale_owner_reservation).is_err());
 

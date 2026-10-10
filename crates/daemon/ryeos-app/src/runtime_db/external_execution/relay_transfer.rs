@@ -905,86 +905,88 @@ impl RuntimeDb {
         kind: RelayKind,
         sequence: u32,
     ) -> Result<RelayApplicationDecision> {
-        let intent = RelayTransferIntent::from_bootstrap(
-            bootstrap,
-            kind,
-            sequence,
-            RelayDirection::GuestToController,
-            None,
-        )?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
-        require_placement_bootstrap(&tx, &intent)?;
-        let inbound = read_transfer(&tx, &intent)?
-            .context("external relay semantic application has no accepted request")?;
-        ensure!(
-            inbound.phase == RelayTransferPhase::Accepted,
-            "external relay semantic application requires accepted file bytes"
-        );
-        let request_digest = inbound
-            .observed_sha256
-            .context("accepted external relay request lost its digest")?;
-        let prior: Option<(String, String, String, Option<String>, Option<Vec<u8>>)> = tx
-            .query_row(
-                "SELECT bootstrap_digest,request_digest,phase,response_sha256,response_bytes
+        self.conn.with_sql(|conn| {
+            let intent = RelayTransferIntent::from_bootstrap(
+                bootstrap,
+                kind,
+                sequence,
+                RelayDirection::GuestToController,
+                None,
+            )?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
+            require_placement_bootstrap(&tx, &intent)?;
+            let inbound = read_transfer(&tx, &intent)?
+                .context("external relay semantic application has no accepted request")?;
+            ensure!(
+                inbound.phase == RelayTransferPhase::Accepted,
+                "external relay semantic application requires accepted file bytes"
+            );
+            let request_digest = inbound
+                .observed_sha256
+                .context("accepted external relay request lost its digest")?;
+            let prior: Option<(String, String, String, Option<String>, Option<Vec<u8>>)> = tx
+                .query_row(
+                    "SELECT bootstrap_digest,request_digest,phase,response_sha256,response_bytes
              FROM external_execution_relay_application
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3",
-                params![bootstrap.placement_thread_id, kind.as_str(), sequence],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((bootstrap_digest, prior_digest, phase, response_digest, response_bytes)) =
-            prior
-        {
-            ensure!(
-                bootstrap_digest == intent.bootstrap_digest && prior_digest == request_digest,
-                "external relay semantic request changed its original file identity"
-            );
-            if phase == "committed" {
-                let bytes = response_bytes.context("committed relay response lost bytes")?;
+                    params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((bootstrap_digest, prior_digest, phase, response_digest, response_bytes)) =
+                prior
+            {
                 ensure!(
-                    response_digest.as_deref() == Some(lillux::sha256_hex(&bytes).as_str()),
-                    "committed relay response changed its digest"
+                    bootstrap_digest == intent.bootstrap_digest && prior_digest == request_digest,
+                    "external relay semantic request changed its original file identity"
                 );
-                verify_relay_application_response(
-                    &tx,
-                    bootstrap,
-                    kind,
-                    sequence,
-                    &request_digest,
-                    &bytes,
-                )?;
-                tx.commit()?;
-                return Ok(RelayApplicationDecision::Committed {
-                    response_bytes: bytes,
-                });
+                if phase == "committed" {
+                    let bytes = response_bytes.context("committed relay response lost bytes")?;
+                    ensure!(
+                        response_digest.as_deref() == Some(lillux::sha256_hex(&bytes).as_str()),
+                        "committed relay response changed its digest"
+                    );
+                    verify_relay_application_response(
+                        &tx,
+                        bootstrap,
+                        kind,
+                        sequence,
+                        &request_digest,
+                        &bytes,
+                    )?;
+                    tx.commit()?;
+                    return Ok(RelayApplicationDecision::Committed {
+                        response_bytes: bytes,
+                    });
+                }
+                ensure!(
+                    phase == "applying" && response_digest.is_none() && response_bytes.is_none(),
+                    "external relay application phase is invalid"
+                );
+                anyhow::bail!("external relay semantic application is indeterminate; cleanup required");
             }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
             ensure!(
-                phase == "applying" && response_digest.is_none() && response_bytes.is_none(),
-                "external relay application phase is invalid"
+                now < intent.deadline_ms,
+                "external relay semantic application deadline expired"
             );
-            anyhow::bail!("external relay semantic application is indeterminate; cleanup required");
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < intent.deadline_ms,
-            "external relay semantic application deadline expired"
-        );
-        tx.execute(
-            "INSERT INTO external_execution_relay_application VALUES(?1,?2,?3,?4,?5,'applying',NULL,NULL,?6,?6)",
-            params![bootstrap.placement_thread_id, kind.as_str(), sequence,
-                intent.bootstrap_digest, request_digest, now],
-        )?;
-        tx.commit()?;
-        Ok(RelayApplicationDecision::Apply { request_digest })
+            tx.execute(
+                "INSERT INTO external_execution_relay_application VALUES(?1,?2,?3,?4,?5,'applying',NULL,NULL,?6,?6)",
+                params![bootstrap.placement_thread_id, kind.as_str(), sequence,
+                    intent.bootstrap_digest, request_digest, now],
+            )?;
+            tx.commit()?;
+            Ok(RelayApplicationDecision::Apply { request_digest })
+        })
     }
 
     /// Commit exactly one owner-signed response. A lost local return can
@@ -996,54 +998,56 @@ impl RuntimeDb {
         sequence: u32,
         response: &ExternalRelayResponseEnvelope,
     ) -> Result<Vec<u8>> {
-        let intent = RelayTransferIntent::from_bootstrap(
-            bootstrap,
-            kind,
-            sequence,
-            RelayDirection::GuestToController,
-            None,
-        )?;
-        let bytes = response.canonical_bytes()?;
-        ensure!(
-            !bytes.is_empty()
-                && bytes.len() as u64 <= bootstrap.controller.relay()?.maximum_file_bytes,
-            "external relay semantic response exceeds signed file bound"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
-        let inbound = read_transfer(&tx, &intent)?
-            .context("external relay semantic commit lost accepted request")?;
-        ensure!(
-            inbound.phase == RelayTransferPhase::Accepted,
-            "external relay semantic commit requires accepted request"
-        );
-        let request_digest = inbound
-            .observed_sha256
-            .context("external relay semantic commit lost request digest")?;
-        verify_relay_application_response(&tx, bootstrap, kind, sequence, &request_digest, &bytes)?;
-        require_retention_budget(&tx, &intent, bytes.len())?;
-        let changed = tx.execute(
-            "UPDATE external_execution_relay_application
+        self.conn.with_sql(|conn| {
+            let intent = RelayTransferIntent::from_bootstrap(
+                bootstrap,
+                kind,
+                sequence,
+                RelayDirection::GuestToController,
+                None,
+            )?;
+            let bytes = response.canonical_bytes()?;
+            ensure!(
+                !bytes.is_empty()
+                    && bytes.len() as u64 <= bootstrap.controller.relay()?.maximum_file_bytes,
+                "external relay semantic response exceeds signed file bound"
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
+            let inbound = read_transfer(&tx, &intent)?
+                .context("external relay semantic commit lost accepted request")?;
+            ensure!(
+                inbound.phase == RelayTransferPhase::Accepted,
+                "external relay semantic commit requires accepted request"
+            );
+            let request_digest = inbound
+                .observed_sha256
+                .context("external relay semantic commit lost request digest")?;
+            verify_relay_application_response(&tx, bootstrap, kind, sequence, &request_digest, &bytes)?;
+            require_retention_budget(&tx, &intent, bytes.len())?;
+            let changed = tx.execute(
+                "UPDATE external_execution_relay_application
              SET phase='committed',response_sha256=?6,response_bytes=?7,updated_at_ms=?8
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3
                AND bootstrap_digest=?4 AND request_digest=?5 AND phase='applying'",
-            params![
-                bootstrap.placement_thread_id,
-                kind.as_str(),
-                sequence,
-                intent.bootstrap_digest,
-                request_digest,
-                lillux::sha256_hex(&bytes),
-                bytes,
-                i64::try_from(lillux::time::timestamp_millis())?
-            ],
-        )?;
-        ensure!(
-            changed == 1,
-            "external relay semantic response has no unique application claim"
-        );
-        tx.commit()?;
-        Ok(bytes)
+                params![
+                    bootstrap.placement_thread_id,
+                    kind.as_str(),
+                    sequence,
+                    intent.bootstrap_digest,
+                    request_digest,
+                    lillux::sha256_hex(&bytes),
+                    bytes,
+                    i64::try_from(lillux::time::timestamp_millis())?
+                ],
+            )?;
+            ensure!(
+                changed == 1,
+                "external relay semantic response has no unique application claim"
+            );
+            tx.commit()?;
+            Ok(bytes)
+        })
     }
 
     /// Recover precommitted controller bytes without minting a replacement PUT.
@@ -1053,72 +1057,76 @@ impl RuntimeDb {
         kind: RelayKind,
         sequence: u32,
     ) -> Result<Vec<u8>> {
-        bootstrap.validate()?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        let transfer_bytes: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT canonical_bytes FROM external_execution_relay_transfer
+        self.conn.with_sql(|conn| {
+            bootstrap.validate()?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let transfer_bytes: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT canonical_bytes FROM external_execution_relay_transfer
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3
                AND direction='controller_to_guest'",
-                params![bootstrap.placement_thread_id, kind.as_str(), sequence],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let application_bytes: Vec<u8> = tx
-            .query_row(
-                "SELECT response_bytes FROM external_execution_relay_application
+                    params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let application_bytes: Vec<u8> = tx
+                .query_row(
+                    "SELECT response_bytes FROM external_execution_relay_application
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND phase='committed'",
-                params![bootstrap.placement_thread_id, kind.as_str(), sequence],
-                |row| row.get(0),
-            )
-            .context("external relay has no committed semantic response")?;
-        if let Some(ref transfer_bytes) = transfer_bytes {
-            ensure!(
-                transfer_bytes == &application_bytes,
-                "external relay transfer differs from committed semantic response"
-            );
-        }
-        let bytes = application_bytes;
-        let intent = RelayTransferIntent::from_bootstrap(
-            bootstrap,
-            kind,
-            sequence,
-            RelayDirection::ControllerToGuest,
-            Some(&bytes),
-        )?;
-        require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
-        require_placement_bootstrap(&tx, &intent)?;
-        require_committed_relay_application(&tx, bootstrap, kind, sequence, &bytes)?;
-        if let Some(record) = read_transfer(&tx, &intent)? {
-            ensure!(
-                record.canonical_bytes.as_deref() == Some(bytes.as_slice()),
-                "external relay retained response changed its exact bytes"
-            );
-        }
-        tx.commit()?;
-        Ok(bytes)
+                    params![bootstrap.placement_thread_id, kind.as_str(), sequence],
+                    |row| row.get(0),
+                )
+                .context("external relay has no committed semantic response")?;
+            if let Some(ref transfer_bytes) = transfer_bytes {
+                ensure!(
+                    transfer_bytes == &application_bytes,
+                    "external relay transfer differs from committed semantic response"
+                );
+            }
+            let bytes = application_bytes;
+            let intent = RelayTransferIntent::from_bootstrap(
+                bootstrap,
+                kind,
+                sequence,
+                RelayDirection::ControllerToGuest,
+                Some(&bytes),
+            )?;
+            require_live_relay_bootstrap(&tx, &intent, bootstrap)?;
+            require_placement_bootstrap(&tx, &intent)?;
+            require_committed_relay_application(&tx, bootstrap, kind, sequence, &bytes)?;
+            if let Some(record) = read_transfer(&tx, &intent)? {
+                ensure!(
+                    record.canonical_bytes.as_deref() == Some(bytes.as_slice()),
+                    "external relay retained response changed its exact bytes"
+                );
+            }
+            tx.commit()?;
+            Ok(bytes)
+        })
     }
 
     pub(crate) fn accepted_external_relay_request(
         &self,
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
-        ensure!(
-            intent.direction == RelayDirection::GuestToController,
-            "external relay predecessor must be a guest request"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        require_live_relay_allocation(&tx, intent)?;
-        let record = read_transfer(&tx, intent)?
-            .context("external relay has no exact predecessor request")?;
-        ensure!(
-            record.phase == RelayTransferPhase::Accepted
-                && record.observed_sha256.is_some()
-                && record.canonical_bytes.is_some(),
-            "external relay predecessor request is not accepted"
-        );
-        tx.commit()?;
-        Ok(record)
+        self.conn.with_sql(|conn| {
+            ensure!(
+                intent.direction == RelayDirection::GuestToController,
+                "external relay predecessor must be a guest request"
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            require_live_relay_allocation(&tx, intent)?;
+            let record = read_transfer(&tx, intent)?
+                .context("external relay has no exact predecessor request")?;
+            ensure!(
+                record.phase == RelayTransferPhase::Accepted
+                    && record.observed_sha256.is_some()
+                    && record.canonical_bytes.is_some(),
+                "external relay predecessor request is not accepted"
+            );
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub(crate) fn claim_external_relay_read_contact(
@@ -1151,67 +1159,69 @@ impl RuntimeDb {
         intent: &RelayTransferIntent,
         outbound: Option<&[u8]>,
     ) -> Result<RelayTransferRecord> {
-        bootstrap.validate()?;
-        ensure!(
-            bootstrap.controller.relay().is_ok()
-                && bootstrap.placement_thread_id == intent.placement_thread_id
-                && bootstrap.occurrence_id == intent.occurrence_id
-                && bootstrap.allocation_request_digest == intent.allocation_request_digest
-                && bootstrap.digest()? == intent.bootstrap_digest,
-            "external relay transfer changed its sealed bootstrap"
-        );
-        let expected = RelayTransferIntent::from_bootstrap(
-            bootstrap,
-            intent.kind,
-            intent.sequence,
-            intent.direction,
-            outbound,
-        )?;
-        ensure!(
-            expected == *intent,
-            "external relay slot differs from sealed bootstrap"
-        );
-        intent.validate()?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_relay_bootstrap(&tx, intent, bootstrap)?;
-        require_placement_bootstrap(&tx, intent)?;
-        if let Some(bytes) = outbound {
-            require_committed_relay_application(
-                &tx,
+        self.conn.with_sql(|conn| {
+            bootstrap.validate()?;
+            ensure!(
+                bootstrap.controller.relay().is_ok()
+                    && bootstrap.placement_thread_id == intent.placement_thread_id
+                    && bootstrap.occurrence_id == intent.occurrence_id
+                    && bootstrap.allocation_request_digest == intent.allocation_request_digest
+                    && bootstrap.digest()? == intent.bootstrap_digest,
+                "external relay transfer changed its sealed bootstrap"
+            );
+            let expected = RelayTransferIntent::from_bootstrap(
                 bootstrap,
                 intent.kind,
                 intent.sequence,
-                bytes,
+                intent.direction,
+                outbound,
             )?;
-        }
-        if let Some(prior) = read_transfer(&tx, intent)? {
-            if intent.direction == RelayDirection::ControllerToGuest {
-                ensure!(
-                    prior.canonical_bytes.as_deref() == outbound,
-                    "external relay exact replay changed retained response bytes"
-                );
+            ensure!(
+                expected == *intent,
+                "external relay slot differs from sealed bootstrap"
+            );
+            intent.validate()?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_live_relay_bootstrap(&tx, intent, bootstrap)?;
+            require_placement_bootstrap(&tx, intent)?;
+            if let Some(bytes) = outbound {
+                require_committed_relay_application(
+                    &tx,
+                    bootstrap,
+                    intent.kind,
+                    intent.sequence,
+                    bytes,
+                )?;
             }
+            if let Some(prior) = read_transfer(&tx, intent)? {
+                if intent.direction == RelayDirection::ControllerToGuest {
+                    ensure!(
+                        prior.canonical_bytes.as_deref() == outbound,
+                        "external relay exact replay changed retained response bytes"
+                    );
+                }
+                tx.commit()?;
+                return Ok(prior);
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < intent.deadline_ms,
+                "external relay deadline expired before reservation"
+            );
+            require_preceding_transfer(&tx, intent)?;
+            if let Some(bytes) = outbound {
+                require_retention_budget(&tx, intent, bytes.len())?;
+            }
+            tx.execute(
+                "INSERT INTO external_execution_relay_transfer VALUES(?1,?2,?3,?4,?5,?6,'reserved',0,NULL,NULL,?7,?8,?8)",
+                params![intent.placement_thread_id, intent.kind.as_str(), intent.sequence,
+                    intent.direction.as_str(), intent.remote_path, canonical(intent)?, outbound, now],
+            )?;
+            let record =
+                read_transfer(&tx, intent)?.context("external relay reservation disappeared")?;
             tx.commit()?;
-            return Ok(prior);
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < intent.deadline_ms,
-            "external relay deadline expired before reservation"
-        );
-        require_preceding_transfer(&tx, intent)?;
-        if let Some(bytes) = outbound {
-            require_retention_budget(&tx, intent, bytes.len())?;
-        }
-        tx.execute(
-            "INSERT INTO external_execution_relay_transfer VALUES(?1,?2,?3,?4,?5,?6,'reserved',0,NULL,NULL,?7,?8,?8)",
-            params![intent.placement_thread_id, intent.kind.as_str(), intent.sequence,
-                intent.direction.as_str(), intent.remote_path, canonical(intent)?, outbound, now],
-        )?;
-        let record =
-            read_transfer(&tx, intent)?.context("external relay reservation disappeared")?;
-        tx.commit()?;
-        Ok(record)
+            Ok(record)
+        })
     }
 
     /// Retain each read allowance before minting a Render download token.
@@ -1220,36 +1230,38 @@ impl RuntimeDb {
         &self,
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_relay_allocation(&tx, intent)?;
-        let prior =
-            read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
-        ensure!(
-            (intent.direction == RelayDirection::GuestToController
-                && matches!(
-                    prior.phase,
-                    RelayTransferPhase::Reserved | RelayTransferPhase::Reading
-                ))
-                || (intent.direction == RelayDirection::ControllerToGuest
-                    && prior.phase == RelayTransferPhase::UploadPossible),
-            "external relay read is outside its transfer phase"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < intent.deadline_ms && prior.read_attempts < 128,
-            "external relay read budget or deadline expired"
-        );
-        tx.execute(
-            "UPDATE external_execution_relay_transfer SET phase=?5,read_attempts=read_attempts+1,updated_at_ms=?6
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_live_relay_allocation(&tx, intent)?;
+            let prior =
+                read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
+            ensure!(
+                (intent.direction == RelayDirection::GuestToController
+                    && matches!(
+                        prior.phase,
+                        RelayTransferPhase::Reserved | RelayTransferPhase::Reading
+                    ))
+                    || (intent.direction == RelayDirection::ControllerToGuest
+                        && prior.phase == RelayTransferPhase::UploadPossible),
+                "external relay read is outside its transfer phase"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < intent.deadline_ms && prior.read_attempts < 128,
+                "external relay read budget or deadline expired"
+            );
+            tx.execute(
+                "UPDATE external_execution_relay_transfer SET phase=?5,read_attempts=read_attempts+1,updated_at_ms=?6
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND direction=?4",
-            params![intent.placement_thread_id, intent.kind.as_str(), intent.sequence,
-                intent.direction.as_str(),
-                if intent.direction == RelayDirection::GuestToController { "reading" } else { "upload_possible" }, now],
-        )?;
-        let current =
-            read_transfer(&tx, intent)?.context("external relay read claim disappeared")?;
-        tx.commit()?;
-        Ok(current)
+                params![intent.placement_thread_id, intent.kind.as_str(), intent.sequence,
+                    intent.direction.as_str(),
+                    if intent.direction == RelayDirection::GuestToController { "reading" } else { "upload_possible" }, now],
+            )?;
+            let current =
+                read_transfer(&tx, intent)?.context("external relay read claim disappeared")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     /// This is the only permission for one upload token mint and PUT. A lost
@@ -1259,38 +1271,40 @@ impl RuntimeDb {
         &self,
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
-        ensure!(
-            intent.direction == RelayDirection::ControllerToGuest,
-            "external relay upload requires a controller response"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_relay_allocation(&tx, intent)?;
-        let prior =
-            read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
-        ensure!(
-            prior.phase == RelayTransferPhase::Reserved,
-            "external relay upload was already possible; use exact readback"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < intent.deadline_ms,
-            "external relay upload deadline expired"
-        );
-        tx.execute(
-            "UPDATE external_execution_relay_transfer SET phase='upload_possible',updated_at_ms=?5
+        self.conn.with_sql(|conn| {
+            ensure!(
+                intent.direction == RelayDirection::ControllerToGuest,
+                "external relay upload requires a controller response"
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_live_relay_allocation(&tx, intent)?;
+            let prior =
+                read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
+            ensure!(
+                prior.phase == RelayTransferPhase::Reserved,
+                "external relay upload was already possible; use exact readback"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < intent.deadline_ms,
+                "external relay upload deadline expired"
+            );
+            tx.execute(
+                "UPDATE external_execution_relay_transfer SET phase='upload_possible',updated_at_ms=?5
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND direction=?4",
-            params![
-                intent.placement_thread_id,
-                intent.kind.as_str(),
-                intent.sequence,
-                intent.direction.as_str(),
-                now
-            ],
-        )?;
-        let current =
-            read_transfer(&tx, intent)?.context("external relay upload claim disappeared")?;
-        tx.commit()?;
-        Ok(current)
+                params![
+                    intent.placement_thread_id,
+                    intent.kind.as_str(),
+                    intent.sequence,
+                    intent.direction.as_str(),
+                    now
+                ],
+            )?;
+            let current =
+                read_transfer(&tx, intent)?.context("external relay upload claim disappeared")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     /// Exact canonical readback is a transport receipt, never an ACK. For a
@@ -1301,75 +1315,77 @@ impl RuntimeDb {
         intent: &RelayTransferIntent,
         bytes: &[u8],
     ) -> Result<RelayTransferRecord> {
-        intent.validate()?;
-        ensure!(
-            !bytes.is_empty() && bytes.len() as u64 <= intent.maximum_file_bytes,
-            "external relay readback exceeds file bound"
-        );
-        let value: serde_json::Value = serde_json::from_slice(bytes)?;
-        ensure!(
-            lillux::canonical_json(&value)?.as_bytes() == bytes,
-            "external relay readback is not canonical JSON"
-        );
-        let digest = lillux::sha256_hex(bytes);
-        let len = u64::try_from(bytes.len())?;
-        if intent.direction == RelayDirection::ControllerToGuest
-            && (intent.expected_sha256.as_deref() != Some(&digest)
-                || intent.expected_bytes != Some(len))
-        {
-            self.quarantine_external_relay_transfer(intent)?;
-            anyhow::bail!("external relay upload readback differs from precommitted response");
-        }
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_live_relay_allocation(&tx, intent)?;
-        let prior =
-            read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
-        if prior.phase == RelayTransferPhase::Accepted {
-            if prior.observed_sha256.as_deref() != Some(&digest)
-                || prior.observed_bytes != Some(len)
+        self.conn.with_sql(|conn| {
+            intent.validate()?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() as u64 <= intent.maximum_file_bytes,
+                "external relay readback exceeds file bound"
+            );
+            let value: serde_json::Value = serde_json::from_slice(bytes)?;
+            ensure!(
+                lillux::canonical_json(&value)?.as_bytes() == bytes,
+                "external relay readback is not canonical JSON"
+            );
+            let digest = lillux::sha256_hex(bytes);
+            let len = u64::try_from(bytes.len())?;
+            if intent.direction == RelayDirection::ControllerToGuest
+                && (intent.expected_sha256.as_deref() != Some(&digest)
+                    || intent.expected_bytes != Some(len))
             {
-                quarantine_in_transaction(&tx, intent)?;
-                tx.commit()?;
-                anyhow::bail!("external relay accepted file changed its exact bytes");
+                self.quarantine_external_relay_transfer(intent)?;
+                anyhow::bail!("external relay upload readback differs from precommitted response");
             }
-            tx.commit()?;
-            return Ok(prior);
-        }
-        ensure!(
-            prior.read_attempts > 0
-                && ((intent.direction == RelayDirection::GuestToController
-                    && prior.phase == RelayTransferPhase::Reading)
-                    || (intent.direction == RelayDirection::ControllerToGuest
-                        && prior.phase == RelayTransferPhase::UploadPossible)),
-            "external relay readback has no prior download claim"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < intent.deadline_ms,
-            "external relay readback arrived after deadline"
-        );
-        if intent.direction == RelayDirection::GuestToController {
-            require_retention_budget(&tx, intent, bytes.len())?;
-        }
-        tx.execute(
-            "UPDATE external_execution_relay_transfer
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_live_relay_allocation(&tx, intent)?;
+            let prior =
+                read_transfer(&tx, intent)?.context("external relay has no durable transfer owner")?;
+            if prior.phase == RelayTransferPhase::Accepted {
+                if prior.observed_sha256.as_deref() != Some(&digest)
+                    || prior.observed_bytes != Some(len)
+                {
+                    quarantine_in_transaction(&tx, intent)?;
+                    tx.commit()?;
+                    anyhow::bail!("external relay accepted file changed its exact bytes");
+                }
+                tx.commit()?;
+                return Ok(prior);
+            }
+            ensure!(
+                prior.read_attempts > 0
+                    && ((intent.direction == RelayDirection::GuestToController
+                        && prior.phase == RelayTransferPhase::Reading)
+                        || (intent.direction == RelayDirection::ControllerToGuest
+                            && prior.phase == RelayTransferPhase::UploadPossible)),
+                "external relay readback has no prior download claim"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < intent.deadline_ms,
+                "external relay readback arrived after deadline"
+            );
+            if intent.direction == RelayDirection::GuestToController {
+                require_retention_budget(&tx, intent, bytes.len())?;
+            }
+            tx.execute(
+                "UPDATE external_execution_relay_transfer
              SET phase='accepted',observed_sha256=?5,observed_bytes=?6,
                  canonical_bytes=COALESCE(canonical_bytes,?7),updated_at_ms=?8
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND direction=?4",
-            params![
-                intent.placement_thread_id,
-                intent.kind.as_str(),
-                intent.sequence,
-                intent.direction.as_str(),
-                digest,
-                i64::try_from(len)?,
-                bytes,
-                now
-            ],
-        )?;
-        let current = read_transfer(&tx, intent)?.context("external relay readback disappeared")?;
-        tx.commit()?;
-        Ok(current)
+                params![
+                    intent.placement_thread_id,
+                    intent.kind.as_str(),
+                    intent.sequence,
+                    intent.direction.as_str(),
+                    digest,
+                    i64::try_from(len)?,
+                    bytes,
+                    now
+                ],
+            )?;
+            let current = read_transfer(&tx, intent)?.context("external relay readback disappeared")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     /// The original provider occurrence has settled. This closes further
@@ -1379,40 +1395,42 @@ impl RuntimeDb {
         &self,
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let allocation = read(&tx, &intent.placement_thread_id)?
-            .context("external relay terminal closure lost allocation")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Terminated
-                && allocation
-                    .occurrence
-                    .as_ref()
-                    .map(|o| o.occurrence_id.as_str())
-                    == Some(intent.occurrence_id.as_str()),
-            "external relay closure requires exact provider terminal settlement"
-        );
-        let prior =
-            read_transfer(&tx, intent)?.context("external relay terminal closure lost transfer")?;
-        if prior.phase == RelayTransferPhase::TerminalClosed {
-            tx.commit()?;
-            return Ok(prior);
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE external_execution_relay_transfer SET phase='terminal_closed',updated_at_ms=?5
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let allocation = read(&tx, &intent.placement_thread_id)?
+                .context("external relay terminal closure lost allocation")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Terminated
+                    && allocation
+                        .occurrence
+                        .as_ref()
+                        .map(|o| o.occurrence_id.as_str())
+                        == Some(intent.occurrence_id.as_str()),
+                "external relay closure requires exact provider terminal settlement"
+            );
+            let prior =
+                read_transfer(&tx, intent)?.context("external relay terminal closure lost transfer")?;
+            if prior.phase == RelayTransferPhase::TerminalClosed {
+                tx.commit()?;
+                return Ok(prior);
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            tx.execute(
+                "UPDATE external_execution_relay_transfer SET phase='terminal_closed',updated_at_ms=?5
              WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND direction=?4",
-            params![
-                intent.placement_thread_id,
-                intent.kind.as_str(),
-                intent.sequence,
-                intent.direction.as_str(),
-                now
-            ],
-        )?;
-        let closed =
-            read_transfer(&tx, intent)?.context("external relay terminal closure disappeared")?;
-        tx.commit()?;
-        Ok(closed)
+                params![
+                    intent.placement_thread_id,
+                    intent.kind.as_str(),
+                    intent.sequence,
+                    intent.direction.as_str(),
+                    now
+                ],
+            )?;
+            let closed =
+                read_transfer(&tx, intent)?.context("external relay terminal closure disappeared")?;
+            tx.commit()?;
+            Ok(closed)
+        })
     }
 
     /// A complete but contradictory file, or any other unreconcilable
@@ -1422,16 +1440,18 @@ impl RuntimeDb {
         &self,
         intent: &RelayTransferIntent,
     ) -> Result<RelayTransferRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let prior =
-            read_transfer(&tx, intent)?.context("external relay quarantine lost transfer")?;
-        if prior.phase != RelayTransferPhase::Quarantined {
-            quarantine_in_transaction(&tx, intent)?;
-        }
-        let current =
-            read_transfer(&tx, intent)?.context("external relay quarantine disappeared")?;
-        tx.commit()?;
-        Ok(current)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let prior =
+                read_transfer(&tx, intent)?.context("external relay quarantine lost transfer")?;
+            if prior.phase != RelayTransferPhase::Quarantined {
+                quarantine_in_transaction(&tx, intent)?;
+            }
+            let current =
+                read_transfer(&tx, intent)?.context("external relay quarantine disappeared")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 

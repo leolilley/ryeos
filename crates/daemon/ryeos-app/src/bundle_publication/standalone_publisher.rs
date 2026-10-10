@@ -109,7 +109,7 @@ pub struct StandalonePublisherPolicy {
     pub catalog_publisher_fingerprint: String,
     pub bundle_publication_policy_section_digest: String,
     pub trust_epoch: u64,
-    pub calibration_execution_environment: super::calibration::CalibrationEnvironmentEvidence,
+    pub calibration_execution_environment: ryeos_node_runtime::calibration_policy::CalibrationEnvironmentEvidence,
     pub qualification_signer_public_key: [u8; 32],
     pub qualification_signer_fingerprint: String,
     pub portable_qualification_policy: ProductQualificationPolicySource,
@@ -139,7 +139,7 @@ impl StandalonePublisherPolicy {
     /// release, source and consumer nodes. This does not discover or authorize
     /// identities: the operator supplies the measured section explicitly.
     pub fn from_node_policy(
-        section: &crate::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+        section: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         namespace: &str,
     ) -> anyhow::Result<Self> {
         section.validate()?;
@@ -250,7 +250,7 @@ impl StandalonePublisherPolicy {
             &self.portable_qualification_policy,
             &self.required_portable_qualification_claims,
             "config:bundle-release/portable-qualification",
-            super::recipe::PORTABLE_QUALIFIER,
+            ryeos_bundle_publication_contract::PORTABLE_QUALIFIER,
             "portable_bundle_release_checks_v1",
         )?;
         require_closed_bundle_qualification(
@@ -269,9 +269,9 @@ impl StandalonePublisherPolicy {
         )?;
         anyhow::ensure!(
             self.core_seed_qualification_policy.canonical_ref
-                == super::core_seed::QUALIFICATION_POLICY
+                == ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_POLICY
                 && self.core_seed_qualification_policy.policy.verifier_ref
-                    == super::core_seed::QUALIFIER
+                    == ryeos_bundle_publication_contract::CORE_SEED_QUALIFIER
                 && self
                     .core_seed_qualification_policy
                     .policy
@@ -283,16 +283,16 @@ impl StandalonePublisherPolicy {
                     .subject_declaration_id
                     == "subject"
                 && self.core_seed_qualification_policy.policy.allowed_claims
-                    == [super::core_seed::QUALIFICATION_CLAIM.to_owned()]
+                    == [ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM.to_owned()]
                 && self.required_core_seed_qualification_claims
-                    == vec![super::core_seed::QUALIFICATION_CLAIM.to_owned()],
+                    == vec![ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM.to_owned()],
             "invalid Core seed qualification policy pins"
         );
         require_closed_bundle_qualification(
             &self.substrate_qualification_policy,
             &self.required_substrate_qualification_claims,
             "config:bundle-release/substrate-qualification",
-            super::recipe::SUBSTRATE_QUALIFIER,
+            ryeos_bundle_publication_contract::SUBSTRATE_QUALIFIER,
             "substrate_release_checks_v1",
         )?;
         require_distinct_qualification_verifiers(
@@ -394,9 +394,7 @@ mod policy_invariant_tests {
         expected_non_core_selections, require_distinct_qualification_verifiers,
         require_non_core_release_input, require_non_core_selections,
     };
-    use crate::bundle_publication::calibration::{
-        CalibrationEnvironmentSelection, CalibrationProductSelection,
-    };
+    use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection, CalibrationProductSelection};
     use ryeos_bundle_publication_contract::{
         BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleGeneration, BundleTarget,
     };
@@ -1032,7 +1030,7 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
                     super::recipe::PORTABLE_CAPTURE_RECIPE_REF,
                     "signed_portable_bundle",
                     "signed_portable_bundle_to_release_qualification",
-                    super::recipe::PORTABLE_QUALIFIER,
+                    ryeos_bundle_publication_contract::PORTABLE_QUALIFIER,
                     &self.policy.portable_qualification_policy,
                     &self
                         .policy
@@ -1202,9 +1200,9 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
 }
 
 fn calibration_environment_selection(
-    environment: &super::calibration::CalibrationEnvironmentEvidence,
-) -> super::calibration::CalibrationEnvironmentSelection {
-    super::calibration::CalibrationEnvironmentSelection {
+    environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentEvidence,
+) -> ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection {
+    ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection {
         python_runtime: environment.python_runtime.selection.clone(),
         platform: environment.platform.selection.clone(),
         cargo_vendor: environment.cargo_vendor.selection.clone(),
@@ -1213,7 +1211,7 @@ fn calibration_environment_selection(
 }
 
 fn expected_non_core_selections(
-    environment: &super::calibration::CalibrationEnvironmentSelection,
+    environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
     target: &ryeos_bundle_publication_contract::BundleTarget,
     capture: bool,
     build_witness: &str,
@@ -1227,7 +1225,7 @@ fn expected_non_core_selections(
     };
     environment.validate()?;
     let environment_selection =
-        |declaration_id: &str, selected: &super::calibration::CalibrationProductSelection| {
+        |declaration_id: &str, selected: &ryeos_node_runtime::calibration_policy::CalibrationProductSelection| {
             ProductSelectionInput {
                 target: ProductSelectionTarget::Root {},
                 selection: ProductSelection {
@@ -1264,7 +1262,7 @@ fn expected_non_core_selections(
 
 fn require_non_core_selections(
     observed: &serde_json::Value,
-    environment: &super::calibration::CalibrationEnvironmentSelection,
+    environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
     target: &ryeos_bundle_publication_contract::BundleTarget,
     capture: bool,
     build_witness: &str,

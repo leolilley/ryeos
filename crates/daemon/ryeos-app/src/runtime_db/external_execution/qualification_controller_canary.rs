@@ -220,75 +220,77 @@ impl RuntimeDb {
         guest_input_identity: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, &expected.placement_thread_id)?
-            .context("Q canary lost original start")?;
-        ensure!(
-            &current == expected
-                && current.controller_canary_intent.is_none()
-                && current.directory_borrow_intent.is_none()
-                && current.worker_incarnation_digest.is_none()
-                && matches!(
-                    current.phase,
-                    QualificationLocalStartPhase::Reserved
-                        | QualificationLocalStartPhase::WorkspaceReady
-                ),
-            "Q canary creation was already reserved or directory borrowed"
-        );
-        require_current_start(&tx, &current)?;
-        require_live_credential_custody(&tx, &current)?;
-        let allocation =
-            read(&tx, &current.placement_thread_id)?.context("Q canary lost allocation")?;
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        let request = proof
-            .canary_request()
-            .context("Q canary has no exact signed selection")?;
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            bail!("Q canary has wrong owner")
-        };
-        let retained = read_retained_binding(&tx, &allocation.reservation.binding_hash)?
-            .context("Q canary lost binding")?;
-        let contract = retained.backend_contract();
-        let selected = contract.workload.session_artifacts()?;
-        let activation = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
-            &tx,
-            "external_execution_supervisor_activation_intent",
-            "intent_json",
-            &current.placement_thread_id,
-        )?
-        .context("Q canary lost original activation")?;
-        ensure!(
-            activation.guest_input_identity == guest_input_identity,
-            "Q canary exclusion witness changed original activation"
-        );
-        let now = now_after(&current)?;
-        let mut next = current.clone();
-        next.updated_at_ms = now;
-        next.controller_canary_intent = Some(QualificationControllerCanaryIntent {
-            schema: 1,
-            contract: request
-                .controller_canary
-                .context("Q signed canary is absent")?,
-            controller_path: std::path::Path::new(&current.state_root)
-                .join("controller-canary")
-                .join("canary")
-                .to_str()
-                .context("Q canary path not UTF-8")?
-                .into(),
-            program_digest: owner.program.digest()?,
-            guest_input_identity: guest_input_identity.into(),
-            template_request_digest: ryeos_state::objects::canonical_value_digest(&request.body)?,
-            reserved_at_ms: now,
-            provider_declaration_id: selected.provider_declaration_id.into(),
-            configuration_adapter_artifact_hash: selected
-                .configuration_adapter_artifact_hash
-                .into(),
-            configuration_adapter_artifact_bytes: selected.configuration_adapter_artifact_bytes,
-        });
-        transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, &expected.placement_thread_id)?
+                .context("Q canary lost original start")?;
+            ensure!(
+                &current == expected
+                    && current.controller_canary_intent.is_none()
+                    && current.directory_borrow_intent.is_none()
+                    && current.worker_incarnation_digest.is_none()
+                    && matches!(
+                        current.phase,
+                        QualificationLocalStartPhase::Reserved
+                            | QualificationLocalStartPhase::WorkspaceReady
+                    ),
+                "Q canary creation was already reserved or directory borrowed"
+            );
+            require_current_start(&tx, &current)?;
+            require_live_credential_custody(&tx, &current)?;
+            let allocation =
+                read(&tx, &current.placement_thread_id)?.context("Q canary lost allocation")?;
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            let request = proof
+                .canary_request()
+                .context("Q canary has no exact signed selection")?;
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                bail!("Q canary has wrong owner")
+            };
+            let retained = read_retained_binding(&tx, &allocation.reservation.binding_hash)?
+                .context("Q canary lost binding")?;
+            let contract = retained.backend_contract();
+            let selected = contract.workload.session_artifacts()?;
+            let activation = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
+                &tx,
+                "external_execution_supervisor_activation_intent",
+                "intent_json",
+                &current.placement_thread_id,
+            )?
+            .context("Q canary lost original activation")?;
+            ensure!(
+                activation.guest_input_identity == guest_input_identity,
+                "Q canary exclusion witness changed original activation"
+            );
+            let now = now_after(&current)?;
+            let mut next = current.clone();
+            next.updated_at_ms = now;
+            next.controller_canary_intent = Some(QualificationControllerCanaryIntent {
+                schema: 1,
+                contract: request
+                    .controller_canary
+                    .context("Q signed canary is absent")?,
+                controller_path: std::path::Path::new(&current.state_root)
+                    .join("controller-canary")
+                    .join("canary")
+                    .to_str()
+                    .context("Q canary path not UTF-8")?
+                    .into(),
+                program_digest: owner.program.digest()?,
+                guest_input_identity: guest_input_identity.into(),
+                template_request_digest: ryeos_state::objects::canonical_value_digest(&request.body)?,
+                reserved_at_ms: now,
+                provider_declaration_id: selected.provider_declaration_id.into(),
+                configuration_adapter_artifact_hash: selected
+                    .configuration_adapter_artifact_hash
+                    .into(),
+                configuration_adapter_artifact_bytes: selected.configuration_adapter_artifact_bytes,
+            });
+            transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     pub(crate) fn bind_qualification_controller_canary(
@@ -297,39 +299,41 @@ impl RuntimeDb {
         binding: &QControllerCanaryBinding,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, &expected.placement_thread_id)?
-            .context("Q canary bind lost start")?;
-        ensure!(
-            &current == expected
-                && current.controller_canary_intent.is_some()
-                && current.controller_canary_binding.is_none()
-                && current.directory_borrow_intent.is_none()
-                && current.worker_incarnation_digest.is_none()
-                && matches!(
-                    current.phase,
-                    QualificationLocalStartPhase::Reserved
-                        | QualificationLocalStartPhase::WorkspaceReady
-                ),
-            "Q canary cannot replace or adopt its original adapter binding"
-        );
-        require_current_start(&tx, &current)?;
-        require_live_credential_custody(&tx, &current)?;
-        let allocation =
-            read(&tx, &current.placement_thread_id)?.context("Q canary bind lost allocation")?;
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        proof
-            .canary_request()
-            .context("Q canary lost signed selection")?
-            .bound_controller_canary_body(Some(binding))?;
-        let mut next = current.clone();
-        next.controller_canary_binding = Some(binding.clone());
-        next.updated_at_ms = now_after(&current)?;
-        validate_canary_shape(&next)?;
-        require_bound_canary(&next, proof, None)?;
-        transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, &expected.placement_thread_id)?
+                .context("Q canary bind lost start")?;
+            ensure!(
+                &current == expected
+                    && current.controller_canary_intent.is_some()
+                    && current.controller_canary_binding.is_none()
+                    && current.directory_borrow_intent.is_none()
+                    && current.worker_incarnation_digest.is_none()
+                    && matches!(
+                        current.phase,
+                        QualificationLocalStartPhase::Reserved
+                            | QualificationLocalStartPhase::WorkspaceReady
+                    ),
+                "Q canary cannot replace or adopt its original adapter binding"
+            );
+            require_current_start(&tx, &current)?;
+            require_live_credential_custody(&tx, &current)?;
+            let allocation =
+                read(&tx, &current.placement_thread_id)?.context("Q canary bind lost allocation")?;
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            proof
+                .canary_request()
+                .context("Q canary lost signed selection")?
+                .bound_controller_canary_body(Some(binding))?;
+            let mut next = current.clone();
+            next.controller_canary_binding = Some(binding.clone());
+            next.updated_at_ms = now_after(&current)?;
+            validate_canary_shape(&next)?;
+            require_bound_canary(&next, proof, None)?;
+            transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 }
 
@@ -341,48 +345,50 @@ impl RuntimeDb {
         expected: &QualificationLocalStartRecord,
         evidence: &QControllerCanaryEvidence,
     ) -> Result<QualificationLocalStartRecord> {
-        evidence.validate()?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, &expected.placement_thread_id)?
-            .context("Q terminal canary lost local start")?;
-        ensure!(
-            &current == expected
-                && current.daemon_generation_id == daemon_generation_id()
-                && current.controller_canary_terminal.is_none()
-                && current.controller_canary_binding.as_ref() == Some(&evidence.binding)
-                && matches!(
-                    current.phase,
-                    QualificationLocalStartPhase::WorkerAttached
-                        | QualificationLocalStartPhase::CleanupUnproved
-                )
-                && current
-                    .credential_custody
-                    .as_ref()
-                    .is_some_and(|custody| custody.released_at_ms.is_none()),
-            "Q terminal canary changed original custody before credential release"
-        );
-        require_local_processes_settled(&tx, &current)?;
-        let allocation = read(&tx, &current.placement_thread_id)?
-            .context("Q terminal canary lost allocation")?;
-        let process = qualification_process::require_terminal_qualification_worker_process(
-            &tx,
-            &allocation.reservation,
-        )?;
-        ensure!(
-            current.worker_incarnation_digest.as_deref()
-                == Some(
-                    process
-                        .process_identity
-                        .owner_incarnation_digest()?
-                        .as_str()
-                ),
-            "Q terminal canary changed original dead process"
-        );
-        let mut next = current.clone();
-        next.controller_canary_terminal = Some(evidence.clone());
-        next.updated_at_ms = now_after(&current)?;
-        transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            evidence.validate()?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, &expected.placement_thread_id)?
+                .context("Q terminal canary lost local start")?;
+            ensure!(
+                &current == expected
+                    && current.daemon_generation_id == daemon_generation_id()
+                    && current.controller_canary_terminal.is_none()
+                    && current.controller_canary_binding.as_ref() == Some(&evidence.binding)
+                    && matches!(
+                        current.phase,
+                        QualificationLocalStartPhase::WorkerAttached
+                            | QualificationLocalStartPhase::CleanupUnproved
+                    )
+                    && current
+                        .credential_custody
+                        .as_ref()
+                        .is_some_and(|custody| custody.released_at_ms.is_none()),
+                "Q terminal canary changed original custody before credential release"
+            );
+            require_local_processes_settled(&tx, &current)?;
+            let allocation = read(&tx, &current.placement_thread_id)?
+                .context("Q terminal canary lost allocation")?;
+            let process = qualification_process::require_terminal_qualification_worker_process(
+                &tx,
+                &allocation.reservation,
+            )?;
+            ensure!(
+                current.worker_incarnation_digest.as_deref()
+                    == Some(
+                        process
+                            .process_identity
+                            .owner_incarnation_digest()?
+                            .as_str()
+                    ),
+                "Q terminal canary changed original dead process"
+            );
+            let mut next = current.clone();
+            next.controller_canary_terminal = Some(evidence.clone());
+            next.updated_at_ms = now_after(&current)?;
+            transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 }

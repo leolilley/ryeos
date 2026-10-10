@@ -306,17 +306,19 @@ impl RuntimeDb {
         plan: &QualificationScopeSettlementPlan,
         stage_id: &str,
     ) -> Result<QualificationFixtureReceiverRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = channel::prepare_qualification_scope_settlement_tx(
-            &tx,
-            &plan.evidence.binding.placement_thread_id,
-            true,
-        )?
-        .context("Q receiver settlement disappeared")?;
-        same_plan(plan, &current)?;
-        let record = bind_stage_record(&tx, &expected_record(&current, stage_id)?)?;
-        tx.commit()?;
-        Ok(record)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = channel::prepare_qualification_scope_settlement_tx(
+                &tx,
+                &plan.evidence.binding.placement_thread_id,
+                true,
+            )?
+            .context("Q receiver settlement disappeared")?;
+            same_plan(plan, &current)?;
+            let record = bind_stage_record(&tx, &expected_record(&current, stage_id)?)?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub(crate) fn finish_external_qualification_scope_settlement(
@@ -324,107 +326,113 @@ impl RuntimeDb {
         plan: &QualificationScopeSettlementPlan,
         custody: Option<&VerifiedQualificationFixtureCustody>,
     ) -> Result<RetainedExternalQualificationScopeSettlement> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let placement = &plan.evidence.binding.placement_thread_id;
-        let current = channel::prepare_qualification_scope_settlement_tx(&tx, placement, true)?
-            .context("Q settlement disappeared before application")?;
-        same_plan(plan, &current)?;
-        match (
-            wrapper(&current)?.fixture_capture.as_ref(),
-            custody,
-            current.receiver_stage.as_ref(),
-        ) {
-            (None, None, None) => {}
-            (Some(_), Some(proof), Some(record)) => {
-                ensure!(
-                    same_intent(&proof.record, record),
-                    "Q receiver verified proof changed its exact stage intent"
-                );
-                if record.verified_at_ms.is_none() {
-                    tx.execute("UPDATE external_qualification_fixture_receiver SET verified_at_ms=?2 WHERE placement_thread_id=?1 AND verified_at_ms IS NULL",params![placement,lillux::time::timestamp_millis().max(1)])?;
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let placement = &plan.evidence.binding.placement_thread_id;
+            let current = channel::prepare_qualification_scope_settlement_tx(&tx, placement, true)?
+                .context("Q settlement disappeared before application")?;
+            same_plan(plan, &current)?;
+            match (
+                wrapper(&current)?.fixture_capture.as_ref(),
+                custody,
+                current.receiver_stage.as_ref(),
+            ) {
+                (None, None, None) => {}
+                (Some(_), Some(proof), Some(record)) => {
+                    ensure!(
+                        same_intent(&proof.record, record),
+                        "Q receiver verified proof changed its exact stage intent"
+                    );
+                    if record.verified_at_ms.is_none() {
+                        tx.execute("UPDATE external_qualification_fixture_receiver SET verified_at_ms=?2 WHERE placement_thread_id=?1 AND verified_at_ms IS NULL",params![placement,lillux::time::timestamp_millis().max(1)])?;
+                    }
                 }
+                _ => bail!("Q settlement lacks exact verified controller fixture custody"),
             }
-            _ => bail!("Q settlement lacks exact verified controller fixture custody"),
-        }
-        let frame = &current.evidence.settlement;
-        match journal::claim_application(
-            &tx,
-            &channel::NodeJournalOwner,
-            placement,
-            frame.frame().direction,
-            frame.frame().sequence,
-            frame.digest(),
-        )? {
-            journal::ApplicationClaim::Revoked => bail!("Q settlement was revoked"),
-            _ => {}
-        }
-        journal::finish_application(
-            &tx,
-            &channel::NodeJournalOwner,
-            placement,
-            frame.frame().direction,
-            frame.frame().sequence,
-            frame.digest(),
-        )?;
-        tx.commit()?;
-        Ok(current.evidence)
+            let frame = &current.evidence.settlement;
+            match journal::claim_application(
+                &tx,
+                &channel::NodeJournalOwner,
+                placement,
+                frame.frame().direction,
+                frame.frame().sequence,
+                frame.digest(),
+            )? {
+                journal::ApplicationClaim::Revoked => bail!("Q settlement was revoked"),
+                _ => {}
+            }
+            journal::finish_application(
+                &tx,
+                &channel::NodeJournalOwner,
+                placement,
+                frame.frame().direction,
+                frame.frame().sequence,
+                frame.digest(),
+            )?;
+            tx.commit()?;
+            Ok(current.evidence)
+        })
     }
 
     pub(crate) fn retained_q_fixture_receiver_plan(
         &self,
         placement: &str,
     ) -> Result<Option<QualificationScopeSettlementPlan>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        let Some(allocation) = read(&tx, placement)? else {
-            return Ok(None);
-        };
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            return Ok(None);
-        };
-        if owner.program.fixture().is_none() {
-            return Ok(None);
-        }
-        let plan = channel::prepare_qualification_scope_settlement_tx(&tx, placement, false)?
-            .context("retained Q fixture has no settlement")?;
-        require_verified_receiver_for_settlement(
-            &tx,
-            placement,
-            &plan.evidence.binding,
-            &plan.evidence.settlement,
-        )?;
-        tx.commit()?;
-        Ok(Some(plan))
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let Some(allocation) = read(&tx, placement)? else {
+                return Ok(None);
+            };
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                return Ok(None);
+            };
+            if owner.program.fixture().is_none() {
+                return Ok(None);
+            }
+            let plan = channel::prepare_qualification_scope_settlement_tx(&tx, placement, false)?
+                .context("retained Q fixture has no settlement")?;
+            require_verified_receiver_for_settlement(
+                &tx,
+                placement,
+                &plan.evidence.binding,
+                &plan.evidence.settlement,
+            )?;
+            tx.commit()?;
+            Ok(Some(plan))
+        })
     }
 
     pub(crate) fn q_fixture_receiver_custody_required(&self, placement: &str) -> Result<bool> {
-        let Some(allocation) = read(&self.conn, placement)? else {
-            return Ok(false);
-        };
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            return Ok(false);
-        };
-        if owner.program.fixture().is_none() {
-            return Ok(false);
-        }
-        let channel: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
-            [placement],
-            |row| row.get(0),
-        )?;
-        if !channel {
-            ensure!(
-                matches!(
-                    allocation.phase,
-                    ExternalAllocationPhase::Quarantined | ExternalAllocationPhase::Terminated
-                ),
-                "Q fixture custody lost its channel"
-            );
-            return Ok(false);
-        }
-        let binding = load_binding(&self.conn, placement)?;
-        Ok(!revoked(&self.conn, &binding.digest()?)?)
+        self.conn.with_sql(|conn| {
+            let Some(allocation) = read(&conn, placement)? else {
+                return Ok(false);
+            };
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                return Ok(false);
+            };
+            if owner.program.fixture().is_none() {
+                return Ok(false);
+            }
+            let channel: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
+                [placement],
+                |row| row.get(0),
+            )?;
+            if !channel {
+                ensure!(
+                    matches!(
+                        allocation.phase,
+                        ExternalAllocationPhase::Quarantined | ExternalAllocationPhase::Terminated
+                    ),
+                    "Q fixture custody lost its channel"
+                );
+                return Ok(false);
+            }
+            let binding = load_binding(&conn, placement)?;
+            Ok(!revoked(&conn, &binding.digest()?)?)
+        })
     }
 }
 

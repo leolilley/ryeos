@@ -75,6 +75,35 @@ use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
 };
 
+/// Read-only observation issued exclusively by this module after durable
+/// completion. Payload/status are observations, not launch authorization.
+pub struct DurableThreadTerminal<'a> {
+    thread_id: &'a str,
+    terminal_status: &'a str,
+    outcome_code: Option<&'a str>,
+    result: Option<&'a Value>,
+    state_store: &'a StateStore,
+}
+
+impl DurableThreadTerminal<'_> {
+    pub fn thread_id(&self) -> &str {
+        self.thread_id
+    }
+    pub fn terminal_status(&self) -> &str {
+        self.terminal_status
+    }
+    pub fn outcome_code(&self) -> Option<&str> {
+        self.outcome_code
+    }
+    pub fn result(&self) -> Option<&Value> {
+        self.result
+    }
+    pub fn admitted_launch_capsule_hash(&self) -> Result<Option<String>> {
+        self.state_store
+            .admitted_launch_capsule_hash(self.thread_id)
+    }
+}
+
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
     engine: Arc<Engine>,
@@ -88,9 +117,7 @@ pub struct ThreadLifecycleService {
     /// re-derived per call site (see `publish_records`).
     event_hub: Arc<ThreadEventHub>,
     current_site_id: String,
-    scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
-    scheduler_runtime_gate: std::sync::RwLock<Option<Arc<tokio::sync::RwLock<()>>>>,
-    app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
+    scheduler: std::sync::RwLock<SchedulerParticipantSlot>,
     /// Operator live-input staging, shared with `AppState`. Wired once after
     /// construction (`set_live_input_queue`) so the existing constructor call
     /// sites stay unchanged. Finalization closes the per-thread entry after the
@@ -99,6 +126,12 @@ pub struct ThreadLifecycleService {
     /// that don't wire it — the persist-path running-guard still prevents any
     /// `cognition_in` append after terminal regardless.
     live_input: std::sync::RwLock<Option<Arc<crate::live_input_queue::LiveInputQueue>>>,
+}
+
+enum SchedulerParticipantSlot {
+    Available,
+    Installed(Arc<dyn crate::scheduler_boundary::SchedulerParticipant>),
+    Withdrawn,
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -3845,16 +3878,14 @@ impl ThreadLifecycleService {
             _events: events,
             event_hub,
             current_site_id,
-            scheduler_db: std::sync::RwLock::new(None),
-            scheduler_runtime_gate: std::sync::RwLock::new(None),
-            app_root: std::sync::RwLock::new(None),
+            scheduler: std::sync::RwLock::new(SchedulerParticipantSlot::Available),
             live_input: std::sync::RwLock::new(None),
         }
     }
 
     /// Wire the shared operator live-input queue. Called once after
     /// construction with the same `Arc` held by `AppState`, so finalization can
-    /// close a thread's entry. Mirrors `set_scheduler_db`.
+    /// close a thread's entry. Installed during composition.
     pub fn set_live_input_queue(&self, queue: Arc<crate::live_input_queue::LiveInputQueue>) {
         *self.live_input.write().unwrap() = Some(queue);
     }
@@ -3880,17 +3911,45 @@ impl ThreadLifecycleService {
         self.event_hub.publish_ordered(records);
     }
 
-    /// Wire the scheduler DB for thread completion tracking.
-    /// Called once after construction, once the scheduler DB is available.
-    pub fn set_scheduler_db(
+    pub(crate) fn scheduler_participant(
         &self,
-        db: Arc<ryeos_scheduler::db::SchedulerDb>,
-        runtime_gate: Arc<tokio::sync::RwLock<()>>,
-        app_root: std::path::PathBuf,
-    ) {
-        *self.scheduler_db.write().unwrap() = Some(db);
-        *self.scheduler_runtime_gate.write().unwrap() = Some(runtime_gate);
-        *self.app_root.write().unwrap() = Some(app_root);
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        match &*self.scheduler.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            SchedulerParticipantSlot::Installed(participant) => Some(Arc::clone(participant)),
+            SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
+        }
+    }
+
+    pub(crate) fn install_scheduler_participant(
+        &self,
+        participant: Arc<dyn crate::scheduler_boundary::SchedulerParticipant>,
+    ) -> Result<()> {
+        let mut slot = self.scheduler.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*slot {
+            SchedulerParticipantSlot::Available => {
+                *slot = SchedulerParticipantSlot::Installed(participant);
+                Ok(())
+            }
+            SchedulerParticipantSlot::Installed(_) => {
+                anyhow::bail!("scheduler participant already installed")
+            }
+            SchedulerParticipantSlot::Withdrawn => {
+                anyhow::bail!("scheduler participant was withdrawn for finalization")
+            }
+        }
+    }
+
+    /// Withdraw the selected participant only after daemon work and admitted
+    /// scheduler operations have drained, so the composition can transfer its
+    /// closed native DB into finalization custody.
+    pub fn take_scheduler_participant_for_shutdown(
+        &self,
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        let mut slot = self.scheduler.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::mem::replace(&mut *slot, SchedulerParticipantSlot::Withdrawn) {
+            SchedulerParticipantSlot::Installed(participant) => Some(participant),
+            SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
+        }
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
@@ -5726,97 +5785,23 @@ impl ThreadLifecycleService {
         outcome_code: Option<&str>,
         result: Option<&Value>,
     ) {
-        let runtime_gate = self
-            .scheduler_runtime_gate
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        let Some(runtime_gate) = runtime_gate else {
+        let Some(participant) = self.scheduler_participant() else {
             return;
         };
-        let Ok(_runtime_guard) = runtime_gate.try_read() else {
-            // An exclusive schedule/project/retention mutation owns the state.
-            // Do not block synchronous thread finalization; the scheduler's
-            // periodic repair sweep will classify this durable terminal thread.
-            tracing::debug!(
-                thread_id = %thread_id,
-                "scheduler: terminal completion hook deferred behind runtime mutation"
-            );
-            return;
+        // All callers have completed their durable write and released the
+        // StateStore inner mutex before issuing this borrowed observation.
+        let observation = DurableThreadTerminal {
+            thread_id,
+            terminal_status,
+            outcome_code,
+            result,
+            state_store: &self.state_store,
         };
-        let db = self
-            .scheduler_db
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        let app_root = self.app_root.read().ok().and_then(|guard| guard.clone());
-        let scheduler = (db, app_root);
-        if let (Some(db), Some(app_root)) = scheduler
-            && let Ok(Some(fire)) = db.find_fire_by_thread(thread_id)
-        {
-            let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
-            let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
-            let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
-                terminal_status,
-                result_outcome.as_ref(),
-                outcome_code,
-            );
-            let now = lillux::time::timestamp_millis();
-            // A very short execution can terminalize after the launch capsule
-            // is durable but before the scheduler task persists its handoff.
-            // Close that crash window from the exact thread/capsule authority;
-            // never jump directly from `reserved` to a terminal state.
-            let fire = if fire.status == "reserved" {
-                let capsule_hash = match self.state_store.admitted_launch_capsule_hash(thread_id) {
-                    Ok(Some(hash)) if fire.project_authority.is_some() => hash,
-                    Ok(_) => return,
-                    Err(error) => {
-                        tracing::warn!(
-                            thread_id = %thread_id,
-                            %error,
-                            "scheduler: failed to recover launch handoff during terminal completion"
-                        );
-                        return;
-                    }
-                };
-                let dispatched = ryeos_scheduler::types::FireRecord {
-                    status: "dispatched".to_string(),
-                    dispatched_at: Some(now.max(fire.reserved_at)),
-                    admitted_capsule_hash: Some(capsule_hash),
-                    ..fire
-                };
-                if let Err(error) =
-                    ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &dispatched)
-                {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        %error,
-                        "scheduler: failed to persist recovered launch handoff"
-                    );
-                    return;
-                }
-                dispatched
-            } else {
-                fire
-            };
-            if fire.status != "dispatched" {
-                return;
-            }
-            let updated = ryeos_scheduler::types::FireRecord {
-                status: fire_status.to_string(),
-                outcome: Some(outcome_str.to_string()),
-                completed_at: Some(now.max(fire.dispatched_at.unwrap_or(fire.reserved_at))),
-                ..fire
-            };
-            if let Err(e) =
-                ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &updated)
-            {
-                tracing::warn!(
-                    thread_id = %thread_id,
-                    error = %e,
-                    "scheduler: failed to update fire status on thread completion"
-                );
-            }
+        if let Err(error) = participant.observe_terminal(&observation) {
+            // Durable terminal history is the repair source; scheduler failure
+            // cannot roll back the completed lifecycle write.
+            tracing::warn!(thread_id = %thread_id, %error,
+                "scheduler terminal observation deferred for repair");
         }
     }
 

@@ -1,7 +1,7 @@
 //! Actual signed protocol/CAS/node-attestation/descriptor fixture for the
 //! production read-only J1 factory. No raw proof constructor or native launch.
 use super::*;
-use crate::node_policy::sections::execution::*;
+use ryeos_node_runtime::node_policy::sections::execution::*;
 use ryeos_engine::{contracts::*, resolution::*};
 use ryeos_state::objects::*;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
@@ -123,7 +123,7 @@ pub(crate) fn populate_fixture(
         producer_resource_ceiling: None,
     };
     policy.validate().unwrap();
-    state.node_policy = Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
         vec![Arc::new(policy)],
     ));
     state.execution_resources = Arc::new(
@@ -394,7 +394,7 @@ fn genuine_j1_factory_refuses_revoked_protocol_signer_and_changed_node_agreement
         .as_mut()
         .unwrap()
         .trusted_cleanup_contract_digest = Some(lillux::sha256_hex(b"changed cleanup"));
-    state.node_policy = Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
         vec![Arc::new(policy)],
     ));
     assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &hash).is_err());

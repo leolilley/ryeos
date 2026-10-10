@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{BindResponse, RetainedProductImportRequest};
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 
 /// Root selector admission uses the already-admitted execution principal.
@@ -396,7 +396,7 @@ pub fn select_and_import_products(
         &request.selections,
         project_context_resolver,
     )?;
-    let import_policy = state.node_policy.require::<crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
+    let import_policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
     if request.maximum_bytes > import_policy.limits.max_total_bytes {
         bail!("product batch import ceiling exceeds node policy");
     }

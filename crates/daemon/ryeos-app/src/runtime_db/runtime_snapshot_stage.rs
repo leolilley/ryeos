@@ -380,59 +380,63 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<RuntimeSnapshotStageRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| {
+            read(&conn, operation_id)
+        })
     }
 
     pub fn reserve_runtime_snapshot_upload_stage(
         &self,
         intent: &RuntimeSnapshotStageIntent,
     ) -> Result<RuntimeSnapshotStageRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let parent = super::runtime_snapshot::read(&tx, &intent.parent_operation_id)?
-            .context("snapshot upload has no retained parent")?;
-        intent.validate_for(&parent.intent, None)?;
-        ensure!(
-            intent.stage == RuntimeSnapshotStage::Upload,
-            "only upload may use this claim"
-        );
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let parent = super::runtime_snapshot::read(&tx, &intent.parent_operation_id)?
+                .context("snapshot upload has no retained parent")?;
+            intent.validate_for(&parent.intent, None)?;
             ensure!(
-                existing.intent == *intent,
-                "snapshot upload reservation replay changed"
+                intent.stage == RuntimeSnapshotStage::Upload,
+                "only upload may use this claim"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        ensure!(
-            parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
-            "snapshot parent already began another provider sequence"
-        );
-        ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms <= parent.intent.attempt_deadline_ms
-                && intent.attempt_deadline_ms.saturating_sub(now)
-                    <= maximum_reservation_window(&parent.intent),
-            "snapshot upload deadline is outside admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_stage
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent,
+                    "snapshot upload reservation replay changed"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            ensure!(
+                parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
+                "snapshot parent already began another provider sequence"
+            );
+            ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms <= parent.intent.attempt_deadline_ms
+                    && intent.attempt_deadline_ms.saturating_sub(now)
+                        <= maximum_reservation_window(&parent.intent),
+                "snapshot upload deadline is outside admission window"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_stage
              (operation_id,parent_operation_id,stage,intent_json,intent_digest,phase,
               receipt_json,completion_at_ms,runner_deadline_exceeded,created_at_ms,claimed_at_ms,updated_at_ms)
              VALUES(?1,?2,'upload',?3,?4,'reserved',NULL,NULL,NULL,?5,NULL,?5)",
-            params![
-                intent.operation_id,
-                intent.parent_operation_id,
-                canonical(intent)?,
-                intent.digest()?,
-                now
-            ],
-        )?;
-        let current =
-            read(&tx, &intent.operation_id)?.context("snapshot upload reservation vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![
+                    intent.operation_id,
+                    intent.parent_operation_id,
+                    canonical(intent)?,
+                    intent.digest()?,
+                    now
+                ],
+            )?;
+            let current =
+                read(&tx, &intent.operation_id)?.context("snapshot upload reservation vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn claim_runtime_snapshot_upload_stage(
@@ -440,50 +444,52 @@ impl RuntimeDb {
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("snapshot upload was not reserved")?;
-        ensure!(
-            record.intent.stage == RuntimeSnapshotStage::Upload
-                && record.intent.digest()? == intent_digest,
-            "snapshot upload changed intent"
-        );
-        match record.phase {
-            RuntimeSnapshotStagePhase::Accepted => {
-                tx.commit()?;
-                return Ok(RuntimeSnapshotStageClaim::Accepted(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("snapshot upload was not reserved")?;
+            ensure!(
+                record.intent.stage == RuntimeSnapshotStage::Upload
+                    && record.intent.digest()? == intent_digest,
+                "snapshot upload changed intent"
+            );
+            match record.phase {
+                RuntimeSnapshotStagePhase::Accepted => {
+                    tx.commit()?;
+                    return Ok(RuntimeSnapshotStageClaim::Accepted(record));
+                }
+                RuntimeSnapshotStagePhase::AttemptPending
+                | RuntimeSnapshotStagePhase::Quarantined
+                | RuntimeSnapshotStagePhase::LateObserved => {
+                    tx.commit()?;
+                    return Ok(RuntimeSnapshotStageClaim::Reconcile(record));
+                }
+                RuntimeSnapshotStagePhase::Reserved => {}
+                RuntimeSnapshotStagePhase::Bound => {
+                    anyhow::bail!("upload stage cannot hold a bound snapshot")
+                }
             }
-            RuntimeSnapshotStagePhase::AttemptPending
-            | RuntimeSnapshotStagePhase::Quarantined
-            | RuntimeSnapshotStagePhase::LateObserved => {
-                tx.commit()?;
-                return Ok(RuntimeSnapshotStageClaim::Reconcile(record));
-            }
-            RuntimeSnapshotStagePhase::Reserved => {}
-            RuntimeSnapshotStagePhase::Bound => {
-                anyhow::bail!("upload stage cannot hold a bound snapshot")
-            }
-        }
-        let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
-            .context("snapshot upload lost parent")?;
-        ensure!(
-            parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
-            "snapshot parent began another provider sequence"
-        );
-        ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms && now < parent.intent.attempt_deadline_ms,
-            "snapshot upload deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_stage SET phase='attempt_pending',claimed_at_ms=?2,updated_at_ms=?2
+            let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
+                .context("snapshot upload lost parent")?;
+            ensure!(
+                parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
+                "snapshot parent began another provider sequence"
+            );
+            ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms && now < parent.intent.attempt_deadline_ms,
+                "snapshot upload deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_stage SET phase='attempt_pending',claimed_at_ms=?2,updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(changed == 1, "snapshot upload claim lost durable CAS");
-        let current = read(&tx, operation_id)?.context("snapshot upload claim vanished")?;
-        tx.commit()?;
-        Ok(RuntimeSnapshotStageClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(changed == 1, "snapshot upload claim lost durable CAS");
+            let current = read(&tx, operation_id)?.context("snapshot upload claim vanished")?;
+            tx.commit()?;
+            Ok(RuntimeSnapshotStageClaim::StartAttempt(current))
+        })
     }
 
     /// Reserve the sole create mutation only after the journal has accepted
@@ -492,73 +498,75 @@ impl RuntimeDb {
         &self,
         intent: &RuntimeSnapshotStageIntent,
     ) -> Result<RuntimeSnapshotStageRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        ensure!(
-            intent.stage == RuntimeSnapshotStage::Create,
-            "only create may use this claim"
-        );
-        let parent = super::runtime_snapshot::read(&tx, &intent.parent_operation_id)?
-            .context("snapshot create has no retained parent")?;
-        let upload_id: Option<String> = tx
-            .query_row(
-                "SELECT operation_id FROM runtime_snapshot_stage
-                 WHERE parent_operation_id=?1 AND stage='upload'",
-                [&intent.parent_operation_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let upload = read(
-            &tx,
-            &upload_id.context("snapshot create has no upload stage")?,
-        )?
-        .context("snapshot create upload stage vanished")?;
-        ensure!(
-            upload.phase == RuntimeSnapshotStagePhase::Accepted,
-            "snapshot create requires accepted upload"
-        );
-        intent.validate_for(
-            &parent.intent,
-            Some((
-                &upload.intent,
-                upload
-                    .receipt
-                    .as_ref()
-                    .context("accepted upload has no receipt")?,
-            )),
-        )?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
             ensure!(
-                existing.intent == *intent,
-                "snapshot create reservation replay changed"
+                intent.stage == RuntimeSnapshotStage::Create,
+                "only create may use this claim"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        ensure!(
-            parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
-            "snapshot parent already bound or began another provider sequence"
-        );
-        ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms <= parent.intent.attempt_deadline_ms
-                && intent.attempt_deadline_ms.saturating_sub(now)
-                    <= maximum_reservation_window(&parent.intent),
-            "snapshot create deadline is outside admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_stage
+            let parent = super::runtime_snapshot::read(&tx, &intent.parent_operation_id)?
+                .context("snapshot create has no retained parent")?;
+            let upload_id: Option<String> = tx
+                .query_row(
+                    "SELECT operation_id FROM runtime_snapshot_stage
+                 WHERE parent_operation_id=?1 AND stage='upload'",
+                    [&intent.parent_operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let upload = read(
+                &tx,
+                &upload_id.context("snapshot create has no upload stage")?,
+            )?
+            .context("snapshot create upload stage vanished")?;
+            ensure!(
+                upload.phase == RuntimeSnapshotStagePhase::Accepted,
+                "snapshot create requires accepted upload"
+            );
+            intent.validate_for(
+                &parent.intent,
+                Some((
+                    &upload.intent,
+                    upload
+                        .receipt
+                        .as_ref()
+                        .context("accepted upload has no receipt")?,
+                )),
+            )?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent,
+                    "snapshot create reservation replay changed"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            ensure!(
+                parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
+                "snapshot parent already bound or began another provider sequence"
+            );
+            ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms <= parent.intent.attempt_deadline_ms
+                    && intent.attempt_deadline_ms.saturating_sub(now)
+                        <= maximum_reservation_window(&parent.intent),
+                "snapshot create deadline is outside admission window"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_stage
              (operation_id,parent_operation_id,stage,intent_json,intent_digest,phase,
               receipt_json,completion_at_ms,runner_deadline_exceeded,created_at_ms,claimed_at_ms,updated_at_ms)
              VALUES(?1,?2,'create',?3,?4,'reserved',NULL,NULL,NULL,?5,NULL,?5)",
-            params![intent.operation_id, intent.parent_operation_id, canonical(intent)?,
-                    intent.digest()?, now],
-        )?;
-        let current =
-            read(&tx, &intent.operation_id)?.context("snapshot create reservation vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![intent.operation_id, intent.parent_operation_id, canonical(intent)?,
+                        intent.digest()?, now],
+            )?;
+            let current =
+                read(&tx, &intent.operation_id)?.context("snapshot create reservation vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn claim_runtime_snapshot_create_stage(
@@ -566,46 +574,48 @@ impl RuntimeDb {
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("snapshot create was not reserved")?;
-        ensure!(
-            record.intent.stage == RuntimeSnapshotStage::Create
-                && record.intent.digest()? == intent_digest,
-            "snapshot create changed intent"
-        );
-        match record.phase {
-            RuntimeSnapshotStagePhase::Bound => {
-                tx.commit()?;
-                return Ok(RuntimeSnapshotStageClaim::Bound(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("snapshot create was not reserved")?;
+            ensure!(
+                record.intent.stage == RuntimeSnapshotStage::Create
+                    && record.intent.digest()? == intent_digest,
+                "snapshot create changed intent"
+            );
+            match record.phase {
+                RuntimeSnapshotStagePhase::Bound => {
+                    tx.commit()?;
+                    return Ok(RuntimeSnapshotStageClaim::Bound(record));
+                }
+                RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(RuntimeSnapshotStageClaim::Reconcile(record));
+                }
+                RuntimeSnapshotStagePhase::Reserved => {}
+                _ => anyhow::bail!("snapshot create has an invalid journal phase"),
             }
-            RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined => {
-                tx.commit()?;
-                return Ok(RuntimeSnapshotStageClaim::Reconcile(record));
-            }
-            RuntimeSnapshotStagePhase::Reserved => {}
-            _ => anyhow::bail!("snapshot create has an invalid journal phase"),
-        }
-        let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
-            .context("snapshot create lost parent")?;
-        ensure!(
-            parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
-            "snapshot parent already bound or began another provider sequence"
-        );
-        ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms && now < parent.intent.attempt_deadline_ms,
-            "snapshot create deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_stage SET phase='attempt_pending',claimed_at_ms=?2,updated_at_ms=?2
+            let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
+                .context("snapshot create lost parent")?;
+            ensure!(
+                parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
+                "snapshot parent already bound or began another provider sequence"
+            );
+            ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms && now < parent.intent.attempt_deadline_ms,
+                "snapshot create deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_stage SET phase='attempt_pending',claimed_at_ms=?2,updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(changed == 1, "snapshot create claim lost durable CAS");
-        let current = read(&tx, operation_id)?.context("snapshot create claim vanished")?;
-        tx.commit()?;
-        Ok(RuntimeSnapshotStageClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(changed == 1, "snapshot create claim lost durable CAS");
+            let current = read(&tx, operation_id)?.context("snapshot create claim vanished")?;
+            tx.commit()?;
+            Ok(RuntimeSnapshotStageClaim::StartAttempt(current))
+        })
     }
 
     /// A timely create response commits the stage and its parent locator in
@@ -616,99 +626,101 @@ impl RuntimeDb {
         result: &RuntimeSnapshotCreateResult,
         deadline_exceeded: bool,
     ) -> Result<RuntimeSnapshotStageRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &result.create_operation_id)?
-            .context("snapshot create has no attempt claim")?;
-        ensure!(
-            record.intent.stage == RuntimeSnapshotStage::Create
-                && record.intent.digest()? == result.create_intent_digest,
-            "snapshot create locator changed its retained stage"
-        );
-        let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
-            .context("snapshot create lost parent")?;
-        let upload_id: String = tx.query_row(
-            "SELECT operation_id FROM runtime_snapshot_stage
-             WHERE parent_operation_id=?1 AND stage='upload'",
-            [&parent.intent.operation_id],
-            |row| row.get(0),
-        )?;
-        let upload = read(&tx, &upload_id)?.context("snapshot create lost upload stage")?;
-        ensure!(
-            upload.phase == RuntimeSnapshotStagePhase::Accepted,
-            "snapshot create lost accepted upload"
-        );
-        let request = RuntimeSnapshotCreateAdapterRequest {
-            protocol: RUNTIME_SNAPSHOT_CREATE_ADAPTER_PROTOCOL.into(),
-            intent: parent.intent.clone(),
-            upload_stage: upload.intent,
-            accepted_upload: upload.receipt.context("accepted upload lost receipt")?,
-            create_stage: record.intent.clone(),
-            provider_spec_digest: parent.intent.provider_spec_digest.clone(),
-        };
-        result.validate_for(&request)?;
-        let locator = &result.locator;
-        if matches!(
-            record.phase,
-            RuntimeSnapshotStagePhase::Bound | RuntimeSnapshotStagePhase::LateObserved
-        ) {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &result.create_operation_id)?
+                .context("snapshot create has no attempt claim")?;
             ensure!(
-                record.locator.as_ref() == Some(locator),
-                "snapshot create locator replay changed"
+                record.intent.stage == RuntimeSnapshotStage::Create
+                    && record.intent.digest()? == result.create_intent_digest,
+                "snapshot create locator changed its retained stage"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
+            let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
+                .context("snapshot create lost parent")?;
+            let upload_id: String = tx.query_row(
+                "SELECT operation_id FROM runtime_snapshot_stage
+             WHERE parent_operation_id=?1 AND stage='upload'",
+                [&parent.intent.operation_id],
+                |row| row.get(0),
+            )?;
+            let upload = read(&tx, &upload_id)?.context("snapshot create lost upload stage")?;
+            ensure!(
+                upload.phase == RuntimeSnapshotStagePhase::Accepted,
+                "snapshot create lost accepted upload"
+            );
+            let request = RuntimeSnapshotCreateAdapterRequest {
+                protocol: RUNTIME_SNAPSHOT_CREATE_ADAPTER_PROTOCOL.into(),
+                intent: parent.intent.clone(),
+                upload_stage: upload.intent,
+                accepted_upload: upload.receipt.context("accepted upload lost receipt")?,
+                create_stage: record.intent.clone(),
+                provider_spec_digest: parent.intent.provider_spec_digest.clone(),
+            };
+            result.validate_for(&request)?;
+            let locator = &result.locator;
+            if matches!(
                 record.phase,
-                RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined
-            ) && parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
-            "snapshot create locator did not follow its one attempt claim"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now >= record.updated_at_ms
-                && now
-                    >= record
-                        .claimed_at_ms
-                        .context("snapshot create has no claim time")?,
-            "snapshot create completion predates its retained attempt"
-        );
-        let late = deadline_exceeded || now >= record.intent.attempt_deadline_ms;
-        ensure!(
-            record.phase == RuntimeSnapshotStagePhase::AttemptPending || late,
-            "quarantined snapshot create cannot become timely bound"
-        );
-        let target = if late { "late_observed" } else { "bound" };
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_stage SET phase=?2,locator_json=?3,
+                RuntimeSnapshotStagePhase::Bound | RuntimeSnapshotStagePhase::LateObserved
+            ) {
+                ensure!(
+                    record.locator.as_ref() == Some(locator),
+                    "snapshot create locator replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                matches!(
+                    record.phase,
+                    RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined
+                ) && parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
+                "snapshot create locator did not follow its one attempt claim"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now >= record.updated_at_ms
+                    && now
+                        >= record
+                            .claimed_at_ms
+                            .context("snapshot create has no claim time")?,
+                "snapshot create completion predates its retained attempt"
+            );
+            let late = deadline_exceeded || now >= record.intent.attempt_deadline_ms;
+            ensure!(
+                record.phase == RuntimeSnapshotStagePhase::AttemptPending || late,
+                "quarantined snapshot create cannot become timely bound"
+            );
+            let target = if late { "late_observed" } else { "bound" };
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_stage SET phase=?2,locator_json=?3,
              completion_at_ms=?4,runner_deadline_exceeded=?5,updated_at_ms=?4
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![
-                result.create_operation_id,
-                target,
-                canonical(locator)?,
-                now,
-                i64::from(deadline_exceeded)
-            ],
-        )?;
-        ensure!(
-            changed == 1,
-            "snapshot create locator bind lost durable CAS"
-        );
-        if !late {
-            let changed = tx.execute(
-                "UPDATE runtime_snapshot_operation SET phase='bound',locator_json=?2,
+                params![
+                    result.create_operation_id,
+                    target,
+                    canonical(locator)?,
+                    now,
+                    i64::from(deadline_exceeded)
+                ],
+            )?;
+            ensure!(
+                changed == 1,
+                "snapshot create locator bind lost durable CAS"
+            );
+            if !late {
+                let changed = tx.execute(
+                    "UPDATE runtime_snapshot_operation SET phase='bound',locator_json=?2,
                  completion_at_ms=?3,runner_deadline_exceeded=0,updated_at_ms=?3
                  WHERE operation_id=?1 AND phase='reserved' AND locator_json IS NULL",
-                params![parent.intent.operation_id, canonical(locator)?, now],
-            )?;
-            ensure!(changed == 1, "snapshot parent bind lost durable CAS");
-        }
-        let current =
-            read(&tx, &result.create_operation_id)?.context("snapshot create locator vanished")?;
-        tx.commit()?;
-        Ok(current)
+                    params![parent.intent.operation_id, canonical(locator)?, now],
+                )?;
+                ensure!(changed == 1, "snapshot parent bind lost durable CAS");
+            }
+            let current =
+                read(&tx, &result.create_operation_id)?.context("snapshot create locator vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn quarantine_runtime_snapshot_create_stage(
@@ -716,31 +728,33 @@ impl RuntimeDb {
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("snapshot create is absent")?;
-        ensure!(
-            record.intent.stage == RuntimeSnapshotStage::Create
-                && record.intent.digest()? == intent_digest,
-            "snapshot create quarantine changed intent"
-        );
-        if record.phase == RuntimeSnapshotStagePhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == RuntimeSnapshotStagePhase::AttemptPending,
-            "snapshot create quarantine requires a pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_stage SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("snapshot create is absent")?;
+            ensure!(
+                record.intent.stage == RuntimeSnapshotStage::Create
+                    && record.intent.digest()? == intent_digest,
+                "snapshot create quarantine changed intent"
+            );
+            if record.phase == RuntimeSnapshotStagePhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == RuntimeSnapshotStagePhase::AttemptPending,
+                "snapshot create quarantine requires a pending attempt"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_stage SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        ensure!(changed == 1, "snapshot create quarantine lost durable CAS");
-        let current = read(&tx, operation_id)?.context("snapshot create quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            ensure!(changed == 1, "snapshot create quarantine lost durable CAS");
+            let current = read(&tx, operation_id)?.context("snapshot create quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn bind_runtime_snapshot_upload_receipt(
@@ -748,72 +762,74 @@ impl RuntimeDb {
         receipt: &RuntimeSnapshotUploadReceipt,
         deadline_exceeded: bool,
     ) -> Result<RuntimeSnapshotStageRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &receipt.upload_operation_id)?
-            .context("snapshot upload has no attempt claim")?;
-        let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
-            .context("snapshot upload lost parent")?;
-        receipt.validate_for(&parent.intent)?;
-        ensure!(
-            receipt.upload_intent_digest == record.intent.digest()?,
-            "snapshot upload receipt changed its retained stage"
-        );
-        if matches!(
-            record.phase,
-            RuntimeSnapshotStagePhase::Accepted | RuntimeSnapshotStagePhase::LateObserved
-        ) {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &receipt.upload_operation_id)?
+                .context("snapshot upload has no attempt claim")?;
+            let parent = super::runtime_snapshot::read(&tx, &record.intent.parent_operation_id)?
+                .context("snapshot upload lost parent")?;
+            receipt.validate_for(&parent.intent)?;
             ensure!(
-                record.receipt.as_ref() == Some(receipt),
-                "snapshot upload receipt replay changed"
+                receipt.upload_intent_digest == record.intent.digest()?,
+                "snapshot upload receipt changed its retained stage"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
+            if matches!(
                 record.phase,
-                RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined
-            ),
-            "snapshot upload receipt did not follow one attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now >= record.updated_at_ms
-                && receipt.completed_at_ms
-                    >= record
-                        .claimed_at_ms
-                        .context("snapshot upload has no claim time")?
-                && receipt.completed_at_ms <= now,
-            "snapshot upload receipt timestamp contradicts retained attempt"
-        );
-        let late = deadline_exceeded
-            || now >= record.intent.attempt_deadline_ms
-            || receipt.completed_at_ms >= record.intent.attempt_deadline_ms;
-        ensure!(
-            late || record.phase == RuntimeSnapshotStagePhase::AttemptPending,
-            "quarantined snapshot upload cannot become accepted"
-        );
-        if !late {
-            receipt.validate_for_stage(&parent.intent, &record.intent)?;
-        }
-        let target = if late { "late_observed" } else { "accepted" };
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_stage SET phase=?2,receipt_json=?3,completion_at_ms=?4,
+                RuntimeSnapshotStagePhase::Accepted | RuntimeSnapshotStagePhase::LateObserved
+            ) {
+                ensure!(
+                    record.receipt.as_ref() == Some(receipt),
+                    "snapshot upload receipt replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                matches!(
+                    record.phase,
+                    RuntimeSnapshotStagePhase::AttemptPending | RuntimeSnapshotStagePhase::Quarantined
+                ),
+                "snapshot upload receipt did not follow one attempt"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now >= record.updated_at_ms
+                    && receipt.completed_at_ms
+                        >= record
+                            .claimed_at_ms
+                            .context("snapshot upload has no claim time")?
+                    && receipt.completed_at_ms <= now,
+                "snapshot upload receipt timestamp contradicts retained attempt"
+            );
+            let late = deadline_exceeded
+                || now >= record.intent.attempt_deadline_ms
+                || receipt.completed_at_ms >= record.intent.attempt_deadline_ms;
+            ensure!(
+                late || record.phase == RuntimeSnapshotStagePhase::AttemptPending,
+                "quarantined snapshot upload cannot become accepted"
+            );
+            if !late {
+                receipt.validate_for_stage(&parent.intent, &record.intent)?;
+            }
+            let target = if late { "late_observed" } else { "accepted" };
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_stage SET phase=?2,receipt_json=?3,completion_at_ms=?4,
              runner_deadline_exceeded=?5,updated_at_ms=?4
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![
-                receipt.upload_operation_id,
-                target,
-                canonical(receipt)?,
-                now,
-                i64::from(deadline_exceeded)
-            ],
-        )?;
-        ensure!(changed == 1, "snapshot upload bind lost durable CAS");
-        let current =
-            read(&tx, &receipt.upload_operation_id)?.context("snapshot upload receipt vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![
+                    receipt.upload_operation_id,
+                    target,
+                    canonical(receipt)?,
+                    now,
+                    i64::from(deadline_exceeded)
+                ],
+            )?;
+            ensure!(changed == 1, "snapshot upload bind lost durable CAS");
+            let current =
+                read(&tx, &receipt.upload_operation_id)?.context("snapshot upload receipt vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn quarantine_runtime_snapshot_upload_stage(
@@ -821,30 +837,32 @@ impl RuntimeDb {
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotStageRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("snapshot upload is absent")?;
-        ensure!(
-            record.intent.stage == RuntimeSnapshotStage::Upload
-                && record.intent.digest()? == intent_digest,
-            "snapshot upload quarantine changed intent"
-        );
-        if record.phase == RuntimeSnapshotStagePhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == RuntimeSnapshotStagePhase::AttemptPending,
-            "snapshot upload quarantine requires a pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE runtime_snapshot_stage SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("snapshot upload is absent")?;
+            ensure!(
+                record.intent.stage == RuntimeSnapshotStage::Upload
+                    && record.intent.digest()? == intent_digest,
+                "snapshot upload quarantine changed intent"
+            );
+            if record.phase == RuntimeSnapshotStagePhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == RuntimeSnapshotStagePhase::AttemptPending,
+                "snapshot upload quarantine requires a pending attempt"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            tx.execute(
+                "UPDATE runtime_snapshot_stage SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        let current = read(&tx, operation_id)?.context("snapshot upload quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            let current = read(&tx, operation_id)?.context("snapshot upload quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 
@@ -1034,7 +1052,7 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Accepted(_)
         ));
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -1064,7 +1082,7 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -1137,7 +1155,7 @@ mod tests {
             .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -1188,7 +1206,7 @@ mod tests {
                 .unwrap(),
             bound,
         );
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -1232,7 +1250,7 @@ mod tests {
             super::super::runtime_snapshot::RuntimeSnapshotPhase::Reserved
         );
         assert!(parent_record.locator.is_none());
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]

@@ -331,10 +331,12 @@ impl QualificationWorkspaceCustody {
         self.state_root_parent.ensure_path_binding()?;
         self.state_root.remove_contents_recursive()?;
         ensure!(
-            self.state_root_parent.remove_empty_child_if_same(
-                OsStr::new(self.coordinate.workspace_id.as_str()),
-                &self.state_root,
-            )?,
+            self.state_root_parent
+                .remove_empty_child_if_same(
+                    OsStr::new(self.coordinate.workspace_id.as_str()),
+                    &self.state_root,
+                )
+                .map(|receipt| receipt.is_some())?,
             "Q original state root was replaced before removal"
         );
         *removed = true;

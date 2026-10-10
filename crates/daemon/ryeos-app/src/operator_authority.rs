@@ -9,8 +9,8 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use crate::state::AppState;
 use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use crate::state::AppState;
 
 /// Exact target-node operator grant retained by a remotely adopted execution.
 /// The node-signed grant remains revocable; this value binds admission and the

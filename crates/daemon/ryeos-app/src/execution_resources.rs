@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 
-use crate::node_policy::sections::execution::{
+use ryeos_node_runtime::node_policy::sections::execution::{
     NodeExecutionResourceDescriptor, NodeExecutionResourcePolicy,
 };
 use ryeos_engine::contracts::{

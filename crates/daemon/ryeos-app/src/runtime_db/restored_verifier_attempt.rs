@@ -521,34 +521,37 @@ impl RuntimeDb {
         launch_owner: &str,
         value: T,
     ) -> Result<T> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        require_current_callback_launch(&tx, root, launch_owner)?;
-        tx.commit()?;
-        Ok(value)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            require_current_callback_launch(&tx, root, launch_owner)?;
+            tx.commit()?;
+            Ok(value)
+        })
     }
 
     /// Consumer input is rooted from reservation onward; evidence is rooted
     /// after observation. Both are Blob roots owned by the existing attempt.
     pub(crate) fn restored_verifier_blob_roots(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id")?;
-        let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut roots = BTreeSet::new();
-        for id in ids {
-            let record = read(&self.conn, &id)?.context("verifier evidence root disappeared")?;
-            if let Some(hash) = record.consumer_input_blob_hash {
-                roots.insert(hash);
+        self.conn.with_sql(|conn| {
+            let mut statement = conn
+                .prepare("SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id")?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut roots = BTreeSet::new();
+            for id in ids {
+                let record = read(&conn, &id)?.context("verifier evidence root disappeared")?;
+                if let Some(hash) = record.consumer_input_blob_hash {
+                    roots.insert(hash);
+                }
+                if let Some(RestoredVerifierObservation::ConsumerRuntime { observation }) =
+                    record.observation
+                {
+                    roots.insert(observation.evidence_sha256);
+                }
             }
-            if let Some(RestoredVerifierObservation::ConsumerRuntime { observation }) =
-                record.observation
-            {
-                roots.insert(observation.evidence_sha256);
-            }
-        }
-        Ok(roots.into_iter().collect())
+            Ok(roots.into_iter().collect())
+        })
     }
 
     /// Store complete transport observation only. Guest settlement and semantic
@@ -559,41 +562,43 @@ impl RuntimeDb {
         observation: &ConsumerVerifierAdapterObservation,
         evidence: &[u8],
     ) -> Result<RestoredVerifierAttemptRecord> {
-        observation.verify_evidence_bytes(evidence)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &observation.operation_id)?
-            .context("consumer observation has no claimed attempt")?;
-        observation.validate_for_intent(&record.intent)?;
-        let tagged = RestoredVerifierObservation::ConsumerRuntime {
-            observation: observation.clone(),
-        };
-        if record.phase == RestoredVerifierAttemptPhase::Observed {
+        self.conn.with_sql(|conn| {
+            observation.verify_evidence_bytes(evidence)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &observation.operation_id)?
+                .context("consumer observation has no claimed attempt")?;
+            observation.validate_for_intent(&record.intent)?;
+            let tagged = RestoredVerifierObservation::ConsumerRuntime {
+                observation: observation.clone(),
+            };
+            if record.phase == RestoredVerifierAttemptPhase::Observed {
+                ensure!(
+                    record.observation.as_ref() == Some(&tagged),
+                    "consumer observation replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
             ensure!(
-                record.observation.as_ref() == Some(&tagged),
-                "consumer observation replay changed"
+                matches!(
+                    record.phase,
+                    RestoredVerifierAttemptPhase::AttemptPending
+                        | RestoredVerifierAttemptPhase::Quarantined
+                ),
+                "consumer observation did not follow a contact claim"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                RestoredVerifierAttemptPhase::AttemptPending
-                    | RestoredVerifierAttemptPhase::Quarantined
-            ),
-            "consumer observation did not follow a contact claim"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![observation.operation_id, canonical(&tagged)?, now],
-        )?;
-        ensure!(changed == 1, "consumer observation bind lost durable CAS");
-        let current =
-            read(&tx, &observation.operation_id)?.context("consumer observation vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![observation.operation_id, canonical(&tagged)?, now],
+            )?;
+            ensure!(changed == 1, "consumer observation bind lost durable CAS");
+            let current =
+                read(&tx, &observation.operation_id)?.context("consumer observation vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     /// Read-only prelaunch admission. No born root/capsule coordinate exists
@@ -603,28 +608,30 @@ impl RuntimeDb {
         owner_principal: &str,
         selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
     ) -> Result<super::runtime_snapshot_qualification::SnapshotQualificationRecord> {
-        selection.validate()?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        read_retained_owner_measurement_prerequisite(
-            &tx,
-            &selection.qualification_operation_id,
-            owner_principal,
-            &selection.prerequisite_measurement_attempt_id,
-        )?;
-        let qualification = super::runtime_snapshot_qualification::read(
-            &tx,
-            &selection.qualification_operation_id,
-        )?
-        .context("consumer invocation qualification is absent")?;
-        ensure!(qualification.phase == super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound,
-            "consumer invocation has no bound occurrence");
-        require_live_occurrence(
-            &tx,
-            &qualification,
-            i64::try_from(lillux::time::timestamp_millis())?,
-        )?;
-        tx.commit()?;
-        Ok(qualification)
+        self.conn.with_sql(|conn| {
+            selection.validate()?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            read_retained_owner_measurement_prerequisite(
+                &tx,
+                &selection.qualification_operation_id,
+                owner_principal,
+                &selection.prerequisite_measurement_attempt_id,
+            )?;
+            let qualification = super::runtime_snapshot_qualification::read(
+                &tx,
+                &selection.qualification_operation_id,
+            )?
+            .context("consumer invocation qualification is absent")?;
+            ensure!(qualification.phase == super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound,
+                "consumer invocation has no bound occurrence");
+            require_live_occurrence(
+                &tx,
+                &qualification,
+                i64::try_from(lillux::time::timestamp_millis())?,
+            )?;
+            tx.commit()?;
+            Ok(qualification)
+        })
     }
 
     /// Load authenticated prerequisite evidence without granting contact.
@@ -637,22 +644,26 @@ impl RuntimeDb {
         owner_principal: &str,
         coordinate: &ConsumerRuntimeVerificationCoordinate,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_consumer_prerequisite(
-            &tx,
-            qualification_operation_id,
-            owner_principal,
-            coordinate,
-        )?;
-        tx.commit()?;
-        Ok(record)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_consumer_prerequisite(
+                &tx,
+                qualification_operation_id,
+                owner_principal,
+                coordinate,
+            )?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn restored_verifier_attempt(
         &self,
         operation_id: &str,
     ) -> Result<Option<RestoredVerifierAttemptRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| {
+            read(&conn, operation_id)
+        })
     }
 
     pub fn reserve_restored_verifier_attempt(
@@ -677,88 +688,90 @@ impl RuntimeDb {
         consumer_input_blob_hash: Option<&str>,
         admission: Option<&AuthenticatedConsumerRoot>,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        match (&intent.purpose, consumer_input_blob_hash) {
-            (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {}
-            (RemoteVerificationPurpose::ConsumerRuntime { .. }, Some(hash)) => {
-                ensure!(
-                    lillux::valid_hash(hash),
-                    "consumer input blob hash is invalid"
-                );
+        self.conn.with_sql(|conn| {
+            match (&intent.purpose, consumer_input_blob_hash) {
+                (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {}
+                (RemoteVerificationPurpose::ConsumerRuntime { .. }, Some(hash)) => {
+                    ensure!(
+                        lillux::valid_hash(hash),
+                        "consumer input blob hash is invalid"
+                    );
+                }
+                _ => anyhow::bail!("verifier reservation requires its matching consumer input lane"),
             }
-            _ => anyhow::bail!("verifier reservation requires its matching consumer input lane"),
-        }
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let qualification =
-            super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
-                .context("restored verifier qualification was not retained")?;
-        let selection = admitted_consumer_selection(&tx, intent, &qualification.intent, admission)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let qualification =
+                super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
+                    .context("restored verifier qualification was not retained")?;
+            let selection = admitted_consumer_selection(&tx, intent, &qualification.intent, admission)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent
+                        && existing.consumer_selection == selection
+                        && existing.consumer_input_blob_hash.as_deref() == consumer_input_blob_hash,
+                    "restored verifier reservation replay changed"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let occurrence = qualification
+                .occurrence
+                .as_ref()
+                .context("restored verifier occurrence was not bound")?;
+            let source =
+                super::runtime_snapshot::read(&tx, &qualification.intent.snapshot_operation_id)?
+                    .context("restored verifier snapshot was not retained")?;
+            let locator = source
+                .locator
+                .as_ref()
+                .context("restored verifier snapshot has no locator")?;
             ensure!(
-                existing.intent == *intent
-                    && existing.consumer_selection == selection
-                    && existing.consumer_input_blob_hash.as_deref() == consumer_input_blob_hash,
-                "restored verifier reservation replay changed"
+                source.readiness.is_some(),
+                "restored verifier snapshot is not ready"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let occurrence = qualification
-            .occurrence
-            .as_ref()
-            .context("restored verifier occurrence was not bound")?;
-        let source =
-            super::runtime_snapshot::read(&tx, &qualification.intent.snapshot_operation_id)?
-                .context("restored verifier snapshot was not retained")?;
-        let locator = source
-            .locator
-            .as_ref()
-            .context("restored verifier snapshot has no locator")?;
-        ensure!(
-            source.readiness.is_some(),
-            "restored verifier snapshot is not ready"
-        );
-        if let Some(admission) = admission {
-            intent.validate_consumer_for(
-                &source.intent,
-                locator,
-                &qualification.intent,
-                occurrence,
-                admission.selection(),
-                admission.coordinate(),
-            )?;
-            read_consumer_prerequisite(
-                &tx,
-                &qualification.intent.operation_id,
-                &qualification.intent.owner_principal,
-                admission.coordinate(),
-            )?;
-        } else {
-            intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        require_live_occurrence(&tx, &qualification, now)?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "restored verifier deadline is outside admission window"
-        );
-        tx.execute(
-            "INSERT INTO restored_verifier_attempt
+            if let Some(admission) = admission {
+                intent.validate_consumer_for(
+                    &source.intent,
+                    locator,
+                    &qualification.intent,
+                    occurrence,
+                    admission.selection(),
+                    admission.coordinate(),
+                )?;
+                read_consumer_prerequisite(
+                    &tx,
+                    &qualification.intent.operation_id,
+                    &qualification.intent.owner_principal,
+                    admission.coordinate(),
+                )?;
+            } else {
+                intent.validate_for(&source.intent, locator, &qualification.intent, occurrence)?;
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            require_live_occurrence(&tx, &qualification, now)?;
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "restored verifier deadline is outside admission window"
+            );
+            tx.execute(
+                "INSERT INTO restored_verifier_attempt
              (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,?4,?5,'reserved',NULL,?6,?6)",
-            params![
-                intent.operation_id,
-                intent.qualification_operation_id,
-                canonical(intent)?,
-                selection.as_ref().map(canonical).transpose()?,
-                consumer_input_blob_hash,
-                now
-            ],
-        )?;
-        let record =
-            read(&tx, &intent.operation_id)?.context("restored verifier reservation vanished")?;
-        tx.commit()?;
-        Ok(record)
+                params![
+                    intent.operation_id,
+                    intent.qualification_operation_id,
+                    canonical(intent)?,
+                    selection.as_ref().map(canonical).transpose()?,
+                    consumer_input_blob_hash,
+                    now
+                ],
+            )?;
+            let record =
+                read(&tx, &intent.operation_id)?.context("restored verifier reservation vanished")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn claim_restored_verifier_attempt(
@@ -781,141 +794,147 @@ impl RuntimeDb {
         operation_id: &str,
         admission: Option<&AuthenticatedConsumerRoot>,
     ) -> Result<RestoredVerifierAttemptClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("restored verifier was not reserved")?;
-        let qualification = super::runtime_snapshot_qualification::read(
-            &tx,
-            &record.intent.qualification_operation_id,
-        )?
-        .context("restored verifier qualification disappeared before contact claim")?;
-        ensure!(
-            admitted_consumer_selection(&tx, &record.intent, &qualification.intent, admission)?
-                == record.consumer_selection,
-            "consumer claim changed admitted selection"
-        );
-        if record.phase == RestoredVerifierAttemptPhase::Observed {
-            tx.commit()?;
-            return Ok(RestoredVerifierAttemptClaim::Observed(record));
-        }
-        if record.phase != RestoredVerifierAttemptPhase::Reserved {
-            tx.commit()?;
-            return Ok(RestoredVerifierAttemptClaim::Reconcile(record));
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms,
-            "restored verifier deadline expired"
-        );
-        if let Some(admission) = admission {
-            read_consumer_prerequisite(
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("restored verifier was not reserved")?;
+            let qualification = super::runtime_snapshot_qualification::read(
                 &tx,
-                &qualification.intent.operation_id,
-                &qualification.intent.owner_principal,
-                admission.coordinate(),
-            )?;
-        }
-        require_live_occurrence(&tx, &qualification, now)?;
-        let changed = tx.execute(
-            "UPDATE restored_verifier_attempt SET phase='attempt_pending',updated_at_ms=?2
+                &record.intent.qualification_operation_id,
+            )?
+            .context("restored verifier qualification disappeared before contact claim")?;
+            ensure!(
+                admitted_consumer_selection(&tx, &record.intent, &qualification.intent, admission)?
+                    == record.consumer_selection,
+                "consumer claim changed admitted selection"
+            );
+            if record.phase == RestoredVerifierAttemptPhase::Observed {
+                tx.commit()?;
+                return Ok(RestoredVerifierAttemptClaim::Observed(record));
+            }
+            if record.phase != RestoredVerifierAttemptPhase::Reserved {
+                tx.commit()?;
+                return Ok(RestoredVerifierAttemptClaim::Reconcile(record));
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms,
+                "restored verifier deadline expired"
+            );
+            if let Some(admission) = admission {
+                read_consumer_prerequisite(
+                    &tx,
+                    &qualification.intent.operation_id,
+                    &qualification.intent.owner_principal,
+                    admission.coordinate(),
+                )?;
+            }
+            require_live_occurrence(&tx, &qualification, now)?;
+            let changed = tx.execute(
+                "UPDATE restored_verifier_attempt SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(changed == 1, "restored verifier attempt lost durable CAS");
-        let current = read(&tx, operation_id)?.context("restored verifier claim vanished")?;
-        tx.commit()?;
-        Ok(RestoredVerifierAttemptClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(changed == 1, "restored verifier attempt lost durable CAS");
+            let current = read(&tx, operation_id)?.context("restored verifier claim vanished")?;
+            tx.commit()?;
+            Ok(RestoredVerifierAttemptClaim::StartAttempt(current))
+        })
     }
 
     pub fn quarantine_restored_verifier_attempt(
         &self,
         operation_id: &str,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("restored verifier attempt is absent")?;
-        if record.phase == RestoredVerifierAttemptPhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == RestoredVerifierAttemptPhase::AttemptPending,
-            "restored verifier quarantine requires pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE restored_verifier_attempt SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("restored verifier attempt is absent")?;
+            if record.phase == RestoredVerifierAttemptPhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == RestoredVerifierAttemptPhase::AttemptPending,
+                "restored verifier quarantine requires pending attempt"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            tx.execute(
+                "UPDATE restored_verifier_attempt SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        let current = read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            let current = read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn bind_restored_verifier_observation(
         &self,
         observation: &RestoredVerifierAdapterObservation,
     ) -> Result<RestoredVerifierAttemptRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &observation.operation_id)?
-            .context("restored verifier observation has no claimed attempt")?;
-        let tagged = RestoredVerifierObservation::OwnerMeasurement {
-            observation: observation.clone(),
-        };
-        if record.phase == RestoredVerifierAttemptPhase::Observed {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &observation.operation_id)?
+                .context("restored verifier observation has no claimed attempt")?;
+            let tagged = RestoredVerifierObservation::OwnerMeasurement {
+                observation: observation.clone(),
+            };
+            if record.phase == RestoredVerifierAttemptPhase::Observed {
+                ensure!(
+                    record.observation.as_ref() == Some(&tagged),
+                    "restored verifier observation replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
             ensure!(
-                record.observation.as_ref() == Some(&tagged),
-                "restored verifier observation replay changed"
+                matches!(
+                    record.phase,
+                    RestoredVerifierAttemptPhase::AttemptPending
+                        | RestoredVerifierAttemptPhase::Quarantined
+                ),
+                "restored verifier observation did not follow a contact claim"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                RestoredVerifierAttemptPhase::AttemptPending
-                    | RestoredVerifierAttemptPhase::Quarantined
-            ),
-            "restored verifier observation did not follow a contact claim"
-        );
-        let qualification = super::runtime_snapshot_qualification::read(
-            &tx,
-            &record.intent.qualification_operation_id,
-        )?
-        .context("restored verifier qualification disappeared")?;
-        let occurrence = qualification
-            .occurrence
-            .as_ref()
-            .context("restored occurrence disappeared")?;
-        let source =
-            super::runtime_snapshot::read(&tx, &qualification.intent.snapshot_operation_id)?
-                .context("restored verifier source disappeared")?;
-        observation.validate_for_retained(
-            &record.intent,
-            &source.intent,
-            source
-                .locator
+            let qualification = super::runtime_snapshot_qualification::read(
+                &tx,
+                &record.intent.qualification_operation_id,
+            )?
+            .context("restored verifier qualification disappeared")?;
+            let occurrence = qualification
+                .occurrence
                 .as_ref()
-                .context("restored verifier locator disappeared")?,
-            source
-                .readiness
-                .as_ref()
-                .context("restored verifier readiness disappeared")?,
-            &qualification.intent,
-            occurrence,
-        )?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
+                .context("restored occurrence disappeared")?;
+            let source =
+                super::runtime_snapshot::read(&tx, &qualification.intent.snapshot_operation_id)?
+                    .context("restored verifier source disappeared")?;
+            observation.validate_for_retained(
+                &record.intent,
+                &source.intent,
+                source
+                    .locator
+                    .as_ref()
+                    .context("restored verifier locator disappeared")?,
+                source
+                    .readiness
+                    .as_ref()
+                    .context("restored verifier readiness disappeared")?,
+                &qualification.intent,
+                occurrence,
+            )?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE restored_verifier_attempt SET phase='observed',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![observation.operation_id, canonical(&tagged)?, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "restored verifier observation bind lost durable CAS"
-        );
-        let current = read(&tx, &observation.operation_id)?
-            .context("restored verifier observation vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![observation.operation_id, canonical(&tagged)?, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "restored verifier observation bind lost durable CAS"
+            );
+            let current = read(&tx, &observation.operation_id)?
+                .context("restored verifier observation vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }

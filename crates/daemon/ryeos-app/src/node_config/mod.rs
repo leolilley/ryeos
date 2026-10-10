@@ -25,29 +25,10 @@ pub mod loader;
 pub mod sections;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
+use ryeos_node_runtime::node_config_source::{BundleRecord, NodeItemContext};
 
 use crate::node_config::sections::command::CommandRecord;
 use crate::route_raw::RawRouteSpec;
-
-/// Loader-derived structural context for a node-config item.
-#[derive(Debug, Clone)]
-pub struct NodeItemContext {
-    /// Section name selected by `.ai/node/<section>/...`.
-    pub section: String,
-    /// Relative item id below the section root, without extension.
-    pub id: String,
-    /// Filename stem.
-    pub stem: String,
-    /// Path relative to the section root, including extension.
-    pub rel_path: PathBuf,
-    /// Absolute source file path.
-    pub source_file: PathBuf,
-    /// Trusted signer fingerprint from the verified signature.
-    pub signer_fingerprint: String,
-}
 
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,17 +82,6 @@ pub struct SectionLoadSpec {
 }
 
 /// A single parsed bundle registration record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BundleRecord {
-    /// Bundle name (filename without extension).
-    pub name: String,
-    /// Absolute, canonicalized path to the bundle root directory.
-    pub path: PathBuf,
-    /// Path to the `.yaml` file that declared this record.
-    pub source_file: PathBuf,
-}
-
 /// Immutable snapshot of all node-config sections loaded at startup.
 #[derive(Debug, Clone)]
 pub struct NodeConfigSnapshot {

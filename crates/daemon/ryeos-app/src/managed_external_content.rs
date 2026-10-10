@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::managed_external_content_operation::AcquisitionMode;
-use crate::node_policy::sections::external_content::{
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ManagedExternalContentActivationPolicy,
 };
 
@@ -768,7 +768,7 @@ fn resolve_activation_with_policy(
     )>,
 )>{
     let import_policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     let policy = import_policy.managed_activation.require_enabled()?;
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(activation_ref)
@@ -1064,7 +1064,7 @@ mod tests {
             .ancestors()
             .nth(3)
             .expect("ryeos-app lives below the repository root");
-        let policy_table = crate::node_policy::NodePolicyTable::new();
+        let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         for worker_profile in ["qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"] {
             let activation_path = repository
                 .join("bundles/local-inference/.ai/config/ryeos-runtime")
@@ -1090,7 +1090,7 @@ mod tests {
                 let profile_path = repository
                     .join("bundles/.ai/node/init/profiles")
                     .join(format!("{node_profile}.yaml"));
-                let profile: crate::node_policy::generation::NodeInitProfile =
+                let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                     serde_yaml::from_str(&lillux::signature::strip_signature_lines(
                         &std::fs::read_to_string(&profile_path).unwrap(),
                     ))
@@ -1098,7 +1098,7 @@ mod tests {
                 let generation = profile
                     .validated_generation(&policy_table, &profile_path)
                     .unwrap();
-                let external: crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord =
+                let external: ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord =
                     serde_json::from_value(generation.policies()["external_content"].clone()).unwrap();
                 activation
                     .admit(

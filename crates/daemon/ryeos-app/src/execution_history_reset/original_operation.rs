@@ -1,0 +1,585 @@
+//! Original reset evidence. Staging is inert until State activates its exact
+//! reference; this module does not grant allocation or recreate native owners.
+
+use std::ffi::OsStr;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, ensure};
+use ryeos_scheduler_contract::{
+    SchedulerFireHistoryAccounting, SchedulerRetirementStoppedRolePlan,
+    SchedulerRetirementStoppedSource,
+};
+use ryeos_state::{CasMutationGuard, PinnedStateAuthority, ThreadHistoryDiscardOperationRef};
+use serde::{Deserialize, Serialize};
+
+use super::original_quota_claim::OriginalQuotaClaim;
+use super::{ExecutionHistoryResetOptions, ExecutionHistorySchemaCut, OfflineResetAuthority};
+use ryeos_node_runtime::identity::NodeIdentity;
+use crate::runtime_db::{RuntimeDb, SqliteInspectionCopyLease};
+
+const PREFIX: &str = "execution-history-reset.operation.";
+const MAX_BYTES: usize = 8192;
+
+fn required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationRecord {
+    schema: u32,
+    purpose: String,
+    operation_id: String,
+    owner_fingerprint: String,
+    runtime_identity: String,
+    app_root_identity: String,
+    discard_project_heads: bool,
+    #[serde(deserialize_with = "required_nullable")]
+    schema_cut: Option<ExecutionHistorySchemaCut>,
+    scheduler_selected: bool,
+    scheduler_accounting: SchedulerFireHistoryAccounting,
+    scheduler_sources: [SchedulerRetirementStoppedRolePlan; 3],
+}
+
+pub(super) struct OriginalOperation {
+    record: OperationRecord,
+    reference: ThreadHistoryDiscardOperationRef,
+    signed: Vec<u8>,
+    app_root: lillux::PinnedDirectory,
+    runtime: lillux::PinnedDirectory,
+    // This is the same producer lease, never reconstructed from copied paths.
+    _source_lease: Option<Arc<SqliteInspectionCopyLease>>,
+    // Fresh source retains the original reservation; cold evidence has no
+    // reconstructed allocation owner and requires separate recovery admission.
+    _quota_claim: Option<Arc<OriginalQuotaClaim>>,
+}
+
+/// Preserve the same operation and its original descriptor/copy owners on
+/// publication or durability failure. A State marker may have been installed
+/// before an activation error; this error grants no permission to replay effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PublicationPhase {
+    Staging,
+    StateActivation,
+    PreActivationAdmission,
+}
+
+pub(super) struct OperationPublicationFailure {
+    error: anyhow::Error,
+    operation: Arc<OriginalOperation>,
+    phase: PublicationPhase,
+}
+
+impl OperationPublicationFailure {
+    pub(super) fn phase(&self) -> PublicationPhase {
+        self.phase
+    }
+    pub(super) fn operation(&self) -> &Arc<OriginalOperation> {
+        &self.operation
+    }
+}
+
+impl std::fmt::Debug for OperationPublicationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OperationPublicationFailure")
+            .field("error", &self.error)
+            .field("phase", &self.phase)
+            .field("operation_id", &self.operation.reference.operation_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for OperationPublicationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "original reset {:?} retains its exact owner: {}",
+            self.phase, self.error
+        )
+    }
+}
+
+impl std::error::Error for OperationPublicationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+impl OriginalOperation {
+    #[cfg(test)]
+    pub(super) fn retains_quota_claim(&self, claim: &Arc<OriginalQuotaClaim>) -> bool {
+        self._quota_claim
+            .as_ref()
+            .is_some_and(|original| Arc::ptr_eq(original, claim))
+    }
+
+    /// Live mutation must retain the actual original funded claim. Signed
+    /// cold evidence alone cannot renew a resource owner or attach a fresh
+    /// allocation to the old operation's effects.
+    pub(super) fn require_quota_claim(&self, claim: &Arc<OriginalQuotaClaim>) -> Result<()> {
+        ensure!(self._quota_claim.as_ref().is_some_and(|original| Arc::ptr_eq(original, claim)),
+            "original operation does not retain this exact funded claim; cold recovery admission required");
+        Ok(())
+    }
+
+    pub(super) fn reference(&self) -> &ThreadHistoryDiscardOperationRef {
+        &self.reference
+    }
+
+    pub(super) fn accounting(&self) -> &SchedulerFireHistoryAccounting {
+        &self.record.scheduler_accounting
+    }
+
+    pub(super) fn signed_bytes(&self) -> &[u8] {
+        &self.signed
+    }
+
+    pub(super) fn scheduler_sources(&self) -> &[SchedulerRetirementStoppedRolePlan; 3] {
+        &self.record.scheduler_sources
+    }
+
+    pub(super) fn initial_generation(&self) -> Result<[u8; 16]> {
+        self.reference.validate()?;
+        let mut bytes = [0; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&self.reference.operation_id[index * 2..index * 2 + 2], 16)?;
+        }
+        Ok(bytes)
+    }
+
+    fn require_app_root(&self) -> Result<()> {
+        let current = lillux::PinnedDirectory::open(self.app_root.path())?
+            .context("original reset app root is absent")?;
+        ensure!(
+            current.is_same_directory(&self.app_root)?
+                && self.record.app_root_identity
+                    == serde_json::to_string(&self.app_root.identity()?)?,
+            "original reset operation selects a different app root"
+        );
+        Ok(())
+    }
+
+    fn check_record(
+        &self,
+        runtime: &lillux::PinnedDirectory,
+        identity: &NodeIdentity,
+        options: &ExecutionHistoryResetOptions,
+        scheduler_selected: bool,
+    ) -> Result<()> {
+        self.reference.validate()?;
+        self.require_app_root()?;
+        ensure!(
+            self.record.schema == 2
+                && self.record.purpose == "execution_history_reset_operation_v2",
+            "unsupported original execution-history reset operation"
+        );
+        ensure!(
+            self.record.operation_id == self.reference.operation_id
+                && lillux::sha256_hex(&self.signed) == self.reference.sha256,
+            "original reset reference differs from its exact signed bytes"
+        );
+        ensure!(
+            self.record.owner_fingerprint == identity.fingerprint()
+                && self.record.runtime_identity == serde_json::to_string(&runtime.identity()?)?,
+            "original reset operation selects a different signer or runtime"
+        );
+        ensure!(
+            self.record.discard_project_heads == options.discard_project_heads
+                && self.record.schema_cut == options.schema_cut
+                && self.record.scheduler_selected == scheduler_selected,
+            "reset options or scheduler selection differ from the original operation"
+        );
+        let mut physical_sources = std::collections::BTreeSet::new();
+        for source in &self.record.scheduler_sources {
+            match (&source.source, &source.current) {
+                (SchedulerRetirementStoppedSource::Absent, None) => {}
+                (SchedulerRetirementStoppedSource::Canonical, Some(identity)) => {
+                    identity.validate()?;
+                    ensure!(
+                        physical_sources.insert((identity.device, identity.inode)),
+                        "original scheduler roles alias the same physical source"
+                    );
+                    ensure!(
+                        identity.content_sha256.is_some(),
+                        "original source lacks its copied digest"
+                    );
+                }
+                _ => anyhow::bail!("original reset source is not canonical or absent"),
+            }
+        }
+        if self.record.scheduler_sources[0].current.is_none() {
+            ensure!(
+                self.record
+                    .scheduler_sources
+                    .iter()
+                    .all(|source| source.current.is_none()),
+                "original scheduler main is absent with retained sidecars"
+            );
+            ensure!(
+                self.record.scheduler_accounting
+                    == SchedulerFireHistoryAccounting::Exact {
+                        counts: Default::default(),
+                    },
+                "absent original scheduler cannot supply nonzero or unavailable accounting"
+            );
+        }
+        ensure!(
+            self.record.scheduler_selected || physical_sources.is_empty(),
+            "unselected scheduler has retained original sources"
+        );
+        if let SchedulerFireHistoryAccounting::Exact { counts } = &self.record.scheduler_accounting
+        {
+            ensure!(
+                counts.total_rows().is_some(),
+                "original scheduler accounting overflows"
+            );
+        }
+        Ok(())
+    }
+
+    /// Called before scheduler preview. Only the original signed accounting
+    /// is returned on re-entry; missing canonical P never manufactures zero.
+    pub(super) fn read_active(
+        app_root: &std::path::Path,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+        runtime: &lillux::PinnedDirectory,
+        namespace: &lillux::PinnedDirectoryLock,
+        identity: &NodeIdentity,
+        options: &ExecutionHistoryResetOptions,
+        scheduler_selected: bool,
+    ) -> Result<Option<Arc<Self>>> {
+        state.ensure_guard(guard)?;
+        namespace.ensure_protects(runtime)?;
+        ensure!(
+            state.runtime_directory().is_same_directory(runtime)?,
+            "original reset State owner differs from runtime"
+        );
+        let Some(reference) = state
+            .require_recovery()?
+            .thread_history_discard_operation()?
+        else {
+            return Ok(None);
+        };
+        reference.validate()?;
+        let name = format!("{PREFIX}{}", reference.operation_id);
+        let signed = lillux_sqlite::read_regular_without_sqlite_alias(
+            runtime,
+            OsStr::new(&name),
+            MAX_BYTES,
+        )?
+        .context("active reset marker lacks its staged signed operation")?;
+        ensure!(
+            lillux::sha256_hex(&signed) == reference.sha256,
+            "active reset operation digest mismatch"
+        );
+        let raw = std::str::from_utf8(&signed)?;
+        let (body, header) =
+            lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)?;
+        let header = header.context("original reset operation is unsigned")?;
+        ensure!(
+            lillux::signature::is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                &body,
+                identity.verifying_key(),
+                identity.fingerprint()
+            ),
+            "original reset operation signature is invalid"
+        );
+        let record: OperationRecord = serde_json::from_str(&body)?;
+        ensure!(
+            lillux::canonical_json(&serde_json::to_value(&record)?)? == body,
+            "original reset operation is not canonical"
+        );
+        let app_root =
+            lillux::PinnedDirectory::open(app_root)?.context("active reset app root is absent")?;
+        let operation = Self {
+            record,
+            reference,
+            signed,
+            app_root,
+            runtime: runtime.try_clone()?,
+            _source_lease: None,
+            _quota_claim: None,
+        };
+        operation.check_record(runtime, identity, options, scheduler_selected)?;
+        Ok(Some(Arc::new(operation)))
+    }
+
+    /// Private issuer called in the actual pre-effect frame. Signing/staging
+    /// does not activate the record and supplies no resource-funding grant.
+    pub(super) fn prepare(
+        authority: &OfflineResetAuthority<'_>,
+        db: &RuntimeDb,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+        identity: &NodeIdentity,
+        options: &ExecutionHistoryResetOptions,
+        scheduler_selected: bool,
+        accounting: &SchedulerFireHistoryAccounting,
+        source_lease: Option<Arc<SqliteInspectionCopyLease>>,
+        quota_claim: &Arc<OriginalQuotaClaim>,
+    ) -> Result<Arc<Self>> {
+        authority.require_held(db)?;
+        state.ensure_guard(guard)?;
+        ensure!(
+            guard.is_exclusive()
+                && state
+                    .runtime_directory()
+                    .is_same_directory(authority.runtime_directory)?,
+            "original reset preparation requires its actual exclusive State owner"
+        );
+        let runtime = authority.runtime_directory;
+        let names = [
+            "scheduler.sqlite3",
+            "scheduler.sqlite3-wal",
+            "scheduler.sqlite3-shm",
+            "scheduler.sqlite3-journal",
+        ];
+        let sources = if let Some(lease) = &source_lease {
+            let receipts = lease
+                .source_receipts
+                .get()
+                .context("original copy receipts are incomplete")?;
+            ensure!(
+                receipts.len() == names.len()
+                    && receipts
+                        .iter()
+                        .zip(names)
+                        .all(|((name, _), expected)| name == OsStr::new(expected))
+                    && receipts[3].1.is_none(),
+                "original scheduler source role grammar differs"
+            );
+            std::array::from_fn(|index| match &receipts[index].1 {
+                None => SchedulerRetirementStoppedRolePlan {
+                    source: SchedulerRetirementStoppedSource::Absent,
+                    current: None,
+                },
+                Some(receipt) => SchedulerRetirementStoppedRolePlan {
+                    source: SchedulerRetirementStoppedSource::Canonical,
+                    current: Some(ryeos_scheduler_contract::SchedulerRetirementRoleIdentity {
+                        device: receipt.source_identity.device,
+                        inode: receipt.source_identity.inode,
+                        byte_length: receipt.source_identity.byte_length,
+                        content_sha256: Some(receipt.copied_sha256.clone()),
+                    }),
+                },
+            })
+        } else {
+            for name in names {
+                ensure!(
+                    runtime.entry_no_follow(OsStr::new(name))?.is_none(),
+                    "original scheduler accounting lacks source-copy provenance"
+                );
+            }
+            std::array::from_fn(|_| SchedulerRetirementStoppedRolePlan {
+                source: SchedulerRetirementStoppedSource::Absent,
+                current: None,
+            })
+        };
+        let app_root = lillux::PinnedDirectory::open(authority.app_root)?
+            .context("original reset preparation app root is absent")?;
+        let operation_id = quota_claim
+            .require_original_identity(runtime, identity, authority.app_root)?
+            .to_owned();
+        let record = OperationRecord {
+            schema: 2,
+            purpose: "execution_history_reset_operation_v2".to_owned(),
+            operation_id: operation_id.clone(),
+            owner_fingerprint: identity.fingerprint().to_owned(),
+            runtime_identity: serde_json::to_string(&runtime.identity()?)?,
+            app_root_identity: serde_json::to_string(&app_root.identity()?)?,
+            discard_project_heads: options.discard_project_heads,
+            schema_cut: options.schema_cut,
+            scheduler_selected,
+            scheduler_accounting: accounting.clone(),
+            scheduler_sources: sources,
+        };
+        let body = lillux::canonical_json(&serde_json::to_value(&record)?)?;
+        let signed =
+            lillux::signature::sign_content(&body, identity.signing_key(), "#", None).into_bytes();
+        ensure!(
+            signed.len() <= MAX_BYTES,
+            "original signed reset operation exceeds its byte bound"
+        );
+        let reference = ThreadHistoryDiscardOperationRef {
+            operation_id,
+            sha256: lillux::sha256_hex(&signed),
+        };
+        let operation = Self {
+            record,
+            reference,
+            signed,
+            app_root,
+            runtime: runtime.try_clone()?,
+            _source_lease: source_lease,
+            _quota_claim: Some(Arc::clone(quota_claim)),
+        };
+        operation.check_record(runtime, identity, options, scheduler_selected)?;
+        Ok(Arc::new(operation))
+    }
+
+    /// Exact bytes are memoized before installation. Retrying never chooses
+    /// another operation ID or signs/re-previews the original accounting.
+    pub(super) fn stage(self: &Arc<Self>, runtime: &lillux::PinnedDirectory) -> Result<()> {
+        self.stage_retained(runtime).map_err(|error| {
+            anyhow::Error::new(OperationPublicationFailure {
+                error,
+                operation: Arc::clone(self),
+                phase: PublicationPhase::Staging,
+            })
+        })
+    }
+
+    fn stage_retained(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
+        ensure!(
+            self.runtime.is_same_directory(runtime)?,
+            "original reset staging requires its retained runtime descriptor"
+        );
+        self.require_app_root()?;
+        self.reference.validate()?;
+        ensure!(
+            self.record.runtime_identity == serde_json::to_string(&runtime.identity()?)?
+                && lillux::sha256_hex(&self.signed) == self.reference.sha256,
+            "staged operation differs from its original runtime or bytes"
+        );
+        let name = format!("{PREFIX}{}", self.reference.operation_id);
+        if runtime
+            .atomic_create_regular(OsStr::new(&name), &self.signed, 0o600)?
+            .is_none()
+        {
+            let existing = lillux_sqlite::read_regular_without_sqlite_alias(
+                runtime,
+                OsStr::new(&name),
+                MAX_BYTES,
+            )?
+            .context("staged original reset operation disappeared")?;
+            ensure!(
+                existing == self.signed,
+                "staged reset operation conflicts with retained bytes"
+            );
+        }
+        runtime
+            .sync()
+            .context("sync staged original reset operation")
+    }
+
+    /// Hold this exact candidate through namespace/reservation refusal. The
+    /// callback validates domain admission; it does not activate State.
+    pub(super) fn validate_pre_activation(
+        self: &Arc<Self>,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+        validate: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let result = (|| -> Result<()> {
+            state.ensure_guard(guard)?;
+            self.require_app_root()?;
+            ensure!(
+                guard.is_exclusive()
+                    && self.runtime.is_same_directory(state.runtime_directory())?,
+                "reset pre-activation admission requires its actual State runtime"
+            );
+            self.require_staged(state.runtime_directory())?;
+            if let Some(active) = state
+                .require_recovery()?
+                .thread_history_discard_operation()?
+            {
+                ensure!(
+                    active == self.reference,
+                    "pre-activation marker selects another original operation"
+                );
+            }
+            validate()
+        })();
+        result.map_err(|error| {
+            anyhow::Error::new(OperationPublicationFailure {
+                error,
+                operation: Arc::clone(self),
+                phase: PublicationPhase::PreActivationAdmission,
+            })
+        })
+    }
+
+    /// Activation failure can follow a successful marker install and failed
+    /// sync. Keep the exact operation, pins and lease rather than returning an
+    /// error which discards its owner or prepares replacement signed bytes.
+    pub(super) fn activate(
+        self: &Arc<Self>,
+        state_db: &ryeos_state::StateDb,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+    ) -> Result<()> {
+        let result = (|| -> Result<()> {
+            state.ensure_guard(guard)?;
+            self.require_app_root()?;
+            ensure!(
+                guard.is_exclusive()
+                    && self.runtime.is_same_directory(state.runtime_directory())?,
+                "original operation activation requires its actual exclusive State runtime"
+            );
+            self.require_staged(state.runtime_directory())?;
+            state_db.begin_thread_history_discard_admitted(guard, &self.reference)?;
+            self.require_active(state, guard)
+        })();
+        result.map_err(|error| {
+            anyhow::Error::new(OperationPublicationFailure {
+                error,
+                operation: Arc::clone(self),
+                phase: PublicationPhase::StateActivation,
+            })
+        })
+    }
+
+    pub(super) fn require_staged(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
+        self.require_app_root()?;
+        ensure!(
+            self.runtime.is_same_directory(runtime)?,
+            "original operation staged read requires its retained runtime"
+        );
+        let name = format!("{PREFIX}{}", self.reference.operation_id);
+        let current = lillux_sqlite::read_regular_without_sqlite_alias(
+            runtime,
+            OsStr::new(&name),
+            MAX_BYTES,
+        )?
+        .context("original staged operation is missing")?;
+        ensure!(
+            current == self.signed,
+            "original staged operation bytes changed"
+        );
+        Ok(())
+    }
+
+    pub(super) fn require_active(
+        &self,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+    ) -> Result<()> {
+        state.ensure_guard(guard)?;
+        self.require_app_root()?;
+        ensure!(
+            guard.is_exclusive()
+                && self.record.runtime_identity
+                    == serde_json::to_string(&state.runtime_directory().identity()?)?,
+            "active original operation requires its actual exclusive State runtime"
+        );
+        ensure!(
+            state
+                .require_recovery()?
+                .thread_history_discard_operation()?
+                .as_ref()
+                == Some(&self.reference),
+            "original reset operation is not activated by its exact State marker"
+        );
+        self.require_staged(state.runtime_directory())?;
+        Ok(())
+    }
+}

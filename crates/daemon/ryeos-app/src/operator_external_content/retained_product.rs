@@ -5,7 +5,7 @@
 //! pass the existing exact-manifest bind checks for its eventual consumer.
 
 use super::*;
-use crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
+use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
 use ryeos_state::external_content::products::ProductCaptureEvidence;
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, ProductWitnessLookup, VerifiedProductWitness,
@@ -135,7 +135,7 @@ pub(super) fn validate_import_bounds(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
-    policy: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     maximum_bytes: u64,
     exact: &VerifiedProductWitness,
 ) -> anyhow::Result<()> {

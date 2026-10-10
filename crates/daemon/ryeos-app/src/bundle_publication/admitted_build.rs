@@ -432,14 +432,14 @@ fn required_features(package: &str, binary: &str) -> anyhow::Result<Vec<String>>
         "rye-parser-yaml-document" | "rye-parser-yaml-header-document" | "rye-parser-regex-kv" => {
             Some("basic-parsers")
         }
-        "rye-composer-extends-chain"
-        | "rye-composer-identity"
-        | "ryeos-directive-launch-preparer"
-        | "ryeos-graph-effective-validator"
-        | "ryeos-graph-launch-preparer"
-        | "ryeos-graph-execution-evidence"
+        "rye-composer-identity"
         | "ryeos-direct-execution-evidence"
-        | "ryeos-scoped-qualification-execution-evidence" => Some("full-handlers"),
+        | "ryeos-scoped-qualification-execution-evidence" => Some("core-handlers"),
+        "rye-composer-extends-chain" => Some("extends-composer"),
+        "ryeos-directive-launch-preparer" => Some("directive-handlers"),
+        "ryeos-graph-effective-validator"
+        | "ryeos-graph-launch-preparer"
+        | "ryeos-graph-execution-evidence" => Some("graph-handlers"),
         _ => None,
     };
     match (package, feature) {
@@ -467,7 +467,11 @@ fn cargo_feature_selections(payloads: &[OwnedPayload]) -> Vec<CargoFeatureSelect
     by_package
         .into_iter()
         .map(|(cargo_package, mut features)| {
-            if features.contains("full-handlers") {
+            if features.contains("graph-handlers") || features.contains("directive-handlers") {
+                features.remove("core-handlers");
+                features.remove("basic-parsers");
+                features.remove("extends-composer");
+            } else if features.contains("core-handlers") {
                 features.remove("basic-parsers");
             }
             CargoFeatureSelection {
@@ -779,7 +783,7 @@ mod input_contract_tests {
         };
         let full = OwnedPayload {
             binary: "ryeos-direct-execution-evidence".into(),
-            required_features: vec!["full-handlers".into()],
+            required_features: vec!["core-handlers".into()],
             ..parser.clone()
         };
         assert_eq!(
@@ -793,7 +797,7 @@ mod input_contract_tests {
             cargo_feature_selections(&[parser, full]),
             vec![CargoFeatureSelection {
                 cargo_package: "ryeos-handler-bins".into(),
-                features: vec!["full-handlers".into()],
+                features: vec!["core-handlers".into()],
             }]
         );
         assert!(required_features("ryeos-handler-bins", "unlisted-handler").is_err());
@@ -898,7 +902,7 @@ mod input_contract_tests {
         }
         let mut stale_features = input.clone();
         stale_features["cargo_feature_selections"] = serde_json::json!([
-            {"cargo_package":"ryeos-handler-bins", "features":["full-handlers"]}
+            {"cargo_package":"ryeos-handler-bins", "features":["core-handlers"]}
         ]);
         assert!(AdmittedReleaseInput::from_value(&stale_features).is_err());
         let mut old_schema = input.clone();

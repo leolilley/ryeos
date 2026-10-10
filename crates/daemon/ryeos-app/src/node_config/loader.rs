@@ -1,6 +1,5 @@
-//! Node-config loader: two-phase bootstrap for daemon-consumed control-plane items.
+//! Full domain node-config loader; bundle bootstrap belongs to Node Runtime.
 //!
-//! Phase 1: `load_bundle_section()` — minimal bootstrap verifier, bundle roots only.
 //! Phase 2: `load_full()` — full engine-based scan across all sources.
 //!
 //! Section directories support recursive subfolders. For example:
@@ -16,43 +15,34 @@
 //! Security: signed-required, trusted-signer-required, symlinks rejected,
 //! regular files only, deterministic traversal order.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 #[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
 use serde_json::Value;
 
-use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::trust::TrustStore;
 
-use super::sections::bundle::BundleSection;
+use ryeos_node_runtime::node_config_source::{VerifiedNodeConfigItem, scan_yaml_files, scan_yaml_files_recursive, verify_and_parse, check_bundle_collisions};
+#[cfg(test)]
+use ryeos_node_runtime::node_config_source::strip_signature;
 use super::sections::command::CommandRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeConfigSourceScope, NodeConfigTable,
-    NodeItemContext, SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
+    SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
-use crate::node_policy::sections::command_registration::CommandRegistrationAuthority;
+use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
 use crate::route_raw::RawRouteSpec;
 
-/// Bootstrap loader for node-config items.
+/// Full loader for domain node-config items.
 ///
-/// Phase 1: `load_bundle_section()` — minimal bootstrap verifier, bundle roots only.
 /// Phase 2: `load_full()` — full engine-based scan across all sources.
-pub struct BootstrapLoader<'a> {
+pub struct NodeConfigLoader<'a> {
     pub app_root: &'a Path,
     pub trust_store: &'a TrustStore,
-}
-
-/// A verified and parsed node-config YAML file, ready for section-specific handling.
-struct VerifiedItem {
-    path: PathBuf,
-    ctx: NodeItemContext,
-    signer_fingerprint: String,
-    signer_verifying_key: [u8; 32],
-    body: Value,
-    signed_source: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,10 +133,10 @@ impl NodeConfigSnapshotBuilder {
     fn admit(
         &mut self,
         record: Box<dyn super::CompiledNodeConfigItem>,
-        verified: &VerifiedItem,
+        verified: &VerifiedNodeConfigItem,
         source: &NodeConfigSource,
     ) -> Result<()> {
-        let context = &verified.ctx;
+        let context = verified.context();
         if record.section_name() != context.section {
             bail!(
                 "node-config compiler `{}` returned record for section `{}`",
@@ -157,9 +147,9 @@ impl NodeConfigSnapshotBuilder {
         let admission = NodeConfigAdmission {
             source_file: context.source_file.clone(),
             command_provenance: source.command_provenance()?,
-            signed_source: verified.signed_source.clone(),
-            signer_fingerprint: verified.signer_fingerprint.clone(),
-            signer_verifying_key: verified.signer_verifying_key,
+            signed_source: std::sync::Arc::clone(verified.signed_source()),
+            signer_fingerprint: verified.signer_fingerprint().to_owned(),
+            signer_verifying_key: verified.signer_verifying_key(),
         };
         record.admit(self, &admission)
     }
@@ -261,235 +251,7 @@ impl NodeConfigSnapshotBuilder {
     }
 }
 
-/// Signature envelope used for all node-config items.
-fn node_config_envelope() -> SignatureEnvelope {
-    SignatureEnvelope {
-        prefix: "#".into(),
-        suffix: None,
-        after_shebang: false,
-    }
-}
-
-const MAX_NODE_CONFIG_ENTRIES_PER_ROOT: usize = 512;
-const MAX_NODE_CONFIG_DEPTH: usize = 32;
-
-/// Recursively collect all `.yaml`/`.yml` regular files under a directory.
-///
-/// Returns files in deterministic depth-first order, with entries sorted
-/// alphabetically at each directory level. Rejects symlinks at every level
-/// (both files and directories).
-fn scan_yaml_files_recursive(dir: &Path) -> Result<Vec<lillux::PinnedRegularFile>> {
-    scan_yaml_files(dir, true)
-}
-
-fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<lillux::PinnedRegularFile>> {
-    let files = lillux::collect_pinned_regular_files_no_follow_bounded(
-        dir,
-        recursive,
-        lillux::DirectoryTraversalBudget::new(
-            MAX_NODE_CONFIG_ENTRIES_PER_ROOT,
-            MAX_NODE_CONFIG_DEPTH,
-        ),
-    )?
-    .unwrap_or_default();
-    for file in &files {
-        let path = file.path();
-        let ext = path.extension().and_then(|extension| extension.to_str());
-        if !matches!(ext, Some("yaml" | "yml")) {
-            bail!(
-                "node config directory contains unsupported non-YAML entry {}",
-                path.display()
-            );
-        }
-    }
-    Ok(files)
-}
-
-/// Verify signature, trust, and section invariant for a single node-config file.
-///
-/// The `section_root` is the `.ai/node/<section>/` directory (e.g. the
-/// `routes/` dir). The invariant checks that:
-/// 1. `file` lives under `section_root` (at any depth)
-fn verify_and_parse(
-    file: &lillux::PinnedRegularFile,
-    section_root: &Path,
-    expected_section: &str,
-    trust_store: &TrustStore,
-) -> Result<VerifiedItem> {
-    let path = file.path();
-    let ext = path.extension().and_then(|e| e.to_str());
-    if ext != Some("yaml") && ext != Some("yml") {
-        bail!(
-            "node config item at {} is not a .yaml or .yml file",
-            path.display()
-        );
-    }
-
-    let stem = path.file_stem().and_then(|s| s.to_str()).context(format!(
-        "node config item at {} has no filename stem",
-        path.display()
-    ))?;
-
-    let content = file.read_bounded(ryeos_node_runtime::node_document::MAX_ITEM_BYTES)?;
-    let content = std::str::from_utf8(&content)
-        .with_context(|| format!("node config item at {} is not UTF-8", path.display()))?;
-
-    let envelope = node_config_envelope();
-
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-        .with_context(|| {
-            format!(
-                "node config item at {} has no valid signature line",
-                path.display()
-            )
-        })?;
-    let signer_fingerprint = header.signer_fingerprint.clone();
-
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
-
-    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-        bail!(
-            "node config item at {} is not trusted (trust_class: {:?}); \
-             only trusted items are allowed in node config",
-            path.display(),
-            trust_class
-        );
-    }
-    let signer_verifying_key = trust_store
-        .get(&signer_fingerprint)
-        .context("verified node-config signer disappeared from trust store")?
-        .verifying_key
-        .to_bytes();
-
-    let body_str = strip_signature(&content);
-    let body: Value = serde_yaml::from_str(&body_str)
-        .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
-
-    // Check section invariant: file must live under section_root. Section is
-    // selected by path, not duplicated in the body.
-    if !path.starts_with(section_root) {
-        bail!(
-            "node config item at {} is not under expected section directory '{}' \
-             (section containment invariant violated)",
-            path.display(),
-            section_root.display()
-        );
-    }
-
-    for forbidden in ["category", "section"] {
-        if body.get(forbidden).is_some() {
-            bail!(
-                "node config item at {} declares path-owned structural field '{}' \
-                 (section/category are derived from path and must not be in node YAML)",
-                path.display(),
-                forbidden
-            );
-        }
-    }
-
-    let rel_path = path.strip_prefix(section_root).with_context(|| {
-        format!(
-            "node config item at {} is not under expected section directory {}",
-            path.display(),
-            section_root.display()
-        )
-    })?;
-    let mut id_path = rel_path.to_path_buf();
-    id_path.set_extension("");
-    let id = id_path
-        .components()
-        .map(|component| match component {
-            std::path::Component::Normal(part) => part
-                .to_str()
-                .map(|s| s.to_string())
-                .context("node config path contains non-UTF-8 segment"),
-            _ => bail!("node config relative path contains non-normal segment"),
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join("/");
-
-    if id.is_empty() {
-        bail!(
-            "node config item at {} has empty path-derived id",
-            path.display()
-        );
-    }
-
-    let ctx = NodeItemContext {
-        section: expected_section.to_string(),
-        id,
-        stem: stem.to_string(),
-        rel_path: rel_path.to_path_buf(),
-        source_file: path.to_path_buf(),
-        signer_fingerprint: signer_fingerprint.clone(),
-    };
-
-    Ok(VerifiedItem {
-        path: path.to_path_buf(),
-        ctx,
-        signer_fingerprint,
-        signer_verifying_key,
-        body,
-        signed_source: content.into(),
-    })
-}
-
-impl<'a> BootstrapLoader<'a> {
-    /// Phase 1: load only the `bundles` section to determine effective bundle roots.
-    ///
-    /// Scans `<app_root>/.ai/node/bundles/` (flat only — no recursion).
-    /// Uses minimal bootstrap verifier (signature + hash, no full engine).
-    pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
-        let section = BundleSection;
-        let mut records: Vec<BundleRecord> = Vec::new();
-
-        let node_dir = self
-            .app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node")
-            .join(section.name());
-        // Bundles use one exact flat YAML namespace. Missing is empty; any
-        // directory, symlink, special file, or non-YAML entry is an error.
-        for path in scan_yaml_files(&node_dir, false)? {
-            let verified = verify_and_parse(&path, &node_dir, section.name(), self.trust_store)?;
-
-            let mut record = section
-                .parse_bundle(&verified.ctx, &verified.body)
-                .with_context(|| {
-                    format!("failed to parse bundle record {}", verified.path.display())
-                })?;
-            record.source_file = verified.path.clone();
-
-            // Validate path: canonicalize, must exist as directory
-            if !record.path.is_dir() {
-                bail!(
-                    "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
-                    record.name,
-                    record.path.display(),
-                    record.source_file.display()
-                );
-            }
-
-            let canonical = record.path.canonicalize().with_context(|| {
-                format!(
-                    "failed to canonicalize bundle '{}' path '{}'",
-                    record.name,
-                    record.path.display()
-                )
-            })?;
-            record.path = canonical;
-
-            records.push(record);
-        }
-
-        // Collision detection: by canonical path AND by name (fail-closed)
-        check_bundle_collisions(&records)?;
-        validate_section_cardinality(&section, records.len())?;
-
-        Ok(records)
-    }
-
+impl<'a> NodeConfigLoader<'a> {
     /// Phase 2: full node-config scan across all sections and sources.
     ///
     /// Sections explicitly select app-root-only or app-root-plus-bundle scan scope.
@@ -498,9 +260,9 @@ impl<'a> BootstrapLoader<'a> {
         config_table: &NodeConfigTable,
         bundles: &[BundleRecord],
         command_registration_authority: &CommandRegistrationAuthority,
-        policy_table: &crate::node_policy::NodePolicyTable,
+        policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
     ) -> Result<NodeConfigSnapshot> {
-        let node_fingerprint = node_identity_fingerprint(self.app_root)?;
+        let node_fingerprint = ryeos_node_runtime::identity::node_identity_fingerprint(self.app_root)?;
         command_registration_authority
             .require_bundle_sources(bundles.iter().map(|bundle| bundle.name.as_str()))?;
         let mut builder =
@@ -550,11 +312,11 @@ impl<'a> BootstrapLoader<'a> {
                     verify_section_signer(section, &verified, &node_fingerprint)?;
                     let record =
                         section
-                            .parse(&verified.ctx, &verified.body)
+                            .parse(verified.context(), verified.body())
                             .with_context(|| {
                                 format!(
                                     "failed to parse node config item {} in section '{}'",
-                                    verified.path.display(),
+                                    verified.path().display(),
                                     section_name
                                 )
                             })?;
@@ -569,21 +331,6 @@ impl<'a> BootstrapLoader<'a> {
     }
 }
 
-pub(crate) fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
-    let key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("identity")
-        .join("private_key.pem");
-    let identity =
-        ryeos_node_runtime::identity::NodeIdentity::load(&key_path).with_context(|| {
-            format!(
-                "load node identity for node-owned command registration policy from {}",
-                key_path.display()
-            )
-        })?;
-    Ok(identity.fingerprint().to_string())
-}
 
 fn system_scan_root(app_root: &Path, policy: &CommandRegistrationAuthority) -> NodeConfigScanRoot {
     NodeConfigScanRoot {
@@ -637,18 +384,18 @@ fn section_scan_roots(
 
 fn verify_section_signer(
     section: &dyn NodeConfigSection,
-    item: &VerifiedItem,
+    item: &VerifiedNodeConfigItem,
     node_fingerprint: &str,
 ) -> Result<()> {
     if section.load_spec().signer == SectionSignerPolicy::CurrentNode
-        && item.signer_fingerprint != node_fingerprint
+        && item.signer_fingerprint() != node_fingerprint
     {
         bail!(
             "node-config item {} in section `{}` must be signed by current node {}; got {}",
-            item.path.display(),
+            item.path().display(),
             section.name(),
             node_fingerprint,
-            item.signer_fingerprint
+            item.signer_fingerprint()
         );
     }
     Ok(())
@@ -673,7 +420,7 @@ fn validate_section_cardinality(section: &dyn NodeConfigSection, count: usize) -
 
 fn reject_disallowed_bundle_section_contributions(
     config_table: &NodeConfigTable,
-    policy_table: &crate::node_policy::NodePolicyTable,
+    policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
     bundles: &[BundleRecord],
 ) -> Result<()> {
     let mut forbidden_directories = BTreeSet::new();
@@ -683,7 +430,7 @@ fn reject_disallowed_bundle_section_contributions(
         }
         forbidden_directories.insert(section.name());
     }
-    forbidden_directories.insert(crate::node_policy::generation::POLICIES_DIRECTORY);
+    forbidden_directories.insert(ryeos_node_runtime::node_policy::generation::POLICIES_DIRECTORY);
     for section in policy_table.sections() {
         forbidden_directories.insert(section.name());
     }
@@ -717,16 +464,6 @@ fn reject_disallowed_bundle_section_contributions(
 }
 
 /// Strip the signature line(s) from the top of a file.
-fn strip_signature(content: &str) -> String {
-    content
-        .lines()
-        .skip_while(|l| l.starts_with("# ryeos:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_start()
-        .to_string()
-}
-
 fn validate_prospective_bundle_records(records: &[BundleRecord]) -> Result<Vec<BundleRecord>> {
     let mut validated = Vec::with_capacity(records.len());
     for record in records {
@@ -758,46 +495,6 @@ fn validate_prospective_bundle_records(records: &[BundleRecord]) -> Result<Vec<B
     Ok(validated)
 }
 
-/// Fail-closed collision detection for bundle records.
-///
-/// Errors if two records share either:
-/// - the same canonical path (the engine would mount the same bundle twice), or
-/// - the same name (accidental duplicate registration).
-///
-/// All `BundleRecord::path` values must already be canonicalized before this
-/// is called.
-fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
-    let mut by_path: HashMap<&Path, &BundleRecord> = HashMap::new();
-    let mut by_name: HashMap<&str, &BundleRecord> = HashMap::new();
-
-    for record in records {
-        if let Some(prev) = by_name.get(record.name.as_str()) {
-            bail!(
-                "node config section 'bundles' has duplicate name '{}': \
-                 first registered from '{}' (path: {}), second from '{}' (path: {})",
-                record.name,
-                prev.source_file.display(),
-                prev.path.display(),
-                record.source_file.display(),
-                record.path.display(),
-            );
-        }
-        if let Some(prev) = by_path.get(record.path.as_path()) {
-            bail!(
-                "node config section 'bundles' has duplicate canonical path '{}': \
-                 first registered as '{}' (from {}), second as '{}' (from {})",
-                record.path.display(),
-                prev.name,
-                prev.source_file.display(),
-                record.name,
-                record.source_file.display(),
-            );
-        }
-        by_name.insert(record.name.as_str(), record);
-        by_path.insert(record.path.as_path(), record);
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -886,18 +583,13 @@ mod tests {
         let write = |body: &Value| {
             fs::write(
                 &path,
-                ryeos_node_runtime::node_document::render_signed_item(
-                    SECTION_NAME,
-                    "primary",
-                    body,
-                    &identity,
-                )
-                .unwrap(),
+                ryeos_node_runtime::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
+                    .unwrap(),
             )
             .unwrap()
         };
         write(&body);
-        let loader = BootstrapLoader {
+        let loader = NodeConfigLoader {
             app_root: system.path(),
             trust_store: &trust,
         };
@@ -906,7 +598,7 @@ mod tests {
                 &NodeConfigTable::new(),
                 &[],
                 &command_policy([]),
-                &crate::node_policy::NodePolicyTable::new(),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
             )
         };
         let first = load().unwrap();
@@ -1098,7 +790,7 @@ mod tests {
         let files = scan_yaml_files(&dir, false).unwrap();
         let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
         assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
-        let record = section.parse(&verified.ctx, &verified.body).unwrap();
+        let record = section.parse(verified.context(), verified.body()).unwrap();
         let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         let source = NodeConfigSource::Node {
             command_registration_caps: Vec::new(),
@@ -1107,7 +799,7 @@ mod tests {
         assert!(
             builder
                 .admit(
-                    section.parse(&verified.ctx, &verified.body).unwrap(),
+                    section.parse(verified.context(), verified.body()).unwrap(),
                     &verified,
                     &source
                 )
@@ -1131,7 +823,7 @@ mod tests {
                     &NodeConfigTable::new(),
                     &[contributed],
                     &command_policy([("test", Vec::new())]),
-                    &crate::node_policy::NodePolicyTable::new()
+                    &ryeos_node_runtime::node_policy::NodePolicyTable::new()
                 )
                 .is_err()
         );
@@ -1615,7 +1307,7 @@ mod tests {
         }];
         let command_policy = command_policy([("ryeos-ui", Vec::new())]);
 
-        let loader = BootstrapLoader {
+        let loader = NodeConfigLoader {
             app_root: system.path(),
             trust_store: &trust_store,
         };
@@ -1624,7 +1316,7 @@ mod tests {
                 &NodeConfigTable::new(),
                 &bundles,
                 &command_policy,
-                &crate::node_policy::NodePolicyTable::new(),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
             )
             .expect("load full node config with RyeOS UI bundle");
 

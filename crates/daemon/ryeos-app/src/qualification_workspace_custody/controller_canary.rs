@@ -357,6 +357,7 @@ mod tests {
             fixture
                 .state
                 .remove_empty_child_if_same(OsStr::new(DIRECTORY), &child)
+                .map(|receipt| receipt.is_some())
                 .unwrap();
             assert!(
                 slot.create(

@@ -295,7 +295,7 @@ fn prepare_original_qualification_guest_scratch_under_gate(
     let guard = Arc::new(TempDirGuard::new_pinned(
         parent,
         std::ffi::OsString::from(&placement),
-        child,
+        Arc::new(child),
     ));
     guard
         .owned_scratch_root()?

@@ -2,6 +2,7 @@
 //! No image digest or substrate receipt is an input: those are measured only
 //! after this exact signed/qualified Core generation is packaged.
 
+use ryeos_bundle_publication_contract::{CORE_SEED_QUALIFIER, CORE_SEED_QUALIFICATION_POLICY, CORE_SEED_QUALIFICATION_CLAIM};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,9 +11,6 @@ pub const BUILD_GRAPH: &str = "graph:ryeos/bundle-release/core-seed-build";
 pub const CAPTURE_GRAPH: &str = "graph:ryeos/bundle-release/core-seed-capture";
 pub const BUILD_RECIPE: &str = "config:bundle-release/core-seed-build-products";
 pub const CAPTURE_RECIPE: &str = "config:bundle-release/core-seed-capture-products";
-pub const QUALIFIER: &str = "tool:ryeos/bundle-release/core-seed-qualify";
-pub const QUALIFICATION_POLICY: &str = "config:bundle-release/core-seed-qualification";
-pub const QUALIFICATION_CLAIM: &str = "substrate_core_seed_checks_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,9 +149,9 @@ impl CoreSeedRecipeRequest {
                 "signed_core_seed",
                 "products/signed-core-seed",
                 "signed_core_seed_to_qualification",
-                QUALIFIER,
+                CORE_SEED_QUALIFIER,
                 "subject",
-                json!({"policy_ref":QUALIFICATION_POLICY,"required_claims":[QUALIFICATION_CLAIM]}),
+                json!({"policy_ref":CORE_SEED_QUALIFICATION_POLICY,"required_claims":[CORE_SEED_QUALIFICATION_CLAIM]}),
             ),
         };
         let bounds = json!({"maximum_entries":4096,"maximum_depth":32,
@@ -321,7 +319,7 @@ mod tests {
         assert_eq!(relation["producer"]["canonical_ref"], CAPTURE_GRAPH);
         assert_eq!(
             relation["qualification"],
-            json!({"policy_ref":QUALIFICATION_POLICY,"required_claims":[QUALIFICATION_CLAIM]})
+            json!({"policy_ref":CORE_SEED_QUALIFICATION_POLICY,"required_claims":[CORE_SEED_QUALIFICATION_CLAIM]})
         );
         assert_eq!(relation["producer"]["parameters"], recipe.parameters());
         let qualifier_input = &body["product_relationships"]["relationships"][1];

@@ -73,8 +73,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 
 const QUALIFICATION_POLICY_FIELD: &str = "product_qualification_policy";
@@ -1584,7 +1584,7 @@ pub(super) fn prepare_activated_bundle_consumer_content_inputs(
     let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     result.require_external_runtime_member_alignment(
         state,
@@ -2297,7 +2297,7 @@ impl PreparedExternalQualificationRoot {
         let guard = authority.acquire_shared_guard()?;
         let limits = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let admitted = self.invocation.authenticate(
             state,

@@ -187,7 +187,9 @@ pub fn materialize_bundle_tree(
     })();
     if result.is_err() {
         let _ = root.remove_contents_recursive();
-        let _ = parent.remove_empty_child_if_same(name, &root);
+        let _ = parent
+            .remove_empty_child_if_same(name, &root)
+            .map(|receipt| receipt.is_some());
     }
     result
 }

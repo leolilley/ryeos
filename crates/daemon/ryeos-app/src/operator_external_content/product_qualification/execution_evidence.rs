@@ -1013,7 +1013,7 @@ fn corroborate_qualification_worker_transcript(
         )?;
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let (witness_hash, witness_source, _) = input.purpose.subject.captured_product()?;
     let product = super::super::product_receipt::load_product_source(
@@ -1188,7 +1188,7 @@ fn verify_retained_remote_consumer(
 ) -> anyhow::Result<()> {
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let capsule = AdmittedLaunchCapsule::from_current_value(
         ryeos_state::object_closure::load_exact_capsule_object_with_cas(
@@ -1587,7 +1587,7 @@ pub(in crate::operator_external_content) fn verify_current(
         // proof cannot stand in for a missing or different journal record.
         let limits = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let capsule = AdmittedLaunchCapsule::from_current_value(
             ryeos_state::object_closure::load_exact_capsule_object_with_cas(
@@ -1672,7 +1672,7 @@ pub(in crate::operator_external_content) fn verify_current(
         }
         let limits = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let child_capsule = AdmittedLaunchCapsule::from_current_value(
             ryeos_state::object_closure::load_exact_capsule_object_with_cas(

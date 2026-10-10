@@ -281,10 +281,12 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<qualification_fixture_receiver::QualificationScopeSettlementPlan>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        let plan = prepare_qualification_scope_settlement_tx(&tx, placement, true)?;
-        tx.commit()?;
-        Ok(plan)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let plan = prepare_qualification_scope_settlement_tx(&tx, placement, true)?;
+            tx.commit()?;
+            Ok(plan)
+        })
     }
 
     /// Recover only the single applied, authenticated runtime receipt for this
@@ -294,48 +296,50 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<RetainedExternalRuntimeApplied>> {
-        let binding = load_binding(&self.conn, placement)?;
-        NodeJournalOwner.require_owner(&self.conn, &binding)?;
-        let digest = binding.digest()?;
-        let mut statement = self.conn.prepare(
-            "SELECT sequence,frame_digest,frame_json,application
+        self.conn.with_sql(|conn| {
+            let binding = load_binding(&conn, placement)?;
+            NodeJournalOwner.require_owner(&conn, &binding)?;
+            let digest = binding.digest()?;
+            let mut statement = conn.prepare(
+                "SELECT sequence,frame_digest,frame_json,application
              FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
              ORDER BY sequence LIMIT 2",
-        )?;
-        let mut rows = statement.query([&digest])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let sequence: i64 = row.get(0)?;
-        let stored_digest: String = row.get(1)?;
-        let wire: String = row.get(2)?;
-        let application: String = row.get(3)?;
-        ensure!(
-            rows.next()?.is_none(),
-            "external runtime has multiple applied observations"
-        );
-        ensure!(
-            application == "applied",
-            "external runtime observation has not been applied"
-        );
-        let frame = SignedExecutionFrame::decode_and_verify(
-            wire.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        ensure!(
-            frame.digest() == stored_digest
-                && frame.frame().direction == ChannelDirection::SupervisorToOwner
-                && i64::try_from(frame.frame().sequence)? == sequence
-                && matches!(
-                    frame.frame().payload,
-                    ExecutionChannelPayload::RuntimeApplied { .. }
-                ),
-            "retained runtime observation contradicts its signed frame"
-        );
-        Ok(Some(RetainedExternalRuntimeApplied { binding, frame }))
+            )?;
+            let mut rows = statement.query([&digest])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            let sequence: i64 = row.get(0)?;
+            let stored_digest: String = row.get(1)?;
+            let wire: String = row.get(2)?;
+            let application: String = row.get(3)?;
+            ensure!(
+                rows.next()?.is_none(),
+                "external runtime has multiple applied observations"
+            );
+            ensure!(
+                application == "applied",
+                "external runtime observation has not been applied"
+            );
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                frame.digest() == stored_digest
+                    && frame.frame().direction == ChannelDirection::SupervisorToOwner
+                    && i64::try_from(frame.frame().sequence)? == sequence
+                    && matches!(
+                        frame.frame().payload,
+                        ExecutionChannelPayload::RuntimeApplied { .. }
+                    ),
+                "retained runtime observation contradicts its signed frame"
+            );
+            Ok(Some(RetainedExternalRuntimeApplied { binding, frame }))
+        })
     }
 
     /// Reconstruct only a complete target observation. Applying these frames
@@ -345,37 +349,39 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<ExternalDirectOutput>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let Some((result, frames)) = retained_external_direct_output(&tx, placement)? else {
-            return Ok(None);
-        };
-        for frame in &frames {
-            match journal::claim_application(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::SupervisorToOwner,
-                frame.frame().sequence,
-                frame.digest(),
-            )? {
-                journal::ApplicationClaim::Revoked => {
-                    bail!("retained target observation cannot be revoked execution input")
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let Some((result, frames)) = retained_external_direct_output(&tx, placement)? else {
+                return Ok(None);
+            };
+            for frame in &frames {
+                match journal::claim_application(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::SupervisorToOwner,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )? {
+                    journal::ApplicationClaim::Revoked => {
+                        bail!("retained target observation cannot be revoked execution input")
+                    }
+                    journal::ApplicationClaim::New(_)
+                    | journal::ApplicationClaim::AlreadyClaimed
+                    | journal::ApplicationClaim::AlreadyApplied => {}
                 }
-                journal::ApplicationClaim::New(_)
-                | journal::ApplicationClaim::AlreadyClaimed
-                | journal::ApplicationClaim::AlreadyApplied => {}
+                journal::finish_application(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::SupervisorToOwner,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )?;
             }
-            journal::finish_application(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::SupervisorToOwner,
-                frame.frame().sequence,
-                frame.digest(),
-            )?;
-        }
-        tx.commit()?;
-        Ok(Some(result))
+            tx.commit()?;
+            Ok(Some(result))
+        })
     }
 
     /// Read complete applied target data only after the peer applied Release.
@@ -385,10 +391,12 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<ExternalDirectOutput>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let output = complete_applied_direct_output_tx(&tx, placement)?;
-        tx.commit()?;
-        Ok(output)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let output = complete_applied_direct_output_tx(&tx, placement)?;
+            tx.commit()?;
+            Ok(output)
+        })
     }
 
     /// Historical normal-settlement evidence. Absence or ineligible execution
@@ -398,10 +406,12 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<ExternalDirectOutput>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let output = normal_settlement_output_tx(&tx, placement)?;
-        tx.commit()?;
-        Ok(output)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let output = normal_settlement_output_tx(&tx, placement)?;
+            tx.commit()?;
+            Ok(output)
+        })
     }
 
     /// Historical joined data from the SAME allocation/journal transaction.
@@ -412,34 +422,36 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<(ExternalAllocationRecord, ExternalDirectOutput)>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let Some(output) = normal_settlement_output_tx(&tx, placement)? else {
-            tx.commit()?;
-            return Ok(None);
-        };
-        let record = read(&tx, placement)?
-            .context("settled external direct output lost its retained allocation")?;
-        let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
-        else {
-            bail!("settled external direct output changed its retained owner kind");
-        };
-        let unstopped: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM thread_runtime
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let Some(output) = normal_settlement_output_tx(&tx, placement)? else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            let record = read(&tx, placement)?
+                .context("settled external direct output lost its retained allocation")?;
+            let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
+            else {
+                bail!("settled external direct output changed its retained owner kind");
+            };
+            let unstopped: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_runtime
              WHERE thread_id=?1 AND chain_root_id=?2 AND stop_requested_at_ms IS NULL)",
-            params![placement, chain_root_id],
-            |row| row.get(0),
-        )?;
-        if record.phase != ExternalAllocationPhase::Terminated || !unstopped {
+                params![placement, chain_root_id],
+                |row| row.get(0),
+            )?;
+            if record.phase != ExternalAllocationPhase::Terminated || !unstopped {
+                tx.commit()?;
+                return Ok(None);
+            }
+            // The normal reader already joins its DirectThread owner, exact intent,
+            // applied Release and raw terminal streams. Revalidate lifecycle death
+            // beside that same immutable program/capsule/occurrence, never separately
+            // sampled allocation facts or caller-supplied receipt JSON.
+            validate_lifecycle_evidence(&tx, &record)?;
             tx.commit()?;
-            return Ok(None);
-        }
-        // The normal reader already joins its DirectThread owner, exact intent,
-        // applied Release and raw terminal streams. Revalidate lifecycle death
-        // beside that same immutable program/capsule/occurrence, never separately
-        // sampled allocation facts or caller-supplied receipt JSON.
-        validate_lifecycle_evidence(&tx, &record)?;
-        tx.commit()?;
-        Ok(Some((record, output)))
+            Ok(Some((record, output)))
+        })
     }
 
     /// Read exact settled output for the ordinary terminal writer. The caller
@@ -450,48 +462,50 @@ impl RuntimeDb {
         placement: &str,
         current_launch_owner: &str,
     ) -> Result<ExternalDirectOutput> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let output = normal_settlement_output_tx(&tx, placement)?
-            .context("external direct finalization lacks complete normal settlement")?;
-        let record = read(&tx, placement)?.context("external direct allocation absent")?;
-        ensure!(
-            record.phase == ExternalAllocationPhase::Terminated,
-            "external direct finalization requires exact occurrence death"
-        );
-        validate_lifecycle_evidence(&tx, &record)?;
-        let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
-        else {
-            bail!("external direct finalization requires its retained direct owner");
-        };
-        let current: LaunchOwner = serde_json::from_str(current_launch_owner)?;
-        ensure!(
-            current.thread_id == placement
-                && current.daemon_generation_id == daemon_generation_id()
-                && lillux::canonical_json(&serde_json::to_value(&current)?)?
-                    == current_launch_owner,
-            "external direct finalization changed its current recovery owner"
-        );
-        let matches: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM thread_runtime r
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let output = normal_settlement_output_tx(&tx, placement)?
+                .context("external direct finalization lacks complete normal settlement")?;
+            let record = read(&tx, placement)?.context("external direct allocation absent")?;
+            ensure!(
+                record.phase == ExternalAllocationPhase::Terminated,
+                "external direct finalization requires exact occurrence death"
+            );
+            validate_lifecycle_evidence(&tx, &record)?;
+            let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
+            else {
+                bail!("external direct finalization requires its retained direct owner");
+            };
+            let current: LaunchOwner = serde_json::from_str(current_launch_owner)?;
+            ensure!(
+                current.thread_id == placement
+                    && current.daemon_generation_id == daemon_generation_id()
+                    && lillux::canonical_json(&serde_json::to_value(&current)?)?
+                        == current_launch_owner,
+                "external direct finalization changed its current recovery owner"
+            );
+            let matches: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_runtime r
              JOIN thread_launch_claim c ON c.thread_id=r.thread_id
              JOIN thread_launch_epoch e ON e.thread_id=r.thread_id
              WHERE r.thread_id=?1 AND r.chain_root_id=?2 AND r.stop_requested_at_ms IS NULL
                AND c.claimed_by=?3 AND c.claim_id=?4 AND e.last_epoch=?5)",
-            params![
-                placement,
-                chain_root_id,
-                current_launch_owner,
-                current.unpredictable_nonce,
-                i64::try_from(current.monotonic_launch_epoch)?
-            ],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            matches,
-            "external direct finalization has no current unstopped recovery claim"
-        );
-        tx.commit()?;
-        Ok(output)
+                params![
+                    placement,
+                    chain_root_id,
+                    current_launch_owner,
+                    current.unpredictable_nonce,
+                    i64::try_from(current.monotonic_launch_epoch)?
+                ],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                matches,
+                "external direct finalization has no current unstopped recovery claim"
+            );
+            tx.commit()?;
+            Ok(output)
+        })
     }
 
     /// Author exactly one completion-bound quiesce request, or return the
@@ -503,63 +517,65 @@ impl RuntimeDb {
         completion_request_digest: &str,
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
-        ensure!(
-            lillux::valid_hash(completion_request_digest)
-                && !completion_request_digest
-                    .bytes()
-                    .any(|byte| byte.is_ascii_uppercase()),
-            "external quiesce completion coordinate is not canonical"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        require_structured_session_channel(&binding)?;
-        NodeJournalOwner.require_owner(&tx, &binding)?;
-        let binding_digest = binding.digest()?;
-        let retained = {
-            let mut statement = tx.prepare(
-                "SELECT frame_json FROM external_execution_frame
+        self.conn.with_sql(|conn| {
+            ensure!(
+                lillux::valid_hash(completion_request_digest)
+                    && !completion_request_digest
+                        .bytes()
+                        .any(|byte| byte.is_ascii_uppercase()),
+                "external quiesce completion coordinate is not canonical"
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            require_structured_session_channel(&binding)?;
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            let binding_digest = binding.digest()?;
+            let retained = {
+                let mut statement = tx.prepare(
+                    "SELECT frame_json FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                    AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'
                  ORDER BY sequence",
-            )?;
-            statement
-                .query_map([&binding_digest], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        ensure!(
-            retained.len() <= 1,
-            "external channel retained competing quiesce requests"
-        );
-        let frame = if let Some(wire) = retained.into_iter().next() {
-            let frame = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
-                &binding,
-                binding.issued_at_ms,
-            )?;
+                )?;
+                statement
+                    .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
             ensure!(
-                matches!(
-                    &frame.frame().payload,
-                    ExecutionChannelPayload::Quiesce {
-                        completion_request_digest: retained,
-                    } if retained == completion_request_digest
-                ),
-                "external quiesce retry changed its completion coordinate"
+                retained.len() <= 1,
+                "external channel retained competing quiesce requests"
             );
-            frame
-        } else {
-            journal::author_frame(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::OwnerToSupervisor,
-                signing_key,
-                ExecutionChannelPayload::Quiesce {
-                    completion_request_digest: completion_request_digest.to_owned(),
-                },
-            )?
-        };
-        tx.commit()?;
-        Ok(frame)
+            let frame = if let Some(wire) = retained.into_iter().next() {
+                let frame = SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+                ensure!(
+                    matches!(
+                        &frame.frame().payload,
+                        ExecutionChannelPayload::Quiesce {
+                            completion_request_digest: retained,
+                        } if retained == completion_request_digest
+                    ),
+                    "external quiesce retry changed its completion coordinate"
+                );
+                frame
+            } else {
+                journal::author_frame(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    signing_key,
+                    ExecutionChannelPayload::Quiesce {
+                        completion_request_digest: completion_request_digest.to_owned(),
+                    },
+                )?
+            };
+            tx.commit()?;
+            Ok(frame)
+        })
     }
 
     /// Author one Q-only native completion request after the exact local
@@ -573,165 +589,167 @@ impl RuntimeDb {
         placement: &str,
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        ensure!(
-            matches!(
-                binding.execution_mode,
-                ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
-            ) && binding.candidate_export_max_bytes == 0,
-            "Q completion requires the zero-export qualification channel"
-        );
-        NodeJournalOwner.require_owner(&tx, &binding)?;
-        let allocation = read(&tx, placement)?.context("Q completion lost its allocation")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "Q completion has no live bound occurrence"
-        );
-        require_contactable_qualification_owner(&tx, &allocation.reservation)?;
-        let worker = qualification_process::require_terminal_qualification_worker_process(
-            &tx,
-            &allocation.reservation,
-        )?;
-        let binding_digest = binding.digest()?;
-        ensure!(
-            worker.channel_binding_digest == binding_digest && !revoked(&tx, &binding_digest)?,
-            "Q completion lost exact live channel or was cancelled"
-        );
-        let connector = connector::read_connector(&tx, placement)?
-            .context("Q completion lost its one-shot local connector")?;
-        let connector_peer = connector
-            .peer_process_identity
-            .as_ref()
-            .context("Q completion connector never authenticated a peer")?;
-        let connector_peer_incarnation = connector_peer
-            .incarnation_digest()
-            .map_err(anyhow::Error::msg)?;
-        // Connection admission already proved this peer belongs to the
-        // retained Worker scope. The peer may be a Worker subprocess.
-        ensure!(
-            connector.channel_binding_digest == binding_digest
-                && connector.phase == connector::ExternalConnectorPhase::Closed
-                && connector.close_reason.as_deref() == Some("completed")
-                && connector
-                    .connected_at_ms
-                    .is_some_and(|connected| { connected >= worker.attached_at_ms })
-                && connector.peer_process_identity_digest.as_deref()
-                    == Some(connector_peer_incarnation.as_str())
-                && connector_peer.boot_id == worker.process_identity.boot_id,
-            "Q completion has no normally retired scoped connector peer"
-        );
-        for kind in ["runtime_applied", "protocol_eof"] {
-            let count: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM external_execution_frame
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            ensure!(
+                matches!(
+                    binding.execution_mode,
+                    ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                ) && binding.candidate_export_max_bytes == 0,
+                "Q completion requires the zero-export qualification channel"
+            );
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            let allocation = read(&tx, placement)?.context("Q completion lost its allocation")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "Q completion has no live bound occurrence"
+            );
+            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+            let worker = qualification_process::require_terminal_qualification_worker_process(
+                &tx,
+                &allocation.reservation,
+            )?;
+            let binding_digest = binding.digest()?;
+            ensure!(
+                worker.channel_binding_digest == binding_digest && !revoked(&tx, &binding_digest)?,
+                "Q completion lost exact live channel or was cancelled"
+            );
+            let connector = connector::read_connector(&tx, placement)?
+                .context("Q completion lost its one-shot local connector")?;
+            let connector_peer = connector
+                .peer_process_identity
+                .as_ref()
+                .context("Q completion connector never authenticated a peer")?;
+            let connector_peer_incarnation = connector_peer
+                .incarnation_digest()
+                .map_err(anyhow::Error::msg)?;
+            // Connection admission already proved this peer belongs to the
+            // retained Worker scope. The peer may be a Worker subprocess.
+            ensure!(
+                connector.channel_binding_digest == binding_digest
+                    && connector.phase == connector::ExternalConnectorPhase::Closed
+                    && connector.close_reason.as_deref() == Some("completed")
+                    && connector
+                        .connected_at_ms
+                        .is_some_and(|connected| { connected >= worker.attached_at_ms })
+                    && connector.peer_process_identity_digest.as_deref()
+                        == Some(connector_peer_incarnation.as_str())
+                    && connector_peer.boot_id == worker.process_identity.boot_id,
+                "Q completion has no normally retired scoped connector peer"
+            );
+            for kind in ["runtime_applied", "protocol_eof"] {
+                let count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                    AND json_extract(frame_json,'$.frame.payload.kind')=?2",
-                params![&binding_digest, kind],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                count == 1,
-                "Q completion requires one exact native runtime and protocol EOF"
-            );
-        }
-        let applied_runtime: (String, String) = tx.query_row(
-            "SELECT frame_digest,frame_json FROM external_execution_frame
+                    params![&binding_digest, kind],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    count == 1,
+                    "Q completion requires one exact native runtime and protocol EOF"
+                );
+            }
+            let applied_runtime: (String, String) = tx.query_row(
+                "SELECT frame_digest,frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                AND application='applied'
                AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'",
-            [&binding_digest],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let runtime = SignedExecutionFrame::decode_and_verify(
-            applied_runtime.1.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        ensure!(
-            runtime.digest() == applied_runtime.0
-                && matches!(
-                    runtime.frame().payload,
-                    ExecutionChannelPayload::RuntimeApplied { .. }
-                ),
-            "Q completion has no exact applied native runtime"
-        );
-        let eof: (String, String) = tx.query_row(
-            "SELECT frame_digest,frame_json FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-               AND application='applied'
-               AND json_extract(frame_json,'$.frame.payload.kind')='protocol_eof'",
-            [&binding_digest],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let protocol_eof = SignedExecutionFrame::decode_and_verify(
-            eof.1.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        ensure!(
-            protocol_eof.digest() == eof.0
-                && matches!(
-                    protocol_eof.frame().payload,
-                    ExecutionChannelPayload::ProtocolEof
-                ),
-            "Q completion has no exact applied protocol EOF"
-        );
-        let completion_request_digest =
-            ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-                "domain": "ryeos.external-qualification-native-completion.v1",
-                "placement_thread_id": placement,
-                "binding_digest": binding_digest,
-                "accepted_root_id": worker.accepted_root_id,
-                "accepted_capsule_hash": worker.accepted_capsule_hash,
-                "qualification_operation_id": worker.qualification_operation_id,
-                "qualification_occurrence_id": worker.qualification_occurrence_id,
-                "local_process_identity": worker.process_identity,
-                "local_process_terminal_at_ms": worker.terminal_at_ms,
-                "local_connector_peer_incarnation": connector_peer_incarnation,
-                "runtime_applied_frame_digest": runtime.digest(),
-                "protocol_eof_frame_digest": protocol_eof.digest(),
-            }))?;
-        let mut statement = tx.prepare(
-            "SELECT frame_json FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'
-             ORDER BY sequence LIMIT 2",
-        )?;
-        let retained = statement
-            .query_map([&binding_digest], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
-        ensure!(
-            retained.len() <= 1,
-            "Q channel retained competing completion requests"
-        );
-        let frame = if let Some(wire) = retained.into_iter().next() {
-            let frame = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let runtime = SignedExecutionFrame::decode_and_verify(
+                applied_runtime.1.as_bytes(),
                 &binding,
                 binding.issued_at_ms,
             )?;
             ensure!(
-                matches!(&frame.frame().payload,
-                    ExecutionChannelPayload::QualificationComplete { completion_request_digest: retained }
-                    if retained == &completion_request_digest),
-                "Q completion retry changed its exact terminal coordinate"
+                runtime.digest() == applied_runtime.0
+                    && matches!(
+                        runtime.frame().payload,
+                        ExecutionChannelPayload::RuntimeApplied { .. }
+                    ),
+                "Q completion has no exact applied native runtime"
             );
-            frame
-        } else {
-            journal::author_frame(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::OwnerToSupervisor,
-                signing_key,
-                ExecutionChannelPayload::QualificationComplete {
-                    completion_request_digest,
-                },
-            )?
-        };
-        tx.commit()?;
-        Ok(frame)
+            let eof: (String, String) = tx.query_row(
+                "SELECT frame_digest,frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')='protocol_eof'",
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let protocol_eof = SignedExecutionFrame::decode_and_verify(
+                eof.1.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                protocol_eof.digest() == eof.0
+                    && matches!(
+                        protocol_eof.frame().payload,
+                        ExecutionChannelPayload::ProtocolEof
+                    ),
+                "Q completion has no exact applied protocol EOF"
+            );
+            let completion_request_digest =
+                ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+                    "domain": "ryeos.external-qualification-native-completion.v1",
+                    "placement_thread_id": placement,
+                    "binding_digest": binding_digest,
+                    "accepted_root_id": worker.accepted_root_id,
+                    "accepted_capsule_hash": worker.accepted_capsule_hash,
+                    "qualification_operation_id": worker.qualification_operation_id,
+                    "qualification_occurrence_id": worker.qualification_occurrence_id,
+                    "local_process_identity": worker.process_identity,
+                    "local_process_terminal_at_ms": worker.terminal_at_ms,
+                    "local_connector_peer_incarnation": connector_peer_incarnation,
+                    "runtime_applied_frame_digest": runtime.digest(),
+                    "protocol_eof_frame_digest": protocol_eof.digest(),
+                }))?;
+            let mut statement = tx.prepare(
+                "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'
+             ORDER BY sequence LIMIT 2",
+            )?;
+            let retained = statement
+                .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            ensure!(
+                retained.len() <= 1,
+                "Q channel retained competing completion requests"
+            );
+            let frame = if let Some(wire) = retained.into_iter().next() {
+                let frame = SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+                ensure!(
+                    matches!(&frame.frame().payload,
+                        ExecutionChannelPayload::QualificationComplete { completion_request_digest: retained }
+                        if retained == &completion_request_digest),
+                    "Q completion retry changed its exact terminal coordinate"
+                );
+                frame
+            } else {
+                journal::author_frame(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    signing_key,
+                    ExecutionChannelPayload::QualificationComplete {
+                        completion_request_digest,
+                    },
+                )?
+            };
+            tx.commit()?;
+            Ok(frame)
+        })
     }
 
     /// Read the one fully applied imported candidate for a placement. This is
@@ -741,73 +759,74 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<RetainedExternalCandidateImport>> {
-        let binding = match self.optional_external_execution_channel(placement)? {
-            Some(binding) => binding,
-            None => return Ok(None),
-        };
-        require_structured_session_channel(&binding)?;
-        NodeJournalOwner.require_owner(&self.conn, &binding)?;
-        let binding_digest = binding.digest()?;
-        let retained: Option<(String, Option<String>, String, String, String)> = self
-            .conn
-            .query_row(
-                "SELECT snapshot_hash,output_capture_hash,evidence_blob_hash,completion_request_digest,export_frame_digest
+        self.conn.with_sql(|conn| {
+            let binding = match self.optional_external_execution_channel(placement)? {
+                Some(binding) => binding,
+                None => return Ok(None),
+            };
+            require_structured_session_channel(&binding)?;
+            NodeJournalOwner.require_owner(&conn, &binding)?;
+            let binding_digest = binding.digest()?;
+            let retained: Option<(String, Option<String>, String, String, String)> = conn
+                .query_row(
+                    "SELECT snapshot_hash,output_capture_hash,evidence_blob_hash,completion_request_digest,export_frame_digest
                  FROM external_execution_import WHERE binding_digest=?1",
-                [&binding_digest],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            )
-            .optional()?;
-        let Some((
-            candidate_snapshot_hash,
-            candidate_output_capture_hash,
-            writer_exclusion_evidence_hash,
-            completion_request_digest,
-            seal_digest,
-        )) = retained
-        else {
-            return Ok(None);
-        };
-        let (seal_sequence, seal_wire, application): (i64, String, String) = self.conn.query_row(
-            "SELECT sequence,frame_json,application FROM external_execution_frame
+                    [&binding_digest],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .optional()?;
+            let Some((
+                candidate_snapshot_hash,
+                candidate_output_capture_hash,
+                writer_exclusion_evidence_hash,
+                completion_request_digest,
+                seal_digest,
+            )) = retained
+            else {
+                return Ok(None);
+            };
+            let (seal_sequence, seal_wire, application): (i64, String, String) = conn.query_row(
+                "SELECT sequence,frame_json,application FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                AND frame_digest=?2",
-            params![binding_digest, seal_digest],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        ensure!(
-            application == "applied",
-            "retained external candidate import has no applied seal"
-        );
-        let sealed = SignedExecutionFrame::decode_and_verify(
-            seal_wire.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        ensure!(
-            sealed.digest() == seal_digest
-                && matches!(
-                    &sealed.frame().payload,
-                    ExecutionChannelPayload::ExportSealed {
-                        candidate_snapshot_hash: snapshot,
-                        candidate_output_capture_hash: output_capture,
-                        completion_request_digest: completion,
-                        writer_exclusion_evidence_hash: evidence,
-                    } if snapshot == &candidate_snapshot_hash
-                        && output_capture == &candidate_output_capture_hash
-                        && completion == &completion_request_digest
-                        && evidence == &writer_exclusion_evidence_hash
-                ),
-            "retained external candidate import changed its authenticated seal"
-        );
-        Ok(Some(RetainedExternalCandidateImport {
-            binding,
-            candidate_snapshot_hash,
-            candidate_output_capture_hash,
-            completion_request_digest,
-            writer_exclusion_evidence_hash,
-            seal_sequence: u64::try_from(seal_sequence)?,
-            seal_digest,
-        }))
+                params![binding_digest, seal_digest],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(
+                application == "applied",
+                "retained external candidate import has no applied seal"
+            );
+            let sealed = SignedExecutionFrame::decode_and_verify(
+                seal_wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                sealed.digest() == seal_digest
+                    && matches!(
+                        &sealed.frame().payload,
+                        ExecutionChannelPayload::ExportSealed {
+                            candidate_snapshot_hash: snapshot,
+                            candidate_output_capture_hash: output_capture,
+                            completion_request_digest: completion,
+                            writer_exclusion_evidence_hash: evidence,
+                        } if snapshot == &candidate_snapshot_hash
+                            && output_capture == &candidate_output_capture_hash
+                            && completion == &completion_request_digest
+                            && evidence == &writer_exclusion_evidence_hash
+                    ),
+                "retained external candidate import changed its authenticated seal"
+            );
+            Ok(Some(RetainedExternalCandidateImport {
+                binding,
+                candidate_snapshot_hash,
+                candidate_output_capture_hash,
+                completion_request_digest,
+                writer_exclusion_evidence_hash,
+                seal_sequence: u64::try_from(seal_sequence)?,
+                seal_digest,
+            }))
+        })
     }
 
     /// Claim the next exact remote protocol-output frame for the protected
@@ -818,103 +837,105 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<ExternalProtocolOutputClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        require_session_protocol_channel(&binding)?;
-        NodeJournalOwner.require_owner(&tx, &binding)?;
-        let row: Option<(i64, String, String, String)> = tx
-            .query_row(
-                "SELECT sequence,frame_digest,application,frame_json
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            require_session_protocol_channel(&binding)?;
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            let row: Option<(i64, String, String, String)> = tx
+                .query_row(
+                    "SELECT sequence,frame_digest,application,frame_json
                    FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                     AND application IN ('pending','claimed')
                     AND json_extract(frame_json,'$.frame.payload.kind')
                         IN ('protocol_bytes','protocol_eof')
                   ORDER BY sequence LIMIT 1",
-                [binding.digest()?],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let Some((sequence, frame_digest, application, wire)) = row else {
-            tx.commit()?;
-            return Ok(ExternalProtocolOutputClaim::Idle);
-        };
-        let sequence = u64::try_from(sequence)?;
-        let retained = SignedExecutionFrame::decode_and_verify(
-            wire.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        ensure!(
-            retained.frame().sequence == sequence
-                && retained.digest() == frame_digest
-                && matches!(
-                    retained.frame().payload,
+                    [binding.digest()?],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((sequence, frame_digest, application, wire)) = row else {
+                tx.commit()?;
+                return Ok(ExternalProtocolOutputClaim::Idle);
+            };
+            let sequence = u64::try_from(sequence)?;
+            let retained = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                retained.frame().sequence == sequence
+                    && retained.digest() == frame_digest
+                    && matches!(
+                        retained.frame().payload,
+                        ExecutionChannelPayload::ProtocolBytes { .. }
+                            | ExecutionChannelPayload::ProtocolEof
+                    ),
+                "external protocol output changed after retention"
+            );
+            if application == "claimed" {
+                tx.commit()?;
+                return Ok(ExternalProtocolOutputClaim::Uncertain {
+                    sequence,
+                    frame_digest,
+                });
+            }
+            ensure!(
+                application == "pending",
+                "external protocol output retained an unknown application state"
+            );
+            // This claim authorizes fresh delivery into the live controller
+            // connector. Retaining/retransmitting a historical supervisor
+            // observation is a different operation and must remain possible while
+            // late peer evidence settles uncertainty. Already-claimed output above
+            // is never re-delivered or made current by this check.
+            ensure!(
+                lillux::time::timestamp_millis() < binding.execution_deadline_ms
+                    && !revoked(&tx, &binding.digest()?)?,
+                "external protocol output delivery authority has expired or been revoked"
+            );
+            let phase: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                ryeos_state::external_execution::transcript::ChannelPhase::parse(&phase)?
+                    .permits_pending_input(),
+                "external protocol output cannot be newly delivered after stop"
+            );
+            if matches!(
+                binding.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+            ) {
+                let allocation = read(&tx, placement)?
+                    .context("external qualification protocol output lost its allocation")?;
+                require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+            }
+            let claimed = journal::claim_application(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::SupervisorToOwner,
+                sequence,
+                &frame_digest,
+            )?;
+            let journal::ApplicationClaim::New(frame) = claimed else {
+                bail!("external protocol output claim changed during its transaction")
+            };
+            ensure!(
+                matches!(
+                    frame.frame().payload,
                     ExecutionChannelPayload::ProtocolBytes { .. }
                         | ExecutionChannelPayload::ProtocolEof
                 ),
-            "external protocol output changed after retention"
-        );
-        if application == "claimed" {
+                "external protocol output selection changed after claim"
+            );
             tx.commit()?;
-            return Ok(ExternalProtocolOutputClaim::Uncertain {
-                sequence,
-                frame_digest,
-            });
-        }
-        ensure!(
-            application == "pending",
-            "external protocol output retained an unknown application state"
-        );
-        // This claim authorizes fresh delivery into the live controller
-        // connector. Retaining/retransmitting a historical supervisor
-        // observation is a different operation and must remain possible while
-        // late peer evidence settles uncertainty. Already-claimed output above
-        // is never re-delivered or made current by this check.
-        ensure!(
-            lillux::time::timestamp_millis() < binding.execution_deadline_ms
-                && !revoked(&tx, &binding.digest()?)?,
-            "external protocol output delivery authority has expired or been revoked"
-        );
-        let phase: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            ryeos_state::external_execution::transcript::ChannelPhase::parse(&phase)?
-                .permits_pending_input(),
-            "external protocol output cannot be newly delivered after stop"
-        );
-        if matches!(
-            binding.execution_mode,
-            ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
-        ) {
-            let allocation = read(&tx, placement)?
-                .context("external qualification protocol output lost its allocation")?;
-            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
-        }
-        let claimed = journal::claim_application(
-            &tx,
-            &NodeJournalOwner,
-            placement,
-            ChannelDirection::SupervisorToOwner,
-            sequence,
-            &frame_digest,
-        )?;
-        let journal::ApplicationClaim::New(frame) = claimed else {
-            bail!("external protocol output claim changed during its transaction")
-        };
-        ensure!(
-            matches!(
-                frame.frame().payload,
-                ExecutionChannelPayload::ProtocolBytes { .. }
-                    | ExecutionChannelPayload::ProtocolEof
-            ),
-            "external protocol output selection changed after claim"
-        );
-        tx.commit()?;
-        Ok(ExternalProtocolOutputClaim::Claimed(frame))
+            Ok(ExternalProtocolOutputClaim::Claimed(frame))
+        })
     }
 
     /// Return complete sealed exports whose exact Quiesce prerequisite is
@@ -924,9 +945,10 @@ impl RuntimeDb {
         &self,
         placement_filter: Option<&str>,
     ) -> Result<Vec<ExternalCandidateImportTarget>> {
-        let rows = {
-            let mut statement = self.conn.prepare(
-                "SELECT c.placement_thread_id,c.binding_json,f.sequence,
+        self.conn.with_sql(|conn| {
+            let rows = {
+                let mut statement = conn.prepare(
+                    "SELECT c.placement_thread_id,c.binding_json,f.sequence,
                         f.frame_digest,f.frame_json,f.application
                  FROM external_execution_frame f
                  JOIN external_execution_channel c ON c.binding_digest=f.binding_digest
@@ -934,86 +956,87 @@ impl RuntimeDb {
                    AND f.application IN ('pending','claimed')
                    AND json_extract(f.frame_json,'$.frame.payload.kind')='export_sealed'
                  ORDER BY c.placement_thread_id,f.sequence",
-            )?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut targets = Vec::new();
-        let mut seen_placements = BTreeSet::new();
-        for (placement, binding_json, sequence, digest, wire, application) in rows {
-            if placement_filter.is_some_and(|filter| filter != placement.as_str()) {
-                continue;
-            }
-            ensure!(
-                seen_placements.insert(placement.clone()),
-                "external channel retained competing candidate export seals"
-            );
-            let binding: ExecutionChannelBinding = serde_json::from_str(&binding_json)?;
-            require_structured_session_channel(&binding)?;
-            ensure!(
-                binding.placement_thread_id == placement,
-                "external import target changed its channel placement"
-            );
-            NodeJournalOwner.require_owner(&self.conn, &binding)?;
-            let verified = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
-                &binding,
-                binding.issued_at_ms,
-            )?;
-            ensure!(
-                verified.digest() == digest
-                    && verified.frame().sequence == u64::try_from(sequence)?,
-                "external import target changed authenticated seal identity"
-            );
-            let completion_request_digest = match &verified.frame().payload {
-                ExecutionChannelPayload::ExportSealed {
-                    completion_request_digest,
-                    ..
-                } => completion_request_digest,
-                _ => bail!("external import target is not a sealed export"),
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
             };
-            let quiesce_count: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM external_execution_frame
+            let mut targets = Vec::new();
+            let mut seen_placements = BTreeSet::new();
+            for (placement, binding_json, sequence, digest, wire, application) in rows {
+                if placement_filter.is_some_and(|filter| filter != placement.as_str()) {
+                    continue;
+                }
+                ensure!(
+                    seen_placements.insert(placement.clone()),
+                    "external channel retained competing candidate export seals"
+                );
+                let binding: ExecutionChannelBinding = serde_json::from_str(&binding_json)?;
+                require_structured_session_channel(&binding)?;
+                ensure!(
+                    binding.placement_thread_id == placement,
+                    "external import target changed its channel placement"
+                );
+                NodeJournalOwner.require_owner(&conn, &binding)?;
+                let verified = SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+                ensure!(
+                    verified.digest() == digest
+                        && verified.frame().sequence == u64::try_from(sequence)?,
+                    "external import target changed authenticated seal identity"
+                );
+                let completion_request_digest = match &verified.frame().payload {
+                    ExecutionChannelPayload::ExportSealed {
+                        completion_request_digest,
+                        ..
+                    } => completion_request_digest,
+                    _ => bail!("external import target is not a sealed export"),
+                };
+                let quiesce_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                    AND application='applied'
                    AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'
                    AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?2",
-                params![binding.digest()?, completion_request_digest],
-                |row| row.get(0),
-            )?;
-            if quiesce_count == 0 {
-                continue;
-            }
-            ensure!(
-                quiesce_count == 1,
-                "external import target has ambiguous applied quiescence"
-            );
-            if application == "pending" {
-                let allocation = read(&self.conn, &placement)?
-                    .context("external import target lost its allocation")?;
-                if allocation.phase != ExternalAllocationPhase::Bound
-                    || revoked(&self.conn, &binding.digest()?)?
-                {
+                    params![binding.digest()?, completion_request_digest],
+                    |row| row.get(0),
+                )?;
+                if quiesce_count == 0 {
                     continue;
                 }
+                ensure!(
+                    quiesce_count == 1,
+                    "external import target has ambiguous applied quiescence"
+                );
+                if application == "pending" {
+                    let allocation = read(&conn, &placement)?
+                        .context("external import target lost its allocation")?;
+                    if allocation.phase != ExternalAllocationPhase::Bound
+                        || revoked(&conn, &binding.digest()?)?
+                    {
+                        continue;
+                    }
+                }
+                targets.push(ExternalCandidateImportTarget {
+                    placement,
+                    seal_sequence: u64::try_from(sequence)?,
+                    seal_digest: digest,
+                });
             }
-            targets.push(ExternalCandidateImportTarget {
-                placement,
-                seal_sequence: u64::try_from(sequence)?,
-                seal_digest: digest,
-            });
-        }
-        Ok(targets)
+            Ok(targets)
+        })
     }
 
     /// Accept only terminal revocation without waiting for missing protocol
@@ -1025,15 +1048,19 @@ impl RuntimeDb {
         placement: &str,
         wire: &[u8],
     ) -> Result<bool> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let result = journal::record_revocation(&tx, &NodeJournalOwner, placement, wire)?;
-        tx.commit()?;
-        Ok(result)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let result = journal::record_revocation(&tx, &NodeJournalOwner, placement, wire)?;
+            tx.commit()?;
+            Ok(result)
+        })
     }
 
     pub fn external_execution_revoked(&self, placement: &str) -> Result<bool> {
-        let binding = load_binding(&self.conn, placement)?;
-        revoked(&self.conn, &binding.digest()?)
+        self.conn.with_sql(|conn| {
+            let binding = load_binding(&conn, placement)?;
+            revoked(&conn, &binding.digest()?)
+        })
     }
 
     /// Retain a fully validated content closure before releasing the import
@@ -1044,10 +1071,12 @@ impl RuntimeDb {
         verified: &ryeos_state::external_execution::export::ValidatedCandidateRetention<'_>,
         authority: &ryeos_state::PinnedStateAuthority,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        retain_external_candidate_import_tx(&tx, placement, verified, authority)?;
-        tx.commit()?;
-        Ok(())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            retain_external_candidate_import_tx(&tx, placement, verified, authority)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Atomically claim the complete retained export prefix. Individual chunks
@@ -1061,222 +1090,224 @@ impl RuntimeDb {
         seal_sequence: u64,
         seal_digest: &str,
     ) -> Result<ExternalCandidateImportClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        require_structured_session_channel(&binding)?;
-        NodeJournalOwner.require_owner(&tx, &binding)?;
-        let binding_digest = binding.digest()?;
-        let target: (String, String, String) = tx.query_row(
-            "SELECT frame_digest,application,frame_json FROM external_execution_frame
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            require_structured_session_channel(&binding)?;
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            let binding_digest = binding.digest()?;
+            let target: (String, String, String) = tx.query_row(
+                "SELECT frame_digest,application,frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=?2",
-            params![binding_digest, i64::try_from(seal_sequence)?],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        ensure!(
-            target.0 == seal_digest,
-            "external import seal digest changed"
-        );
-        let sealed = SignedExecutionFrame::decode_and_verify(
-            target.2.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        let (
-            candidate_snapshot_hash,
-            candidate_output_capture_hash,
-            completion_request_digest,
-            writer_exclusion_evidence_hash,
-        ) = match &sealed.frame().payload {
-            ExecutionChannelPayload::ExportSealed {
+                params![binding_digest, i64::try_from(seal_sequence)?],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(
+                target.0 == seal_digest,
+                "external import seal digest changed"
+            );
+            let sealed = SignedExecutionFrame::decode_and_verify(
+                target.2.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            let (
                 candidate_snapshot_hash,
                 candidate_output_capture_hash,
                 completion_request_digest,
                 writer_exclusion_evidence_hash,
-            } => (
-                candidate_snapshot_hash.clone(),
-                candidate_output_capture_hash.clone(),
-                completion_request_digest.clone(),
-                writer_exclusion_evidence_hash.clone(),
-            ),
-            _ => bail!("external candidate import target is not a sealed export"),
-        };
-
-        if target.1 == "applied" {
-            let retained: Option<(String, Option<String>, String, String, String)> = tx
-                .query_row(
-                    "SELECT snapshot_hash,output_capture_hash,evidence_blob_hash,completion_request_digest,export_frame_digest
-                     FROM external_execution_import WHERE binding_digest=?1",
-                    [&binding_digest],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                )
-                .optional()?;
-            ensure!(
-                retained
-                    == Some((
-                        candidate_snapshot_hash.clone(),
-                        candidate_output_capture_hash.clone(),
-                        writer_exclusion_evidence_hash.clone(),
-                        completion_request_digest.clone(),
-                        seal_digest.to_owned(),
-                    )),
-                "applied external export lost its exact retained import"
-            );
-            tx.commit()?;
-            return Ok(ExternalCandidateImportClaim::AlreadyApplied(
-                RetainedExternalCandidateImport {
-                    binding,
+            ) = match &sealed.frame().payload {
+                ExecutionChannelPayload::ExportSealed {
                     candidate_snapshot_hash,
                     candidate_output_capture_hash,
                     completion_request_digest,
                     writer_exclusion_evidence_hash,
-                    seal_sequence,
-                    seal_digest: seal_digest.to_owned(),
-                },
-            ));
-        }
-        ensure!(
-            matches!(target.1.as_str(), "pending" | "claimed"),
-            "sealed external export is not importable"
-        );
+                } => (
+                    candidate_snapshot_hash.clone(),
+                    candidate_output_capture_hash.clone(),
+                    completion_request_digest.clone(),
+                    writer_exclusion_evidence_hash.clone(),
+                ),
+                _ => bail!("external candidate import target is not a sealed export"),
+            };
 
-        let quiesce_wires = {
-            let mut statement = tx.prepare(
-                "SELECT frame_json FROM external_execution_frame
+            if target.1 == "applied" {
+                let retained: Option<(String, Option<String>, String, String, String)> = tx
+                    .query_row(
+                        "SELECT snapshot_hash,output_capture_hash,evidence_blob_hash,completion_request_digest,export_frame_digest
+                     FROM external_execution_import WHERE binding_digest=?1",
+                        [&binding_digest],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                    )
+                    .optional()?;
+                ensure!(
+                    retained
+                        == Some((
+                            candidate_snapshot_hash.clone(),
+                            candidate_output_capture_hash.clone(),
+                            writer_exclusion_evidence_hash.clone(),
+                            completion_request_digest.clone(),
+                            seal_digest.to_owned(),
+                        )),
+                    "applied external export lost its exact retained import"
+                );
+                tx.commit()?;
+                return Ok(ExternalCandidateImportClaim::AlreadyApplied(
+                    RetainedExternalCandidateImport {
+                        binding,
+                        candidate_snapshot_hash,
+                        candidate_output_capture_hash,
+                        completion_request_digest,
+                        writer_exclusion_evidence_hash,
+                        seal_sequence,
+                        seal_digest: seal_digest.to_owned(),
+                    },
+                ));
+            }
+            ensure!(
+                matches!(target.1.as_str(), "pending" | "claimed"),
+                "sealed external export is not importable"
+            );
+
+            let quiesce_wires = {
+                let mut statement = tx.prepare(
+                    "SELECT frame_json FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                  AND application='applied'
                  AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'
                  AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?2
                  ORDER BY sequence ASC LIMIT 2",
+                )?;
+                statement
+                    .query_map(params![binding_digest, completion_request_digest], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            ensure!(
+                quiesce_wires.len() == 1,
+                "external candidate import requires one exact applied quiesce"
+            );
+            let quiesce = SignedExecutionFrame::decode_and_verify(
+                quiesce_wires[0].as_bytes(),
+                &binding,
+                binding.issued_at_ms,
             )?;
-            statement
-                .query_map(params![binding_digest, completion_request_digest], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        ensure!(
-            quiesce_wires.len() == 1,
-            "external candidate import requires one exact applied quiesce"
-        );
-        let quiesce = SignedExecutionFrame::decode_and_verify(
-            quiesce_wires[0].as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
 
-        let rows = {
-            let mut statement = tx.prepare(
-                "SELECT sequence,frame_digest,application,frame_json
+            let rows = {
+                let mut statement = tx.prepare(
+                    "SELECT sequence,frame_digest,application,frame_json
                  FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                    AND sequence<=?2
                    AND json_extract(frame_json,'$.frame.payload.kind')
                        IN ('export_object_chunk','export_sealed')
                  ORDER BY sequence ASC",
-            )?;
-            statement
-                .query_map(
-                    params![binding_digest, i64::try_from(seal_sequence)?],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        ensure!(
-            !rows.is_empty(),
-            "sealed external export has no retained prefix"
-        );
-        let final_row = rows
-            .last()
-            .context("sealed external export prefix disappeared")?;
-        ensure!(
-            u64::try_from(final_row.0)? == seal_sequence && final_row.1 == seal_digest,
-            "external export prefix does not end at its exact seal"
-        );
-        let application = rows[0].2.as_str();
-        ensure!(
-            matches!(application, "pending" | "claimed")
-                && rows.iter().all(|row| row.2 == application),
-            "external export prefix retained a partial or contradictory claim"
-        );
-        let unsettled_non_export_predecessor: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                )?;
+                statement
+                    .query_map(
+                        params![binding_digest, i64::try_from(seal_sequence)?],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            ensure!(
+                !rows.is_empty(),
+                "sealed external export has no retained prefix"
+            );
+            let final_row = rows
+                .last()
+                .context("sealed external export prefix disappeared")?;
+            ensure!(
+                u64::try_from(final_row.0)? == seal_sequence && final_row.1 == seal_digest,
+                "external export prefix does not end at its exact seal"
+            );
+            let application = rows[0].2.as_str();
+            ensure!(
+                matches!(application, "pending" | "claimed")
+                    && rows.iter().all(|row| row.2 == application),
+                "external export prefix retained a partial or contradictory claim"
+            );
+            let unsettled_non_export_predecessor: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence<?2
                AND application NOT IN ('applied','revoked')
                AND json_extract(frame_json,'$.frame.payload.kind')
                    NOT IN ('export_object_chunk','export_sealed'))",
-            params![binding_digest, i64::try_from(seal_sequence)?],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            !unsettled_non_export_predecessor,
-            "external export has an unsettled non-export predecessor"
-        );
-
-        let mut export_frames = Vec::with_capacity(rows.len());
-        let mut total_wire_bytes = 0_u64;
-        for row in &rows {
-            total_wire_bytes = total_wire_bytes
-                .checked_add(u64::try_from(row.3.len())?)
-                .context("external export retained wire-byte overflow")?;
-            ensure!(
-                total_wire_bytes <= binding.max_bytes,
-                "external export retained prefix exceeds its channel bound"
-            );
-            let frame = SignedExecutionFrame::decode_and_verify(
-                row.3.as_bytes(),
-                &binding,
-                binding.issued_at_ms,
+                params![binding_digest, i64::try_from(seal_sequence)?],
+                |row| row.get(0),
             )?;
             ensure!(
-                frame.digest() == row.1
-                    && u64::try_from(row.0)? == frame.frame().sequence
-                    && matches!(
-                        frame.frame().payload,
-                        ExecutionChannelPayload::ExportObjectChunk { .. }
-                            | ExecutionChannelPayload::ExportSealed { .. }
-                    ),
-                "external export prefix changed authenticated frame identity"
+                !unsettled_non_export_predecessor,
+                "external export has an unsettled non-export predecessor"
             );
-            if application == "pending" {
-                NodeJournalOwner.authorize_frame(&tx, &binding, &frame.frame().payload)?;
+
+            let mut export_frames = Vec::with_capacity(rows.len());
+            let mut total_wire_bytes = 0_u64;
+            for row in &rows {
+                total_wire_bytes = total_wire_bytes
+                    .checked_add(u64::try_from(row.3.len())?)
+                    .context("external export retained wire-byte overflow")?;
+                ensure!(
+                    total_wire_bytes <= binding.max_bytes,
+                    "external export retained prefix exceeds its channel bound"
+                );
+                let frame = SignedExecutionFrame::decode_and_verify(
+                    row.3.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+                ensure!(
+                    frame.digest() == row.1
+                        && u64::try_from(row.0)? == frame.frame().sequence
+                        && matches!(
+                            frame.frame().payload,
+                            ExecutionChannelPayload::ExportObjectChunk { .. }
+                                | ExecutionChannelPayload::ExportSealed { .. }
+                        ),
+                    "external export prefix changed authenticated frame identity"
+                );
+                if application == "pending" {
+                    NodeJournalOwner.authorize_frame(&tx, &binding, &frame.frame().payload)?;
+                }
+                export_frames.push(frame);
             }
-            export_frames.push(frame);
-        }
-        if application == "pending" {
-            ensure!(
-                !revoked(&tx, &binding_digest)?,
-                "revoked external execution cannot begin a new import claim"
-            );
-            let changed = tx.execute(
-                "UPDATE external_execution_frame SET application='claimed'
+            if application == "pending" {
+                ensure!(
+                    !revoked(&tx, &binding_digest)?,
+                    "revoked external execution cannot begin a new import claim"
+                );
+                let changed = tx.execute(
+                    "UPDATE external_execution_frame SET application='claimed'
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                    AND sequence<=?2 AND application='pending'
                    AND json_extract(frame_json,'$.frame.payload.kind')
                        IN ('export_object_chunk','export_sealed')",
-                params![binding_digest, i64::try_from(seal_sequence)?],
-            )?;
-            ensure!(
-                changed == rows.len(),
-                "external export prefix claim lost its atomic retained set"
-            );
-        }
-        tx.commit()?;
-        Ok(ExternalCandidateImportClaim::Reconcile(
-            ExternalCandidateImportPlan {
-                binding,
-                quiesce,
-                export_frames,
-                seal_sequence,
-                seal_digest: seal_digest.to_owned(),
-            },
-        ))
+                    params![binding_digest, i64::try_from(seal_sequence)?],
+                )?;
+                ensure!(
+                    changed == rows.len(),
+                    "external export prefix claim lost its atomic retained set"
+                );
+            }
+            tx.commit()?;
+            Ok(ExternalCandidateImportClaim::Reconcile(
+                ExternalCandidateImportPlan {
+                    binding,
+                    quiesce,
+                    export_frames,
+                    seal_sequence,
+                    seal_digest: seal_digest.to_owned(),
+                },
+            ))
+        })
     }
 
     /// Commit the reconstructed candidate roots and every export-frame
@@ -1289,33 +1320,35 @@ impl RuntimeDb {
         verified: &ryeos_state::external_execution::export::ValidatedCandidateRetention<'_>,
         authority: &ryeos_state::PinnedStateAuthority,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        ensure!(
-            binding.digest()? == plan.binding.digest()?,
-            "external import plan changed its channel binding"
-        );
-        retain_external_candidate_import_tx(&tx, placement, verified, authority)?;
-        for frame in &plan.export_frames {
-            journal::finish_application(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::SupervisorToOwner,
-                frame.frame().sequence,
-                frame.digest(),
-            )?;
-        }
-        let seal = plan
-            .export_frames
-            .last()
-            .context("external import plan lost its seal")?;
-        ensure!(
-            seal.frame().sequence == plan.seal_sequence && seal.digest() == plan.seal_digest,
-            "external import plan seal identity changed"
-        );
-        tx.commit()?;
-        Ok(())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            ensure!(
+                binding.digest()? == plan.binding.digest()?,
+                "external import plan changed its channel binding"
+            );
+            retain_external_candidate_import_tx(&tx, placement, verified, authority)?;
+            for frame in &plan.export_frames {
+                journal::finish_application(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::SupervisorToOwner,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )?;
+            }
+            let seal = plan
+                .export_frames
+                .last()
+                .context("external import plan lost its seal")?;
+            ensure!(
+                seal.frame().sequence == plan.seal_sequence && seal.digest() == plan.seal_digest,
+                "external import plan seal identity changed"
+            );
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Called only by protected placement admission after exact allocation.
@@ -1342,115 +1375,123 @@ impl RuntimeDb {
         binding: &ExecutionChannelBinding,
         test_now: Option<i64>,
     ) -> Result<()> {
-        binding.validate()?;
-        let digest = binding.digest()?;
-        let canonical = lillux::canonical_json(&serde_json::to_value(binding)?)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let allocation =
-            read(&tx, &binding.placement_thread_id)?.context("external allocation absent")?;
-        require_retained_channel_allocation(&tx, binding, &allocation)?;
-        let reservation = &allocation.reservation;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "external channel requires a bound allocation owner"
-        );
-        let retained = read_retained_binding(&tx, &reservation.binding_hash)?
-            .context("external channel lost its retained binding generation")?;
-        require_supervisor_activation_allows_channel(&tx, &allocation, binding, &retained)?;
-        let prior: Option<(String, String)> = tx.query_row(
-            "SELECT binding_digest,binding_json FROM external_execution_channel WHERE placement_thread_id=?1",
-            [&binding.placement_thread_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-        if let Some((prior_digest, prior_json)) = prior {
-            if prior_digest != digest || prior_json != canonical {
-                bail!("external channel replay changed its exact binding");
+        self.conn.with_sql(|conn| {
+            binding.validate()?;
+            let digest = binding.digest()?;
+            let canonical = lillux::canonical_json(&serde_json::to_value(binding)?)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let allocation =
+                read(&tx, &binding.placement_thread_id)?.context("external allocation absent")?;
+            require_retained_channel_allocation(&tx, binding, &allocation)?;
+            let reservation = &allocation.reservation;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "external channel requires a bound allocation owner"
+            );
+            let retained = read_retained_binding(&tx, &reservation.binding_hash)?
+                .context("external channel lost its retained binding generation")?;
+            require_supervisor_activation_allows_channel(&tx, &allocation, binding, &retained)?;
+            let prior: Option<(String, String)> = tx.query_row(
+                "SELECT binding_digest,binding_json FROM external_execution_channel WHERE placement_thread_id=?1",
+                [&binding.placement_thread_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            if let Some((prior_digest, prior_json)) = prior {
+                if prior_digest != digest || prior_json != canonical {
+                    bail!("external channel replay changed its exact binding");
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        require_current_execution_owner(&tx, reservation)?;
-        let contract = retained.backend_contract();
-        // Sample the production clock only after acquiring the writer lock.
-        // Lock contention must not carry stale pre-expiry authority across the
-        // first-registration boundary. Tests inject an exact instant without
-        // exposing clock selection outside this module.
-        let now = test_now.unwrap_or_else(lillux::time::timestamp_millis);
-        let attach_deadline_ms = reservation
-            .contact_deadline_ms
-            .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
-            .context("external channel attachment deadline overflow")?;
-        if now >= attach_deadline_ms {
-            bail!("external channel bootstrap capability expired before registration");
-        }
-        if now < binding.issued_at_ms
-            || now >= binding.execution_deadline_ms
-            || binding
-                .execution_deadline_ms
-                .saturating_sub(binding.issued_at_ms)
-                > i64::from(reservation.timeout_seconds) * 1000
-        {
-            bail!("external channel exceeds its reserved execution window");
-        }
-        tx.execute(
-            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
-            params![binding.placement_thread_id, digest, canonical],
-        )?;
-        tx.commit()?;
-        Ok(())
+            require_current_execution_owner(&tx, reservation)?;
+            let contract = retained.backend_contract();
+            // Sample the production clock only after acquiring the writer lock.
+            // Lock contention must not carry stale pre-expiry authority across the
+            // first-registration boundary. Tests inject an exact instant without
+            // exposing clock selection outside this module.
+            let now = test_now.unwrap_or_else(lillux::time::timestamp_millis);
+            let attach_deadline_ms = reservation
+                .contact_deadline_ms
+                .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
+                .context("external channel attachment deadline overflow")?;
+            if now >= attach_deadline_ms {
+                bail!("external channel bootstrap capability expired before registration");
+            }
+            if now < binding.issued_at_ms
+                || now >= binding.execution_deadline_ms
+                || binding
+                    .execution_deadline_ms
+                    .saturating_sub(binding.issued_at_ms)
+                    > i64::from(reservation.timeout_seconds) * 1000
+            {
+                bail!("external channel exceeds its reserved execution window");
+            }
+            tx.execute(
+                "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
+                params![binding.placement_thread_id, digest, canonical],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Return the exact public binding; never return an activation secret.
     pub fn external_execution_channel(&self, placement: &str) -> Result<ExecutionChannelBinding> {
-        load_binding(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            load_binding(&conn, placement)
+        })
     }
 
     pub(crate) fn optional_external_execution_channel(
         &self,
         placement: &str,
     ) -> Result<Option<ExecutionChannelBinding>> {
-        let exists: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
-            [placement],
-            |row| row.get(0),
-        )?;
-        if exists {
-            Ok(Some(load_binding(&self.conn, placement)?))
-        } else {
-            Ok(None)
-        }
+        self.conn.with_sql(|conn| {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
+                [placement],
+                |row| row.get(0),
+            )?;
+            if exists {
+                Ok(Some(load_binding(&conn, placement)?))
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     /// Persist one authenticated frame before it is acknowledged or applied.
     /// false is an exact duplicate, never permission to forward bytes again.
     pub fn record_external_execution_frame(&self, placement: &str, wire: &[u8]) -> Result<bool> {
-        let binding = load_binding(&self.conn, placement)?;
-        let verified = SignedExecutionFrame::decode_and_verify(
-            wire,
-            &binding,
-            lillux::time::timestamp_millis(),
-        )?;
-        if matches!(verified.frame().payload, ExecutionChannelPayload::Cancel) {
-            // Independent commit: a subsequent gap/fork cannot undo revocation.
-            self.record_external_execution_revocation(placement, wire)?;
-        }
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if matches!(verified.frame().payload, ExecutionChannelPayload::Release) {
-            // Only the readiness owner can mint Release with a live startup
-            // cap. Transport may acknowledge/replay an exact retained frame,
-            // never introduce a new one through generic append.
-            let retained: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+        self.conn.with_sql(|conn| {
+            let binding = load_binding(&conn, placement)?;
+            let verified = SignedExecutionFrame::decode_and_verify(
+                wire,
+                &binding,
+                lillux::time::timestamp_millis(),
+            )?;
+            if matches!(verified.frame().payload, ExecutionChannelPayload::Cancel) {
+                // Independent commit: a subsequent gap/fork cannot undo revocation.
+                self.record_external_execution_revocation(placement, wire)?;
+            }
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            if matches!(verified.frame().payload, ExecutionChannelPayload::Release) {
+                // Only the readiness owner can mint Release with a live startup
+                // cap. Transport may acknowledge/replay an exact retained frame,
+                // never introduce a new one through generic append.
+                let retained: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                    AND frame_digest=?2 AND frame_json=?3)",
-                params![binding.digest()?, verified.digest(), verified.canonical()],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                retained,
-                "first external release requires the readiness owner"
-            );
-        }
-        let result = journal::append_frame(&tx, &NodeJournalOwner, placement, wire)?;
-        tx.commit()?;
-        Ok(result)
+                    params![binding.digest()?, verified.digest(), verified.canonical()],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    retained,
+                    "first external release requires the readiness owner"
+                );
+            }
+            let result = journal::append_frame(&tx, &NodeJournalOwner, placement, wire)?;
+            tx.commit()?;
+            Ok(result)
+        })
     }
 
     /// Author one controller-owned command/acknowledgement using the protected
@@ -1462,21 +1503,23 @@ impl RuntimeDb {
         signing_key: &lillux::crypto::SigningKey,
         payload: ExecutionChannelPayload,
     ) -> Result<AuthenticatedExecutionFrame> {
-        ensure!(
-            !matches!(payload, ExecutionChannelPayload::Release),
-            "external release requires the readiness owner"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let frame = journal::author_frame(
-            &tx,
-            &NodeJournalOwner,
-            placement,
-            ChannelDirection::OwnerToSupervisor,
-            signing_key,
-            payload,
-        )?;
-        tx.commit()?;
-        Ok(frame)
+        self.conn.with_sql(|conn| {
+            ensure!(
+                !matches!(payload, ExecutionChannelPayload::Release),
+                "external release requires the readiness owner"
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let frame = journal::author_frame(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+                signing_key,
+                payload,
+            )?;
+            tx.commit()?;
+            Ok(frame)
+        })
     }
 
     /// Atomically accept the exact supervisor readiness observation and
@@ -1522,171 +1565,173 @@ impl RuntimeDb {
         live_deadline: lillux::time::MonotonicDeadline,
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        let binding_digest = binding.digest()?;
-        let ready_rows = {
-            let mut statement = tx.prepare(
-                "SELECT sequence,frame_digest,application,frame_json
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let binding = load_binding(&tx, placement)?;
+            let binding_digest = binding.digest()?;
+            let ready_rows = {
+                let mut statement = tx.prepare(
+                    "SELECT sequence,frame_digest,application,frame_json
                    FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                     AND json_extract(frame_json,'$.frame.payload.kind')='ready'
                   ORDER BY sequence",
+                )?;
+                statement
+                    .query_map([&binding_digest], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            ensure!(
+                ready_rows.len() <= 1,
+                "external channel retained competing readiness observations"
+            );
+            let Some((ready_sequence, ready_digest, ready_application, ready_wire)) =
+                ready_rows.into_iter().next()
+            else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            NodeJournalOwner.require_owner(&tx, &binding)?;
+            NodeJournalOwner.authorize_frame(&tx, &binding, &ExecutionChannelPayload::Release)?;
+            let allocation = read(&tx, placement)?.context("external readiness lost its allocation")?;
+            require_current_execution_owner(&tx, &allocation.reservation)?;
+            ensure!(
+                !revoked(&tx, &binding_digest)?,
+                "revoked external execution cannot regain connector readiness"
+            );
+            ensure!(
+                lillux::time::timestamp_millis() < binding.execution_deadline_ms,
+                "external execution deadline passed before connector readiness"
+            );
+            ensure!(
+                ryeos_state::external_execution::encode_channel_public_key(
+                    &signing_key.verifying_key()
+                )? == binding.owner_public_key,
+                "protected external readiness signer changed its channel binding"
+            );
+            let ready_sequence = u64::try_from(ready_sequence)?;
+            let ready = SignedExecutionFrame::decode_and_verify(
+                ready_wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
             )?;
-            statement
-                .query_map([&binding_digest], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        ensure!(
-            ready_rows.len() <= 1,
-            "external channel retained competing readiness observations"
-        );
-        let Some((ready_sequence, ready_digest, ready_application, ready_wire)) =
-            ready_rows.into_iter().next()
-        else {
-            tx.commit()?;
-            return Ok(None);
-        };
-        NodeJournalOwner.require_owner(&tx, &binding)?;
-        NodeJournalOwner.authorize_frame(&tx, &binding, &ExecutionChannelPayload::Release)?;
-        let allocation = read(&tx, placement)?.context("external readiness lost its allocation")?;
-        require_current_execution_owner(&tx, &allocation.reservation)?;
-        ensure!(
-            !revoked(&tx, &binding_digest)?,
-            "revoked external execution cannot regain connector readiness"
-        );
-        ensure!(
-            lillux::time::timestamp_millis() < binding.execution_deadline_ms,
-            "external execution deadline passed before connector readiness"
-        );
-        ensure!(
-            ryeos_state::external_execution::encode_channel_public_key(
-                &signing_key.verifying_key()
-            )? == binding.owner_public_key,
-            "protected external readiness signer changed its channel binding"
-        );
-        let ready_sequence = u64::try_from(ready_sequence)?;
-        let ready = SignedExecutionFrame::decode_and_verify(
-            ready_wire.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        ensure!(
-            ready.digest() == ready_digest
-                && ready.frame().sequence == ready_sequence
-                && matches!(ready.frame().payload, ExecutionChannelPayload::Ready { .. }),
-            "external readiness observation changed after retention"
-        );
-        match ready_application.as_str() {
-            "pending" => match journal::claim_application(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::SupervisorToOwner,
-                ready_sequence,
-                &ready_digest,
-            )? {
-                journal::ApplicationClaim::New(_) => journal::finish_application(
+            ensure!(
+                ready.digest() == ready_digest
+                    && ready.frame().sequence == ready_sequence
+                    && matches!(ready.frame().payload, ExecutionChannelPayload::Ready { .. }),
+                "external readiness observation changed after retention"
+            );
+            match ready_application.as_str() {
+                "pending" => match journal::claim_application(
                     &tx,
                     &NodeJournalOwner,
                     placement,
                     ChannelDirection::SupervisorToOwner,
                     ready_sequence,
                     &ready_digest,
-                )?,
-                _ => bail!("external readiness claim changed during its transaction"),
-            },
-            "applied" => {}
-            "claimed" => bail!("external readiness retained an uncertain application"),
-            "revoked" => bail!("external readiness was unexpectedly revoked"),
-            _ => bail!("external readiness retained an unknown application state"),
-        }
+                )? {
+                    journal::ApplicationClaim::New(_) => journal::finish_application(
+                        &tx,
+                        &NodeJournalOwner,
+                        placement,
+                        ChannelDirection::SupervisorToOwner,
+                        ready_sequence,
+                        &ready_digest,
+                    )?,
+                    _ => bail!("external readiness claim changed during its transaction"),
+                },
+                "applied" => {}
+                "claimed" => bail!("external readiness retained an uncertain application"),
+                "revoked" => bail!("external readiness was unexpectedly revoked"),
+                _ => bail!("external readiness retained an unknown application state"),
+            }
 
-        let releases = {
-            let mut statement = tx.prepare(
-                "SELECT sequence,frame_digest,frame_json
+            let releases = {
+                let mut statement = tx.prepare(
+                    "SELECT sequence,frame_digest,frame_json
                    FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                     AND json_extract(frame_json,'$.frame.payload.kind')='release'
                   ORDER BY sequence",
-            )?;
-            statement
-                .query_map([&binding_digest], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        ensure!(
-            releases.len() <= 1,
-            "external channel retained competing candidate releases"
-        );
-        let channel_phase: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        let release = if let Some((sequence, digest, wire)) = releases.into_iter().next() {
+                )?;
+                statement
+                    .query_map([&binding_digest], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
             ensure!(
-                ryeos_state::external_execution::transcript::ChannelPhase::parse(&channel_phase)?
-                    == ryeos_state::external_execution::transcript::ChannelPhase::Running,
-                "retained external release is not current connector readiness"
+                releases.len() <= 1,
+                "external channel retained competing candidate releases"
             );
-            let retained = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
-                &binding,
-                binding.issued_at_ms,
+            let channel_phase: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
             )?;
-            ensure!(
-                retained.frame().sequence == u64::try_from(sequence)?
-                    && retained.digest() == digest
-                    && matches!(retained.frame().payload, ExecutionChannelPayload::Release),
-                "retained external candidate release changed"
-            );
-            retained
-        } else {
-            match &allocation.reservation.owner {
-                ExternalAllocationOwner::QualificationCandidate(_) => {
-                    require_new_owner(&tx, &allocation.reservation, None, qualification_proof)?;
+            let release = if let Some((sequence, digest, wire)) = releases.into_iter().next() {
+                ensure!(
+                    ryeos_state::external_execution::transcript::ChannelPhase::parse(&channel_phase)?
+                        == ryeos_state::external_execution::transcript::ChannelPhase::Running,
+                    "retained external release is not current connector readiness"
+                );
+                let retained = SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &binding,
+                    binding.issued_at_ms,
+                )?;
+                ensure!(
+                    retained.frame().sequence == u64::try_from(sequence)?
+                        && retained.digest() == digest
+                        && matches!(retained.frame().payload, ExecutionChannelPayload::Release),
+                    "retained external candidate release changed"
+                );
+                retained
+            } else {
+                match &allocation.reservation.owner {
+                    ExternalAllocationOwner::QualificationCandidate(_) => {
+                        require_new_owner(&tx, &allocation.reservation, None, qualification_proof)?;
+                    }
+                    _ => ensure!(
+                        qualification_proof.is_none(),
+                        "Q release changed its allocation owner kind"
+                    ),
                 }
-                _ => ensure!(
-                    qualification_proof.is_none(),
-                    "Q release changed its allocation owner kind"
-                ),
-            }
-            // Sample after the writer lock and all readiness validation,
-            // immediately before the first Release can become durable. Wall
-            // clock recovery never extends this live caller's original cap.
-            ensure!(
-                !live_deadline.has_elapsed(),
-                "external startup live deadline expired before release"
-            );
-            ensure!(
-                ryeos_state::external_execution::transcript::ChannelPhase::parse(&channel_phase)?
-                    == ryeos_state::external_execution::transcript::ChannelPhase::Ready,
-                "external channel is not ready for its first release"
-            );
-            journal::author_frame(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                ChannelDirection::OwnerToSupervisor,
-                signing_key,
-                ExecutionChannelPayload::Release,
-            )?
-        };
-        tx.commit()?;
-        Ok(Some(release))
+                // Sample after the writer lock and all readiness validation,
+                // immediately before the first Release can become durable. Wall
+                // clock recovery never extends this live caller's original cap.
+                ensure!(
+                    !live_deadline.has_elapsed(),
+                    "external startup live deadline expired before release"
+                );
+                ensure!(
+                    ryeos_state::external_execution::transcript::ChannelPhase::parse(&channel_phase)?
+                        == ryeos_state::external_execution::transcript::ChannelPhase::Ready,
+                    "external channel is not ready for its first release"
+                );
+                journal::author_frame(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    signing_key,
+                    ExecutionChannelPayload::Release,
+                )?
+            };
+            tx.commit()?;
+            Ok(Some(release))
+        })
     }
 
     /// Commit sticky cancellation before attempting its contiguous transcript
@@ -1697,19 +1742,21 @@ impl RuntimeDb {
         placement: &str,
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
-        let first = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let frame = ensure_owner_revocation_tx(&first, placement, signing_key)?;
-        first.commit()?;
+        self.conn.with_sql(|conn| {
+            let first = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let frame = ensure_owner_revocation_tx(&first, placement, signing_key)?;
+            first.commit()?;
 
-        let second = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        journal::append_frame(
-            &second,
-            &NodeJournalOwner,
-            placement,
-            frame.canonical().as_bytes(),
-        )?;
-        second.commit()?;
-        Ok(frame)
+            let second = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            journal::append_frame(
+                &second,
+                &NodeJournalOwner,
+                placement,
+                frame.canonical().as_bytes(),
+            )?;
+            second.commit()?;
+            Ok(frame)
+        })
     }
 
     #[cfg(test)]
@@ -1719,14 +1766,16 @@ impl RuntimeDb {
         frame_limit: usize,
         byte_limit: usize,
     ) -> Result<Vec<journal::PendingExecutionFrame>> {
-        journal::pending_transport_frames(
-            &self.conn,
-            &NodeJournalOwner,
-            placement,
-            ChannelDirection::OwnerToSupervisor,
-            frame_limit,
-            byte_limit,
-        )
+        self.conn.with_sql(|conn| {
+            journal::pending_transport_frames(
+                &conn,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+                frame_limit,
+                byte_limit,
+            )
+        })
     }
 
     /// Retain one supervisor fact and any stale-owner sticky stop first, then
@@ -1742,120 +1791,122 @@ impl RuntimeDb {
         frame_limit: usize,
         byte_limit: usize,
     ) -> Result<ExternalSupervisorExchange> {
-        let binding = load_binding(&self.conn, placement)?;
-        let verified = SignedExecutionFrame::decode_and_verify(
-            wire,
-            &binding,
-            lillux::time::timestamp_millis(),
-        )?;
-        if verified.frame().direction != ChannelDirection::SupervisorToOwner {
-            bail!("external exchange accepts only supervisor-authored frames");
-        }
-        let sequence = verified.frame().sequence;
-        let digest = verified.digest().to_owned();
-        let first = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        // Recovery first closes the source transcript around any cancellation
-        // whose sticky commit survived a lost ordinary append. The peer may now
-        // acknowledge that exact sequence; never mint a replacement for it.
-        append_retained_owner_revocation_tx(&first, placement)?;
-        let incoming_new = journal::append_frame(&first, &NodeJournalOwner, placement, wire)?;
-        let allocation =
-            read(&first, placement)?.context("external exchange lost its allocation")?;
-        if matches!(
-            allocation.reservation.owner,
-            ExternalAllocationOwner::DirectThread { .. }
-        ) && !allocation.phase.is_settled()
-            && !direct_owner_is_contactable(&first, &allocation.reservation)?
-            // An already committed normal termination intent has permanently
-            // fenced input. Historical terminal/ACK replay must not turn that
-            // settlement into cancellation when its execution claim rotates.
-            // Existing explicit revocation still makes this predicate false.
-            && normal_settlement_output_tx(&first, placement)?.is_none()
-        {
-            ensure_owner_revocation_tx(&first, placement, signing_key)?;
-        }
-        // Preserve the incoming fact and sticky stop even if later contiguous
-        // append/acknowledgement fails. A failed response grants no peer receipt.
-        first.commit()?;
-
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        append_retained_owner_revocation_tx(&tx, placement)?;
-        if matches!(
-            verified.frame().payload,
-            ExecutionChannelPayload::Acknowledge { .. }
-        ) {
-            journal::apply_received_acknowledgement(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                verified.frame().direction,
-                sequence,
-                &digest,
+        self.conn.with_sql(|conn| {
+            let binding = load_binding(&conn, placement)?;
+            let verified = SignedExecutionFrame::decode_and_verify(
+                wire,
+                &binding,
+                lillux::time::timestamp_millis(),
             )?;
-        } else if matches!(
-            verified.frame().payload,
-            ExecutionChannelPayload::RuntimeApplied { .. }
-        ) {
-            // This applies only a retained signed observation to the node's
-            // journal. It neither delivers bytes to Codex nor qualifies the
-            // consumer runtime. A lost response can finish the same claimed
-            // no-effect frame without replaying a native operation.
-            match journal::claim_application(
-                &tx,
-                &NodeJournalOwner,
-                placement,
-                verified.frame().direction,
-                sequence,
-                &digest,
-            )? {
-                journal::ApplicationClaim::New(_) | journal::ApplicationClaim::AlreadyClaimed => {
-                    journal::finish_application(
-                        &tx,
-                        &NodeJournalOwner,
-                        placement,
-                        verified.frame().direction,
-                        sequence,
-                        &digest,
-                    )?;
-                }
-                journal::ApplicationClaim::AlreadyApplied => {}
-                journal::ApplicationClaim::Revoked => {
-                    bail!("runtime-applied observation was revoked as executable input")
+            if verified.frame().direction != ChannelDirection::SupervisorToOwner {
+                bail!("external exchange accepts only supervisor-authored frames");
+            }
+            let sequence = verified.frame().sequence;
+            let digest = verified.digest().to_owned();
+            let first = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            // Recovery first closes the source transcript around any cancellation
+            // whose sticky commit survived a lost ordinary append. The peer may now
+            // acknowledge that exact sequence; never mint a replacement for it.
+            append_retained_owner_revocation_tx(&first, placement)?;
+            let incoming_new = journal::append_frame(&first, &NodeJournalOwner, placement, wire)?;
+            let allocation =
+                read(&first, placement)?.context("external exchange lost its allocation")?;
+            if matches!(
+                allocation.reservation.owner,
+                ExternalAllocationOwner::DirectThread { .. }
+            ) && !allocation.phase.is_settled()
+                && !direct_owner_is_contactable(&first, &allocation.reservation)?
+                // An already committed normal termination intent has permanently
+                // fenced input. Historical terminal/ACK replay must not turn that
+                // settlement into cancellation when its execution claim rotates.
+                // Existing explicit revocation still makes this predicate false.
+                && normal_settlement_output_tx(&first, placement)?.is_none()
+            {
+                ensure_owner_revocation_tx(&first, placement, signing_key)?;
+            }
+            // Preserve the incoming fact and sticky stop even if later contiguous
+            // append/acknowledgement fails. A failed response grants no peer receipt.
+            first.commit()?;
+
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            append_retained_owner_revocation_tx(&tx, placement)?;
+            if matches!(
+                verified.frame().payload,
+                ExecutionChannelPayload::Acknowledge { .. }
+            ) {
+                journal::apply_received_acknowledgement(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    verified.frame().direction,
+                    sequence,
+                    &digest,
+                )?;
+            } else if matches!(
+                verified.frame().payload,
+                ExecutionChannelPayload::RuntimeApplied { .. }
+            ) {
+                // This applies only a retained signed observation to the node's
+                // journal. It neither delivers bytes to Codex nor qualifies the
+                // consumer runtime. A lost response can finish the same claimed
+                // no-effect frame without replaying a native operation.
+                match journal::claim_application(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    verified.frame().direction,
+                    sequence,
+                    &digest,
+                )? {
+                    journal::ApplicationClaim::New(_) | journal::ApplicationClaim::AlreadyClaimed => {
+                        journal::finish_application(
+                            &tx,
+                            &NodeJournalOwner,
+                            placement,
+                            verified.frame().direction,
+                            sequence,
+                            &digest,
+                        )?;
+                    }
+                    journal::ApplicationClaim::AlreadyApplied => {}
+                    journal::ApplicationClaim::Revoked => {
+                        bail!("runtime-applied observation was revoked as executable input")
+                    }
                 }
             }
-        }
-        let acknowledgement =
-            ensure_owner_acknowledgement_tx(&tx, placement, sequence, &digest, signing_key)?;
-        // Import runs outside this short transaction. On any later poll,
-        // publish the upgraded Applied receipt for the exact rooted seal even
-        // when the current inbound frame is an acknowledgement and therefore
-        // intentionally receives no acknowledgement-of-acknowledgement.
-        if matches!(
-            binding.execution_mode,
-            ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
-        ) {
-            ensure_applied_export_acknowledgement_tx(&tx, placement, signing_key)?;
-        }
-        let outbound = journal::pending_transport_frames(
-            &tx,
-            &NodeJournalOwner,
-            placement,
-            ChannelDirection::OwnerToSupervisor,
-            frame_limit,
-            byte_limit,
-        )?;
-        let urgent_revocation = journal::pending_terminal_revocation_frame(
-            &tx,
-            &NodeJournalOwner,
-            placement,
-            ChannelDirection::OwnerToSupervisor,
-        )?;
-        tx.commit()?;
-        Ok(ExternalSupervisorExchange {
-            incoming_new,
-            acknowledgement,
-            outbound,
-            urgent_revocation,
+            let acknowledgement =
+                ensure_owner_acknowledgement_tx(&tx, placement, sequence, &digest, signing_key)?;
+            // Import runs outside this short transaction. On any later poll,
+            // publish the upgraded Applied receipt for the exact rooted seal even
+            // when the current inbound frame is an acknowledgement and therefore
+            // intentionally receives no acknowledgement-of-acknowledgement.
+            if matches!(
+                binding.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::StructuredSession {}
+            ) {
+                ensure_applied_export_acknowledgement_tx(&tx, placement, signing_key)?;
+            }
+            let outbound = journal::pending_transport_frames(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+                frame_limit,
+                byte_limit,
+            )?;
+            let urgent_revocation = journal::pending_terminal_revocation_frame(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+            )?;
+            tx.commit()?;
+            Ok(ExternalSupervisorExchange {
+                incoming_new,
+                acknowledgement,
+                outbound,
+                urgent_revocation,
+            })
         })
     }
 
@@ -1869,17 +1920,19 @@ impl RuntimeDb {
         sequence: u64,
         digest: &str,
     ) -> Result<bool> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let result = journal::claim_application(
-            &tx,
-            &NodeJournalOwner,
-            placement,
-            direction,
-            sequence,
-            digest,
-        )?;
-        tx.commit()?;
-        Ok(result.is_new())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let result = journal::claim_application(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                direction,
+                sequence,
+                digest,
+            )?;
+            tx.commit()?;
+            Ok(result.is_new())
+        })
     }
 
     /// Called by the protected relay only after its exact application completes.
@@ -1891,17 +1944,19 @@ impl RuntimeDb {
         sequence: u64,
         digest: &str,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let result = journal::finish_application(
-            &tx,
-            &NodeJournalOwner,
-            placement,
-            direction,
-            sequence,
-            digest,
-        )?;
-        tx.commit()?;
-        Ok(result)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let result = journal::finish_application(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                direction,
+                sequence,
+                digest,
+            )?;
+            tx.commit()?;
+            Ok(result)
+        })
     }
 }
 
@@ -2134,7 +2189,9 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<bool> {
-        has_qualification_normal_termination_intent(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            has_qualification_normal_termination_intent(&conn, placement)
+        })
     }
 
     /// Historical read for consuming the process-local Q cleanup lifeline.
@@ -2144,7 +2201,9 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<()> {
-        require_external_qualification_normal_terminal_tx(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            require_external_qualification_normal_terminal_tx(&conn, placement)
+        })
     }
 }
 
@@ -3070,7 +3129,7 @@ pub(super) mod tests {
             .external_allocation(&binding.placement_thread_id)
             .unwrap()
             .unwrap();
-        require_retained_channel_allocation(&db.conn, &binding, &allocation).unwrap();
+        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
         for coordinate in [
             "runtime",
             "snapshot",
@@ -3098,7 +3157,7 @@ pub(super) mod tests {
             }
             changed.validate().unwrap();
             assert!(
-                require_retained_channel_allocation(&db.conn, &changed, &allocation).is_err(),
+                db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &changed, &allocation)?)).is_err(),
                 "{coordinate} changed retained channel authority"
             );
         }
@@ -3111,15 +3170,14 @@ pub(super) mod tests {
         let mut reservation = super::super::tests::direct_owner_reservation(db);
         let installed = InstalledExternalExecutionBinding::direct_test_fixture(60);
         let retained = installed.retained_generation().unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,1)",
                 params![
                     retained.digest(),
                     retained.capacity_owner(),
                     retained.canonical_json().unwrap()
                 ],
-            )
+            )?))
             .unwrap();
         reservation.binding_hash = retained.digest().into();
         reservation.capacity_owner = retained.capacity_owner().into();
@@ -3176,9 +3234,9 @@ pub(super) mod tests {
         let path = root.path().join("runtime.sqlite3");
         let db = RuntimeDb::open(&path).unwrap();
         let (allocation, binding) = direct_channel_coordinates(&db);
-        require_retained_channel_allocation(&db.conn, &binding, &allocation).unwrap();
+        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
         assert!(db.register_external_execution_channel(&binding).is_err());
-        assert!(NodeJournalOwner.require_owner(&db.conn, &binding).is_err());
+        assert!(db.conn.with_sql(|connection| Ok(NodeJournalOwner.require_owner(connection, &binding)?)).is_err());
         assert!(require_structured_session_channel(&binding).is_err());
         for coordinate in [
             "program",
@@ -3221,13 +3279,13 @@ pub(super) mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                require_retained_channel_allocation(&db.conn, &changed, &allocation).is_err(),
+                db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &changed, &allocation)?)).is_err(),
                 "{coordinate} changed retained direct authority"
             );
         }
         let mut changed = allocation.clone();
         changed.reservation.timeout_seconds += 1;
-        assert!(require_retained_channel_allocation(&db.conn, &binding, &changed).is_err());
+        assert!(db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &changed)?)).is_err());
         let mut changed = allocation.clone();
         let ExternalAllocationOwner::DirectThread { program, .. } = &mut changed.reservation.owner
         else {
@@ -3236,7 +3294,7 @@ pub(super) mod tests {
         let mut encoded = serde_json::to_value(&*program).unwrap();
         encoded["projection"]["endpoint_binding_digest"] = "7".repeat(64).into();
         *program = serde_json::from_value(encoded).unwrap();
-        assert!(require_retained_channel_allocation(&db.conn, &binding, &changed).is_err());
+        assert!(db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &changed)?)).is_err());
         db.fixture_release_thread_launch_claim(&binding.placement_thread_id, "direct-claim")
             .unwrap();
         db.fixture_claim_thread_launch(
@@ -3247,14 +3305,14 @@ pub(super) mod tests {
         .unwrap();
         db.request_thread_stop(&binding.placement_thread_id, StopIntent::Cancel)
             .unwrap();
-        assert!(!direct_owner_is_contactable(&db.conn, &allocation.reservation).unwrap());
+        assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &allocation.reservation)?)).unwrap());
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
         // Current-owner loss cannot erase exact cleanup/history ownership.
-        require_retained_channel_allocation(&db.conn, &binding, &allocation).unwrap();
+        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
         let mut quarantined = allocation.clone();
         quarantined.phase = ExternalAllocationPhase::Quarantined;
-        require_retained_channel_allocation(&db.conn, &binding, &quarantined).unwrap();
+        db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &quarantined)?)).unwrap();
     }
 
     fn direct_bound_channel_fixture(
@@ -3267,7 +3325,7 @@ pub(super) mod tests {
         let (allocation, binding) = direct_channel_coordinates(db);
         let reservation = &allocation.reservation;
         let occurrence = allocation.occurrence.as_ref().unwrap();
-        let retained = read_retained_binding(&db.conn, &reservation.binding_hash)
+        let retained = db.conn.with_sql(|connection| Ok(read_retained_binding(connection, &reservation.binding_hash)?))
             .unwrap()
             .unwrap();
         // Isolate downstream ownership transitions without pretending that the
@@ -3276,8 +3334,7 @@ pub(super) mod tests {
             db.reserve_external_allocation(reservation, &retained)
                 .is_err()
         );
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'bound',?4,1,1)",
                 params![
                     reservation.placement_thread_id,
@@ -3285,7 +3342,7 @@ pub(super) mod tests {
                     lillux::canonical_json(&serde_json::to_value(reservation).unwrap()).unwrap(),
                     lillux::canonical_json(&serde_json::to_value(occurrence).unwrap()).unwrap()
                 ],
-            )
+            )?))
             .unwrap();
         let contract = retained.backend_contract();
         let ExternalAllocationOwner::DirectThread { program, .. } = &reservation.owner else {
@@ -3363,15 +3420,14 @@ pub(super) mod tests {
                         "daemon" => owner.daemon_generation_id.push_str("-changed"),
                         _ => unreachable!(),
                     }
-                    db.conn
-                        .execute(
+                    db.conn.with_sql(|connection| Ok(connection.execute(
                             "UPDATE thread_launch_claim SET claimed_by=?2 WHERE thread_id=?1",
                             params![
                                 placement,
                                 lillux::canonical_json(&serde_json::to_value(owner).unwrap())
                                     .unwrap()
                             ],
-                        )
+                        )?))
                         .unwrap();
                 }
                 let error = match boundary {
@@ -3396,13 +3452,12 @@ pub(super) mod tests {
                     "{boundary}/{loss}: {error:#}"
                 );
                 let releases: i64 = db
-                    .conn
-                    .query_row(
+                    .conn.with_sql(|connection| Ok(connection.query_row(
                         "SELECT COUNT(*) FROM external_execution_frame
                     WHERE json_extract(frame_json,'$.frame.payload.kind')='release'",
                         [],
                         |row| row.get(0),
-                    )
+                    )?))
                     .unwrap();
                 assert_eq!(releases, 0);
                 if boundary != "activation" {
@@ -3489,12 +3544,11 @@ pub(super) mod tests {
             .author_external_owner_revocation(placement, &owner)
             .unwrap();
         assert_eq!(
-            journal::pending_terminal_revocation_frame(
-                &db.conn,
+            db.conn.with_sql(|connection| Ok(journal::pending_terminal_revocation_frame(connection,
                 &NodeJournalOwner,
                 placement,
                 ChannelDirection::OwnerToSupervisor
-            )
+            )?))
             .unwrap()
             .unwrap()
             .digest(),
@@ -3502,19 +3556,18 @@ pub(super) mod tests {
         );
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
-        NodeJournalOwner.require_owner(&db.conn, &binding).unwrap();
+        db.conn.with_sql(|connection| Ok(NodeJournalOwner.require_owner(connection, &binding)?)).unwrap();
         assert!(
             db.pending_external_owner_transport_frames(placement, 8, 64 * 1024)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            db.conn
-                .query_row(
+            db.conn.with_sql(|connection| Ok(connection.query_row(
                     "SELECT application FROM external_execution_frame WHERE frame_digest=?1",
                     [release.digest()],
                     |row| row.get::<_, String>(0)
-                )
+                )?))
                 .unwrap(),
             "applied"
         );
@@ -3702,14 +3755,13 @@ pub(super) mod tests {
                 .is_none()
         );
         let (sequence, digest): (u64, String) = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT sequence,frame_digest FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
               AND json_extract(frame_json,'$.frame.payload.kind')='release'",
                 [binding.digest().unwrap()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            )?))
             .unwrap();
         let supervisor = SigningKey::from_bytes(&[23; 32]);
         let (ack, _) = wire(
@@ -3793,8 +3845,9 @@ pub(super) mod tests {
                     .unwrap()
                     .is_none()
             );
-            assert!(!revoked(&db.conn, &binding.digest().unwrap()).unwrap());
-            let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
+            assert!(!db.conn.with_sql(|connection| Ok(revoked(connection, &binding.digest().unwrap())?)).unwrap());
+            db.conn.with_mutable_sql(|connection| {
+let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
             journal::require_direct_command_complete_observation(
                 &tx,
                 &NodeJournalOwner,
@@ -3815,6 +3868,8 @@ pub(super) mod tests {
                 exit == ExternalTargetExit::Code(0)
             );
             tx.commit().unwrap();
+Ok(())
+}).unwrap();
             db.fixture_release_thread_launch_claim(placement, "direct-claim")
                 .unwrap();
             db.fixture_claim_thread_launch(placement, "recovery-claim", daemon_generation_id())
@@ -3854,7 +3909,7 @@ pub(super) mod tests {
                     .urgent_revocation
                     .is_none()
             );
-            assert!(!revoked(&db.conn, &binding.digest().unwrap()).unwrap());
+            assert!(!db.conn.with_sql(|connection| Ok(revoked(connection, &binding.digest().unwrap())?)).unwrap());
             // Existing cleanup intent is historical reconciliation, independent
             // of the reservation's original execution claim.
             assert!(!db.begin_external_termination(placement, &intent).unwrap());
@@ -3906,22 +3961,20 @@ pub(super) mod tests {
             else {
                 unreachable!();
             };
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "UPDATE thread_runtime SET chain_root_id='foreign-chain' WHERE thread_id=?1",
                     [placement],
-                )
+                )?))
                 .unwrap();
             assert!(
                 db.external_direct_settled_owner_output(placement)
                     .unwrap()
                     .is_none()
             );
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "UPDATE thread_runtime SET chain_root_id=?2 WHERE thread_id=?1",
                     params![placement, chain_root_id],
-                )
+                )?))
                 .unwrap();
             assert_eq!(
                 db.external_direct_normal_settlement_output(placement)
@@ -3965,7 +4018,7 @@ pub(super) mod tests {
                 // its separately durable sticky Cancel. Complete output must
                 // not rehabilitate this first-intent window into normal work.
                 db.cancel_external_allocation(placement).unwrap();
-                assert!(!revoked(&db.conn, &binding.digest().unwrap()).unwrap());
+                assert!(!db.conn.with_sql(|connection| Ok(revoked(connection, &binding.digest().unwrap())?)).unwrap());
                 assert!(
                     db.begin_external_termination(placement, &intent)
                         .unwrap_err()
@@ -4052,16 +4105,16 @@ pub(super) mod tests {
                     .unwrap()
                     .is_none()
             );
-            assert_eq!(db.conn.query_row(
+            assert_eq!(db.conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame WHERE direction='supervisor_to_owner' AND sequence IN (3,4) AND application='pending'",
-                [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+                [], |row| row.get::<_, i64>(0))?)).unwrap(), 2);
             db.record_external_execution_frame(placement, &terminal)
                 .unwrap();
             // An interrupted pure reconstruction may own an exact claimed
             // observation; no external delivery occurred and replay is safe.
-            let output_digest: String = db.conn.query_row(
+            let output_digest: String = db.conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT frame_digest FROM external_execution_frame WHERE direction='supervisor_to_owner' AND sequence=3",
-                [], |row| row.get(0)).unwrap();
+                [], |row| row.get(0))?)).unwrap();
             db.claim_external_frame_application(
                 placement,
                 ChannelDirection::SupervisorToOwner,
@@ -4082,9 +4135,9 @@ pub(super) mod tests {
                 output.termination.target_exit,
                 ryeos_state::external_execution::ExternalTargetExit::Code(exit_code)
             );
-            assert_eq!(db.conn.query_row(
+            assert_eq!(db.conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame WHERE direction='supervisor_to_owner' AND sequence IN (3,4,5) AND application='applied'",
-                [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+                [], |row| row.get::<_, i64>(0))?)).unwrap(), 3);
             assert_eq!(
                 db.collect_external_direct_output(placement).unwrap(),
                 Some(output.clone())
@@ -4113,7 +4166,8 @@ pub(super) mod tests {
             .collect_external_direct_output(placement)
             .unwrap()
             .unwrap();
-        let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
+        db.conn.with_mutable_sql(|connection| {
+let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
         assert!(
             journal::require_direct_command_success_observation(
                 &tx,
@@ -4127,6 +4181,8 @@ pub(super) mod tests {
             .contains("revocation")
         );
         tx.commit().unwrap();
+Ok(())
+}).unwrap();
         let allocation = db.external_allocation(placement).unwrap().unwrap();
         let intent = ExternalTerminationIntent {
             schema: 1,
@@ -4169,19 +4225,18 @@ pub(super) mod tests {
         let placement = &binding.placement_thread_id;
         db.record_external_execution_frame(placement, &terminal)
             .unwrap();
-        db.conn
-            .execute_batch("DROP TRIGGER external_execution_frame_immutable")
+        db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER external_execution_frame_immutable")?))
             .unwrap();
-        db.conn.execute("UPDATE external_execution_frame SET frame_digest=?1 WHERE direction='supervisor_to_owner' AND sequence=4", ["a".repeat(64)]).unwrap();
+        db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_execution_frame SET frame_digest=?1 WHERE direction='supervisor_to_owner' AND sequence=4", ["a".repeat(64)])?)).unwrap();
         assert!(
             db.collect_external_direct_output(placement)
                 .unwrap_err()
                 .to_string()
                 .contains("authenticated bytes")
         );
-        assert_eq!(db.conn.query_row(
+        assert_eq!(db.conn.with_sql(|connection| Ok(connection.query_row(
             "SELECT COUNT(*) FROM external_execution_frame WHERE direction='supervisor_to_owner' AND sequence IN (3,4,5) AND application='pending'",
-            [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+            [], |row| row.get::<_, i64>(0))?)).unwrap(), 3);
     }
 
     #[test]
@@ -4253,17 +4308,16 @@ pub(super) mod tests {
                 assert_eq!(cancel.digest(), original);
             }
             assert_eq!(
-                db.conn
-                    .query_row(
+                db.conn.with_sql(|connection| Ok(connection.query_row(
                         "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
                         [&placement],
                         |row| row.get::<_, String>(0)
-                    )
+                    )?))
                     .unwrap(),
                 "stopping"
             );
-            assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM external_execution_frame WHERE json_extract(frame_json,'$.frame.payload.kind')='release'",
-                [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(db.conn.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM external_execution_frame WHERE json_extract(frame_json,'$.frame.payload.kind')='release'",
+                [], |row| row.get::<_, i64>(0))?)).unwrap(), 0);
             assert!(
                 db.admit_external_ready_and_author_release(
                     &placement,
@@ -4309,7 +4363,7 @@ pub(super) mod tests {
                 .unwrap();
             assert!(acknowledged.incoming_new);
             assert!(acknowledged.urgent_revocation.is_none());
-            validate_channels(&db.conn).unwrap();
+            db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
         }
     }
 
@@ -4386,7 +4440,8 @@ pub(super) mod tests {
             &terminal_digest,
         )
         .unwrap();
-        let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
+        db.conn.with_mutable_sql(|connection| {
+let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
         let error = journal::require_direct_command_success_observation(
             &tx,
             &NodeJournalOwner,
@@ -4397,6 +4452,8 @@ pub(super) mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("revocation"));
         tx.commit().unwrap();
+Ok(())
+}).unwrap();
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
         let repeated = db
@@ -4407,7 +4464,7 @@ pub(super) mod tests {
             repeated.urgent_revocation.unwrap().digest(),
             cancel.digest()
         );
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -4436,9 +4493,9 @@ pub(super) mod tests {
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
             },
         );
-        db.conn.execute_batch("CREATE TRIGGER test_refuse_owner_ack BEFORE INSERT ON external_execution_frame
+        db.conn.with_sql(|connection| Ok(connection.execute_batch("CREATE TRIGGER test_refuse_owner_ack BEFORE INSERT ON external_execution_frame
             WHEN NEW.direction='owner_to_supervisor' AND json_extract(NEW.frame_json,'$.frame.payload.kind')='acknowledge'
-            BEGIN SELECT RAISE(ABORT, 'fixture acknowledgement failure'); END;").unwrap();
+            BEGIN SELECT RAISE(ABORT, 'fixture acknowledgement failure'); END;")?)).unwrap();
         let error = db
             .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
             .err()
@@ -4448,13 +4505,12 @@ pub(super) mod tests {
                 .to_string()
                 .contains("fixture acknowledgement failure")
         );
-        let cancel = retained_owner_revocation(&db.conn, placement)
+        let cancel = db.conn.with_sql(|connection| Ok(retained_owner_revocation(connection, placement)?))
             .unwrap()
             .unwrap();
-        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'", [],
-            |row| row.get::<_, i64>(0)).unwrap(), 0);
-        db.conn
-            .execute_batch("DROP TRIGGER test_refuse_owner_ack")
+        assert_eq!(db.conn.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'", [],
+            |row| row.get::<_, i64>(0))?)).unwrap(), 0);
+        db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER test_refuse_owner_ack")?))
             .unwrap();
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
@@ -4463,7 +4519,7 @@ pub(super) mod tests {
             .unwrap();
         assert!(!retry.incoming_new);
         assert_eq!(retry.urgent_revocation.unwrap().digest(), cancel.digest());
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -4747,15 +4803,15 @@ pub(super) mod tests {
                 "{error:#}"
             );
         }
-        let count: i64 = db.conn.query_row(
+        let count: i64 = db.conn.with_sql(|connection| Ok(connection.query_row(
             "SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'",
             [], |row| row.get(0),
-        ).unwrap();
+        )?)).unwrap();
         assert_eq!(count, 0);
-        let applied: String = db.conn.query_row(
+        let applied: String = db.conn.with_sql(|connection| Ok(connection.query_row(
             "SELECT application FROM external_execution_frame WHERE direction='supervisor_to_owner'",
             [], |row| row.get(0),
-        ).unwrap();
+        )?)).unwrap();
         assert_eq!(applied, "pending");
         // Cancellation is still admitted: readiness expiry is not cleanup expiry.
         db.author_external_owner_revocation(&binding.placement_thread_id, &owner)
@@ -4801,7 +4857,8 @@ pub(super) mod tests {
         assert_eq!(original.digest(), replay.digest());
         assert_eq!(original.frame().sequence, replay.frame().sequence);
         // Shared authorization also serves pending application, not just authoring.
-        let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
+        db.conn.with_mutable_sql(|connection| {
+let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
         assert!(matches!(
             journal::claim_application(
                 &tx,
@@ -4815,6 +4872,8 @@ pub(super) mod tests {
             journal::ApplicationClaim::New(_)
         ));
         tx.rollback().unwrap();
+Ok(())
+}).unwrap();
         assert!(
             db.author_external_owner_frame(
                 &binding.placement_thread_id,
@@ -4848,10 +4907,10 @@ pub(super) mod tests {
             .err()
             .expect("expired live cap must refuse its first release");
         assert!(error.to_string().contains("live deadline"), "{error:#}");
-        let count: i64 = db.conn.query_row(
+        let count: i64 = db.conn.with_sql(|connection| Ok(connection.query_row(
             "SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'",
             [], |row| row.get(0),
-        ).unwrap();
+        )?)).unwrap();
         assert_eq!(count, 0);
         let original = db
             .admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
@@ -4937,14 +4996,13 @@ pub(super) mod tests {
             ExecutionChannelPayload::Release
         ));
         let application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                     AND sequence=1 AND frame_digest=?2",
                 params![binding.digest().unwrap(), ready_digest],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(application, "applied");
 
@@ -4956,14 +5014,13 @@ pub(super) mod tests {
         assert_eq!(replay.digest(), release.digest());
         assert_eq!(replay.canonical(), release.canonical());
         let releases: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                     AND json_extract(frame_json,'$.frame.payload.kind')='release'",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(releases, 1);
     }
@@ -4991,14 +5048,13 @@ pub(super) mod tests {
                 .is_err()
         );
         let quiesces: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                    AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(quiesces, 1);
     }
@@ -5021,24 +5077,22 @@ pub(super) mod tests {
             .is_err()
         );
         let application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=1",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(application, "pending");
         let releases: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                     AND json_extract(frame_json,'$.frame.payload.kind')='release'",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(releases, 0);
 
@@ -5071,14 +5125,13 @@ pub(super) mod tests {
                 .is_err()
         );
         let releases: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                     AND json_extract(frame_json,'$.frame.payload.kind')='release'",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(releases, 0);
     }
@@ -5117,14 +5170,13 @@ pub(super) mod tests {
         assert_eq!(replay.digest(), expected_digest);
         assert_eq!(replay.canonical(), expected_wire);
         let releases: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                     AND json_extract(frame_json,'$.frame.payload.kind')='release'",
                 [replay.frame().binding_digest.as_str()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(releases, 1);
     }
@@ -5258,11 +5310,10 @@ pub(super) mod tests {
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE execution_workspace SET state='orphaned' WHERE thread_id=?1",
                 [placement],
-            )
+            )?))
             .unwrap();
 
         assert!(
@@ -5270,24 +5321,22 @@ pub(super) mod tests {
                 .is_err()
         );
         let application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=1",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(application, "pending");
         let releases: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                   WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                     AND json_extract(frame_json,'$.frame.payload.kind')='release'",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(releases, 0);
     }
@@ -5551,15 +5600,14 @@ pub(super) mod tests {
             "{error:#}"
         );
         let application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame WHERE frame_digest=?1",
                 [&digest],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(application, "pending");
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -5682,13 +5730,12 @@ pub(super) mod tests {
                 .is_err()
         );
         assert_eq!(
-            db.conn
-                .query_row(
+            db.conn.with_sql(|connection| Ok(connection.query_row(
                     "SELECT frame_digest FROM external_execution_revocation
                      WHERE binding_digest=?1",
                     [binding.digest().unwrap()],
                     |row| row.get::<_, String>(0),
-                )
+                )?))
                 .unwrap(),
             cancel_digest
         );
@@ -5713,29 +5760,27 @@ pub(super) mod tests {
         );
         retain_fixture_owner_release(&db, placement, &owner, &release).unwrap();
         let application = || {
-            db.conn
-                .query_row(
+            db.conn.with_sql(|connection| Ok(connection.query_row(
                     "SELECT application FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction=?2 AND sequence=1",
                     params![binding.digest().unwrap(), direction.as_str()],
                     |row| row.get::<_, String>(0),
-                )
+                )?))
                 .unwrap()
         };
         let set_epoch = |epoch: i64| {
             // Deliberately invalidate retained authority between operations.
             // This is test corruption, not an authorized ownership transition.
-            db.conn.execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE dedicated_session SET worker_boot_epoch=?2 WHERE placement_thread_id=?1",
                 params![placement, epoch],
-            )
+            )?))
         };
         // Supported writes already fence ownership replacement. Remove only
         // that trigger in this disposable fixture to test corrupted-state
         // defense at the application API, not claim a normal-path bypass.
         assert!(set_epoch(2).is_err());
-        db.conn
-            .execute_batch("DROP TRIGGER external_execution_session_identity_guard")
+        db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER external_execution_session_identity_guard")?))
             .unwrap();
         set_epoch(2).unwrap();
         assert!(
@@ -5832,7 +5877,7 @@ pub(super) mod tests {
             db.external_allocation(placement).unwrap().unwrap().phase,
             ExternalAllocationPhase::Quarantined
         );
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
     }
 
     #[test]
@@ -5923,8 +5968,8 @@ pub(super) mod tests {
             db.record_external_execution_revocation(placement, &different)
                 .is_err()
         );
-        validate_channels(&db.conn).unwrap();
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-channel", "worker-channel")
                 .is_err()
@@ -6023,7 +6068,7 @@ pub(super) mod tests {
                 .contains(&candidate)
         );
         assert!(db.external_execution_blob_roots().unwrap().is_empty());
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
     }
 
     #[test]
@@ -6127,19 +6172,16 @@ pub(super) mod tests {
         assert_eq!(plan.export_frames[1].frame().sequence, 3);
         assert_eq!(plan.seal_digest, seal_digest);
         let applications = || {
-            let mut statement = db
-                .conn
-                .prepare(
+            db.conn.with_sql(|connection| {
+                let mut statement = connection.prepare(
                     "SELECT application FROM external_execution_frame
                      WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                        AND sequence IN (2,3) ORDER BY sequence",
-                )
-                .unwrap();
-            statement
-                .query_map([binding.digest().unwrap()], |row| row.get::<_, String>(0))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
+                )?;
+                let applications = statement.query_map([binding.digest().unwrap()], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(applications)
+            }).unwrap()
         };
         assert_eq!(applications(), ["claimed", "claimed"]);
         drop(plan);
@@ -6437,27 +6479,25 @@ pub(super) mod tests {
         let verified = imported
             .validate_retention(&authority, &guard, &plan.binding)
             .unwrap();
-        db.conn
-            .execute_batch(
+        db.conn.with_sql(|connection| Ok(connection.execute_batch(
                 "CREATE TEMP TRIGGER fail_external_import_finish
                  BEFORE UPDATE ON external_execution_frame
                  WHEN NEW.application='applied'
                   AND json_extract(NEW.frame_json,'$.frame.payload.kind')
                       IN ('export_object_chunk','export_sealed')
                  BEGIN SELECT RAISE(ABORT, 'fixture import finish failure'); END;",
-            )
+            )?))
             .unwrap();
         assert!(
             db.finish_external_candidate_import(placement, &plan, &verified, &authority)
                 .is_err()
         );
         let import_count: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_import",
                 [],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(import_count, 0);
         assert!(
@@ -6466,8 +6506,7 @@ pub(super) mod tests {
                 .contains(&candidate_hash)
         );
         let claimed_count: i64 = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                    AND application='claimed'
@@ -6475,14 +6514,13 @@ pub(super) mod tests {
                        IN ('export_object_chunk','export_sealed')",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(
             claimed_count,
             i64::try_from(plan.export_frames.len()).unwrap()
         );
-        db.conn
-            .execute_batch("DROP TRIGGER fail_external_import_finish;")
+        db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER fail_external_import_finish;")?))
             .unwrap();
         db.finish_external_candidate_import(placement, &plan, &verified, &authority)
             .unwrap();
@@ -6624,8 +6662,8 @@ pub(super) mod tests {
             .unwrap();
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
-        validate_channels(&db.conn).unwrap();
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
     }
 
     #[test]
@@ -6697,7 +6735,7 @@ pub(super) mod tests {
         );
         db.finish_external_frame_application(placement, direction, 3, &quiesce_digest)
             .unwrap();
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -6760,7 +6798,7 @@ pub(super) mod tests {
             &digest,
         )
         .unwrap();
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -6801,13 +6839,12 @@ pub(super) mod tests {
             .is_err()
         );
         let release_application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor' AND sequence=1",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(release_application, "pending");
         assert!(
@@ -6839,12 +6876,12 @@ pub(super) mod tests {
         );
         db.record_external_execution_frame(placement, &stopped)
             .unwrap();
-        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
         assert!(
             db.release_credential_profile("P-channel", "worker-channel")
                 .is_err()
         );
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -6953,23 +6990,21 @@ pub(super) mod tests {
         );
         // Withholding transport is not proof that the guest never received it.
         let application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame WHERE frame_digest=?1",
                 [release.digest()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(application, "pending");
         let cancel = db
             .author_external_owner_revocation(placement, &owner)
             .unwrap();
-        let urgent = journal::pending_terminal_revocation_frame(
-            &db.conn,
+        let urgent = db.conn.with_sql(|connection| Ok(journal::pending_terminal_revocation_frame(connection,
             &NodeJournalOwner,
             placement,
             ChannelDirection::OwnerToSupervisor,
-        )
+        )?))
         .unwrap()
         .unwrap();
         assert_eq!(urgent.digest(), cancel.digest());
@@ -6978,7 +7013,7 @@ pub(super) mod tests {
                 .unwrap()
                 .is_empty()
         );
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -7089,13 +7124,12 @@ pub(super) mod tests {
         assert!(applied.acknowledgement.is_none());
         assert!(applied.outbound.is_empty());
         let application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor' AND sequence=2",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(application, "applied");
 
@@ -7112,12 +7146,11 @@ pub(super) mod tests {
             .unwrap();
         assert!(pending.is_empty());
         assert_eq!(
-            journal::pending_terminal_revocation_frame(
-                &db.conn,
+            db.conn.with_sql(|connection| Ok(journal::pending_terminal_revocation_frame(connection,
                 &NodeJournalOwner,
                 placement,
                 ChannelDirection::OwnerToSupervisor,
-            )
+            )?))
             .unwrap()
             .unwrap()
             .digest(),
@@ -7217,7 +7250,7 @@ pub(super) mod tests {
         );
         assert!(drained_retry.outbound.is_empty());
         assert!(drained_retry.urgent_revocation.is_none());
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 
     #[test]
@@ -7268,13 +7301,16 @@ pub(super) mod tests {
         // Model interruption between the exchange's durable retention and
         // its no-effect application transaction. Retention alone is not an
         // applied runtime observation; retry must finish the same signed row.
-        let retained_only =
-            Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate).unwrap();
+        db.conn.with_mutable_sql(|connection| {
+let retained_only =
+            Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
         assert!(
             journal::append_frame(&retained_only, &NodeJournalOwner, placement, &first_wire,)
                 .unwrap()
         );
         retained_only.commit().unwrap();
+Ok(())
+}).unwrap();
         assert!(
             db.external_runtime_applied_observation(placement)
                 .err()
@@ -7287,12 +7323,11 @@ pub(super) mod tests {
             .unwrap();
         assert!(!first.incoming_new);
         let applied: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame WHERE frame_digest=?1",
                 [&digest],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(applied, "applied");
         let retained = db
@@ -7338,7 +7373,7 @@ pub(super) mod tests {
                 .to_string()
                 .contains("runtime-applied observation was already retained")
         );
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
         drop(db);
         let reopened = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
         assert_eq!(
@@ -7462,15 +7497,14 @@ pub(super) mod tests {
         assert!(settled_transport.outbound.is_empty());
         assert!(settled_transport.urgent_revocation.is_none());
         let release_application: String = db
-            .conn
-            .query_row(
+            .conn.with_sql(|connection| Ok(connection.query_row(
                 "SELECT application FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor' AND sequence=2",
                 [binding.digest().unwrap()],
                 |row| row.get(0),
-            )
+            )?))
             .unwrap();
         assert_eq!(release_application, "applied");
-        validate_channels(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
     }
 }

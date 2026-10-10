@@ -198,7 +198,7 @@ impl super::VerifiedTrustedPooledSessionInputs {
                     .as_ref()
                     .context("selected GPU loader input has no retained closure inventory")?;
                 let limits = state.node_policy
-                    .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+                    .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
                     .closure_limits()?;
                 inventory.validate_same_seal(
                     limits.max_object_bytes.min(limits.max_total_object_bytes),
@@ -238,7 +238,7 @@ impl super::VerifiedTrustedPooledSessionInputs {
         let selected = self.selected_gpu_loader_realizations()?;
         let node_policy = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
         )?;
         let limits = node_policy.closure_limits()?;
         ensure!(

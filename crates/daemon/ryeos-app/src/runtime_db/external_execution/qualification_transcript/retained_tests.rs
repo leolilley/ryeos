@@ -141,19 +141,17 @@ impl<'a> Fixture<'a> {
             provider_observation_digest: "9".repeat(64),
         };
         allocation_occurrence.validate(&reservation).unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,1)",
                 params![
                     backend.digest(),
                     backend.capacity_owner(),
                     backend.canonical_json().unwrap()
                 ],
-            )
+            )?))
             .unwrap();
         // Retained storage inputs, deliberately not a fresh admission/callback.
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'bound',?4,1,1)",
                 params![
                     placement,
@@ -161,7 +159,7 @@ impl<'a> Fixture<'a> {
                     canonical(&reservation),
                     canonical(&allocation_occurrence)
                 ],
-            )
+            )?))
             .unwrap();
         // Typed retained activation/package testimony closes the full cold
         // journal invariant. It does not claim a provider call/package upload.
@@ -206,14 +204,13 @@ impl<'a> Fixture<'a> {
         activation
             .validate_contract(&reservation, &allocation_occurrence, &contract)
             .unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
                 params![placement, canonical(&activation)],
-            )
+            )?))
             .unwrap();
-        db.conn.execute("INSERT INTO external_execution_channel(placement_thread_id,binding_digest,binding_json,state) VALUES(?1,?2,?3,'prepared')",
-            params![placement,binding.digest().unwrap(),canonical(&binding)]).unwrap();
+        db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_execution_channel(placement_thread_id,binding_digest,binding_json,state) VALUES(?1,?2,?3,'prepared')",
+            params![placement,binding.digest().unwrap(),canonical(&binding)])?)).unwrap();
         let fixture = Self {
             db,
             binding,
@@ -244,7 +241,8 @@ impl<'a> Fixture<'a> {
         direction: ChannelDirection,
         payload: ExecutionChannelPayload,
     ) -> AuthenticatedExecutionFrame {
-        let tx = Transaction::new_unchecked(&self.db.conn, TransactionBehavior::Immediate).unwrap();
+        self.db.conn.with_mutable_sql(|connection| {
+let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
         let key = if direction == ChannelDirection::OwnerToSupervisor {
             &self.owner
         } else {
@@ -260,11 +258,13 @@ impl<'a> Fixture<'a> {
         )
         .unwrap();
         tx.commit().unwrap();
-        frame
+Ok(frame)
+}).unwrap()
     }
 
     fn apply(&self, frame: &AuthenticatedExecutionFrame) {
-        let tx = Transaction::new_unchecked(&self.db.conn, TransactionBehavior::Immediate).unwrap();
+        self.db.conn.with_mutable_sql(|connection| {
+let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
         journal::claim_application(
             &tx,
             &channel::NodeJournalOwner,
@@ -284,6 +284,8 @@ impl<'a> Fixture<'a> {
         )
         .unwrap();
         tx.commit().unwrap();
+Ok(())
+}).unwrap();
     }
 
     fn retain_worker_testimony(
@@ -363,14 +365,14 @@ impl<'a> Fixture<'a> {
                 "worker_incarnation_digest":null,"cleanup_reason":null,"cleanup":null,
                 "created_at_ms":1,"updated_at_ms":1,
             })).unwrap();
-        self.db.conn.execute("INSERT INTO external_qualification_local_start(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
-            params![placement,local.accepted_root_id,local.accepted_capsule_hash,local.qualification_operation_id,local.qualification_occurrence_id,digest,canonical(&local)]).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_local_start(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7,1,1)",
+            params![placement,local.accepted_root_id,local.accepted_capsule_hash,local.qualification_operation_id,local.qualification_occurrence_id,digest,canonical(&local)])?)).unwrap();
         let mut next = local.clone();
         next.phase = qualification_local_start::QualificationLocalStartPhase::WorkspaceReady;
         next.workspace_identity = Some(
             serde_json::from_value(serde_json::json!({"containing_device":1,"inode":123})).unwrap(),
         );
-        qualification_local_start::transition(&self.db.conn, &local, &next).unwrap();
+        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
         local = next;
         let mut next = local.clone();
         next.directory_borrow_intent = Some(
@@ -380,30 +382,30 @@ impl<'a> Fixture<'a> {
                 reserved_at_ms: 1,
             },
         );
-        qualification_local_start::transition(&self.db.conn, &local, &next).unwrap();
+        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
         local = next;
         let mut next = local.clone();
         next.phase = qualification_local_start::QualificationLocalStartPhase::WorkerAttached;
         next.worker_incarnation_digest = Some(identity.owner_incarnation_digest().unwrap());
-        qualification_local_start::transition(&self.db.conn, &local, &next).unwrap();
-        self.db.conn.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
-            params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)]).unwrap();
-        self.db.conn.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",
-            params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,identity.owner_incarnation_digest().unwrap(),"1".repeat(64),"2".repeat(64)]).unwrap();
-        self.db.conn.execute("UPDATE external_qualification_worker_command SET state='setup_possible_contact',setup_contacted_at_ms=2 WHERE placement_thread_id=?1",[placement]).unwrap();
+        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
+            params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)])?)).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",
+            params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,identity.owner_incarnation_digest().unwrap(),"1".repeat(64),"2".repeat(64)])?)).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_qualification_worker_command SET state='setup_possible_contact',setup_contacted_at_ms=2 WHERE placement_thread_id=?1",[placement])?)).unwrap();
         let response = serde_json::json!({"response":{"ok":true}});
         let body = canonical(&response);
         let hash = lillux::sha256_hex(body.as_bytes());
-        self.db.conn.execute("UPDATE external_qualification_worker_command SET state='setup_settled',setup_final_response_json=?2,setup_final_response_digest=?3,setup_final_wire_max_bytes=1024,setup_owner_send_settled_at_ms=3 WHERE placement_thread_id=?1",params![placement,body,hash]).unwrap();
-        self.db.conn.execute("UPDATE external_qualification_worker_command SET state='possible_contact',contacted_at_ms=4 WHERE placement_thread_id=?1",[placement]).unwrap();
-        self.db.conn.execute("UPDATE external_qualification_worker_command SET state='turn_completed',turn_id='turn-retained',turn_started_at_ms=5,turn_start_digest=?2,turn_completed_at_ms=6,turn_completion_digest=?3,final_response_json=?4,final_response_digest=?5,final_wire_max_bytes=1024,completed_at_ms=6,owner_send_settled_at_ms=7 WHERE placement_thread_id=?1",params![placement,"3".repeat(64),"4".repeat(64),body,hash]).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_qualification_worker_command SET state='setup_settled',setup_final_response_json=?2,setup_final_response_digest=?3,setup_final_wire_max_bytes=1024,setup_owner_send_settled_at_ms=3 WHERE placement_thread_id=?1",params![placement,body,hash])?)).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_qualification_worker_command SET state='possible_contact',contacted_at_ms=4 WHERE placement_thread_id=?1",[placement])?)).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_qualification_worker_command SET state='turn_completed',turn_id='turn-retained',turn_started_at_ms=5,turn_start_digest=?2,turn_completed_at_ms=6,turn_completion_digest=?3,final_response_json=?4,final_response_digest=?5,final_wire_max_bytes=1024,completed_at_ms=6,owner_send_settled_at_ms=7 WHERE placement_thread_id=?1",params![placement,"3".repeat(64),"4".repeat(64),body,hash])?)).unwrap();
     }
 
     fn retain_terminal_testimony(&self) {
         let placement = &self.binding.placement_thread_id;
         // The test supplies historical death testimony, not a forged opaque
         // QualificationWorkerDeathProof or a claim that any process was reaped.
-        self.db.conn.execute("UPDATE external_qualification_worker_process SET phase='terminal',terminal_at_ms=8 WHERE placement_thread_id=?1",[placement]).unwrap();
+        self.db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_qualification_worker_process SET phase='terminal',terminal_at_ms=8 WHERE placement_thread_id=?1",[placement])?)).unwrap();
     }
 
     fn settle_native(&mut self) {

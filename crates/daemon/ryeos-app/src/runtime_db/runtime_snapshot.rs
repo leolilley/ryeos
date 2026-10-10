@@ -281,7 +281,9 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<RuntimeSnapshotRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| {
+            read(&conn, operation_id)
+        })
     }
 
     /// Exact replay returns the same row. No provider contact is implied.
@@ -289,76 +291,78 @@ impl RuntimeDb {
         &self,
         intent: &RuntimeSnapshotIntent,
     ) -> Result<RuntimeSnapshotRecord> {
-        intent.validate()?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
+        self.conn.with_sql(|conn| {
+            intent.validate()?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent,
+                    "runtime snapshot reservation replay changed"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let maximum_window_ms = if let Some(bootstrap_operation_id) =
+                &intent.source_bootstrap_operation_id
+            {
+                verify_retained_bootstrap_source(&tx, intent)?;
+                let bootstrap = super::runtime_snapshot_bootstrap::read(&tx, bootstrap_operation_id)?
+                    .context("materialized snapshot lost retained bootstrap")?;
+                let termination_count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM runtime_snapshot_bootstrap_termination WHERE bootstrap_operation_id=?1",
+                    [bootstrap_operation_id], |row| row.get(0),
+                )?;
+                ensure!(
+                    termination_count == 0,
+                    "bootstrap source cleanup already reserved"
+                );
+                let created_ms = chrono::DateTime::parse_from_rfc3339(
+                    intent
+                        .source_created_at
+                        .as_deref()
+                        .context("snapshot source has no creation time")?,
+                )?
+                .timestamp_millis();
+                let source_expiry_ms = created_ms
+                    .checked_add(
+                        i64::from(
+                            intent
+                                .source_timeout_seconds
+                                .context("snapshot source has no timeout")?,
+                        ) * 1_000,
+                    )
+                    .context("snapshot source expiry overflow")?;
+                ensure!(
+                    intent.attempt_deadline_ms <= source_expiry_ms,
+                    "snapshot deadline outlives its retained source"
+                );
+                i64::from(bootstrap.intent.maximum_lifetime_seconds) * 1_000
+            } else {
+                300_000
+            };
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
             ensure!(
-                existing.intent == *intent,
-                "runtime snapshot reservation replay changed"
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= maximum_window_ms,
+                "runtime snapshot attempt deadline is outside its admission window"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let maximum_window_ms = if let Some(bootstrap_operation_id) =
-            &intent.source_bootstrap_operation_id
-        {
-            verify_retained_bootstrap_source(&tx, intent)?;
-            let bootstrap = super::runtime_snapshot_bootstrap::read(&tx, bootstrap_operation_id)?
-                .context("materialized snapshot lost retained bootstrap")?;
-            let termination_count: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM runtime_snapshot_bootstrap_termination WHERE bootstrap_operation_id=?1",
-                [bootstrap_operation_id], |row| row.get(0),
-            )?;
-            ensure!(
-                termination_count == 0,
-                "bootstrap source cleanup already reserved"
-            );
-            let created_ms = chrono::DateTime::parse_from_rfc3339(
-                intent
-                    .source_created_at
-                    .as_deref()
-                    .context("snapshot source has no creation time")?,
-            )?
-            .timestamp_millis();
-            let source_expiry_ms = created_ms
-                .checked_add(
-                    i64::from(
-                        intent
-                            .source_timeout_seconds
-                            .context("snapshot source has no timeout")?,
-                    ) * 1_000,
-                )
-                .context("snapshot source expiry overflow")?;
-            ensure!(
-                intent.attempt_deadline_ms <= source_expiry_ms,
-                "snapshot deadline outlives its retained source"
-            );
-            i64::from(bootstrap.intent.maximum_lifetime_seconds) * 1_000
-        } else {
-            300_000
-        };
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= maximum_window_ms,
-            "runtime snapshot attempt deadline is outside its admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_operation
+            tx.execute(
+                "INSERT INTO runtime_snapshot_operation
              (operation_id,intent_json,intent_digest,source_bootstrap_operation_id,phase,locator_json,readiness_json,completion_at_ms,runner_deadline_exceeded,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,?4,'reserved',NULL,NULL,NULL,NULL,?5,?5)",
-            params![
-                intent.operation_id,
-                canonical(intent)?,
-                intent.digest()?,
-                intent.source_bootstrap_operation_id,
-                now
-            ],
-        )?;
-        let record = read(&tx, &intent.operation_id)?
-            .context("runtime snapshot reservation was not retained")?;
-        tx.commit()?;
-        Ok(record)
+                params![
+                    intent.operation_id,
+                    canonical(intent)?,
+                    intent.digest()?,
+                    intent.source_bootstrap_operation_id,
+                    now
+                ],
+            )?;
+            let record = read(&tx, &intent.operation_id)?
+                .context("runtime snapshot reservation was not retained")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     /// Only StartAttempt may run the bounded provider sequence. The sequence
@@ -369,52 +373,54 @@ impl RuntimeDb {
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotAttemptClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("runtime snapshot was not reserved")?;
-        ensure!(
-            record.intent.digest()? == intent_digest,
-            "runtime snapshot attempt changed intent"
-        );
-        match record.phase {
-            RuntimeSnapshotPhase::Bound => {
-                tx.commit()?;
-                return Ok(RuntimeSnapshotAttemptClaim::Bound(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("runtime snapshot was not reserved")?;
+            ensure!(
+                record.intent.digest()? == intent_digest,
+                "runtime snapshot attempt changed intent"
+            );
+            match record.phase {
+                RuntimeSnapshotPhase::Bound => {
+                    tx.commit()?;
+                    return Ok(RuntimeSnapshotAttemptClaim::Bound(record));
+                }
+                RuntimeSnapshotPhase::AttemptPending
+                | RuntimeSnapshotPhase::Quarantined
+                | RuntimeSnapshotPhase::LateObserved => {
+                    tx.commit()?;
+                    return Ok(RuntimeSnapshotAttemptClaim::Reconcile(record));
+                }
+                RuntimeSnapshotPhase::Reserved => {}
             }
-            RuntimeSnapshotPhase::AttemptPending
-            | RuntimeSnapshotPhase::Quarantined
-            | RuntimeSnapshotPhase::LateObserved => {
-                tx.commit()?;
-                return Ok(RuntimeSnapshotAttemptClaim::Reconcile(record));
-            }
-            RuntimeSnapshotPhase::Reserved => {}
-        }
-        let staged_count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM runtime_snapshot_stage WHERE parent_operation_id=?1",
-            [operation_id],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            staged_count == 0,
-            "runtime snapshot has a separately retained mutation stage"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms,
-            "runtime snapshot attempt deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_operation SET phase='attempt_pending',updated_at_ms=?2
+            let staged_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM runtime_snapshot_stage WHERE parent_operation_id=?1",
+                [operation_id],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                staged_count == 0,
+                "runtime snapshot has a separately retained mutation stage"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms,
+                "runtime snapshot attempt deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_operation SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "runtime snapshot attempt claim lost its durable CAS"
-        );
-        let current =
-            read(&tx, operation_id)?.context("runtime snapshot attempt claim vanished")?;
-        tx.commit()?;
-        Ok(RuntimeSnapshotAttemptClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "runtime snapshot attempt claim lost its durable CAS"
+            );
+            let current =
+                read(&tx, operation_id)?.context("runtime snapshot attempt claim vanished")?;
+            tx.commit()?;
+            Ok(RuntimeSnapshotAttemptClaim::StartAttempt(current))
+        })
     }
 
     /// A complete adapter observation retains one opaque snapshot locator.
@@ -436,58 +442,60 @@ impl RuntimeDb {
         deadline_exceeded: bool,
         observed_at_ms: i64,
     ) -> Result<RuntimeSnapshotRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record =
-            read(&tx, &locator.operation_id)?.context("runtime snapshot has no attempt claim")?;
-        locator.validate_for(&record.intent)?;
-        if matches!(
-            record.phase,
-            RuntimeSnapshotPhase::Bound | RuntimeSnapshotPhase::LateObserved
-        ) {
-            ensure!(
-                record.locator.as_ref() == Some(locator),
-                "runtime snapshot result replay changed"
-            );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            observed_at_ms >= record.updated_at_ms,
-            "runtime snapshot completion predates its retained attempt"
-        );
-        let late = deadline_exceeded || observed_at_ms >= record.intent.attempt_deadline_ms;
-        ensure!(
-            matches!(
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, &locator.operation_id)?.context("runtime snapshot has no attempt claim")?;
+            locator.validate_for(&record.intent)?;
+            if matches!(
                 record.phase,
-                RuntimeSnapshotPhase::AttemptPending | RuntimeSnapshotPhase::Quarantined
-            ),
-            "runtime snapshot locator did not follow its one attempt claim"
-        );
-        ensure!(
-            late || record.phase == RuntimeSnapshotPhase::AttemptPending,
-            "quarantined runtime snapshot cannot become a timely bound locator"
-        );
-        let target_phase = if late { "late_observed" } else { "bound" };
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_operation SET phase=?2,locator_json=?3,
+                RuntimeSnapshotPhase::Bound | RuntimeSnapshotPhase::LateObserved
+            ) {
+                ensure!(
+                    record.locator.as_ref() == Some(locator),
+                    "runtime snapshot result replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                observed_at_ms >= record.updated_at_ms,
+                "runtime snapshot completion predates its retained attempt"
+            );
+            let late = deadline_exceeded || observed_at_ms >= record.intent.attempt_deadline_ms;
+            ensure!(
+                matches!(
+                    record.phase,
+                    RuntimeSnapshotPhase::AttemptPending | RuntimeSnapshotPhase::Quarantined
+                ),
+                "runtime snapshot locator did not follow its one attempt claim"
+            );
+            ensure!(
+                late || record.phase == RuntimeSnapshotPhase::AttemptPending,
+                "quarantined runtime snapshot cannot become a timely bound locator"
+            );
+            let target_phase = if late { "late_observed" } else { "bound" };
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_operation SET phase=?2,locator_json=?3,
              completion_at_ms=?4,runner_deadline_exceeded=?5,updated_at_ms=?4
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![
-                locator.operation_id,
-                target_phase,
-                canonical(locator)?,
-                observed_at_ms,
-                i64::from(deadline_exceeded)
-            ],
-        )?;
-        ensure!(
-            changed == 1,
-            "runtime snapshot locator bind lost its durable CAS"
-        );
-        let current =
-            read(&tx, &locator.operation_id)?.context("runtime snapshot locator vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![
+                    locator.operation_id,
+                    target_phase,
+                    canonical(locator)?,
+                    observed_at_ms,
+                    i64::from(deadline_exceeded)
+                ],
+            )?;
+            ensure!(
+                changed == 1,
+                "runtime snapshot locator bind lost its durable CAS"
+            );
+            let current =
+                read(&tx, &locator.operation_id)?.context("runtime snapshot locator vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     /// Retain one complete provider-readiness observation for an already
@@ -497,45 +505,47 @@ impl RuntimeDb {
         &self,
         observation: &RuntimeSnapshotReadinessObservation,
     ) -> Result<RuntimeSnapshotRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &observation.operation_id)?
-            .context("runtime snapshot readiness has no retained operation")?;
-        ensure!(
-            record.phase == RuntimeSnapshotPhase::Bound,
-            "runtime snapshot is not bound"
-        );
-        let request = RuntimeSnapshotReadinessRequest {
-            protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
-            intent: record.intent.clone(),
-            locator: record
-                .locator
-                .clone()
-                .context("bound snapshot has no locator")?,
-            provider_spec_digest: record.intent.provider_spec_digest.clone(),
-        };
-        observation.validate_for(&request)?;
-        if let Some(existing) = &record.readiness {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &observation.operation_id)?
+                .context("runtime snapshot readiness has no retained operation")?;
             ensure!(
-                existing == observation,
-                "runtime snapshot readiness replay changed"
+                record.phase == RuntimeSnapshotPhase::Bound,
+                "runtime snapshot is not bound"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_operation SET readiness_json=?2,updated_at_ms=?3
+            let request = RuntimeSnapshotReadinessRequest {
+                protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
+                intent: record.intent.clone(),
+                locator: record
+                    .locator
+                    .clone()
+                    .context("bound snapshot has no locator")?,
+                provider_spec_digest: record.intent.provider_spec_digest.clone(),
+            };
+            observation.validate_for(&request)?;
+            if let Some(existing) = &record.readiness {
+                ensure!(
+                    existing == observation,
+                    "runtime snapshot readiness replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_operation SET readiness_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase='bound' AND readiness_json IS NULL",
-            params![observation.operation_id, canonical(observation)?, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "runtime snapshot readiness lost its durable CAS"
-        );
-        let current =
-            read(&tx, &observation.operation_id)?.context("runtime snapshot readiness vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![observation.operation_id, canonical(observation)?, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "runtime snapshot readiness lost its durable CAS"
+            );
+            let current =
+                read(&tx, &observation.operation_id)?.context("runtime snapshot readiness vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn quarantine_runtime_snapshot_attempt(
@@ -543,29 +553,31 @@ impl RuntimeDb {
         operation_id: &str,
         intent_digest: &str,
     ) -> Result<RuntimeSnapshotRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("runtime snapshot attempt is absent")?;
-        ensure!(
-            record.intent.digest()? == intent_digest,
-            "runtime snapshot quarantine changed intent"
-        );
-        if record.phase == RuntimeSnapshotPhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == RuntimeSnapshotPhase::AttemptPending,
-            "runtime snapshot quarantine requires pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE runtime_snapshot_operation SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("runtime snapshot attempt is absent")?;
+            ensure!(
+                record.intent.digest()? == intent_digest,
+                "runtime snapshot quarantine changed intent"
+            );
+            if record.phase == RuntimeSnapshotPhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == RuntimeSnapshotPhase::AttemptPending,
+                "runtime snapshot quarantine requires pending attempt"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            tx.execute(
+                "UPDATE runtime_snapshot_operation SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        let current = read(&tx, operation_id)?.context("runtime snapshot quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            let current = read(&tx, operation_id)?.context("runtime snapshot quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 
@@ -718,7 +730,7 @@ mod tests {
             db.bind_runtime_snapshot_locator(&changed_locator, false)
                 .is_err()
         );
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -777,7 +789,7 @@ mod tests {
             size_bytes: 4096,
         };
         assert!(db.bind_runtime_snapshot_readiness(&readiness).is_err());
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -800,7 +812,7 @@ mod tests {
             db.quarantine_runtime_snapshot_attempt(&intent.operation_id, &digest)
                 .is_err()
         );
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 
     #[test]
@@ -819,6 +831,6 @@ mod tests {
         assert_eq!(record.locator, Some(locator));
         assert_eq!(record.runner_deadline_exceeded, Some(false));
         assert_eq!(record.completion_at_ms, Some(intent.attempt_deadline_ms));
-        validate_current(&db.conn).unwrap();
+        db.conn.with_sql(|connection| Ok(validate_current(connection)?)).unwrap();
     }
 }

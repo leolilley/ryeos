@@ -2,25 +2,24 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use tokio::sync::{RwLock, mpsc};
 
 use ryeos_engine::engine::Engine;
 use ryeos_engine::isolation::{IsolationMode, IsolationRuntime};
 use ryeos_runtime::CommandRegistry;
 use ryeos_runtime::authorizer::Authorizer;
-use ryeos_scheduler::ReloadSignal;
-use ryeos_scheduler::db::SchedulerDb;
 
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
+use ryeos_node_runtime::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
+use ryeos_node_runtime::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
-use crate::node_policy::NodePolicySnapshot;
+use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::resolution_cache::ResolutionCache;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
@@ -28,8 +27,6 @@ use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
 use crate::vault::NodeVault;
 use crate::write_barrier::WriteBarrier;
-use ryeos_node_runtime::config::Config;
-use ryeos_node_runtime::identity::NodeIdentity;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogHealth {
@@ -134,15 +131,6 @@ pub struct AppState {
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.
     pub authorizer: Arc<Authorizer>,
-    /// Scheduler projection DB (SQLite, in-memory for tests, file-backed in prod).
-    pub scheduler_db: Arc<SchedulerDb>,
-    /// Runtime gate shared by scheduler mutation paths and the timer.
-    /// Writers hold it across project/schedule mutations; the timer only
-    /// dispatches while it can acquire a read guard.
-    pub scheduler_runtime_gate: Arc<RwLock<()>>,
-    /// Channel to request scheduler reload after register/deregister/pause/resume.
-    /// `None` when the scheduler is not running (e.g. in unit tests).
-    pub scheduler_reload_tx: Option<mpsc::Sender<ReloadSignal>>,
     /// Ingest ignore matcher compiled from the retained node-policy snapshot.
     pub ignore_matcher: Arc<IgnoreMatcher>,
     /// Vault X25519 public key fingerprint. `None` when using
@@ -229,6 +217,27 @@ pub struct AccountingStatus {
 }
 
 impl AppState {
+    /// The same one-shot participant used by durable lifecycle observations.
+    pub fn scheduler(&self) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.threads.scheduler_participant()
+    }
+
+    /// Install exactly once during composition, before recovery or readiness.
+    pub fn install_scheduler_participant(
+        &self,
+        participant: Arc<dyn crate::scheduler_boundary::SchedulerParticipant>,
+    ) -> anyhow::Result<()> {
+        self.threads.install_scheduler_participant(participant)
+    }
+
+    /// Withdraw the same participant after request and scheduler-task drain.
+    /// This is part of native shutdown custody, not ordinary capability removal.
+    pub fn take_scheduler_participant_for_shutdown(
+        &self,
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.threads.take_scheduler_participant_for_shutdown()
+    }
+
     pub fn node_history_policy(
         &self,
     ) -> anyhow::Result<&ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy> {
@@ -413,7 +422,7 @@ pub mod test_support {
             external_candidate_connectors: Arc::new(Default::default()),
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
-            node_policy: Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+            node_policy: Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
                 Vec::new(),
             )),
             vault: Arc::new(crate::vault::EmptyVault),
@@ -422,9 +431,6 @@ pub mod test_support {
                 &Default::default(),
             )?),
             authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-            scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory()?),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(crate::ignore::IgnoreMatcher::from_config(
                 &crate::ignore::IgnoreConfig {
                     patterns: Vec::new(),

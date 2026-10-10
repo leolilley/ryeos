@@ -73,24 +73,24 @@ fn parser_only_admission_selects_basic_parsers() {
 }
 
 #[test]
-fn full_and_mixed_admission_select_full_handlers() {
+fn core_and_mixed_admission_select_core_handlers() {
     let full = input(
         "web",
         vec![payload(
             "web",
             "ryeos-direct-execution-evidence",
-            &["full-handlers"],
+            &["core-handlers"],
         )],
-        &["full-handlers"],
+        &["core-handlers"],
     );
     let admitted = AdmittedReleaseInput::from_value(&full).expect("full input is valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
-        ["full-handlers"]
+        ["core-handlers"]
     );
 
     // This exact binary pair is also exercised through the Python Core builder
-    // contract test. Full handlers subsume the parser composition.
+    // contract test. Core handlers subsume the parser composition.
     let mixed = input(
         "core",
         vec![
@@ -98,17 +98,84 @@ fn full_and_mixed_admission_select_full_handlers() {
             payload(
                 "core",
                 "ryeos-direct-execution-evidence",
-                &["full-handlers"],
+                &["core-handlers"],
             ),
         ],
-        &["full-handlers"],
+        &["core-handlers"],
     );
     assert!(AdmittedReleaseInput::from_value(&mixed).is_err());
     let admitted =
         AdmittedReleaseInput::from_core_seed_value(&mixed).expect("mixed Core seed input is valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
-        ["full-handlers"]
+        ["core-handlers"]
+    );
+}
+
+#[test]
+fn graph_admission_selects_only_the_graph_composition() {
+    let value = input(
+        "web",
+        vec![
+            payload("web", "rye-composer-identity", &["core-handlers"]),
+            payload("web", "ryeos-graph-launch-preparer", &["graph-handlers"]),
+        ],
+        &["graph-handlers"],
+    );
+    let admitted = AdmittedReleaseInput::from_value(&value).expect("workflow input is valid");
+    assert_eq!(
+        admitted.cargo_feature_selections[0].features,
+        ["graph-handlers"]
+    );
+    let mut widened_core = value.clone();
+    widened_core["payloads"][0]["required_features"] = json!(["graph-handlers"]);
+    assert!(AdmittedReleaseInput::from_value(&widened_core).is_err());
+    let mut missing_workflow = value;
+    missing_workflow["cargo_feature_selections"][0]["features"] = json!(["core-handlers"]);
+    assert!(AdmittedReleaseInput::from_value(&missing_workflow).is_err());
+}
+
+#[test]
+fn independent_handler_roots_are_not_collapsed_into_each_other() {
+    let value = input(
+        "web",
+        vec![
+            payload("web", "rye-composer-identity", &["core-handlers"]),
+            payload("web", "rye-composer-extends-chain", &["extends-composer"]),
+            payload(
+                "web",
+                "ryeos-directive-launch-preparer",
+                &["directive-handlers"],
+            ),
+            payload("web", "ryeos-graph-launch-preparer", &["graph-handlers"]),
+        ],
+        &["directive-handlers", "graph-handlers"],
+    );
+    let admitted =
+        AdmittedReleaseInput::from_value(&value).expect("both independent roots are valid");
+    assert_eq!(
+        admitted.cargo_feature_selections[0].features,
+        ["directive-handlers", "graph-handlers"]
+    );
+    for incomplete in ["directive-handlers", "graph-handlers"] {
+        let mut altered = value.clone();
+        altered["cargo_feature_selections"][0]["features"] = json!([incomplete]);
+        assert!(AdmittedReleaseInput::from_value(&altered).is_err());
+    }
+    let core_extends = input(
+        "web",
+        vec![
+            payload("web", "rye-composer-identity", &["core-handlers"]),
+            payload("web", "rye-composer-extends-chain", &["extends-composer"]),
+        ],
+        &["core-handlers", "extends-composer"],
+    );
+    assert_eq!(
+        AdmittedReleaseInput::from_value(&core_extends)
+            .unwrap()
+            .cargo_feature_selections[0]
+            .features,
+        ["core-handlers", "extends-composer"]
     );
 }
 
@@ -125,11 +192,11 @@ fn payload_and_aggregate_feature_tampering_are_rejected() {
     );
 
     let mut tampered_payload = valid.clone();
-    tampered_payload["payloads"][0]["required_features"] = json!(["full-handlers"]);
+    tampered_payload["payloads"][0]["required_features"] = json!(["core-handlers"]);
     assert!(AdmittedReleaseInput::from_value(&tampered_payload).is_err());
 
     let mut tampered_aggregate = valid;
-    tampered_aggregate["cargo_feature_selections"][0]["features"] = json!(["full-handlers"]);
+    tampered_aggregate["cargo_feature_selections"][0]["features"] = json!(["core-handlers"]);
     assert!(AdmittedReleaseInput::from_value(&tampered_aggregate).is_err());
 
     let mut wrong_package_selection = input(

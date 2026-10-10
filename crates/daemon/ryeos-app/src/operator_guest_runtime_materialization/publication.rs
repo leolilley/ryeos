@@ -69,7 +69,7 @@ pub fn load_retained_guest_owner_materialization(
     );
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         &cas,

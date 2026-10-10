@@ -17,7 +17,7 @@ use super::{
 };
 use crate::handler_context::HandlerContext;
 use crate::managed_external_content_operation::AcquisitionMode;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::operator_external_content::content_qualification::{
     ContentQualificationLaunchRequest, prepare_source,
 };

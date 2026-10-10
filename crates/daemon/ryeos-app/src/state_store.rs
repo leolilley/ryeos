@@ -101,6 +101,30 @@ impl StateStore {
 }
 
 mod projection_access;
+mod live_destination_join;
+pub use live_destination_join::{quote_store_leaf_transfers, quote_store_parent_transfer,
+    quote_store_receiver};
+mod live_outside;
+pub use live_outside::{LiveStateStoreOutsideCustody, LiveStateStoreOutsideSource, StoreExhausted,
+    MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
+    quote_destination_retries, quote_packet_parts, quote_packet_metadata_pin_retirements,
+    quote_retired_packet_metadata_pin_receipts, quote_retired_packet_source_parts};
+mod live_close;
+pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure};
+mod live_native;
+pub use live_native::{
+    LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure,
+    LiveSchedulerNativeAdmission, LiveSchedulerNativeAdmissionFailure,
+    LiveSchedulerNativeAdmissionOutsideSources,
+    ReleasedLiveStateStoreStartup, quote_store_child_parent_alias_retirement,
+    quote_store_completed_parent_root_membership, quote_store_destination_join_preparation,
+    quote_store_direct_operational_handoff, quote_store_operator_lock_membership,
+    quote_store_operator_lock_registration, quote_store_packet_vector_handoff,
+    quote_store_parent_alias_retirement, quote_store_parent_authority_handoff,
+    quote_store_parent_facade_retirement, quote_store_parent_finalization_parts,
+    quote_store_parent_root_membership, quote_store_physical_parent,
+    quote_store_root_registration_handoff,
+};
 mod scoped_child;
 
 use projection_access::committed_value;
@@ -156,7 +180,9 @@ fn discard_abandoned_external_guest_packages(
             );
             child.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
             anyhow::ensure!(
-                parent.remove_empty_child_if_same(&name, &child)?,
+                parent
+                    .remove_empty_child_if_same(&name, &child)
+                    .map(|receipt| receipt.is_some())?,
                 "abandoned guest package changed during recovery"
             );
         }
@@ -206,7 +232,9 @@ fn discard_abandoned_runtime_snapshot_staging(
                 1024, 4,
             ))?;
             anyhow::ensure!(
-                parent.remove_empty_child_if_same(&name, &child)?,
+                parent
+                    .remove_empty_child_if_same(&name, &child)
+                    .map(|receipt| receipt.is_some())?,
                 "runtime snapshot stage changed during startup recovery"
             );
         }
@@ -244,6 +272,7 @@ impl Drop for RuntimeSnapshotStageLease {
             .and_then(|_| {
                 self.parent
                     .remove_empty_child_if_same(&self.name, &self.stage)
+                    .map(|receipt| receipt.is_some())
                     .and_then(|removed| {
                         anyhow::ensure!(removed, "runtime snapshot stage changed before cleanup");
                         Ok(())
@@ -438,15 +467,13 @@ pub struct PersistedEventNavigation {
 }
 
 pub struct NodeIdentitySigner {
-    fingerprint: String,
-    signing_key: lillux::crypto::SigningKey,
+    identity: ryeos_node_runtime::identity::NodeIdentity,
 }
 
 impl NodeIdentitySigner {
     pub fn from_identity(identity: &ryeos_node_runtime::identity::NodeIdentity) -> Self {
         Self {
-            fingerprint: identity.fingerprint().to_string(),
-            signing_key: identity.signing_key().clone(),
+            identity: identity.clone(),
         }
     }
 }
@@ -454,15 +481,15 @@ impl NodeIdentitySigner {
 impl Signer for NodeIdentitySigner {
     fn sign(&self, data: &[u8]) -> Vec<u8> {
         use lillux::crypto::Signer as Ed25519Signer;
-        self.signing_key.sign(data).to_bytes().to_vec()
+        self.identity.signing_key().sign(data).to_bytes().to_vec()
     }
 
     fn fingerprint(&self) -> &str {
-        &self.fingerprint
+        self.identity.fingerprint()
     }
 
     fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
-        self.signing_key.verifying_key()
+        *self.identity.verifying_key()
     }
 }
 
@@ -868,7 +895,7 @@ fn project_follow_action_result(item_ref: &str, result: Value, outputs: Value) -
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
         .with_context(|| format!("parse followed item reference `{item_ref}`"))?;
     if canonical.kind == "graph" {
-        return ryeos_graph_definition::project_graph_action_result(result, outputs)
+        return ryeos_runtime::graph_result::project_graph_action_result(result, outputs)
             .map_err(anyhow::Error::msg)
             .context("project followed graph return");
     }
@@ -1855,6 +1882,7 @@ enum SelectedMetadataAccess {
 }
 
 pub struct StateStore {
+    live_native_open: Option<Arc<live_native::LiveStateOpen>>,
     state_authority: ryeos_state::PinnedStateAuthority,
     thread_runtime_authority: Option<ThreadRuntimeAuthority>,
     inner: Mutex<Inner>,
@@ -3307,6 +3335,14 @@ fn persisted_from_stored_events(
 fn persisted_event_from_projection_row(
     row: ryeos_state::queries::EventRow,
 ) -> Result<PersistedEventRecord> {
+    // The projection stores the State durability vocabulary ("durable"),
+    // not the App event API's storage class ("indexed"). Decode it strictly;
+    // accepting API names here would hide a corrupt projection.
+    let durability = ryeos_state::objects::EventDurability::deserialize(
+        serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&row.durability),
+    )
+    .context("invalid projected event durability")?;
+    let storage_class = persisted_event_storage_class(durability)?;
     let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
         format!(
             "malformed JSON payload for event {} (chain_seq {})",
@@ -3321,7 +3357,7 @@ fn persisted_event_from_projection_row(
         thread_id: row.thread_id,
         thread_seq: row.thread_seq,
         event_type: row.event_type,
-        storage_class: row.durability,
+        storage_class: storage_class.to_owned(),
         ts: row.ts,
         prev_chain_event_hash: row.prev_chain_event_hash,
         prev_thread_event_hash: row.prev_thread_event_hash,
@@ -3649,13 +3685,7 @@ fn persisted_event_from_authoritative(
         .context("authoritative event chain_seq exceeds SQLite range")?;
     let thread_seq = i64::try_from(event.thread_seq)
         .context("authoritative event thread_seq exceeds SQLite range")?;
-    let storage_class = match event.durability {
-        ryeos_state::objects::EventDurability::Durable => "indexed",
-        ryeos_state::objects::EventDurability::Journal => "journal",
-        ryeos_state::objects::EventDurability::Ephemeral => {
-            bail!("authoritative snapshot cannot reference an ephemeral event")
-        }
-    };
+    let storage_class = persisted_event_storage_class(event.durability)?;
     Ok(PersistedEventRecord {
         event_id: chain_seq,
         event_hash: Some(event_hash),
@@ -3670,6 +3700,18 @@ fn persisted_event_from_authoritative(
         prev_thread_event_hash: event.prev_thread_event_hash,
         payload: event.payload,
     })
+}
+
+fn persisted_event_storage_class(
+    durability: ryeos_state::objects::EventDurability,
+) -> Result<&'static str> {
+    match durability {
+        ryeos_state::objects::EventDurability::Durable => Ok("indexed"),
+        ryeos_state::objects::EventDurability::Journal => Ok("journal"),
+        ryeos_state::objects::EventDurability::Ephemeral => {
+            bail!("persisted event cannot have ephemeral durability")
+        }
+    }
 }
 
 fn validate_prefixed_digest(label: &str, value: &str) -> Result<()> {
@@ -4598,7 +4640,10 @@ fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<u
                 deleted = deleted
                     .checked_add(delete_runtime_tree_contents(&child)?)
                     .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
-                if !directory.remove_empty_child_if_same(&name, &child)? {
+                if !directory
+                    .remove_empty_child_if_same(&name, &child)
+                    .map(|receipt| receipt.is_some())?
+                {
                     bail!(
                         "thread runtime directory changed during cleanup: {}",
                         child.path().display()
@@ -4628,7 +4673,8 @@ fn delete_thread_runtime_files(paths: &[ThreadRuntimeRemoval]) -> Result<usize> 
             .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
         if !target
             .threads_root
-            .remove_empty_child_if_same(&target.name, &target.directory)?
+            .remove_empty_child_if_same(&target.name, &target.directory)
+            .map(|receipt| receipt.is_some())?
         {
             bail!(
                 "thread runtime cleanup target changed during deletion: {}",
@@ -4772,6 +4818,7 @@ impl StateStore {
             write_barrier,
             head_trust,
             None,
+            None,
         )
     }
 
@@ -4790,6 +4837,7 @@ impl StateStore {
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
+            live_native_open: None,
             state_authority,
             thread_runtime_authority: None,
             inner: Mutex::new(Inner {
@@ -4837,6 +4885,7 @@ impl StateStore {
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
+            live_native_open: None,
             state_authority,
             thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
@@ -4880,7 +4929,37 @@ impl StateStore {
             write_barrier,
             head_trust,
             Some(recovery_observer),
+            None,
         )
+    }
+
+    /// Production startup under its actual prepaid factory and node exclusion.
+    /// The StateStore opening owner admits Runtime in the original namespace.
+    /// # Safety
+    /// Supply the real original node issuer as lease authority for this same
+    /// admitted factory and process, with its authentic funding, captured
+    /// service/cleanup clocks and retained exclusions. A trait implementation
+    /// or decoded report cannot establish these facts. Keep original custody
+    /// through failed startup, shutdown and actual resource settlement.
+    pub unsafe fn new_live_with_head_trust_and_recovery_observer(
+        app_root: PathBuf,
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
+        exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Self> {
+        let original = live_native::LiveStateOpen::capture(
+            &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
+            Arc::clone(&signer), Arc::clone(&head_trust), deadline,
+        )?;
+        Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
+            write_barrier, head_trust, Some(recovery_observer), Some(original))
     }
 
     fn open(
@@ -4891,12 +4970,17 @@ impl StateStore {
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
         recovery_observer: Option<Arc<dyn ryeos_state::ProjectionRecoveryObserver>>,
+        live: Option<Arc<live_native::LiveStateOpen>>,
     ) -> Result<Self> {
-        let runtime_state_directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
-            .context("failed to establish no-follow runtime_state_dir")?;
-        let runtime_state_lock = runtime_state_directory
-            .lock_exclusive()
-            .context("lock live runtime-state namespace")?;
+        let (runtime_state_directory, runtime_state_lock) = match &live {
+            Some(original) => (original.directory()?, original.namespace()),
+            None => {
+                let directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
+                    .context("failed to establish no-follow runtime_state_dir")?;
+                let lock = directory.lock_exclusive().context("lock runtime-state namespace")?;
+                (directory, lock)
+            }
+        };
         discard_abandoned_external_guest_packages(&runtime_state_directory)
             .context("discard abandoned secret-bearing guest packages")?;
         discard_abandoned_runtime_snapshot_staging(&runtime_state_directory)
@@ -4914,7 +4998,15 @@ impl StateStore {
         let runtime_db_parent_path = runtime_db_path.parent().unwrap_or_else(|| Path::new("."));
         let runtime_db_parent = lillux::PinnedDirectory::open_or_create(runtime_db_parent_path)
             .context("pin runtime database namespace")?;
-        let runtime_db = if runtime_state_directory.is_same_directory(&runtime_db_parent)? {
+        // Establish the real outside checkout before schema/native Runtime
+        // acquisition, so early failures reach the same startup recovery owner.
+        let mut custody = live_native::StateOpenCustody { original: live, runtime: None, state: None };
+        let runtime_db = if let Some(original) = &custody.original {
+            match original.open_runtime() {
+                Ok(runtime) => runtime,
+                Err(error) => return Err(custody.fail(error)),
+            }
+        } else if runtime_state_directory.is_same_directory(&runtime_db_parent)? {
             runtime_db::RuntimeDb::open_with_namespace_authority(
                 &runtime_db_path,
                 runtime_db_parent,
@@ -4923,11 +5015,15 @@ impl StateStore {
         } else {
             runtime_db::RuntimeDb::open(&runtime_db_path)?
         };
+        custody.runtime = Some(runtime_db);
         // Launch claims are durable owner evidence. They must survive process
         // restart so reconciliation can revoke the exact abandoned claim after
         // proving its attached process identity dead (or classify a genuinely
         // pre-attach window). Never erase ownership history wholesale here.
-        let state_db = match recovery_observer {
+        let state_db = if let Some(original) = &custody.original {
+            original.open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
+                head_trust, recovery_observer, custody.runtime.as_ref().expect("acquired Runtime owner"))
+        } else { match recovery_observer {
             Some(recovery_observer) => {
                 StateDb::open_with_recovery_observer_runtime_liveness_and_namespace_authority(
                     &runtime_state_dir,
@@ -4936,7 +5032,7 @@ impl StateStore {
                     projection_health.clone(),
                     head_trust,
                     recovery_observer,
-                    &runtime_db,
+                    custody.runtime.as_ref().expect("acquired Runtime owner"),
                 )
             }
             None => {
@@ -4946,18 +5042,38 @@ impl StateStore {
                     runtime_state_lock,
                     projection_health.clone(),
                     head_trust,
-                    &runtime_db,
+                    custody.runtime.as_ref().expect("acquired Runtime owner"),
                 )
             }
-        }
-        .map_err(with_execution_schema_cutover_hint)?;
-        reconcile_credential_profile_authority(&state_db, &runtime_db)
-            .context("reconcile stable credential-profile authority")?;
-        ensure_current_external_content_bindings(&state_db)?;
-        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
-        let state_authority = state_db.pinned_authority()?;
-        let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
+        } }
+        .map_err(with_execution_schema_cutover_hint);
+        let state_db = match state_db {
+            Ok(state_db) => state_db,
+            Err(error) => return Err(custody.fail(error)),
+        };
+        custody.state = Some(state_db);
+        let completed = (|| -> Result<_> {
+            let state_db = custody.state.as_ref().expect("acquired State owner");
+            let runtime_db = custody.runtime.as_ref().expect("acquired Runtime owner");
+            reconcile_credential_profile_authority(state_db, runtime_db)
+                .context("reconcile stable credential-profile authority")?;
+            ensure_current_external_content_bindings(state_db)?;
+            projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
+            let state_authority = state_db.pinned_authority()?;
+            let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
+            Ok((state_authority, attached_thread_ids))
+        })();
+        let (state_authority, attached_thread_ids) = match completed {
+            Ok(completed) => completed,
+            Err(error) => return Err(custody.fail(error)),
+        };
+        let state_db = custody.state.take().expect("completed State owner");
+        let runtime_db = custody.runtime.take().expect("completed Runtime owner");
+        // Transfer the actual opening owner from the same successful checkout;
+        // `live` already moved into custody before State/recovery effects.
+        let live_native_open = custody.original.take();
         Ok(Self {
+            live_native_open,
             state_authority,
             thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
@@ -4979,6 +5095,23 @@ impl StateStore {
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Issue the fixed scheduler role once from the same live namespace and
+    /// factory used for State/Runtime. Offline stores cannot issue admission.
+    pub fn live_scheduler_native_admission(&self) -> Result<LiveSchedulerNativeAdmission> {
+        anyhow::ensure!(self.process_attachment_admission_is_open(),
+            "StateStore startup/service admission is closed");
+        self.live_native_open.as_ref().context("live StateStore admission owner absent")?
+            .scheduler_admission()
+    }
+
+    /// Monotonic local denial for composition shutdown, without Store locks
+    /// or native effects. Existing tickets still need their actual drain.
+    pub fn close_live_scheduler_metadata_admission(&self) {
+        if let Some(original) = &self.live_native_open {
+            original.close_scheduler_admission();
+        }
     }
 
     /// Publish current-daemon ownership before an in-process handler root
@@ -7238,7 +7371,10 @@ impl StateStore {
                     original.remove_now()?;
                 } else {
                     directory.remove_contents_recursive()?;
-                    if !parent.remove_empty_child_if_same(name, &directory)? {
+                    if !parent
+                        .remove_empty_child_if_same(name, &directory)
+                        .map(|receipt| receipt.is_some())?
+                    {
                         bail!("recovered scratch remained nonempty");
                     }
                 }
@@ -9415,10 +9551,10 @@ impl StateStore {
         status: &str,
     ) -> Result<()> {
         let g = self.lock()?;
-        let updated = g.state_db.projection().connection().execute(
+        let updated = g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "UPDATE threads SET status = ?2 WHERE thread_id = ?1",
             rusqlite::params![thread_id, status],
-        )?;
+        )?))?;
         if updated != 1 {
             bail!("test projection mutation found no exact thread {thread_id}");
         }
@@ -9430,10 +9566,10 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_events_for_test(&self, thread_id: &str) -> Result<usize> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().connection().execute(
+        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "DELETE FROM events WHERE thread_id = ?1",
             rusqlite::params![thread_id],
-        )?)
+        )?))?)
     }
 
     /// Remove the replaceable thread row after its projected events have been
@@ -9442,10 +9578,10 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_row_for_test(&self, thread_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().connection().execute(
+        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "DELETE FROM threads WHERE thread_id = ?1",
             rusqlite::params![thread_id],
-        )? == 1)
+        )?))? == 1)
     }
 
     fn create_thread_inner(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
@@ -17249,7 +17385,9 @@ impl StateStore {
                 Some(child) => {
                     anyhow::ensure!(
                         child.is_same_directory(root)?
-                            && parent.remove_empty_child_if_same(name, root)?,
+                            && parent
+                                .remove_empty_child_if_same(name, root)
+                                .map(|receipt| receipt.is_some())?,
                         "Q rollback state root changed or remained nonempty"
                     );
                 }
@@ -19415,6 +19553,11 @@ impl StateStore {
     /// registered first is visible to the drain, and every later registration
     /// observes the closed gate.
     pub fn close_process_attachment_admission(&self) -> Result<()> {
+        // Deny scheduler metadata before any fallible registry/Store lock.
+        // A shutdown refusal cannot reopen this one-use startup boundary.
+        if let Some(original) = &self.live_native_open {
+            original.close_scheduler_admission();
+        }
         let _active = self
             .active_in_process_handlers
             .lock()
@@ -22345,28 +22488,7 @@ impl StateStore {
         let events = page
             .rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()?;
         Ok(PersistedEventPage {
             events,
@@ -22397,28 +22519,7 @@ impl StateStore {
         let events = page
             .rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()?;
         Ok(PersistedEventPage {
             events,
@@ -22463,28 +22564,7 @@ impl StateStore {
             queries::latest_node_events(g.state_db.projection(), limit, exclude_types)?;
         event_rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -22497,28 +22577,7 @@ impl StateStore {
         let event_rows = queries::latest_thread_events(g.state_db.projection(), thread_id, limit)?;
         event_rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -23108,6 +23167,115 @@ mod tests {
     use std::io::Write as _;
     use tempfile::tempdir;
 
+    fn projected_event_fixture(
+        durability: ryeos_state::objects::EventDurability,
+    ) -> (ryeos_state::objects::ThreadEvent, queries::EventRow) {
+        let event = ryeos_state::objects::ThreadEvent {
+            schema: 1,
+            kind: "thread_event".into(),
+            chain_root_id: "T-projected".into(),
+            chain_seq: 3,
+            thread_id: "T-projected-child".into(),
+            thread_seq: 2,
+            event_type: "test_observation".into(),
+            durability,
+            ts: "2026-10-09T00:00:00Z".into(),
+            prev_chain_event_hash: Some("a".repeat(64)),
+            prev_thread_event_hash: Some("b".repeat(64)),
+            payload: json!({"operation_id": "projection-control", "value": 7}),
+        };
+        let row = queries::EventRow {
+            event_id: 3,
+            event_hash: ryeos_state::objects::thread_event::hash_event(&event).unwrap(),
+            chain_root_id: event.chain_root_id.clone(),
+            chain_seq: 3,
+            thread_id: event.thread_id.clone(),
+            thread_seq: 2,
+            event_type: event.event_type.clone(),
+            durability: event.durability.to_string(),
+            ts: event.ts.clone(),
+            prev_chain_event_hash: event.prev_chain_event_hash.clone(),
+            prev_thread_event_hash: event.prev_thread_event_hash.clone(),
+            payload: serde_json::to_vec(&event.payload).unwrap(),
+        };
+        (event, row)
+    }
+
+    #[test]
+    fn projection_records_match_canonical_events_without_rewriting_evidence() {
+        use ryeos_state::objects::EventDurability::{Durable, Journal};
+        for (durability, storage_class) in [(Durable, "indexed"), (Journal, "journal")] {
+            let (event, row) = projected_event_fixture(durability);
+            let authoritative =
+                persisted_event_from_authoritative(row.event_hash.clone(), event).unwrap();
+            let projected = persisted_event_from_projection_row(row.clone()).unwrap();
+            assert_eq!(projected.storage_class, storage_class);
+            assert_eq!(
+                serde_json::to_value(&projected).unwrap(),
+                serde_json::to_value(&authoritative).unwrap(),
+            );
+
+            // Conversion translates vocabulary only; it must not repair altered
+            // payloads or hashes and thereby conceal a later authentication failure.
+            let mut changed = row;
+            changed.payload = br#"{"value":8}"#.to_vec();
+            let changed = persisted_event_from_projection_row(changed).unwrap();
+            assert_eq!(changed.event_hash, authoritative.event_hash);
+            assert_ne!(changed.payload, authoritative.payload);
+        }
+    }
+
+    #[test]
+    fn projection_conversion_refuses_invalid_persistent_evidence() {
+        use ryeos_state::objects::EventDurability::{Durable, Ephemeral};
+        let (_, row) = projected_event_fixture(Durable);
+        for durability in ["indexed", "ephemeral", "unknown", "", "Durable", "durable "] {
+            let mut changed = row.clone();
+            changed.durability = durability.into();
+            assert!(persisted_event_from_projection_row(changed).is_err());
+        }
+        let (event, ephemeral) = projected_event_fixture(Ephemeral);
+        assert!(persisted_event_from_authoritative(ephemeral.event_hash, event).is_err());
+        let mut malformed = row;
+        malformed.payload = b"invalid JSON".to_vec();
+        assert!(persisted_event_from_projection_row(malformed).is_err());
+    }
+
+    #[test]
+    fn projected_event_read_surfaces_preserve_indexed_class_and_thread_scope() {
+        let store = test_store();
+        let thread = "T-projection-read-surfaces";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let foreign = "T-projection-foreign";
+        store
+            .create_thread_for_test(&thread_record(foreign, foreign))
+            .unwrap();
+        let expected = store
+            .latest_thread_event_by_type(thread, ryeos_state::event_types::THREAD_CREATED)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected.storage_class, "indexed");
+        let scoped = [
+            store.replay_events(thread, Some(thread), None, 10, 1024 * 1024)
+                .unwrap().events,
+            store.replay_events_through(thread, Some(thread), None, expected.chain_seq, 10, 1024 * 1024)
+                .unwrap().events,
+            store.latest_thread_events(thread, 10).unwrap(),
+            vec![store.latest_thread_event_by_type_prefix(thread, "thread_").unwrap().unwrap()],
+        ];
+        for events in scoped {
+            assert_eq!(events.len(), 1);
+            assert_eq!(serde_json::to_value(&events[0]).unwrap(), serde_json::to_value(&expected).unwrap());
+        }
+        let node_events = store.latest_node_events(10, &[]).unwrap();
+        assert_eq!(node_events.len(), 2);
+        assert!(node_events.iter().all(|event| event.storage_class == "indexed"));
+        let owned = node_events.iter().find(|event| event.thread_id == thread).unwrap();
+        assert_eq!(serde_json::to_value(owned).unwrap(), serde_json::to_value(&expected).unwrap());
+    }
+
     fn rooted_bundle_proof_fixture(
         key: &lillux::crypto::SigningKey,
         fingerprint: &str,
@@ -23405,9 +23573,8 @@ mod tests {
         let temporary = tempdir().unwrap();
         let app_root = temporary.path().to_path_buf();
         let runtime_state_dir = app_root.join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+            .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -23684,9 +23851,8 @@ mod tests {
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -26509,9 +26675,8 @@ mod tests {
     fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         let tmp = tempdir().expect("tempdir");
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+            .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -27282,9 +27447,8 @@ mod tests {
     fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -27347,9 +27511,8 @@ mod tests {
     fn recreated_credential_profile_persists_its_advanced_generation() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -27422,9 +27585,8 @@ mod tests {
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -27637,9 +27799,8 @@ mod tests {
     fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
         let tmp = tempdir().unwrap();
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+            .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -31199,9 +31360,8 @@ mod tests {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
         let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-                .expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(

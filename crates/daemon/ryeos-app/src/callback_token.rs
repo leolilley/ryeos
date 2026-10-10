@@ -1,8 +1,8 @@
 use lillux::time::{Duration, MonotonicDeadline};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -276,8 +276,7 @@ impl AdmittedWorkloadClientGrant {
                 .owner_principal
                 .strip_prefix("fp:")
                 .is_none_or(|fingerprint| !lillux::valid_hash(fingerprint))
-            || ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)
-                .is_err()
+            || ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id).is_err()
             || self.worker_instance_id.is_empty()
             || self.worker_instance_id.len() > 256
             || self.worker_boot_epoch == 0
@@ -560,14 +559,9 @@ pub struct DedicatedWorkerCredentialTransport {
 
 impl DedicatedWorkerCredentialTransport {
     pub fn from_transport(callback: String, thread_auth: String) -> Result<Self> {
-        anyhow::ensure!(
-            !callback.is_empty() && !thread_auth.is_empty(),
-            "dedicated worker requires both original transport credentials"
-        );
-        Ok(Self {
-            callback,
-            thread_auth,
-        })
+        anyhow::ensure!(!callback.is_empty() && !thread_auth.is_empty(),
+            "dedicated worker requires both original transport credentials");
+        Ok(Self { callback, thread_auth })
     }
 }
 
@@ -582,9 +576,7 @@ pub struct SelectedDedicatedWorkerAdmission {
 }
 
 impl SelectedDedicatedWorkerAdmission {
-    pub fn invocation(&self) -> &crate::SelectedTicket {
-        &self.ticket
-    }
+    pub fn invocation(&self) -> &crate::SelectedTicket { &self.ticket }
 
     // Narrowing input only. It cannot manufacture funded cleanup authority.
     pub(crate) fn original_pair_expiry(&self) -> MonotonicDeadline {
@@ -592,15 +584,9 @@ impl SelectedDedicatedWorkerAdmission {
     }
 
     pub fn matches_guarded_issuer(
-        &self,
-        callback: &str,
-        thread_auth: &str,
-        thread: &str,
-        claim: &str,
-        owner: &str,
+        &self, callback: &str, thread_auth: &str, thread: &str, claim: &str, owner: &str,
     ) -> bool {
-        self.credentials.callback == callback
-            && self.credentials.thread_auth == thread_auth
+        self.credentials.callback == callback && self.credentials.thread_auth == thread_auth
             && self.ticket.matches_claim(thread, claim, owner)
             && !self.credential_expiry.has_elapsed()
             && self.occurrence.state.load(Ordering::Acquire) == 0
@@ -620,10 +606,8 @@ impl SelectedDedicatedWorkerAdmission {
         if self.credential_expiry.has_elapsed() {
             self.occurrence.revoke();
         }
-        anyhow::ensure!(
-            self.occurrence.service_open(),
-            "selected original pair service is closed"
-        );
+        anyhow::ensure!(self.occurrence.service_open(),
+            "selected original pair service is closed");
         Ok(())
     }
 }
@@ -631,24 +615,15 @@ impl SelectedDedicatedWorkerAdmission {
 // One actual credential occurrence, attached under BOTH original store locks.
 // Record snapshots deliberately omit this state. Contact and revocation share
 // one atomic linearization; neither state owns or drops financial/root custody.
-struct SelectedCredentialOccurrence {
-    state: AtomicU8,
-}
+struct SelectedCredentialOccurrence { state: AtomicU8 }
 const SELECTED_REVOKED: u8 = 1;
 const SELECTED_CONTACT_TAKEN: u8 = 2;
 
 impl SelectedCredentialOccurrence {
-    fn revoke(&self) {
-        self.state.fetch_or(SELECTED_REVOKED, Ordering::AcqRel);
-    }
+    fn revoke(&self) { self.state.fetch_or(SELECTED_REVOKED, Ordering::AcqRel); }
     fn take_contact(&self) -> Result<()> {
-        self.state
-            .compare_exchange(
-                0,
-                SELECTED_CONTACT_TAKEN,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+        self.state.compare_exchange(0, SELECTED_CONTACT_TAKEN,
+            Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| anyhow::anyhow!("selected contact revoked or already consumed"))?;
         Ok(())
     }
@@ -664,27 +639,18 @@ struct CredentialRecord<T> {
 }
 
 impl<T> CredentialRecord<T> {
-    fn new(projection: T) -> Self {
-        Self {
-            projection,
-            selected: None,
-        }
-    }
+    fn new(projection: T) -> Self { Self { projection, selected: None } }
 }
 impl<T> std::ops::Deref for CredentialRecord<T> {
     type Target = T;
-    fn deref(&self) -> &T {
-        &self.projection
-    }
+    fn deref(&self) -> &T { &self.projection }
 }
 impl<T> std::ops::DerefMut for CredentialRecord<T> {
     fn deref_mut(&mut self) -> &mut T {
         // Fresh ordinary setters retain their existing semantics. Once bound,
         // changing an original role/owner/scope cannot leave issued service
         // live against a stale projection. Revoke without dropping custody.
-        if let Some(selected) = &self.selected {
-            selected.revoke();
-        }
+        if let Some(selected) = &self.selected { selected.revoke(); }
         &mut self.projection
     }
 }
@@ -698,21 +664,16 @@ fn bind_selected_occurrence(
 ) -> Result<Arc<SelectedCredentialOccurrence>> {
     match (&callback.selected, &auth.selected) {
         (None, None) => {
-            anyhow::ensure!(
-                prepared.state.load(Ordering::Acquire) == 0,
-                "prepared credential occurrence is not fresh"
-            );
+            anyhow::ensure!(prepared.state.load(Ordering::Acquire) == 0,
+                "prepared credential occurrence is not fresh");
             callback.selected = Some(Arc::clone(prepared));
             auth.selected = Some(Arc::clone(prepared));
             Ok(Arc::clone(prepared))
         }
         (Some(callback), Some(auth))
-            if Arc::ptr_eq(callback, auth) && Arc::ptr_eq(callback, prepared) =>
-        {
-            anyhow::ensure!(
-                callback.state.load(Ordering::Acquire) == 0,
-                "selected credential occurrence already revoked or consumed"
-            );
+            if Arc::ptr_eq(callback, auth) && Arc::ptr_eq(callback, prepared) => {
+            anyhow::ensure!(callback.state.load(Ordering::Acquire) == 0,
+                "selected credential occurrence already revoked or consumed");
             Ok(Arc::clone(callback))
         }
         _ => bail!("selected credential records belong to another occurrence"),
@@ -723,9 +684,7 @@ impl<T> Drop for CredentialRecord<T> {
     fn drop(&mut self) {
         // remove/prune/expiry/whole-store destruction all revoke the original
         // occurrence. A previously returned snapshot cannot keep it live.
-        if let Some(selected) = &self.selected {
-            selected.revoke();
-        }
+        if let Some(selected) = &self.selected { selected.revoke(); }
     }
 }
 
@@ -831,10 +790,7 @@ impl CallbackCapabilityStore {
             remote_consumer_grant: None,
         };
 
-        self.capabilities
-            .lock()
-            .unwrap()
-            .insert(token, CredentialRecord::new(cap.clone()));
+        self.capabilities.lock().unwrap().insert(token, CredentialRecord::new(cap.clone()));
         cap
     }
 
@@ -1274,16 +1230,10 @@ pub struct PairedRemoteConsumerCustody {
 
 impl PairedRemoteConsumerCustody {
     pub fn matches_guarded_issuer(
-        &self,
-        callback: &str,
-        thread_auth: &str,
-        thread_id: &str,
-        launch_owner: &str,
+        &self, callback: &str, thread_auth: &str, thread_id: &str, launch_owner: &str,
     ) -> bool {
-        self.callback_token == callback
-            && self.thread_auth_token == thread_auth
-            && self.grant.root_thread_id == thread_id
-            && self.grant.launch_owner == launch_owner
+        self.callback_token == callback && self.thread_auth_token == thread_auth
+            && self.grant.root_thread_id == thread_id && self.grant.launch_owner == launch_owner
             && !self.callback_invocation_id.is_empty()
             && self.grant.validate().is_ok()
             && !self.credential_expiry().has_elapsed()
@@ -1308,25 +1258,16 @@ impl CallbackCapabilityStore {
         grant: &AdmittedRemoteConsumerGrant,
     ) -> Result<PairedRemoteConsumerCustody> {
         grant.validate()?;
-        let capsule = store
-            .admitted_launch_capsule(&grant.root_thread_id)?
+        let capsule = store.admitted_launch_capsule(&grant.root_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("paired consumer has no admitted capsule"))?;
         let capsule_hash = capsule.content_hash()?;
-        let sealed =
-            crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
-                &capsule,
-            )?;
+        let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(&capsule)?;
         let subject = sealed.admitted_program_subject()?;
-        let expected_handler = sealed
-            .handler_context()
-            .map(|handler| {
-                handler.narrowed_for_execution(
-                    capsule.effective_caps.clone(),
-                    sealed.handoff_current_site_id(),
-                    sealed.origin_site_id(),
-                )
-            })
-            .transpose()?;
+        let expected_handler = sealed.handler_context().map(|handler| {
+            handler.narrowed_for_execution(
+                capsule.effective_caps.clone(), sealed.handoff_current_site_id(), sealed.origin_site_id(),
+            )
+        }).transpose()?;
         if capsule.launch_driver != ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor
             || capsule_hash != grant.admitted_capsule_hash
             || sealed.qualification_purpose() != Some(&grant.purpose)
@@ -1335,20 +1276,10 @@ impl CallbackCapabilityStore {
         {
             bail!("paired consumer differs from actual admitted direct root");
         }
-        let callbacks = self
-            .capabilities
-            .lock()
-            .map_err(|_| anyhow::anyhow!("callback store poisoned"))?;
-        let auths = thread_auth
-            .states
-            .lock()
-            .map_err(|_| anyhow::anyhow!("thread auth store poisoned"))?;
-        let cap = callbacks
-            .get(callback_token)
-            .ok_or_else(|| anyhow::anyhow!("paired callback revoked"))?;
-        let auth = auths
-            .get(thread_auth_token)
-            .ok_or_else(|| anyhow::anyhow!("paired thread auth revoked"))?;
+        let callbacks = self.capabilities.lock().map_err(|_| anyhow::anyhow!("callback store poisoned"))?;
+        let auths = thread_auth.states.lock().map_err(|_| anyhow::anyhow!("thread auth store poisoned"))?;
+        let cap = callbacks.get(callback_token).ok_or_else(|| anyhow::anyhow!("paired callback revoked"))?;
+        let auth = auths.get(thread_auth_token).ok_or_else(|| anyhow::anyhow!("paired thread auth revoked"))?;
         require_remote_consumer_pair(cap, auth, grant)?;
         if sealed.requested_by() != Some(auth.acting_principal.as_str())
             || auth.caller_scopes != capsule.effective_caps
@@ -1357,17 +1288,11 @@ impl CallbackCapabilityStore {
         {
             bail!("paired thread auth differs from admitted principal");
         }
-        let planning = store
-            .launch_planning_record_for_owner(
-                &grant.purpose.launch_id,
-                &grant.purpose.owner_fingerprint,
-            )?
+        let planning = store.launch_planning_record_for_owner(&grant.purpose.launch_id, &grant.purpose.owner_fingerprint)?
             .ok_or_else(|| anyhow::anyhow!("paired consumer planning row absent"))?;
-        let root = store
-            .get_authoritative_root_thread_snapshot(&grant.root_thread_id)?
+        let root = store.get_authoritative_root_thread_snapshot(&grant.root_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("paired consumer born root absent"))?;
-        if planning.state != "bound"
-            || planning.reserved_thread_id != grant.root_thread_id
+        if planning.state != "bound" || planning.reserved_thread_id != grant.root_thread_id
             || planning.bound_thread_id.as_deref() != Some(grant.root_thread_id.as_str())
             || root.chain_root_id != grant.root_thread_id
             || root.admitted_launch_capsule_hash.as_deref() != Some(capsule_hash.as_str())
@@ -1381,12 +1306,9 @@ impl CallbackCapabilityStore {
         require_remote_consumer_pair(cap, auth, grant)?;
         // No atomic StateStore reservation or contact claim is made here.
         Ok(PairedRemoteConsumerCustody {
-            callback_token: cap.token.clone(),
-            callback_invocation_id: cap.invocation_id.clone(),
-            thread_auth_token: auth.token.clone(),
-            grant: grant.clone(),
-            callback_expiry: cap.expires_at,
-            thread_auth_expiry: auth.expires_at,
+            callback_token: cap.token.clone(), callback_invocation_id: cap.invocation_id.clone(),
+            thread_auth_token: auth.token.clone(), grant: grant.clone(),
+            callback_expiry: cap.expires_at, thread_auth_expiry: auth.expires_at,
             handler_context: auth.handler_context.clone(),
             project_authority: cap.provenance.project_authority().clone(),
             current_site_id: sealed.handoff_current_site_id().to_owned(),
@@ -1396,24 +1318,18 @@ impl CallbackCapabilityStore {
 }
 
 fn require_remote_consumer_pair(
-    cap: &CallbackCapability,
-    auth: &ThreadAuthState,
-    grant: &AdmittedRemoteConsumerGrant,
+    cap: &CallbackCapability, auth: &ThreadAuthState, grant: &AdmittedRemoteConsumerGrant,
 ) -> Result<()> {
     require_actual_pair_roles(cap, auth)?;
-    if cap.invocation_id.is_empty()
-        || cap.thread_id != grant.root_thread_id
+    if cap.invocation_id.is_empty() || cap.thread_id != grant.root_thread_id
         || cap.chain_root_id != grant.root_thread_id
         || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
         || cap.remote_consumer_grant.as_ref() != Some(grant)
-        || cap.scoped_producer_grant.is_some()
-        || cap.workload_client_grant.is_some()
-        || cap.runtime_method_surface
-            != CallbackRuntimeMethodSurface::qualification_remote_consumer()
+        || cap.scoped_producer_grant.is_some() || cap.workload_client_grant.is_some()
+        || cap.runtime_method_surface != CallbackRuntimeMethodSurface::qualification_remote_consumer()
         || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
         || cap.root_raw_content_digest != grant.root_raw_content_digest
-        || cap.effective_definition_digest.as_deref()
-            != Some(grant.purpose.verifier_realized_definition_digest.as_str())
+        || cap.effective_definition_digest.as_deref() != Some(grant.purpose.verifier_realized_definition_digest.as_str())
     {
         bail!("remote consumer credential pair expired or contradicts actual issuer");
     }
@@ -1421,11 +1337,8 @@ fn require_remote_consumer_pair(
 }
 
 fn require_actual_pair_roles(cap: &CallbackCapability, auth: &ThreadAuthState) -> Result<()> {
-    if cap.expires_at.has_elapsed()
-        || auth.expires_at.has_elapsed()
-        || cap.thread_id != auth.thread_id
-        || cap.effective_caps != auth.caller_scopes
-    {
+    if cap.expires_at.has_elapsed() || auth.expires_at.has_elapsed()
+        || cap.thread_id != auth.thread_id || cap.effective_caps != auth.caller_scopes {
         bail!("actual credential records are expired or unpaired");
     }
     Ok(())
@@ -1475,10 +1388,7 @@ impl ThreadAuthStore {
             expires_at: MonotonicDeadline::after(ttl),
         };
 
-        self.states
-            .lock()
-            .unwrap()
-            .insert(token, CredentialRecord::new(state.clone()));
+        self.states.lock().unwrap().insert(token, CredentialRecord::new(state.clone()));
         Ok(state)
     }
 
@@ -1532,14 +1442,7 @@ mod tests {
     fn paired_record_roles_refuse_wrong_thread_and_expired_auth_before_any_grant() {
         let callbacks = CallbackCapabilityStore::new();
         let auths = ThreadAuthStore::new();
-        let callback = callbacks.generate(
-            "T-pair",
-            PathBuf::from("/p"),
-            Duration::from_secs(60),
-            vec![],
-            provenance(PathBuf::from("/p")),
-            "0".repeat(64),
-        );
+        let callback = callbacks.generate("T-pair", PathBuf::from("/p"), Duration::from_secs(60), vec![], provenance(PathBuf::from("/p")), "0".repeat(64));
         let wrong = mint_test(&auths, "T-other", "fp:u", vec![], Duration::from_secs(60));
         let expired = mint_test(&auths, "T-pair", "fp:u", vec![], Duration::ZERO);
         assert!(require_actual_pair_roles(&callback, &wrong).is_err());
@@ -1568,47 +1471,21 @@ mod tests {
         for remove_callback in [true, false] {
             let callbacks = CallbackCapabilityStore::new();
             let auths = ThreadAuthStore::new();
-            let cap = callbacks.generate(
-                "T-selected",
-                PathBuf::from("/p"),
-                Duration::from_secs(60),
-                vec![],
-                provenance(PathBuf::from("/p")),
-                "0".repeat(64),
-            );
-            let auth = auths
-                .mint(
-                    "T-selected",
-                    "principal".into(),
-                    vec![],
-                    None,
-                    "site",
-                    "site",
-                    Duration::from_secs(60),
-                )
-                .unwrap();
-            let occurrence = Arc::new(SelectedCredentialOccurrence {
-                state: AtomicU8::new(0),
-            });
+            let cap = callbacks.generate("T-selected", PathBuf::from("/p"),
+                Duration::from_secs(60), vec![], provenance(PathBuf::from("/p")), "0".repeat(64));
+            let auth = auths.mint("T-selected", "principal".into(), vec![],
+                None, "site", "site", Duration::from_secs(60)).unwrap();
+            let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
             {
                 let mut callback_records = callbacks.capabilities.lock().unwrap();
                 let mut auth_records = auths.states.lock().unwrap();
-                bind_selected_occurrence(
-                    callback_records.get_mut(&cap.token).unwrap(),
-                    auth_records.get_mut(&auth.token).unwrap(),
-                    &occurrence,
-                )
-                .unwrap();
+                bind_selected_occurrence(callback_records.get_mut(&cap.token).unwrap(),
+                    auth_records.get_mut(&auth.token).unwrap(), &occurrence).unwrap();
             }
-            let cap_snapshot = callbacks
-                .validate_token_and_thread(&cap.token, "T-selected")
-                .unwrap();
+            let cap_snapshot = callbacks.validate_token_and_thread(&cap.token, "T-selected").unwrap();
             let auth_snapshot = auths.validate(&auth.token, "T-selected").unwrap();
-            if remove_callback {
-                callbacks.invalidate_for_thread("T-selected");
-            } else {
-                auths.invalidate(&auth.token);
-            }
+            if remove_callback { callbacks.invalidate_for_thread("T-selected"); }
+            else { auths.invalidate(&auth.token); }
             assert!(occurrence.take_contact().is_err());
             assert_eq!(cap_snapshot.thread_id, "T-selected");
             assert_eq!(auth_snapshot.thread_id, "T-selected");
@@ -1617,13 +1494,9 @@ mod tests {
 
     #[test]
     fn later_original_authority_mutation_revokes_bound_occurrence() {
-        let occurrence = Arc::new(SelectedCredentialOccurrence {
-            state: AtomicU8::new(0),
-        });
-        let mut original = CredentialRecord {
-            projection: String::from("original"),
-            selected: Some(Arc::clone(&occurrence)),
-        };
+        let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
+        let mut original = CredentialRecord { projection: String::from("original"),
+            selected: Some(Arc::clone(&occurrence)) };
         original.push_str("-changed");
         assert!(occurrence.take_contact().is_err());
         assert_eq!(&original.projection, "original-changed");
@@ -1633,55 +1506,27 @@ mod tests {
     fn prune_original_record_revokes_contact_winner_without_erasing_occurrence() {
         let callbacks = CallbackCapabilityStore::new();
         let auths = ThreadAuthStore::new();
-        let cap = callbacks.generate(
-            "T-selected",
-            PathBuf::from("/p"),
-            Duration::from_secs(60),
-            vec![],
-            provenance(PathBuf::from("/p")),
-            "0".repeat(64),
-        );
-        let auth = auths
-            .mint(
-                "T-selected",
-                "principal".into(),
-                vec![],
-                None,
-                "site",
-                "site",
-                Duration::from_secs(60),
-            )
-            .unwrap();
-        let occurrence = Arc::new(SelectedCredentialOccurrence {
-            state: AtomicU8::new(0),
-        });
+        let cap = callbacks.generate("T-selected", PathBuf::from("/p"),
+            Duration::from_secs(60), vec![], provenance(PathBuf::from("/p")), "0".repeat(64));
+        let auth = auths.mint("T-selected", "principal".into(), vec![],
+            None, "site", "site", Duration::from_secs(60)).unwrap();
+        let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
         {
             let mut callback_records = callbacks.capabilities.lock().unwrap();
             let mut auth_records = auths.states.lock().unwrap();
             // Mechanical pruning setup BEFORE membership binding. The direct
             // latch below is not the production expiry-checking issuer.
-            callback_records.get_mut(&cap.token).unwrap().expires_at =
-                MonotonicDeadline::after(Duration::ZERO);
-            bind_selected_occurrence(
-                callback_records.get_mut(&cap.token).unwrap(),
-                auth_records.get_mut(&auth.token).unwrap(),
-                &occurrence,
-            )
-            .unwrap();
+            callback_records.get_mut(&cap.token).unwrap().expires_at = MonotonicDeadline::after(Duration::ZERO);
+            bind_selected_occurrence(callback_records.get_mut(&cap.token).unwrap(),
+                auth_records.get_mut(&auth.token).unwrap(), &occurrence).unwrap();
         }
         assert_eq!(occurrence.state.load(Ordering::Acquire), 0);
         occurrence.take_contact().unwrap();
         assert!(occurrence.service_open());
-        assert_eq!(
-            occurrence.state.load(Ordering::Acquire),
-            SELECTED_CONTACT_TAKEN
-        );
+        assert_eq!(occurrence.state.load(Ordering::Acquire), SELECTED_CONTACT_TAKEN);
         assert_eq!(callbacks.prune_expired(), 1);
         assert!(!occurrence.service_open());
-        assert_eq!(
-            occurrence.state.load(Ordering::Acquire),
-            SELECTED_REVOKED | SELECTED_CONTACT_TAKEN
-        );
+        assert_eq!(occurrence.state.load(Ordering::Acquire), SELECTED_REVOKED | SELECTED_CONTACT_TAKEN);
         assert!(auths.validate(&auth.token, "T-selected").is_ok());
     }
 
@@ -2586,9 +2431,7 @@ mod selected_occurrence_controls {
 
     #[test]
     fn revocation_before_contact_refuses_without_reset() {
-        let occurrence = SelectedCredentialOccurrence {
-            state: AtomicU8::new(0),
-        };
+        let occurrence = SelectedCredentialOccurrence { state: AtomicU8::new(0) };
         occurrence.revoke();
         assert!(occurrence.take_contact().is_err());
         assert!(!occurrence.service_open());
@@ -2598,29 +2441,21 @@ mod selected_occurrence_controls {
 
     #[test]
     fn contact_winner_is_one_use_and_later_revoke_closes_service() {
-        let occurrence = SelectedCredentialOccurrence {
-            state: AtomicU8::new(0),
-        };
+        let occurrence = SelectedCredentialOccurrence { state: AtomicU8::new(0) };
         occurrence.take_contact().unwrap();
         assert!(occurrence.service_open());
         assert!(occurrence.take_contact().is_err());
         occurrence.revoke();
         assert!(!occurrence.service_open());
-        assert_eq!(
-            occurrence.state.load(Ordering::Acquire),
-            SELECTED_CONTACT_TAKEN | SELECTED_REVOKED
-        );
+        assert_eq!(occurrence.state.load(Ordering::Acquire),
+            SELECTED_CONTACT_TAKEN | SELECTED_REVOKED);
     }
 
     #[test]
     fn projection_clone_cannot_keep_removed_membership_live() {
-        let occurrence = Arc::new(SelectedCredentialOccurrence {
-            state: AtomicU8::new(0),
-        });
-        let record = CredentialRecord {
-            projection: String::from("projection"),
-            selected: Some(Arc::clone(&occurrence)),
-        };
+        let occurrence = Arc::new(SelectedCredentialOccurrence { state: AtomicU8::new(0) });
+        let record = CredentialRecord { projection: String::from("projection"),
+            selected: Some(Arc::clone(&occurrence)) };
         let snapshot = record.projection.clone();
         drop(record);
         assert_eq!(snapshot, "projection");

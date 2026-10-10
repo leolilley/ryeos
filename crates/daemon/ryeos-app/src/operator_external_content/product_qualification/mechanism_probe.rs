@@ -663,7 +663,7 @@ impl CapturedMechanismProbeSource {
                 let cas = authority.cas_store()?;
                 let limits = state
                     .node_policy
-                    .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+                    .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
                     .closure_limits()?;
                 let snapshot_value =
                     ryeos_state::object_closure::load_exact_cas_object_with_cas(

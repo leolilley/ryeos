@@ -276,33 +276,35 @@ impl super::RuntimeDb {
         expected: &super::ProcessResourceReservationRecord,
         next: &super::ProcessResourceReservationRecord,
     ) -> Result<()> {
-        never_issued_scratch_custody(expected)?;
-        never_issued_scratch_custody(next)?;
-        let birth = super::process_resource_reservation_id(expected)?;
-        if birth != super::process_resource_reservation_id(next)? {
-            bail!("scratch cleanup changed its immutable reservation birth authority");
-        }
-        let before = lillux::canonical_json(&serde_json::to_value(expected)?)?;
-        let after = lillux::canonical_json(&serde_json::to_value(next)?)?;
-        let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "UPDATE process_resource_reservation SET reservation=?5, updated_at_ms=?6
+        self.conn.with_sql(|conn| {
+            never_issued_scratch_custody(expected)?;
+            never_issued_scratch_custody(next)?;
+            let birth = super::process_resource_reservation_id(expected)?;
+            if birth != super::process_resource_reservation_id(next)? {
+                bail!("scratch cleanup changed its immutable reservation birth authority");
+            }
+            let before = lillux::canonical_json(&serde_json::to_value(expected)?)?;
+            let after = lillux::canonical_json(&serde_json::to_value(next)?)?;
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE process_resource_reservation SET reservation=?5, updated_at_ms=?6
               WHERE reservation_id=?1 AND owner_kind=?2 AND owner_coordinate=?3 AND reservation=?4
                 AND NOT EXISTS (SELECT 1 FROM process_resource_owner o
                   WHERE o.owner_kind=?2 AND o.owner_coordinate=?3)",
-            rusqlite::params![
-                birth,
-                expected.owner_kind,
-                expected.owner_coordinate,
-                before,
-                after,
-                i64::try_from(lillux::time::timestamp_millis())?
-            ],
-        )?;
-        if changed != 1 {
-            bail!("scratch cleanup lost its exact never-issued reservation owner");
-        }
-        tx.commit().map_err(Into::into)
+                rusqlite::params![
+                    birth,
+                    expected.owner_kind,
+                    expected.owner_coordinate,
+                    before,
+                    after,
+                    i64::try_from(lillux::time::timestamp_millis())?
+                ],
+            )?;
+            if changed != 1 {
+                bail!("scratch cleanup lost its exact never-issued reservation owner");
+            }
+            tx.commit().map_err(Into::into)
+        })
     }
 }
 
@@ -315,25 +317,27 @@ impl super::RuntimeDb {
         current: &super::ProcessResourceReservationRecord,
         old_generation: &str,
     ) -> Result<super::ProcessResourceReservationRecord> {
-        never_issued_scratch_custody(current)?;
-        let mut old = current.clone();
-        old.daemon_generation_id = old_generation.to_owned();
-        let changed = self.conn.execute(
-            "UPDATE process_resource_reservation SET reservation_id=?1, reservation=?2
+        self.conn.with_sql(|conn| {
+            never_issued_scratch_custody(current)?;
+            let mut old = current.clone();
+            old.daemon_generation_id = old_generation.to_owned();
+            let changed = conn.execute(
+                "UPDATE process_resource_reservation SET reservation_id=?1, reservation=?2
              WHERE reservation_id=?3 AND owner_kind=?4 AND owner_coordinate=?5 AND reservation=?6",
-            rusqlite::params![
-                super::process_resource_reservation_id(&old)?,
-                lillux::canonical_json(&serde_json::to_value(&old)?)?,
-                super::process_resource_reservation_id(current)?,
-                current.owner_kind,
-                current.owner_coordinate,
-                lillux::canonical_json(&serde_json::to_value(current)?)?
-            ],
-        )?;
-        if changed != 1 {
-            bail!("old-daemon fixture lost its exact original reservation");
-        }
-        Ok(old)
+                rusqlite::params![
+                    super::process_resource_reservation_id(&old)?,
+                    lillux::canonical_json(&serde_json::to_value(&old)?)?,
+                    super::process_resource_reservation_id(current)?,
+                    current.owner_kind,
+                    current.owner_coordinate,
+                    lillux::canonical_json(&serde_json::to_value(current)?)?
+                ],
+            )?;
+            if changed != 1 {
+                bail!("old-daemon fixture lost its exact original reservation");
+            }
+            Ok(old)
+        })
     }
 }
 

@@ -914,7 +914,9 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationLocalStartRecord>> {
-        read_local_start(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            read_local_start(&conn, placement)
+        })
     }
 
     /// Claim the original launch's credential generation exactly once. The
@@ -930,68 +932,70 @@ impl RuntimeDb {
         subject_projection_contract: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, placement)?
-            .context("Q credential claim has no original start")?;
-        ensure!(
-            current.phase == QualificationLocalStartPhase::Reserved
-                && current.credential_custody.is_none(),
-            "Q credential claim cannot replay or replace original custody"
-        );
-        require_current_start(&tx, &current)?;
-        let allocation = read(&tx, placement)?.context("Q credential claim lost allocation")?;
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        ensure!(
-            matches!(&allocation.reservation.owner,
-            ExternalAllocationOwner::QualificationCandidate(owner) if owner.operator_principal == owner_principal),
-            "Q credential principal differs from its authenticated allocation owner"
-        );
-        let profile = self
-            .credential_profile(profile_id)?
-            .context("Q credential profile is absent")?;
-        ensure!(
-            profile.owner_principal == owner_principal
-                && profile.state == "active"
-                && profile.lock_owner.is_none(),
-            "Q credential profile is not active, owned and available"
-        );
-        let now = now_after(&current)?;
-        let mut next = current.clone();
-        next.credential_custody = Some(QualificationLocalCredentialCustody {
-            profile_id: profile_id.to_owned(),
-            owner_principal: owner_principal.to_owned(),
-            credential_generation: profile.credential_generation,
-            authority_revision: profile.authority_revision,
-            home_id: profile.home_id,
-            lock_owner: current.launch_owner.clone(),
-            workload_family: workload_family.to_owned(),
-            subject_projection_contract: subject_projection_contract.to_owned(),
-            contract_digest: contract_digest.to_owned(),
-            acquired_at_ms: now,
-            released_at_ms: None,
-        });
-        next.updated_at_ms = now;
-        next.validate()?;
-        ensure!(
-            tx.execute(
-                "UPDATE credential_profile SET lock_owner=?3,updated_at_ms=MAX(updated_at_ms,?4)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, placement)?
+                .context("Q credential claim has no original start")?;
+            ensure!(
+                current.phase == QualificationLocalStartPhase::Reserved
+                    && current.credential_custody.is_none(),
+                "Q credential claim cannot replay or replace original custody"
+            );
+            require_current_start(&tx, &current)?;
+            let allocation = read(&tx, placement)?.context("Q credential claim lost allocation")?;
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            ensure!(
+                matches!(&allocation.reservation.owner,
+                ExternalAllocationOwner::QualificationCandidate(owner) if owner.operator_principal == owner_principal),
+                "Q credential principal differs from its authenticated allocation owner"
+            );
+            let profile = self
+                .credential_profile(profile_id)?
+                .context("Q credential profile is absent")?;
+            ensure!(
+                profile.owner_principal == owner_principal
+                    && profile.state == "active"
+                    && profile.lock_owner.is_none(),
+                "Q credential profile is not active, owned and available"
+            );
+            let now = now_after(&current)?;
+            let mut next = current.clone();
+            next.credential_custody = Some(QualificationLocalCredentialCustody {
+                profile_id: profile_id.to_owned(),
+                owner_principal: owner_principal.to_owned(),
+                credential_generation: profile.credential_generation,
+                authority_revision: profile.authority_revision,
+                home_id: profile.home_id,
+                lock_owner: current.launch_owner.clone(),
+                workload_family: workload_family.to_owned(),
+                subject_projection_contract: subject_projection_contract.to_owned(),
+                contract_digest: contract_digest.to_owned(),
+                acquired_at_ms: now,
+                released_at_ms: None,
+            });
+            next.updated_at_ms = now;
+            next.validate()?;
+            ensure!(
+                tx.execute(
+                    "UPDATE credential_profile SET lock_owner=?3,updated_at_ms=MAX(updated_at_ms,?4)
              WHERE profile_id=?1 AND owner_principal=?2 AND lock_owner IS NULL AND state='active'
                AND credential_generation=?5 AND authority_revision=?6",
-                params![
-                    profile_id,
-                    owner_principal,
-                    current.launch_owner,
-                    now,
-                    i64::try_from(profile.credential_generation)?,
-                    i64::try_from(profile.authority_revision)?
-                ],
-            )? == 1,
-            "Q credential claim lost its exact active profile CAS"
-        );
-        transition(&tx, &current, &next)?;
-        require_historical_credential_custody(&tx, &next)?;
-        tx.commit()?;
-        Ok(next)
+                    params![
+                        profile_id,
+                        owner_principal,
+                        current.launch_owner,
+                        now,
+                        i64::try_from(profile.credential_generation)?,
+                        i64::try_from(profile.authority_revision)?
+                    ],
+                )? == 1,
+                "Q credential claim lost its exact active profile CAS"
+            );
+            transition(&tx, &current, &next)?;
+            require_historical_credential_custody(&tx, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Fresh contact must still own the original active profile generation.
@@ -999,10 +1003,12 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = require_live_credential_start_tx(&tx, placement)?;
-        tx.commit()?;
-        Ok(record)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = require_live_credential_start_tx(&tx, placement)?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     /// Cleanup may release revoked/expired custody, but only after exact local
@@ -1012,43 +1018,45 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, placement)?
-            .context("Q credential release has no original start")?;
-        let Some(custody) = &current.credential_custody else {
-            tx.commit()?;
-            return Ok(current);
-        };
-        if custody.released_at_ms.is_some() {
-            tx.commit()?;
-            return Ok(current);
-        }
-        require_local_processes_settled(&tx, &current)?;
-        let now = now_after(&current)?;
-        let mut next = current.clone();
-        next.credential_custody
-            .as_mut()
-            .expect("custody checked")
-            .released_at_ms = Some(now);
-        next.updated_at_ms = now;
-        transition(&tx, &current, &next)?;
-        ensure!(
-            tx.execute(
-                "UPDATE credential_profile SET lock_owner=NULL,updated_at_ms=MAX(updated_at_ms,?3)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, placement)?
+                .context("Q credential release has no original start")?;
+            let Some(custody) = &current.credential_custody else {
+                tx.commit()?;
+                return Ok(current);
+            };
+            if custody.released_at_ms.is_some() {
+                tx.commit()?;
+                return Ok(current);
+            }
+            require_local_processes_settled(&tx, &current)?;
+            let now = now_after(&current)?;
+            let mut next = current.clone();
+            next.credential_custody
+                .as_mut()
+                .expect("custody checked")
+                .released_at_ms = Some(now);
+            next.updated_at_ms = now;
+            transition(&tx, &current, &next)?;
+            ensure!(
+                tx.execute(
+                    "UPDATE credential_profile SET lock_owner=NULL,updated_at_ms=MAX(updated_at_ms,?3)
              WHERE profile_id=?1 AND lock_owner=?2 AND owner_principal=?4 AND home_id=?5",
-                params![
-                    custody.profile_id,
-                    custody.lock_owner,
-                    now,
-                    custody.owner_principal,
-                    custody.home_id
-                ],
-            )? == 1,
-            "Q credential release lost its exact old profile lock"
-        );
-        require_historical_credential_custody(&tx, &next)?;
-        tx.commit()?;
-        Ok(next)
+                    params![
+                        custody.profile_id,
+                        custody.lock_owner,
+                        now,
+                        custody.owner_principal,
+                        custody.home_id
+                    ],
+                )? == 1,
+                "Q credential release lost its exact old profile lock"
+            );
+            require_historical_credential_custody(&tx, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Read-only final pre-spawn gate. The app caller holds the Q occurrence
@@ -1059,22 +1067,24 @@ impl RuntimeDb {
         placement: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let allocation =
-            read(&tx, placement)?.context("qualification local spawn lost allocation")?;
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        let record = read_local_start(&tx, placement)?
-            .context("qualification local spawn has no original start")?;
-        ensure!(
-            record.phase == QualificationLocalStartPhase::WorkspaceReady
-                && record.directory_borrow_intent.is_some(),
-            "qualification local spawn requires its one-use original directory borrow"
-        );
-        require_current_start(&tx, &record)?;
-        require_live_credential_custody(&tx, &record)?;
-        super::qualification_controller_canary::require_bound_canary(&record, proof, None)?;
-        tx.commit()?;
-        Ok(record)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let allocation =
+                read(&tx, placement)?.context("qualification local spawn lost allocation")?;
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            let record = read_local_start(&tx, placement)?
+                .context("qualification local spawn has no original start")?;
+            ensure!(
+                record.phase == QualificationLocalStartPhase::WorkspaceReady
+                    && record.directory_borrow_intent.is_some(),
+                "qualification local spawn requires its one-use original directory borrow"
+            );
+            require_current_start(&tx, &record)?;
+            require_live_credential_custody(&tx, &record)?;
+            super::qualification_controller_canary::require_bound_canary(&record, proof, None)?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     /// Rejoin the original attached process and current released Q channel
@@ -1084,34 +1094,36 @@ impl RuntimeDb {
         placement: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let allocation =
-            read(&tx, placement)?.context("qualification Worker release lost allocation")?;
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        let local = read_local_start(&tx, placement)?
-            .context("qualification Worker release lost its original local start")?;
-        ensure!(
-            local.phase == QualificationLocalStartPhase::WorkerAttached,
-            "qualification Worker release requires its original attached process"
-        );
-        require_current_start(&tx, &local)?;
-        require_live_credential_custody(&tx, &local)?;
-        super::qualification_controller_canary::require_bound_canary(&local, proof, None)?;
-        let process = qualification_process::require_current_attached_worker(&tx, placement)?;
-        ensure!(
-            local.worker_incarnation_digest.as_deref()
-                == Some(
-                    process
-                        .process_identity
-                        .owner_incarnation_digest()?
-                        .as_str()
-                )
-                && process.channel_binding_digest == local.channel_binding_digest
-                && process.daemon_generation_id == local.daemon_generation_id,
-            "qualification Worker release changed its exact attached incarnation"
-        );
-        tx.commit()?;
-        Ok(())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let allocation =
+                read(&tx, placement)?.context("qualification Worker release lost allocation")?;
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            let local = read_local_start(&tx, placement)?
+                .context("qualification Worker release lost its original local start")?;
+            ensure!(
+                local.phase == QualificationLocalStartPhase::WorkerAttached,
+                "qualification Worker release requires its original attached process"
+            );
+            require_current_start(&tx, &local)?;
+            require_live_credential_custody(&tx, &local)?;
+            super::qualification_controller_canary::require_bound_canary(&local, proof, None)?;
+            let process = qualification_process::require_current_attached_worker(&tx, placement)?;
+            ensure!(
+                local.worker_incarnation_digest.as_deref()
+                    == Some(
+                        process
+                            .process_identity
+                            .owner_incarnation_digest()?
+                            .as_str()
+                    )
+                    && process.channel_binding_digest == local.channel_binding_digest
+                    && process.daemon_generation_id == local.daemon_generation_id,
+                "qualification Worker release changed its exact attached incarnation"
+            );
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Commit one possible descriptor borrow before cloning the original
@@ -1121,37 +1133,39 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, placement)?
-            .context("qualification workspace borrow lost its start")?;
-        ensure!(
-            current.phase == QualificationLocalStartPhase::WorkspaceReady
-                && current.directory_borrow_intent.is_none(),
-            "qualification workspace directory borrow is one-use"
-        );
-        require_current_start(&tx, &current)?;
-        let identity = current
-            .workspace_identity
-            .context("qualification workspace borrow has no original directory identity")?;
-        let mut next = current.clone();
-        next.updated_at_ms = now_after(&current)?;
-        next.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
-            workspace_id: current.workspace_id.clone(),
-            directory_identity: identity,
-            reserved_at_ms: next.updated_at_ms,
-        });
-        let prior = canonical(&current)?;
-        let next_json = canonical(&next)?;
-        ensure!(
-            tx.execute(
-                "UPDATE external_qualification_local_start SET record_json=?3,updated_at_ms=?4
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, placement)?
+                .context("qualification workspace borrow lost its start")?;
+            ensure!(
+                current.phase == QualificationLocalStartPhase::WorkspaceReady
+                    && current.directory_borrow_intent.is_none(),
+                "qualification workspace directory borrow is one-use"
+            );
+            require_current_start(&tx, &current)?;
+            let identity = current
+                .workspace_identity
+                .context("qualification workspace borrow has no original directory identity")?;
+            let mut next = current.clone();
+            next.updated_at_ms = now_after(&current)?;
+            next.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
+                workspace_id: current.workspace_id.clone(),
+                directory_identity: identity,
+                reserved_at_ms: next.updated_at_ms,
+            });
+            let prior = canonical(&current)?;
+            let next_json = canonical(&next)?;
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_local_start SET record_json=?3,updated_at_ms=?4
                  WHERE placement_thread_id=?1 AND record_json=?2 AND phase='workspace_ready'",
-                params![placement, prior, next_json, next.updated_at_ms],
-            )? == 1,
-            "qualification workspace borrow lost its one-use CAS"
-        );
-        tx.commit()?;
-        Ok(next)
+                    params![placement, prior, next_json, next.updated_at_ms],
+                )? == 1,
+                "qualification workspace borrow lost its one-use CAS"
+            );
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Reserve before creating a directory. Exact replay is refused even when
@@ -1161,102 +1175,104 @@ impl RuntimeDb {
         placement: &str,
         runtime_cache_root: &std::path::Path,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        ensure!(
-            read_local_start(&tx, placement)?.is_none(),
-            "qualification local start already reserved"
-        );
-        let allocation =
-            read(&tx, placement)?.context("qualification local start has no allocation")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "qualification local start requires bound allocation"
-        );
-        require_contactable_qualification_owner(&tx, &allocation.reservation)?;
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            bail!("qualification local start requires Q owner");
-        };
-        let channel = load_binding(&tx, placement)?;
-        let channel_digest = channel.digest()?;
-        let released: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame WHERE binding_digest=?1
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            ensure!(
+                read_local_start(&tx, placement)?.is_none(),
+                "qualification local start already reserved"
+            );
+            let allocation =
+                read(&tx, placement)?.context("qualification local start has no allocation")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "qualification local start requires bound allocation"
+            );
+            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                bail!("qualification local start requires Q owner");
+            };
+            let channel = load_binding(&tx, placement)?;
+            let channel_digest = channel.digest()?;
+            let released: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame WHERE binding_digest=?1
              AND direction='owner_to_supervisor' AND json_extract(frame_json,'$.frame.payload.kind')='release')",
-            [&channel_digest], |row| row.get(0),
-        )?;
-        let channel_state: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(released && channel_state == "running"
-            && channel.execution_binding_hash == allocation.reservation.binding_hash
-            && matches!(channel.execution_mode, ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {})
-            && channel.candidate_export_max_bytes == 0
-            && i64::try_from(lillux::time::timestamp_millis())? < channel.execution_deadline_ms,
-            "qualification local start requires released zero-export Q channel");
-        ensure!(
-            tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM external_execution_connector WHERE placement_thread_id=?1)",
-                [placement], |row| row.get::<_, bool>(0))?
-                && tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM external_qualification_worker_process WHERE placement_thread_id=?1)",
-                    [placement], |row| row.get::<_, bool>(0))?,
-            "qualification local start cannot replace connector or Worker"
-        );
-        ensure!(
-            runtime_cache_root.is_absolute(),
-            "qualification local workspace root must be absolute"
-        );
-        let digest = local_workspace_digest(
-            placement,
-            &owner.coordinate.accepted_root_id,
-            &owner.coordinate.accepted_capsule_hash,
-            &owner.qualification_operation_id,
-            &owner.qualification_occurrence.occurrence_id,
-            &channel_digest,
-            daemon_generation_id(),
-        )?;
-        let workspace_id = format!("QW-{digest}");
-        let launch_owner = format!("Q-local-{digest}");
-        let workspace_root = runtime_cache_root.join("executions").join(&workspace_id);
-        let state_root = runtime_cache_root
-            .join("qualification-local")
-            .join(&workspace_id);
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let record = QualificationLocalStartRecord {
-            placement_thread_id: placement.to_owned(),
-            accepted_root_id: owner.coordinate.accepted_root_id.clone(),
-            accepted_capsule_hash: owner.coordinate.accepted_capsule_hash.clone(),
-            qualification_operation_id: owner.qualification_operation_id.clone(),
-            qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
-            channel_binding_digest: channel_digest,
-            daemon_generation_id: daemon_generation_id().to_owned(),
-            base_snapshot_hash: allocation.reservation.base_snapshot_hash.clone(),
-            workspace_id,
-            workspace_root: workspace_root.to_string_lossy().into_owned(),
-            state_root: state_root.to_string_lossy().into_owned(),
-            launch_owner,
-            credential_custody: None,
-            controller_canary_intent: None,
-            controller_canary_binding: None,
-            controller_canary_terminal: None,
-            phase: QualificationLocalStartPhase::Reserved,
-            workspace_identity: None,
-            directory_borrow_intent: None,
-            worker_incarnation_digest: None,
-            cleanup_reason: None,
-            cleanup: None,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        let json = canonical(&record)?;
-        tx.execute(
-            "INSERT INTO external_qualification_local_start (placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES (?1,?2,?3,?4,?5,?6,'reserved',?7,?8,?8)",
-            params![record.placement_thread_id, record.accepted_root_id, record.accepted_capsule_hash,
-                record.qualification_operation_id, record.qualification_occurrence_id,
-                record.channel_binding_digest, json, now],
-        )?;
-        tx.commit()?;
-        Ok(record)
+                [&channel_digest], |row| row.get(0),
+            )?;
+            let channel_state: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(released && channel_state == "running"
+                && channel.execution_binding_hash == allocation.reservation.binding_hash
+                && matches!(channel.execution_mode, ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {})
+                && channel.candidate_export_max_bytes == 0
+                && i64::try_from(lillux::time::timestamp_millis())? < channel.execution_deadline_ms,
+                "qualification local start requires released zero-export Q channel");
+            ensure!(
+                tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM external_execution_connector WHERE placement_thread_id=?1)",
+                    [placement], |row| row.get::<_, bool>(0))?
+                    && tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM external_qualification_worker_process WHERE placement_thread_id=?1)",
+                        [placement], |row| row.get::<_, bool>(0))?,
+                "qualification local start cannot replace connector or Worker"
+            );
+            ensure!(
+                runtime_cache_root.is_absolute(),
+                "qualification local workspace root must be absolute"
+            );
+            let digest = local_workspace_digest(
+                placement,
+                &owner.coordinate.accepted_root_id,
+                &owner.coordinate.accepted_capsule_hash,
+                &owner.qualification_operation_id,
+                &owner.qualification_occurrence.occurrence_id,
+                &channel_digest,
+                daemon_generation_id(),
+            )?;
+            let workspace_id = format!("QW-{digest}");
+            let launch_owner = format!("Q-local-{digest}");
+            let workspace_root = runtime_cache_root.join("executions").join(&workspace_id);
+            let state_root = runtime_cache_root
+                .join("qualification-local")
+                .join(&workspace_id);
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let record = QualificationLocalStartRecord {
+                placement_thread_id: placement.to_owned(),
+                accepted_root_id: owner.coordinate.accepted_root_id.clone(),
+                accepted_capsule_hash: owner.coordinate.accepted_capsule_hash.clone(),
+                qualification_operation_id: owner.qualification_operation_id.clone(),
+                qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
+                channel_binding_digest: channel_digest,
+                daemon_generation_id: daemon_generation_id().to_owned(),
+                base_snapshot_hash: allocation.reservation.base_snapshot_hash.clone(),
+                workspace_id,
+                workspace_root: workspace_root.to_string_lossy().into_owned(),
+                state_root: state_root.to_string_lossy().into_owned(),
+                launch_owner,
+                credential_custody: None,
+                controller_canary_intent: None,
+                controller_canary_binding: None,
+                controller_canary_terminal: None,
+                phase: QualificationLocalStartPhase::Reserved,
+                workspace_identity: None,
+                directory_borrow_intent: None,
+                worker_incarnation_digest: None,
+                cleanup_reason: None,
+                cleanup: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            };
+            let json = canonical(&record)?;
+            tx.execute(
+                "INSERT INTO external_qualification_local_start (placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,phase,record_json,created_at_ms,updated_at_ms) VALUES (?1,?2,?3,?4,?5,?6,'reserved',?7,?8,?8)",
+                params![record.placement_thread_id, record.accepted_root_id, record.accepted_capsule_hash,
+                    record.qualification_operation_id, record.qualification_occurrence_id,
+                    record.channel_binding_digest, json, now],
+            )?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     /// Retain the original populated project child identity before any Worker
@@ -1266,21 +1282,23 @@ impl RuntimeDb {
         placement: &str,
         identity: lillux::PinnedDirectoryIdentity,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, placement)?
-            .context("qualification private workspace lost its reservation")?;
-        ensure!(
-            current.phase == QualificationLocalStartPhase::Reserved,
-            "qualification private workspace completion is one-use"
-        );
-        require_current_start(&tx, &current)?;
-        let mut next = current.clone();
-        next.workspace_identity = Some(identity);
-        next.phase = QualificationLocalStartPhase::WorkspaceReady;
-        next.updated_at_ms = now_after(&current)?;
-        transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, placement)?
+                .context("qualification private workspace lost its reservation")?;
+            ensure!(
+                current.phase == QualificationLocalStartPhase::Reserved,
+                "qualification private workspace completion is one-use"
+            );
+            require_current_start(&tx, &current)?;
+            let mut next = current.clone();
+            next.workspace_identity = Some(identity);
+            next.phase = QualificationLocalStartPhase::WorkspaceReady;
+            next.updated_at_ms = now_after(&current)?;
+            transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Fence every unresolved side effect. This transition proves no cleanup.
@@ -1289,26 +1307,28 @@ impl RuntimeDb {
         placement: &str,
         reason: &str,
     ) -> Result<QualificationLocalStartRecord> {
-        validate_bounded_runtime_text("Q local cleanup reason", reason, 1024)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, placement)?
-            .context("qualification local cleanup has no start")?;
-        ensure!(
-            matches!(
-                current.phase,
-                QualificationLocalStartPhase::Reserved
-                    | QualificationLocalStartPhase::WorkspaceReady
-                    | QualificationLocalStartPhase::WorkerAttached
-            ),
-            "qualification local cleanup fence is already retained or positive cleanup began"
-        );
-        let mut next = current.clone();
-        next.phase = QualificationLocalStartPhase::CleanupUnproved;
-        next.cleanup_reason = Some(reason.to_owned());
-        next.updated_at_ms = now_after(&current)?;
-        transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            validate_bounded_runtime_text("Q local cleanup reason", reason, 1024)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, placement)?
+                .context("qualification local cleanup has no start")?;
+            ensure!(
+                matches!(
+                    current.phase,
+                    QualificationLocalStartPhase::Reserved
+                        | QualificationLocalStartPhase::WorkspaceReady
+                        | QualificationLocalStartPhase::WorkerAttached
+                ),
+                "qualification local cleanup fence is already retained or positive cleanup began"
+            );
+            let mut next = current.clone();
+            next.phase = QualificationLocalStartPhase::CleanupUnproved;
+            next.cleanup_reason = Some(reason.to_owned());
+            next.updated_at_ms = now_after(&current)?;
+            transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Fence all new local contact before any physical cleanup. The caller's
@@ -1336,59 +1356,61 @@ impl RuntimeDb {
         expected: &QualificationLocalStartRecord,
         require_unregistered_precreate: bool,
     ) -> Result<QualificationLocalStartRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, &expected.placement_thread_id)?
-            .context("qualification cleanup lost its retained start")?;
-        ensure!(
-            current == *expected,
-            "qualification cleanup changed its original custody row"
-        );
-        if require_unregistered_precreate {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, &expected.placement_thread_id)?
+                .context("qualification cleanup lost its retained start")?;
             ensure!(
-                current.phase == QualificationLocalStartPhase::Reserved,
-                "unregistered Q rollback requires its original directory reservation"
+                current == *expected,
+                "qualification cleanup changed its original custody row"
             );
-            for table in [
-                "external_qualification_worker_process",
-                "external_execution_connector",
-            ] {
-                let exists: bool = tx.query_row(
-                    &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE placement_thread_id=?1)"),
-                    [&current.placement_thread_id],
-                    |row| row.get(0),
-                )?;
+            if require_unregistered_precreate {
                 ensure!(
-                    !exists,
-                    "unregistered Q rollback has local process or connector contact"
+                    current.phase == QualificationLocalStartPhase::Reserved,
+                    "unregistered Q rollback requires its original directory reservation"
                 );
+                for table in [
+                    "external_qualification_worker_process",
+                    "external_execution_connector",
+                ] {
+                    let exists: bool = tx.query_row(
+                        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE placement_thread_id=?1)"),
+                        [&current.placement_thread_id],
+                        |row| row.get(0),
+                    )?;
+                    ensure!(
+                        !exists,
+                        "unregistered Q rollback has local process or connector contact"
+                    );
+                }
             }
-        }
-        ensure!(
-            matches!(
-                current.phase,
-                QualificationLocalStartPhase::Reserved
-                    | QualificationLocalStartPhase::WorkspaceReady
-                    | QualificationLocalStartPhase::WorkerAttached
-                    | QualificationLocalStartPhase::CleanupUnproved
-            ),
-            "qualification cleanup already began or closed"
-        );
-        require_local_processes_settled(&tx, &current)?;
-        let now = now_after(&current)?;
-        let mut next = current.clone();
-        next.phase = QualificationLocalStartPhase::CleanupIntent;
-        next.cleanup_reason = None;
-        next.cleanup = Some(QualificationLocalCleanupEvidence {
-            prior_failure_reason: current.cleanup_reason.clone(),
-            intent_at_ms: now,
-            workspace_removed_at_ms: None,
-            state_removed_at_ms: None,
-            closed_at_ms: None,
-        });
-        next.updated_at_ms = now;
-        transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+            ensure!(
+                matches!(
+                    current.phase,
+                    QualificationLocalStartPhase::Reserved
+                        | QualificationLocalStartPhase::WorkspaceReady
+                        | QualificationLocalStartPhase::WorkerAttached
+                        | QualificationLocalStartPhase::CleanupUnproved
+                ),
+                "qualification cleanup already began or closed"
+            );
+            require_local_processes_settled(&tx, &current)?;
+            let now = now_after(&current)?;
+            let mut next = current.clone();
+            next.phase = QualificationLocalStartPhase::CleanupIntent;
+            next.cleanup_reason = None;
+            next.cleanup = Some(QualificationLocalCleanupEvidence {
+                prior_failure_reason: current.cleanup_reason.clone(),
+                intent_at_ms: now,
+                workspace_removed_at_ms: None,
+                state_removed_at_ms: None,
+                closed_at_ms: None,
+            });
+            next.updated_at_ms = now;
+            transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Recheck exact retained custody and settled local processes immediately
@@ -1397,16 +1419,18 @@ impl RuntimeDb {
         &self,
         expected: &QualificationLocalStartRecord,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_local_start(&tx, &expected.placement_thread_id)?
-            .context("qualification workspace removal lost its original row")?;
-        ensure!(
-            current == *expected && current.phase == QualificationLocalStartPhase::CleanupIntent,
-            "qualification workspace removal requires its exact cleanup intent"
-        );
-        require_local_processes_settled(&tx, &current)?;
-        tx.commit()?;
-        Ok(())
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_local_start(&tx, &expected.placement_thread_id)?
+                .context("qualification workspace removal lost its original row")?;
+            ensure!(
+                current == *expected && current.phase == QualificationLocalStartPhase::CleanupIntent,
+                "qualification workspace removal requires its exact cleanup intent"
+            );
+            require_local_processes_settled(&tx, &current)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// The StateStore wrapper removes the original pinned workspace directory
@@ -1415,49 +1439,55 @@ impl RuntimeDb {
         &self,
         expected: &QualificationLocalStartRecord,
     ) -> Result<QualificationLocalStartRecord> {
-        cleanup_cas(
-            &self.conn,
-            expected,
-            QualificationLocalStartPhase::CleanupIntent,
-            QualificationLocalStartPhase::WorkspaceRemoved,
-            |_, next, now| {
-                next.cleanup.as_mut().unwrap().workspace_removed_at_ms = Some(now);
-                Ok(())
-            },
-        )
+        self.conn.with_sql(|conn| {
+            cleanup_cas(
+                &conn,
+                expected,
+                QualificationLocalStartPhase::CleanupIntent,
+                QualificationLocalStartPhase::WorkspaceRemoved,
+                |_, next, now| {
+                    next.cleanup.as_mut().unwrap().workspace_removed_at_ms = Some(now);
+                    Ok(())
+                },
+            )
+        })
     }
 
     pub(crate) fn record_qualification_state_root_removed(
         &self,
         expected: &QualificationLocalStartRecord,
     ) -> Result<QualificationLocalStartRecord> {
-        cleanup_cas(
-            &self.conn,
-            expected,
-            QualificationLocalStartPhase::WorkspaceRemoved,
-            QualificationLocalStartPhase::StateRemoved,
-            |_, next, now| {
-                next.cleanup.as_mut().unwrap().state_removed_at_ms = Some(now);
-                Ok(())
-            },
-        )
+        self.conn.with_sql(|conn| {
+            cleanup_cas(
+                &conn,
+                expected,
+                QualificationLocalStartPhase::WorkspaceRemoved,
+                QualificationLocalStartPhase::StateRemoved,
+                |_, next, now| {
+                    next.cleanup.as_mut().unwrap().state_removed_at_ms = Some(now);
+                    Ok(())
+                },
+            )
+        })
     }
 
     pub(crate) fn close_qualification_local_start(
         &self,
         expected: &QualificationLocalStartRecord,
     ) -> Result<QualificationLocalStartRecord> {
-        cleanup_cas(
-            &self.conn,
-            expected,
-            QualificationLocalStartPhase::StateRemoved,
-            QualificationLocalStartPhase::Closed,
-            |tx, next, now| {
-                require_local_processes_settled(tx, next)?;
-                next.cleanup.as_mut().unwrap().closed_at_ms = Some(now);
-                Ok(())
-            },
-        )
+        self.conn.with_sql(|conn| {
+            cleanup_cas(
+                &conn,
+                expected,
+                QualificationLocalStartPhase::StateRemoved,
+                QualificationLocalStartPhase::Closed,
+                |tx, next, now| {
+                    require_local_processes_settled(tx, next)?;
+                    next.cleanup.as_mut().unwrap().closed_at_ms = Some(now);
+                    Ok(())
+                },
+            )
+        })
     }
 }
 

@@ -279,10 +279,12 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<QualificationWorkerTranscriptSource> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
-        let retained = source(&tx, placement)?;
-        tx.commit()?;
-        Ok(retained)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let retained = source(&tx, placement)?;
+            tx.commit()?;
+            Ok(retained)
+        })
     }
 
     /// CAS chunks and manifest must already be staged under the same StateStore
@@ -293,47 +295,49 @@ impl RuntimeDb {
         manifest: &QualificationWorkerTranscriptManifest,
         manifest_hash: &str,
     ) -> Result<QualificationWorkerTranscriptRecord> {
-        let value = manifest.to_value()?;
-        let json = lillux::canonical_json(&value)?;
-        ensure!(
-            ryeos_state::objects::canonical_value_digest(&value)? == manifest_hash,
-            "Q transcript staged manifest hash differs"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = source(&tx, &expected.command.placement_thread_id)?;
-        ensure!(
-            current == *expected,
-            "Q transcript source changed during CAS staging"
-        );
-        require_manifest_source(manifest, &current)?;
-        if let Some(existing) = read_record(&tx, &expected.command.placement_thread_id)? {
+        self.conn.with_sql(|conn| {
+            let value = manifest.to_value()?;
+            let json = lillux::canonical_json(&value)?;
             ensure!(
-                existing.manifest_hash == manifest_hash,
-                "Q transcript replay changed its immutable manifest"
+                ryeos_state::objects::canonical_value_digest(&value)? == manifest_hash,
+                "Q transcript staged manifest hash differs"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            tx.execute(
-                "INSERT INTO external_qualification_worker_transcript
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = source(&tx, &expected.command.placement_thread_id)?;
+            ensure!(
+                current == *expected,
+                "Q transcript source changed during CAS staging"
+            );
+            require_manifest_source(manifest, &current)?;
+            if let Some(existing) = read_record(&tx, &expected.command.placement_thread_id)? {
+                ensure!(
+                    existing.manifest_hash == manifest_hash,
+                    "Q transcript replay changed its immutable manifest"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                tx.execute(
+                    "INSERT INTO external_qualification_worker_transcript
                  (placement_thread_id,owner_principal,manifest_hash,manifest_json,retained_at_ms)
                  VALUES(?1,?2,?3,?4,?5)",
-                params![
-                    &expected.command.placement_thread_id,
-                    &expected.owner_principal,
-                    manifest_hash,
-                    json,
-                    now
-                ],
-            )? == 1,
-            "Q transcript did not bind its immutable CAS root"
-        );
-        let record = read_record(&tx, &expected.command.placement_thread_id)?
-            .context("Q transcript bind disappeared")?;
-        tx.commit()?;
-        Ok(record)
+                    params![
+                        &expected.command.placement_thread_id,
+                        &expected.owner_principal,
+                        manifest_hash,
+                        json,
+                        now
+                    ],
+                )? == 1,
+                "Q transcript did not bind its immutable CAS root"
+            );
+            let record = read_record(&tx, &expected.command.placement_thread_id)?
+                .context("Q transcript bind disappeared")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 }
 

@@ -580,11 +580,13 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationWorkerCommandRecord>> {
-        let record = read_command(&self.conn, placement)?;
-        if let Some(record) = &record {
-            require_owner(&self.conn, record)?;
-        }
-        Ok(record)
+        self.conn.with_sql(|conn| {
+            let record = read_command(&conn, placement)?;
+            if let Some(record) = &record {
+                require_owner(&conn, record)?;
+            }
+            Ok(record)
+        })
     }
 
     /// Reserve the only Q request after the exact held Worker is attached.
@@ -595,116 +597,118 @@ impl RuntimeDb {
         setup_request_digest: &str,
         request_digest: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
-        validate_sha256("qualification Worker setup request", setup_request_digest)?;
-        validate_sha256("qualification Worker request", request_digest)?;
-        ensure!(
-            setup_request_digest != request_digest,
-            "Q setup and turn request digests must differ"
-        );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let allocation = read(&tx, placement)?.context("Q command lost its allocation")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "Q command is not bound"
-        );
-        require_contactable_qualification_owner(&tx, &allocation.reservation)?;
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            bail!("Q command requires its qualification allocation owner");
-        };
-        let channel = load_binding(&tx, placement)?;
-        let binding_digest = channel.digest()?;
-        let process: (String, String, String, String, String, String, String) = tx.query_row(
-            "SELECT accepted_root_id,accepted_capsule_hash,qualification_operation_id,
+        self.conn.with_sql(|conn| {
+            validate_sha256("qualification Worker setup request", setup_request_digest)?;
+            validate_sha256("qualification Worker request", request_digest)?;
+            ensure!(
+                setup_request_digest != request_digest,
+                "Q setup and turn request digests must differ"
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let allocation = read(&tx, placement)?.context("Q command lost its allocation")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "Q command is not bound"
+            );
+            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                bail!("Q command requires its qualification allocation owner");
+            };
+            let channel = load_binding(&tx, placement)?;
+            let binding_digest = channel.digest()?;
+            let process: (String, String, String, String, String, String, String) = tx.query_row(
+                "SELECT accepted_root_id,accepted_capsule_hash,qualification_operation_id,
                     qualification_occurrence_id,channel_binding_digest,process_identity_json,phase
              FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )?;
-        ensure!(
-            process.0 == owner.coordinate.accepted_root_id
-                && process.1 == owner.coordinate.accepted_capsule_hash
-                && process.2 == owner.qualification_operation_id
-                && process.3 == owner.qualification_occurrence.occurrence_id
-                && process.4 == binding_digest
-                && process.6 == "attached"
-                && channel.execution_binding_hash == allocation.reservation.binding_hash
-                && matches!(
-                    channel.execution_mode,
-                    ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
-                )
-                && channel.candidate_export_max_bytes == 0,
-            "Q command lost its released zero-export channel"
-        );
-        ensure!(
-            process.5.len() <= 64 * 1024,
-            "Q command process identity exceeds retained bound"
-        );
-        let process_identity: crate::process::ExecutionProcessIdentity =
-            serde_json::from_str(&process.5).context("decode Q command process identity")?;
-        crate::process::validate_execution_process_identity_shape(&process_identity)?;
-        ensure!(
-            lillux::canonical_json(&serde_json::to_value(&process_identity)?)? == process.5
-                && process_identity.process_scope.is_none(),
-            "Q command process identity is not its exact trusted attachment"
-        );
-        let connector_state: (String, String) = tx.query_row(
-            "SELECT state,channel_binding_digest FROM external_execution_connector
-             WHERE placement_thread_id=?1",
-            [placement],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        ensure!(
-            matches!(connector_state.0.as_str(), "prepared" | "connected")
-                && connector_state.1 == binding_digest,
-            "Q command has no live one-shot connector"
-        );
-        let process_digest = process_identity.owner_incarnation_digest()?;
-        if let Some(prior) = read_command(&tx, placement)? {
-            require_owner(&tx, &prior)?;
+                [placement],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )?;
             ensure!(
-                prior.setup_request_digest == setup_request_digest
-                    && prior.request_digest == request_digest
-                    && prior.process_incarnation_digest == process_digest,
-                "Q command reservation replay changed its one request"
+                process.0 == owner.coordinate.accepted_root_id
+                    && process.1 == owner.coordinate.accepted_capsule_hash
+                    && process.2 == owner.qualification_operation_id
+                    && process.3 == owner.qualification_occurrence.occurrence_id
+                    && process.4 == binding_digest
+                    && process.6 == "attached"
+                    && channel.execution_binding_hash == allocation.reservation.binding_hash
+                    && matches!(
+                        channel.execution_mode,
+                        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                    )
+                    && channel.candidate_export_max_bytes == 0,
+                "Q command lost its released zero-export channel"
             );
-            tx.commit()?;
-            return Ok(prior);
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "INSERT INTO external_qualification_worker_command
+            ensure!(
+                process.5.len() <= 64 * 1024,
+                "Q command process identity exceeds retained bound"
+            );
+            let process_identity: crate::process::ExecutionProcessIdentity =
+                serde_json::from_str(&process.5).context("decode Q command process identity")?;
+            crate::process::validate_execution_process_identity_shape(&process_identity)?;
+            ensure!(
+                lillux::canonical_json(&serde_json::to_value(&process_identity)?)? == process.5
+                    && process_identity.process_scope.is_none(),
+                "Q command process identity is not its exact trusted attachment"
+            );
+            let connector_state: (String, String) = tx.query_row(
+                "SELECT state,channel_binding_digest FROM external_execution_connector
+             WHERE placement_thread_id=?1",
+                [placement],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            ensure!(
+                matches!(connector_state.0.as_str(), "prepared" | "connected")
+                    && connector_state.1 == binding_digest,
+                "Q command has no live one-shot connector"
+            );
+            let process_digest = process_identity.owner_incarnation_digest()?;
+            if let Some(prior) = read_command(&tx, placement)? {
+                require_owner(&tx, &prior)?;
+                ensure!(
+                    prior.setup_request_digest == setup_request_digest
+                        && prior.request_digest == request_digest
+                        && prior.process_incarnation_digest == process_digest,
+                    "Q command reservation replay changed its one request"
+                );
+                tx.commit()?;
+                return Ok(prior);
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            tx.execute(
+                "INSERT INTO external_qualification_worker_command
              (placement_thread_id,accepted_root_id,accepted_capsule_hash,
               qualification_operation_id,qualification_occurrence_id,
               channel_binding_digest,process_incarnation_digest,request_digest,
               state,reserved_at_ms,setup_request_digest)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9,?10)",
-            params![
-                placement,
-                &owner.coordinate.accepted_root_id,
-                &owner.coordinate.accepted_capsule_hash,
-                &owner.qualification_operation_id,
-                &owner.qualification_occurrence.occurrence_id,
-                &binding_digest,
-                &process_digest,
-                request_digest,
-                now,
-                setup_request_digest,
-            ],
-        )?;
-        let record = read_command(&tx, placement)?.context("Q command reservation disappeared")?;
-        tx.commit()?;
-        Ok(record)
+                params![
+                    placement,
+                    &owner.coordinate.accepted_root_id,
+                    &owner.coordinate.accepted_capsule_hash,
+                    &owner.qualification_operation_id,
+                    &owner.qualification_occurrence.occurrence_id,
+                    &binding_digest,
+                    &process_digest,
+                    request_digest,
+                    now,
+                    setup_request_digest,
+                ],
+            )?;
+            let record = read_command(&tx, placement)?.context("Q command reservation disappeared")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     /// Possible contact must be committed before the pool may send its one
@@ -715,68 +719,70 @@ impl RuntimeDb {
         setup_request_digest: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
-        ensure!(
-            record.phase == QualificationWorkerCommandPhase::Reserved
-                && record.setup_request_digest == setup_request_digest,
-            "Q command already crossed its one-use send boundary"
-        );
-        require_owner(&tx, &record)?;
-        let allocation = read(&tx, placement)?.context("Q command lost allocation at contact")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "Q command is not bound"
-        );
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        let local = qualification_local_start::read_local_start(&tx, placement)?
-            .context("Q Worker contact has no original local start")?;
-        qualification_local_start::require_live_credential_custody(&tx, &local)?;
-        qualification_controller_canary::require_bound_canary(
-            &local,
-            proof,
-            Some(&record.request_digest),
-        )?;
-        let process_state: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            process_state == "attached",
-            "Q command Worker is no longer attached"
-        );
-        let channel = load_binding(&tx, placement)?;
-        let channel_state: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        let connector: (String, String) = tx.query_row(
-            "SELECT state,channel_binding_digest FROM external_execution_connector
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
+            ensure!(
+                record.phase == QualificationWorkerCommandPhase::Reserved
+                    && record.setup_request_digest == setup_request_digest,
+                "Q command already crossed its one-use send boundary"
+            );
+            require_owner(&tx, &record)?;
+            let allocation = read(&tx, placement)?.context("Q command lost allocation at contact")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "Q command is not bound"
+            );
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            let local = qualification_local_start::read_local_start(&tx, placement)?
+                .context("Q Worker contact has no original local start")?;
+            qualification_local_start::require_live_credential_custody(&tx, &local)?;
+            qualification_controller_canary::require_bound_canary(
+                &local,
+                proof,
+                Some(&record.request_digest),
+            )?;
+            let process_state: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                process_state == "attached",
+                "Q command Worker is no longer attached"
+            );
+            let channel = load_binding(&tx, placement)?;
+            let channel_state: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            let connector: (String, String) = tx.query_row(
+                "SELECT state,channel_binding_digest FROM external_execution_connector
              WHERE placement_thread_id=?1",
-            [placement],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        ensure!(
-            channel_state == "running"
-                && connector.0 == "connected"
-                && connector.1 == record.channel_binding_digest
-                && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
-            "Q command lost its live connected channel before contact"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?.max(record.reserved_at_ms);
-        ensure!(
-            tx.execute(
-                "UPDATE external_qualification_worker_command
+                [placement],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            ensure!(
+                channel_state == "running"
+                    && connector.0 == "connected"
+                    && connector.1 == record.channel_binding_digest
+                    && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
+                "Q command lost its live connected channel before contact"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?.max(record.reserved_at_ms);
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_worker_command
                  SET state='setup_possible_contact',setup_contacted_at_ms=?2
                  WHERE placement_thread_id=?1 AND state='reserved' AND setup_request_digest=?3",
-                params![placement, now, setup_request_digest],
-            )? == 1,
-            "Q command lost its one-use send boundary"
-        );
-        tx.commit()?;
-        Ok(())
+                    params![placement, now, setup_request_digest],
+                )? == 1,
+                "Q command lost its one-use send boundary"
+            );
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     pub(crate) fn mark_qualification_worker_command_possible_contact(
@@ -785,74 +791,76 @@ impl RuntimeDb {
         request_digest: &str,
         proof: &crate::state_store::VerifiedExternalQualificationOwner,
     ) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
-        ensure!(
-            record.phase == QualificationWorkerCommandPhase::SetupSettled
-                && record.setup_final_response.is_some()
-                && record.setup_owner_send_settled_at_ms.is_some()
-                && record.request_digest == request_digest,
-            "Q command already crossed its one-use send boundary"
-        );
-        require_owner(&tx, &record)?;
-        let allocation = read(&tx, placement)?.context("Q command lost allocation at contact")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "Q command is not bound"
-        );
-        require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
-        let local = qualification_local_start::read_local_start(&tx, placement)?
-            .context("Q Worker contact has no original local start")?;
-        qualification_local_start::require_live_credential_custody(&tx, &local)?;
-        qualification_controller_canary::require_bound_canary(
-            &local,
-            proof,
-            Some(&record.request_digest),
-        )?;
-        let process_state: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            process_state == "attached",
-            "Q command Worker is no longer attached"
-        );
-        let channel = load_binding(&tx, placement)?;
-        let channel_state: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        let connector: (String, String) = tx.query_row(
-            "SELECT state,channel_binding_digest FROM external_execution_connector
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q command was not reserved")?;
+            ensure!(
+                record.phase == QualificationWorkerCommandPhase::SetupSettled
+                    && record.setup_final_response.is_some()
+                    && record.setup_owner_send_settled_at_ms.is_some()
+                    && record.request_digest == request_digest,
+                "Q command already crossed its one-use send boundary"
+            );
+            require_owner(&tx, &record)?;
+            let allocation = read(&tx, placement)?.context("Q command lost allocation at contact")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "Q command is not bound"
+            );
+            require_new_owner(&tx, &allocation.reservation, None, Some(proof))?;
+            let local = qualification_local_start::read_local_start(&tx, placement)?
+                .context("Q Worker contact has no original local start")?;
+            qualification_local_start::require_live_credential_custody(&tx, &local)?;
+            qualification_controller_canary::require_bound_canary(
+                &local,
+                proof,
+                Some(&record.request_digest),
+            )?;
+            let process_state: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                process_state == "attached",
+                "Q command Worker is no longer attached"
+            );
+            let channel = load_binding(&tx, placement)?;
+            let channel_state: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            let connector: (String, String) = tx.query_row(
+                "SELECT state,channel_binding_digest FROM external_execution_connector
              WHERE placement_thread_id=?1",
-            [placement],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        ensure!(
-            channel_state == "running"
-                && connector.0 == "connected"
-                && connector.1 == record.channel_binding_digest
-                && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
-            "Q command lost its live connected channel before contact"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?.max(
-            record
-                .setup_owner_send_settled_at_ms
-                .context("Q turn lost settled setup")?,
-        );
-        ensure!(
-            tx.execute(
-                "UPDATE external_qualification_worker_command
+                [placement],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            ensure!(
+                channel_state == "running"
+                    && connector.0 == "connected"
+                    && connector.1 == record.channel_binding_digest
+                    && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
+                "Q command lost its live connected channel before contact"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?.max(
+                record
+                    .setup_owner_send_settled_at_ms
+                    .context("Q turn lost settled setup")?,
+            );
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_worker_command
                  SET state='possible_contact',contacted_at_ms=?2
                  WHERE placement_thread_id=?1 AND state='setup_settled' AND request_digest=?3",
-                params![placement, now, request_digest],
-            )? == 1,
-            "Q command lost its one-use send boundary"
-        );
-        tx.commit()?;
-        Ok(())
+                    params![placement, now, request_digest],
+                )? == 1,
+                "Q command lost its one-use send boundary"
+            );
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Retain setup's exact Final only under its one-use contact row. This
@@ -864,56 +872,58 @@ impl RuntimeDb {
         response: &serde_json::Value,
         max_frame_bytes: u32,
     ) -> Result<QualificationWorkerCommandRecord> {
-        ensure!(
-            (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&max_frame_bytes),
-            "Q setup selected wire maximum is invalid"
-        );
-        let bytes = lillux::canonical_json(response)?;
-        ensure!(
-            bytes.len() <= max_frame_bytes as usize,
-            "Q setup Final exceeds its signed wire bound"
-        );
-        let digest = lillux::sha256_hex(bytes.as_bytes());
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q setup Final has no command")?;
-        require_owner(&tx, &record)?;
-        let process_state: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            record.setup_request_digest == setup_request_digest
-                && process_state == "attached"
-                && matches!(
-                    record.phase,
-                    QualificationWorkerCommandPhase::SetupPossibleContact
-                        | QualificationWorkerCommandPhase::SetupSettled
-                )
-                && record
-                    .setup_final_response_digest
-                    .as_deref()
-                    .is_none_or(|prior| prior == digest)
-                && record
-                    .setup_final_response
-                    .as_ref()
-                    .is_none_or(|prior| prior == response)
-                && record
-                    .setup_final_wire_max_bytes
-                    .is_none_or(|prior| prior == max_frame_bytes),
-            "Q setup Final differs from its one contacted setup request"
-        );
-        if record.setup_final_response_digest.is_none() {
-            ensure!(tx.execute(
-                "UPDATE external_qualification_worker_command
+        self.conn.with_sql(|conn| {
+            ensure!(
+                (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&max_frame_bytes),
+                "Q setup selected wire maximum is invalid"
+            );
+            let bytes = lillux::canonical_json(response)?;
+            ensure!(
+                bytes.len() <= max_frame_bytes as usize,
+                "Q setup Final exceeds its signed wire bound"
+            );
+            let digest = lillux::sha256_hex(bytes.as_bytes());
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q setup Final has no command")?;
+            require_owner(&tx, &record)?;
+            let process_state: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                record.setup_request_digest == setup_request_digest
+                    && process_state == "attached"
+                    && matches!(
+                        record.phase,
+                        QualificationWorkerCommandPhase::SetupPossibleContact
+                            | QualificationWorkerCommandPhase::SetupSettled
+                    )
+                    && record
+                        .setup_final_response_digest
+                        .as_deref()
+                        .is_none_or(|prior| prior == digest)
+                    && record
+                        .setup_final_response
+                        .as_ref()
+                        .is_none_or(|prior| prior == response)
+                    && record
+                        .setup_final_wire_max_bytes
+                        .is_none_or(|prior| prior == max_frame_bytes),
+                "Q setup Final differs from its one contacted setup request"
+            );
+            if record.setup_final_response_digest.is_none() {
+                ensure!(tx.execute(
+                    "UPDATE external_qualification_worker_command
                  SET setup_final_response_digest=?2,setup_final_response_json=?3,setup_final_wire_max_bytes=?4
                  WHERE placement_thread_id=?1 AND state='setup_possible_contact' AND setup_final_response_digest IS NULL",
-                params![placement, digest, bytes, max_frame_bytes],
-            )? == 1, "Q setup Final CAS did not retain one exact response");
-        }
-        let updated = read_command(&tx, placement)?.context("Q setup Final disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+                    params![placement, digest, bytes, max_frame_bytes],
+                )? == 1, "Q setup Final CAS did not retain one exact response");
+            }
+            let updated = read_command(&tx, placement)?.context("Q setup Final disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 
     /// This owner-return marker alone advances setup to its settled stage.
@@ -923,36 +933,38 @@ impl RuntimeDb {
         placement: &str,
         setup_request_digest: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q setup send has no command")?;
-        require_owner(&tx, &record)?;
-        ensure!(
-            record.setup_request_digest == setup_request_digest
-                && record.setup_final_response.is_some()
-                && matches!(
-                    record.phase,
-                    QualificationWorkerCommandPhase::SetupPossibleContact
-                        | QualificationWorkerCommandPhase::SetupSettled
-                ),
-            "Q setup send has no exact successful Final to settle"
-        );
-        if record.setup_owner_send_settled_at_ms.is_none() {
-            let at = i64::try_from(lillux::time::timestamp_millis())?.max(
-                record
-                    .setup_contacted_at_ms
-                    .context("Q setup send has no possible contact")?,
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q setup send has no command")?;
+            require_owner(&tx, &record)?;
+            ensure!(
+                record.setup_request_digest == setup_request_digest
+                    && record.setup_final_response.is_some()
+                    && matches!(
+                        record.phase,
+                        QualificationWorkerCommandPhase::SetupPossibleContact
+                            | QualificationWorkerCommandPhase::SetupSettled
+                    ),
+                "Q setup send has no exact successful Final to settle"
             );
-            ensure!(tx.execute(
-                "UPDATE external_qualification_worker_command
+            if record.setup_owner_send_settled_at_ms.is_none() {
+                let at = i64::try_from(lillux::time::timestamp_millis())?.max(
+                    record
+                        .setup_contacted_at_ms
+                        .context("Q setup send has no possible contact")?,
+                );
+                ensure!(tx.execute(
+                    "UPDATE external_qualification_worker_command
                  SET state='setup_settled',setup_owner_send_settled_at_ms=?2
                  WHERE placement_thread_id=?1 AND state='setup_possible_contact'
                    AND setup_final_response_digest IS NOT NULL AND setup_owner_send_settled_at_ms IS NULL",
-                params![placement, at],
-            )? == 1, "Q setup send settlement CAS did not update its exact command");
-        }
-        let updated = read_command(&tx, placement)?.context("Q setup send disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+                    params![placement, at],
+                )? == 1, "Q setup send settlement CAS did not update its exact command");
+            }
+            let updated = read_command(&tx, placement)?.context("Q setup send disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 
     /// Retain the exact request-correlated command-progress Delta before its
@@ -965,46 +977,48 @@ impl RuntimeDb {
         delta: &serde_json::Value,
         max_frame_bytes: u32,
     ) -> Result<QualificationWorkerCommandRecord> {
-        let (canonical, digest, _) = prepare_progress_delta(delta, max_frame_bytes)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q Worker Delta has no command")?;
-        require_owner(&tx, &record)?;
-        let process_state: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            record.request_digest == request_digest && process_state == "attached",
-            "Q Worker Delta changed its contacted attached process"
-        );
-        if let Some(prior) = &record.delta_response_digest {
+        self.conn.with_sql(|conn| {
+            let (canonical, digest, _) = prepare_progress_delta(delta, max_frame_bytes)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q Worker Delta has no command")?;
+            require_owner(&tx, &record)?;
+            let process_state: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
             ensure!(
-                prior == &digest
-                    && record.delta_response.as_ref() == Some(delta)
-                    && record.delta_wire_max_bytes == Some(max_frame_bytes),
-                "Q Worker repeated a different command-progress Delta"
+                record.request_digest == request_digest && process_state == "attached",
+                "Q Worker Delta changed its contacted attached process"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == QualificationWorkerCommandPhase::PossibleContact,
-            "Q Worker Delta is outside its one possible-contact request"
-        );
-        ensure!(
-            tx.execute(
-                "UPDATE external_qualification_worker_command
+            if let Some(prior) = &record.delta_response_digest {
+                ensure!(
+                    prior == &digest
+                        && record.delta_response.as_ref() == Some(delta)
+                        && record.delta_wire_max_bytes == Some(max_frame_bytes),
+                    "Q Worker repeated a different command-progress Delta"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == QualificationWorkerCommandPhase::PossibleContact,
+                "Q Worker Delta is outside its one possible-contact request"
+            );
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_worker_command
                  SET delta_response_digest=?2,delta_response_json=?3,delta_wire_max_bytes=?4
                  WHERE placement_thread_id=?1 AND state='possible_contact'
                    AND delta_response_digest IS NULL",
-                params![placement, &digest, &canonical, max_frame_bytes],
-            )? == 1,
-            "Q Worker Delta CAS did not retain one progress frame"
-        );
-        let updated = read_command(&tx, placement)?.context("Q Worker Delta disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+                    params![placement, &digest, &canonical, max_frame_bytes],
+                )? == 1,
+                "Q Worker Delta CAS did not retain one progress frame"
+            );
+            let updated = read_command(&tx, placement)?.context("Q Worker Delta disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 
     /// Persist only a strict state transition observed through the framed
@@ -1016,117 +1030,119 @@ impl RuntimeDb {
         request_digest: &str,
         observation: &serde_json::Value,
     ) -> Result<QualificationWorkerCommandRecord> {
-        let parsed: TurnObservation = serde_json::from_value(observation.clone())
-            .context("Q Worker emitted a non-state turn observation")?;
-        let TurnObservation::State {
-            expected,
-            next,
-            turn_id,
-            completed_turn_id,
-        } = parsed;
-        let start = expected == "idle"
-            && next == "turn_running"
-            && turn_id.is_some()
-            && completed_turn_id.is_none();
-        let finish = expected == "turn_running"
-            && next == "idle"
-            && turn_id.is_none()
-            && completed_turn_id.is_some();
-        ensure!(
-            start || finish,
-            "Q Worker emitted an unrelated turn transition"
-        );
-        let observed_turn = turn_id.or(completed_turn_id).expect("transition checked");
-        ensure!(
-            !observed_turn.is_empty()
-                && observed_turn.len() <= 256
-                && !observed_turn.chars().any(char::is_control),
-            "Q Worker turn id is not bounded"
-        );
-        let observation_digest = ryeos_state::objects::canonical_value_digest(observation)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q Worker turn has no command")?;
-        require_owner(&tx, &record)?;
-        let process_state: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            record.request_digest == request_digest
-                && process_state == "attached"
-                && matches!(
-                    record.phase,
-                    QualificationWorkerCommandPhase::PossibleContact
-                        | QualificationWorkerCommandPhase::TurnCompleted
-                ),
-            "Q Worker turn is outside its possible-contact request"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        if start {
-            if !turn_start_is_exact_replay(
-                record.turn_id.as_deref(),
-                record.turn_start_digest.as_deref(),
-                record.turn_completed_at_ms,
-                &observed_turn,
-                &observation_digest,
-            )? {
-                ensure!(
-                    tx.execute(
-                        "UPDATE external_qualification_worker_command
+        self.conn.with_sql(|conn| {
+            let parsed: TurnObservation = serde_json::from_value(observation.clone())
+                .context("Q Worker emitted a non-state turn observation")?;
+            let TurnObservation::State {
+                expected,
+                next,
+                turn_id,
+                completed_turn_id,
+            } = parsed;
+            let start = expected == "idle"
+                && next == "turn_running"
+                && turn_id.is_some()
+                && completed_turn_id.is_none();
+            let finish = expected == "turn_running"
+                && next == "idle"
+                && turn_id.is_none()
+                && completed_turn_id.is_some();
+            ensure!(
+                start || finish,
+                "Q Worker emitted an unrelated turn transition"
+            );
+            let observed_turn = turn_id.or(completed_turn_id).expect("transition checked");
+            ensure!(
+                !observed_turn.is_empty()
+                    && observed_turn.len() <= 256
+                    && !observed_turn.chars().any(char::is_control),
+                "Q Worker turn id is not bounded"
+            );
+            let observation_digest = ryeos_state::objects::canonical_value_digest(observation)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q Worker turn has no command")?;
+            require_owner(&tx, &record)?;
+            let process_state: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                record.request_digest == request_digest
+                    && process_state == "attached"
+                    && matches!(
+                        record.phase,
+                        QualificationWorkerCommandPhase::PossibleContact
+                            | QualificationWorkerCommandPhase::TurnCompleted
+                    ),
+                "Q Worker turn is outside its possible-contact request"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            if start {
+                if !turn_start_is_exact_replay(
+                    record.turn_id.as_deref(),
+                    record.turn_start_digest.as_deref(),
+                    record.turn_completed_at_ms,
+                    &observed_turn,
+                    &observation_digest,
+                )? {
+                    ensure!(
+                        tx.execute(
+                            "UPDATE external_qualification_worker_command
                      SET turn_id=?2,turn_started_at_ms=?3,turn_start_digest=?4
                      WHERE placement_thread_id=?1 AND state='possible_contact' AND turn_id IS NULL",
-                        params![
-                            placement,
-                            &observed_turn,
-                            now.max(record.contacted_at_ms.unwrap_or(now)),
-                            &observation_digest
-                        ],
-                    )? == 1,
-                    "Q Worker turn-start CAS did not update one command"
-                );
-            }
-        } else {
-            ensure!(
-                record.turn_id.as_deref() == Some(observed_turn.as_str())
-                    && record.turn_started_at_ms.is_some(),
-                "Q Worker completed a different or unstarted turn"
-            );
-            if record.turn_completed_at_ms.is_none() {
-                let completed = now.max(record.turn_started_at_ms.expect("checked"));
-                let done = record.final_response_digest.is_some();
+                            params![
+                                placement,
+                                &observed_turn,
+                                now.max(record.contacted_at_ms.unwrap_or(now)),
+                                &observation_digest
+                            ],
+                        )? == 1,
+                        "Q Worker turn-start CAS did not update one command"
+                    );
+                }
+            } else {
                 ensure!(
-                    tx.execute(
-                        "UPDATE external_qualification_worker_command
+                    record.turn_id.as_deref() == Some(observed_turn.as_str())
+                        && record.turn_started_at_ms.is_some(),
+                    "Q Worker completed a different or unstarted turn"
+                );
+                if record.turn_completed_at_ms.is_none() {
+                    let completed = now.max(record.turn_started_at_ms.expect("checked"));
+                    let done = record.final_response_digest.is_some();
+                    ensure!(
+                        tx.execute(
+                            "UPDATE external_qualification_worker_command
                      SET turn_completed_at_ms=?2,turn_completion_digest=?3,
                          state=?4,completed_at_ms=?5
                      WHERE placement_thread_id=?1 AND state='possible_contact'
                        AND turn_id=?6 AND turn_completed_at_ms IS NULL",
-                        params![
-                            placement,
-                            completed,
-                            &observation_digest,
-                            if done {
-                                "turn_completed"
-                            } else {
-                                "possible_contact"
-                            },
-                            done.then_some(completed),
-                            &observed_turn
-                        ],
-                    )? == 1,
-                    "Q Worker turn-completion CAS did not update one command"
-                );
-            } else {
-                ensure!(
-                    record.turn_completion_digest.as_deref() == Some(observation_digest.as_str()),
-                    "Q Worker repeated a different turn-completion observation"
-                );
+                            params![
+                                placement,
+                                completed,
+                                &observation_digest,
+                                if done {
+                                    "turn_completed"
+                                } else {
+                                    "possible_contact"
+                                },
+                                done.then_some(completed),
+                                &observed_turn
+                            ],
+                        )? == 1,
+                        "Q Worker turn-completion CAS did not update one command"
+                    );
+                } else {
+                    ensure!(
+                        record.turn_completion_digest.as_deref() == Some(observation_digest.as_str()),
+                        "Q Worker repeated a different turn-completion observation"
+                    );
+                }
             }
-        }
-        let updated = read_command(&tx, placement)?.context("Q Worker turn disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+            let updated = read_command(&tx, placement)?.context("Q Worker turn disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 
     /// Retain the pool's exact request-correlated Final body before treating
@@ -1140,75 +1156,77 @@ impl RuntimeDb {
         response: &serde_json::Value,
         max_frame_bytes: u32,
     ) -> Result<QualificationWorkerCommandRecord> {
-        ensure!(
-            (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&max_frame_bytes),
-            "Q Worker selected wire maximum is invalid"
-        );
-        let bytes = lillux::canonical_json(response)?;
-        ensure!(
-            bytes.len() <= max_frame_bytes as usize,
-            "Q Worker Final exceeds selected signed wire bound"
-        );
-        let digest = lillux::sha256_hex(bytes.as_bytes());
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q Worker Final has no command")?;
-        require_owner(&tx, &record)?;
-        let process_state: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            record.request_digest == request_digest
-                && process_state == "attached"
-                && matches!(
-                    record.phase,
-                    QualificationWorkerCommandPhase::PossibleContact
-                        | QualificationWorkerCommandPhase::TurnCompleted
-                )
-                && record
-                    .final_response_digest
-                    .as_deref()
-                    .is_none_or(|prior| prior == digest)
-                && record
-                    .final_response
-                    .as_ref()
-                    .is_none_or(|prior| prior == response)
-                && record
-                    .final_wire_max_bytes
-                    .is_none_or(|prior| prior == max_frame_bytes),
-            "Q Worker Final differs from its one contacted request"
-        );
-        if record.final_response_digest.is_none() {
-            let done = record.turn_completed_at_ms.is_some();
-            let now = i64::try_from(lillux::time::timestamp_millis())?
-                .max(record.contacted_at_ms.expect("possible contact checked"));
+        self.conn.with_sql(|conn| {
             ensure!(
-                tx.execute(
-                    "UPDATE external_qualification_worker_command
+                (1..=MAX_QUALIFICATION_WORKER_FINAL_BYTES as u32).contains(&max_frame_bytes),
+                "Q Worker selected wire maximum is invalid"
+            );
+            let bytes = lillux::canonical_json(response)?;
+            ensure!(
+                bytes.len() <= max_frame_bytes as usize,
+                "Q Worker Final exceeds selected signed wire bound"
+            );
+            let digest = lillux::sha256_hex(bytes.as_bytes());
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q Worker Final has no command")?;
+            require_owner(&tx, &record)?;
+            let process_state: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                record.request_digest == request_digest
+                    && process_state == "attached"
+                    && matches!(
+                        record.phase,
+                        QualificationWorkerCommandPhase::PossibleContact
+                            | QualificationWorkerCommandPhase::TurnCompleted
+                    )
+                    && record
+                        .final_response_digest
+                        .as_deref()
+                        .is_none_or(|prior| prior == digest)
+                    && record
+                        .final_response
+                        .as_ref()
+                        .is_none_or(|prior| prior == response)
+                    && record
+                        .final_wire_max_bytes
+                        .is_none_or(|prior| prior == max_frame_bytes),
+                "Q Worker Final differs from its one contacted request"
+            );
+            if record.final_response_digest.is_none() {
+                let done = record.turn_completed_at_ms.is_some();
+                let now = i64::try_from(lillux::time::timestamp_millis())?
+                    .max(record.contacted_at_ms.expect("possible contact checked"));
+                ensure!(
+                    tx.execute(
+                        "UPDATE external_qualification_worker_command
                  SET final_response_digest=?2,final_response_json=?3,
                      final_wire_max_bytes=?4,state=?5,completed_at_ms=?6
                  WHERE placement_thread_id=?1 AND state='possible_contact'
                    AND final_response_digest IS NULL",
-                    params![
-                        placement,
-                        &digest,
-                        &bytes,
-                        max_frame_bytes,
-                        if done {
-                            "turn_completed"
-                        } else {
-                            "possible_contact"
-                        },
-                        done.then_some(now)
-                    ],
-                )? == 1,
-                "Q Worker Final CAS did not update one command"
-            );
-        }
-        let updated = read_command(&tx, placement)?.context("Q Worker Final disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+                        params![
+                            placement,
+                            &digest,
+                            &bytes,
+                            max_frame_bytes,
+                            if done {
+                                "turn_completed"
+                            } else {
+                                "possible_contact"
+                            },
+                            done.then_some(now)
+                        ],
+                    )? == 1,
+                    "Q Worker Final CAS did not update one command"
+                );
+            }
+            let updated = read_command(&tx, placement)?.context("Q Worker Final disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 
     /// Set the one-way owner return fence after the pool send returned Ok and
@@ -1219,38 +1237,40 @@ impl RuntimeDb {
         placement: &str,
         request_digest: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q Worker send has no command")?;
-        require_owner(&tx, &record)?;
-        ensure!(
-            record.request_digest == request_digest
-                && record.final_response_digest.is_some()
-                && matches!(
-                    record.phase,
-                    QualificationWorkerCommandPhase::PossibleContact
-                        | QualificationWorkerCommandPhase::TurnCompleted
-                ),
-            "Q Worker send has no exact successful Final to settle"
-        );
-        if record.owner_send_settled_at_ms.is_none() {
-            let at = i64::try_from(lillux::time::timestamp_millis())?
-                .max(record.contacted_at_ms.expect("possible contact checked"));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q Worker send has no command")?;
+            require_owner(&tx, &record)?;
             ensure!(
-                tx.execute(
-                    "UPDATE external_qualification_worker_command
+                record.request_digest == request_digest
+                    && record.final_response_digest.is_some()
+                    && matches!(
+                        record.phase,
+                        QualificationWorkerCommandPhase::PossibleContact
+                            | QualificationWorkerCommandPhase::TurnCompleted
+                    ),
+                "Q Worker send has no exact successful Final to settle"
+            );
+            if record.owner_send_settled_at_ms.is_none() {
+                let at = i64::try_from(lillux::time::timestamp_millis())?
+                    .max(record.contacted_at_ms.expect("possible contact checked"));
+                ensure!(
+                    tx.execute(
+                        "UPDATE external_qualification_worker_command
                      SET owner_send_settled_at_ms=?2
                      WHERE placement_thread_id=?1
                        AND state IN ('possible_contact','turn_completed')
                        AND final_response_digest IS NOT NULL
                        AND owner_send_settled_at_ms IS NULL",
-                    params![placement, at],
-                )? == 1,
-                "Q Worker send settlement CAS did not update its exact command"
-            );
-        }
-        let updated = read_command(&tx, placement)?.context("Q Worker send disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+                        params![placement, at],
+                    )? == 1,
+                    "Q Worker send settlement CAS did not update its exact command"
+                );
+            }
+            let updated = read_command(&tx, placement)?.context("Q Worker send disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 
     /// A crash or I/O failure after possible contact consumes the one request.
@@ -1258,33 +1278,35 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<QualificationWorkerCommandRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read_command(&tx, placement)?.context("Q Worker command is absent")?;
-        require_owner(&tx, &record)?;
-        ensure!(
-            matches!(
-                record.phase,
-                QualificationWorkerCommandPhase::SetupPossibleContact
-                    | QualificationWorkerCommandPhase::SetupSettled
-                    | QualificationWorkerCommandPhase::PossibleContact
-                    | QualificationWorkerCommandPhase::TurnCompleted
-                    | QualificationWorkerCommandPhase::OutcomeUnknown
-            ),
-            "Q Worker command is not an uncertain contacted request"
-        );
-        if record.phase != QualificationWorkerCommandPhase::OutcomeUnknown {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read_command(&tx, placement)?.context("Q Worker command is absent")?;
+            require_owner(&tx, &record)?;
             ensure!(
-                tx.execute(
-                    "UPDATE external_qualification_worker_command SET state='outcome_unknown'
-                 WHERE placement_thread_id=?1 AND state IN ('setup_possible_contact','setup_settled','possible_contact','turn_completed')",
-                    [placement],
-                )? == 1,
-                "Q Worker unknown-outcome CAS did not update one command"
+                matches!(
+                    record.phase,
+                    QualificationWorkerCommandPhase::SetupPossibleContact
+                        | QualificationWorkerCommandPhase::SetupSettled
+                        | QualificationWorkerCommandPhase::PossibleContact
+                        | QualificationWorkerCommandPhase::TurnCompleted
+                        | QualificationWorkerCommandPhase::OutcomeUnknown
+                ),
+                "Q Worker command is not an uncertain contacted request"
             );
-        }
-        let updated = read_command(&tx, placement)?.context("Q Worker command disappeared")?;
-        tx.commit()?;
-        Ok(updated)
+            if record.phase != QualificationWorkerCommandPhase::OutcomeUnknown {
+                ensure!(
+                    tx.execute(
+                        "UPDATE external_qualification_worker_command SET state='outcome_unknown'
+                 WHERE placement_thread_id=?1 AND state IN ('setup_possible_contact','setup_settled','possible_contact','turn_completed')",
+                        [placement],
+                    )? == 1,
+                    "Q Worker unknown-outcome CAS did not update one command"
+                );
+            }
+            let updated = read_command(&tx, placement)?.context("Q Worker command disappeared")?;
+            tx.commit()?;
+            Ok(updated)
+        })
     }
 }
 

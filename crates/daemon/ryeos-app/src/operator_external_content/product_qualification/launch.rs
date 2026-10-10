@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 
 use super::{require_bounded_name, require_canonical_hash};

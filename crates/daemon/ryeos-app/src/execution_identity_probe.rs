@@ -256,14 +256,10 @@ fn parse_linux_cpuinfo(cpuinfo: &str) -> (Option<String>, Vec<String>) {
 mod tests {
     use super::*;
 
-    fn node_identity() -> (
-        tempfile::TempDir,
-        ryeos_node_runtime::identity::NodeIdentity,
-    ) {
+    fn node_identity() -> (tempfile::TempDir, ryeos_node_runtime::identity::NodeIdentity) {
         let directory = tempfile::tempdir().unwrap();
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem"))
-                .unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem")).unwrap();
         (directory, identity)
     }
 

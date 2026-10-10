@@ -116,6 +116,7 @@ pub fn create(
             .remove_contents_recursive_bounded(HOME_TRAVERSAL_BUDGET)
             .and_then(|()| {
                 root.remove_empty_child_if_same(&home_name, &home)
+                    .map(|receipt| receipt.is_some())
                     .and_then(|removed| {
                         if removed {
                             Ok(())
@@ -144,7 +145,9 @@ pub fn remove(runtime_state_dir: &Path, home_id: &str) -> Result<bool> {
         return Ok(false);
     };
     home.remove_contents_recursive_bounded(HOME_TRAVERSAL_BUDGET)?;
-    let removed = root.remove_empty_child_if_same(&name, &home)?;
+    let removed = root
+        .remove_empty_child_if_same(&name, &home)
+        .map(|receipt| receipt.is_some())?;
     if !removed {
         bail!("private artifact home identity changed during removal");
     }
@@ -168,7 +171,9 @@ pub fn remove_empty_orphan(runtime_state_dir: &Path, home_id: &str) -> Result<bo
     if !home.entries_no_follow_bounded(1)?.is_empty() {
         bail!("private artifact orphan is non-empty and requires explicit recovery");
     }
-    let removed = root.remove_empty_child_if_same(&name, &home)?;
+    let removed = root
+        .remove_empty_child_if_same(&name, &home)
+        .map(|receipt| receipt.is_some())?;
     if !removed {
         bail!("private artifact home identity changed during orphan recovery");
     }

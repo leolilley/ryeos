@@ -609,7 +609,7 @@ fn fixture() -> Result<Fixture> {
         ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA;
     let directory = tempfile::tempdir()?;
     let mut state = crate::state::test_support::build(directory.path())?;
-    state.node_policy = Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
         vec![
             Arc::new(NodeObjectClosurePolicy {
                 schema: 1,
@@ -627,8 +627,7 @@ fn fixture() -> Result<Fixture> {
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
         ],
     ));
-    let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     let scopes = vec!["ryeos.execute.service.external-content/launch-product-qualification".into()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,

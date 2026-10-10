@@ -763,7 +763,7 @@ impl VerifiedTrustedPooledSessionInputs {
             );
             let limits = state
                 .node_policy
-                .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+                .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
                 .closure_limits()?;
             let maximum = limits
                 .max_object_bytes
@@ -890,7 +890,7 @@ impl VerifiedTrustedPooledSessionInputs {
         let result = (|| {
             let limits = state
                 .node_policy
-                .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+                .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
                 .closure_limits()?;
             let maximum = limits
                 .max_object_bytes
@@ -1042,7 +1042,7 @@ impl VerifiedTrustedPooledSessionInputs {
             .context("verified trusted pooled inputs have no product cleanup contract")?;
         let node = state
             .node_policy
-            .require::<crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
         )?;
         let resources = node
             .resource_authority
@@ -1282,7 +1282,7 @@ impl VerifiedTrustedPooledSessionInputs {
             .context("original product preparation lacks actual selected character-device owner")?;
         let limits = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let guard = self
             .state_authority
@@ -1434,7 +1434,7 @@ impl VerifiedTrustedPooledSessionInputs {
         );
         let limits = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let tinygrad = owner
             .realizations

@@ -503,7 +503,9 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationGuestScratchRecord>> {
-        read_scratch(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            read_scratch(&conn, placement)
+        })
     }
 
     /// A retry may report transport completion only for the same one-use Q
@@ -518,27 +520,29 @@ impl RuntimeDb {
         owner_principal: &str,
         program_digest: &str,
     ) -> Result<bool> {
-        let Some(record) = read_scratch(&self.conn, placement)? else {
-            return Ok(false);
-        };
-        if record.phase != QualificationGuestScratchPhase::Closed {
-            return Ok(false);
-        }
-        let allocation =
-            read(&self.conn, placement)?.context("closed Q scratch lost its settled allocation")?;
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            bail!("closed Q scratch changed its qualification owner");
-        };
-        ensure!(
-            owner.coordinate == *coordinate
-                && owner.qualification_operation_id == qualification_operation_id
-                && owner.operator_principal == owner_principal
-                && owner.program.digest()? == program_digest,
-            "closed Q scratch does not prove this exact completed transport"
-        );
-        require_completed_transport_tx(&self.conn, &allocation.reservation)?;
-        Ok(true)
+        self.conn.with_sql(|conn| {
+            let Some(record) = read_scratch(&conn, placement)? else {
+                return Ok(false);
+            };
+            if record.phase != QualificationGuestScratchPhase::Closed {
+                return Ok(false);
+            }
+            let allocation =
+                read(&conn, placement)?.context("closed Q scratch lost its settled allocation")?;
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                bail!("closed Q scratch changed its qualification owner");
+            };
+            ensure!(
+                owner.coordinate == *coordinate
+                    && owner.qualification_operation_id == qualification_operation_id
+                    && owner.operator_principal == owner_principal
+                    && owner.program.digest()? == program_digest,
+                "closed Q scratch does not prove this exact completed transport"
+            );
+            require_completed_transport_tx(&conn, &allocation.reservation)?;
+            Ok(true)
+        })
     }
 
     /// A Reserved intent may predate physical child creation. After restart,
@@ -550,7 +554,9 @@ impl RuntimeDb {
         expected: &QualificationGuestScratchRecord,
         original_parent: &lillux::PinnedDirectory,
     ) -> Result<QualificationGuestScratchRecord> {
-        retire_absent_reserved(&self.conn, expected, original_parent)
+        self.conn.with_sql(|conn| {
+            retire_absent_reserved(&conn, expected, original_parent)
+        })
     }
 
     /// Refuse every replay, including a prior Reserved row whose child may
@@ -564,100 +570,104 @@ impl RuntimeDb {
         scratch_root: &std::path::Path,
         callback_launch_owner: Option<&str>,
     ) -> Result<QualificationGuestScratchRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(launch_owner) = callback_launch_owner {
-            super::super::restored_verifier_attempt::require_current_callback_launch(
-                &tx,
-                &coordinate.accepted_root_id,
-                launch_owner,
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            if let Some(launch_owner) = callback_launch_owner {
+                super::super::restored_verifier_attempt::require_current_callback_launch(
+                    &tx,
+                    &coordinate.accepted_root_id,
+                    launch_owner,
+                )?;
+            }
+            let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+                coordinate,
+                qualification_operation_id,
             )?;
-        }
-        let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
-            coordinate,
-            qualification_operation_id,
-        )?;
-        ensure!(
-            read_scratch(&tx, &placement)?.is_none() && read(&tx, &placement)?.is_none(),
-            "Q guest scratch cannot replace an existing attempt"
-        );
-        super::super::restored_verifier_attempt::read_consumer_prerequisite(
-            &tx,
-            qualification_operation_id,
-            owner_principal,
-            coordinate,
-        )?;
-        let qualified =
-            super::super::runtime_snapshot_qualification::read(&tx, qualification_operation_id)?
-                .context("Q guest scratch lost its restored operation")?;
-        ensure!(
-            qualified.phase
-                == super::super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
-                && qualified.intent.owner_principal == owner_principal,
-            "Q guest scratch has no operator-owned bound occurrence"
-        );
-        let occurrence = qualified
-            .occurrence
-            .context("Q guest scratch lost its bound occurrence")?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let record = QualificationGuestScratchRecord {
-            placement_thread_id: placement.clone(),
-            qualification_operation_id: qualification_operation_id.to_owned(),
-            coordinate: coordinate.clone(),
-            qualification_occurrence_id: occurrence.occurrence_id,
-            owner_principal: owner_principal.to_owned(),
-            daemon_generation_id: daemon_generation_id().to_owned(),
-            program_digest: program_digest.to_owned(),
-            scratch_root: scratch_root
-                .to_str()
-                .context("Q guest scratch path is not UTF-8")?
-                .to_owned(),
-            phase: QualificationGuestScratchPhase::Reserved,
-            cleanup_basis: None,
-            removed_at_ms: None,
-            closed_at_ms: None,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        let raw = canonical(&record)?;
-        ensure!(
-            tx.execute(
-                "INSERT INTO external_qualification_guest_scratch VALUES (?1,?2,'reserved',?3,?4,?4)",
-                params![placement, qualification_operation_id, raw, now],
-            )? == 1,
-            "Q guest scratch lost its one-use reservation"
-        );
-        tx.commit()?;
-        Ok(record)
+            ensure!(
+                read_scratch(&tx, &placement)?.is_none() && read(&tx, &placement)?.is_none(),
+                "Q guest scratch cannot replace an existing attempt"
+            );
+            super::super::restored_verifier_attempt::read_consumer_prerequisite(
+                &tx,
+                qualification_operation_id,
+                owner_principal,
+                coordinate,
+            )?;
+            let qualified =
+                super::super::runtime_snapshot_qualification::read(&tx, qualification_operation_id)?
+                    .context("Q guest scratch lost its restored operation")?;
+            ensure!(
+                qualified.phase
+                    == super::super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
+                    && qualified.intent.owner_principal == owner_principal,
+                "Q guest scratch has no operator-owned bound occurrence"
+            );
+            let occurrence = qualified
+                .occurrence
+                .context("Q guest scratch lost its bound occurrence")?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let record = QualificationGuestScratchRecord {
+                placement_thread_id: placement.clone(),
+                qualification_operation_id: qualification_operation_id.to_owned(),
+                coordinate: coordinate.clone(),
+                qualification_occurrence_id: occurrence.occurrence_id,
+                owner_principal: owner_principal.to_owned(),
+                daemon_generation_id: daemon_generation_id().to_owned(),
+                program_digest: program_digest.to_owned(),
+                scratch_root: scratch_root
+                    .to_str()
+                    .context("Q guest scratch path is not UTF-8")?
+                    .to_owned(),
+                phase: QualificationGuestScratchPhase::Reserved,
+                cleanup_basis: None,
+                removed_at_ms: None,
+                closed_at_ms: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            };
+            let raw = canonical(&record)?;
+            ensure!(
+                tx.execute(
+                    "INSERT INTO external_qualification_guest_scratch VALUES (?1,?2,'reserved',?3,?4,?4)",
+                    params![placement, qualification_operation_id, raw, now],
+                )? == 1,
+                "Q guest scratch lost its one-use reservation"
+            );
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub(crate) fn mark_qualification_guest_scratch_created(
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_scratch(&tx, &expected.placement_thread_id)?
-            .context("Q guest scratch lost its reservation")?;
-        ensure!(
-            current == *expected
-                && current.phase == QualificationGuestScratchPhase::Reserved
-                && current.daemon_generation_id == daemon_generation_id(),
-            "Q guest scratch changed its original reservation"
-        );
-        let mut next = current.clone();
-        next.phase = QualificationGuestScratchPhase::Created;
-        next.updated_at_ms =
-            i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
-        let raw = canonical(&next)?;
-        ensure!(
-            tx.execute(
-                "UPDATE external_qualification_guest_scratch SET phase='created',record_json=?3,updated_at_ms=?4
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_scratch(&tx, &expected.placement_thread_id)?
+                .context("Q guest scratch lost its reservation")?;
+            ensure!(
+                current == *expected
+                    && current.phase == QualificationGuestScratchPhase::Reserved
+                    && current.daemon_generation_id == daemon_generation_id(),
+                "Q guest scratch changed its original reservation"
+            );
+            let mut next = current.clone();
+            next.phase = QualificationGuestScratchPhase::Created;
+            next.updated_at_ms =
+                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            let raw = canonical(&next)?;
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_guest_scratch SET phase='created',record_json=?3,updated_at_ms=?4
                  WHERE placement_thread_id=?1 AND record_json=?2 AND phase='reserved'",
-                params![current.placement_thread_id, canonical(&current)?, raw, next.updated_at_ms],
-            )? == 1,
-            "Q guest scratch creation lost its one-use CAS"
-        );
-        tx.commit()?;
-        Ok(next)
+                    params![current.placement_thread_id, canonical(&current)?, raw, next.updated_at_ms],
+                )? == 1,
+                "Q guest scratch creation lost its one-use CAS"
+            );
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Freeze exact no-allocation or settled-allocation evidence before any
@@ -666,36 +676,38 @@ impl RuntimeDb {
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_scratch(&tx, &expected.placement_thread_id)?
-            .context("Q guest scratch cleanup lost its original row")?;
-        ensure!(
-            current == *expected
-                && matches!(
-                    current.phase,
-                    QualificationGuestScratchPhase::Reserved
-                        | QualificationGuestScratchPhase::Created
-                )
-                && current.daemon_generation_id == daemon_generation_id(),
-            "Q guest scratch cleanup changed its current original custody"
-        );
-        let basis = match read(&tx, &current.placement_thread_id)? {
-            None => QualificationGuestScratchCleanupBasis::NoAllocation,
-            Some(allocation) => QualificationGuestScratchCleanupBasis::SettledAllocation {
-                allocation_request_digest: allocation.reservation.request_digest,
-                settled_phase: allocation.phase,
-                occurrence_id: allocation.occurrence.map(|item| item.occurrence_id),
-            },
-        };
-        let mut next = current.clone();
-        next.phase = QualificationGuestScratchPhase::CleanupIntent;
-        next.cleanup_basis = Some(basis);
-        next.updated_at_ms =
-            i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
-        require_cleanup_basis(&tx, &next)?;
-        let next = transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_scratch(&tx, &expected.placement_thread_id)?
+                .context("Q guest scratch cleanup lost its original row")?;
+            ensure!(
+                current == *expected
+                    && matches!(
+                        current.phase,
+                        QualificationGuestScratchPhase::Reserved
+                            | QualificationGuestScratchPhase::Created
+                    )
+                    && current.daemon_generation_id == daemon_generation_id(),
+                "Q guest scratch cleanup changed its current original custody"
+            );
+            let basis = match read(&tx, &current.placement_thread_id)? {
+                None => QualificationGuestScratchCleanupBasis::NoAllocation,
+                Some(allocation) => QualificationGuestScratchCleanupBasis::SettledAllocation {
+                    allocation_request_digest: allocation.reservation.request_digest,
+                    settled_phase: allocation.phase,
+                    occurrence_id: allocation.occurrence.map(|item| item.occurrence_id),
+                },
+            };
+            let mut next = current.clone();
+            next.phase = QualificationGuestScratchPhase::CleanupIntent;
+            next.cleanup_basis = Some(basis);
+            next.updated_at_ms =
+                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            require_cleanup_basis(&tx, &next)?;
+            let next = transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     /// Record physical removal only after the same daemon proves absence
@@ -705,48 +717,52 @@ impl RuntimeDb {
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_scratch(&tx, &expected.placement_thread_id)?
-            .context("Q guest scratch removal lost its original row")?;
-        ensure!(
-            current == *expected
-                && current.phase == QualificationGuestScratchPhase::CleanupIntent
-                && current.daemon_generation_id == daemon_generation_id(),
-            "Q guest scratch removal changed its current cleanup intent"
-        );
-        require_cleanup_basis(&tx, &current)?;
-        let mut next = current.clone();
-        next.phase = QualificationGuestScratchPhase::Removed;
-        next.updated_at_ms =
-            i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
-        next.removed_at_ms = Some(next.updated_at_ms);
-        let next = transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_scratch(&tx, &expected.placement_thread_id)?
+                .context("Q guest scratch removal lost its original row")?;
+            ensure!(
+                current == *expected
+                    && current.phase == QualificationGuestScratchPhase::CleanupIntent
+                    && current.daemon_generation_id == daemon_generation_id(),
+                "Q guest scratch removal changed its current cleanup intent"
+            );
+            require_cleanup_basis(&tx, &current)?;
+            let mut next = current.clone();
+            next.phase = QualificationGuestScratchPhase::Removed;
+            next.updated_at_ms =
+                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            next.removed_at_ms = Some(next.updated_at_ms);
+            let next = transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 
     pub(crate) fn close_qualification_guest_scratch(
         &self,
         expected: &QualificationGuestScratchRecord,
     ) -> Result<QualificationGuestScratchRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_scratch(&tx, &expected.placement_thread_id)?
-            .context("Q guest scratch close lost its original row")?;
-        ensure!(
-            current == *expected
-                && current.phase == QualificationGuestScratchPhase::Removed
-                && current.daemon_generation_id == daemon_generation_id(),
-            "Q guest scratch close changed its physical removal receipt"
-        );
-        require_cleanup_basis(&tx, &current)?;
-        let mut next = current.clone();
-        next.phase = QualificationGuestScratchPhase::Closed;
-        next.updated_at_ms =
-            i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
-        next.closed_at_ms = Some(next.updated_at_ms);
-        let next = transition(&tx, &current, &next)?;
-        tx.commit()?;
-        Ok(next)
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_scratch(&tx, &expected.placement_thread_id)?
+                .context("Q guest scratch close lost its original row")?;
+            ensure!(
+                current == *expected
+                    && current.phase == QualificationGuestScratchPhase::Removed
+                    && current.daemon_generation_id == daemon_generation_id(),
+                "Q guest scratch close changed its physical removal receipt"
+            );
+            require_cleanup_basis(&tx, &current)?;
+            let mut next = current.clone();
+            next.phase = QualificationGuestScratchPhase::Closed;
+            next.updated_at_ms =
+                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            next.closed_at_ms = Some(next.updated_at_ms);
+            let next = transition(&tx, &current, &next)?;
+            tx.commit()?;
+            Ok(next)
+        })
     }
 }
 
@@ -897,7 +913,7 @@ mod tests {
         let guard = Arc::new(TempDirGuard::new_pinned(
             parent,
             reserved.placement_thread_id.clone().into(),
-            child,
+            Arc::new(child),
         ));
         let custody = Arc::new(QualificationGuestScratchCustody::new(&reserved, guard)?);
         let registry = QualificationWorkspaceCustodyRegistry::new();

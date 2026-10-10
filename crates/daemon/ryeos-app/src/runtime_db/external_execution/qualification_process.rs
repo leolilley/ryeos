@@ -431,7 +431,9 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationWorkerProcessRecord>> {
-        read_process(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            read_process(&conn, placement)
+        })
     }
 
     /// Persist one held local Worker before allowing Lillux to release it.
@@ -442,157 +444,161 @@ impl RuntimeDb {
         daemon_generation_id: &str,
         configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
     ) -> Result<QualificationWorkerProcessRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        ensure!(
-            read_process(&tx, placement)?.is_none(),
-            "qualification Worker already has a retained process incarnation"
-        );
-        let allocation =
-            read(&tx, placement)?.context("qualification Worker allocation is absent")?;
-        ensure!(
-            allocation.phase == ExternalAllocationPhase::Bound,
-            "qualification Worker requires a bound Q allocation"
-        );
-        require_contactable_qualification_owner(&tx, &allocation.reservation)?;
-        let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
-        else {
-            bail!("qualification Worker requires a Q allocation owner");
-        };
-        let channel = load_binding(&tx, placement)?;
-        let credential_start =
-            qualification_local_start::require_live_credential_start_tx(&tx, placement)?;
-        let credential_home_id = &credential_start
-            .credential_custody
-            .as_ref()
-            .context("Q configuration attachment lost credential custody")?
-            .home_id;
-        let configuration_input = configuration.require_for(
-            placement,
-            &allocation.reservation.binding_hash,
-            credential_home_id,
-        )?;
-        require_configuration_binding(&tx, &allocation.reservation, configuration_input)?;
-        if let Some(binding) = &credential_start.controller_canary_binding {
-            require_canary_configuration_binding(binding, configuration_input)?;
-        }
-        let channel_binding_digest = channel.digest()?;
-        let channel_state: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        let release: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            ensure!(
+                read_process(&tx, placement)?.is_none(),
+                "qualification Worker already has a retained process incarnation"
+            );
+            let allocation =
+                read(&tx, placement)?.context("qualification Worker allocation is absent")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "qualification Worker requires a bound Q allocation"
+            );
+            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                bail!("qualification Worker requires a Q allocation owner");
+            };
+            let channel = load_binding(&tx, placement)?;
+            let credential_start =
+                qualification_local_start::require_live_credential_start_tx(&tx, placement)?;
+            let credential_home_id = &credential_start
+                .credential_custody
+                .as_ref()
+                .context("Q configuration attachment lost credential custody")?
+                .home_id;
+            let configuration_input = configuration.require_for(
+                placement,
+                &allocation.reservation.binding_hash,
+                credential_home_id,
+            )?;
+            require_configuration_binding(&tx, &allocation.reservation, configuration_input)?;
+            if let Some(binding) = &credential_start.controller_canary_binding {
+                require_canary_configuration_binding(binding, configuration_input)?;
+            }
+            let channel_binding_digest = channel.digest()?;
+            let channel_state: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            let release: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                AND json_extract(frame_json,'$.frame.payload.kind')='release')",
-            [&channel_binding_digest],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            channel_state == "running"
-                && release
-                && channel.execution_binding_hash == allocation.reservation.binding_hash
-                && matches!(
-                    channel.execution_mode,
-                    ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
-                )
-                && channel.candidate_export_max_bytes == 0
-                && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
-            "qualification Worker requires its live released zero-export channel"
-        );
-        let connector_state: Option<(String, String)> = tx
-            .query_row(
-                "SELECT state,channel_binding_digest FROM external_execution_connector
+                [&channel_binding_digest],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                channel_state == "running"
+                    && release
+                    && channel.execution_binding_hash == allocation.reservation.binding_hash
+                    && matches!(
+                        channel.execution_mode,
+                        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                    )
+                    && channel.candidate_export_max_bytes == 0
+                    && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
+                "qualification Worker requires its live released zero-export channel"
+            );
+            let connector_state: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT state,channel_binding_digest FROM external_execution_connector
              WHERE placement_thread_id=?1",
-                [placement],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        ensure!(
-            connector_state.as_ref().is_some_and(|(state, binding)| {
-                state == "prepared" && binding == &channel_binding_digest
-            }),
-            "qualification Worker has no fresh prepared connector"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let record = QualificationWorkerProcessRecord {
-            placement_thread_id: placement.to_owned(),
-            accepted_root_id: owner.coordinate.accepted_root_id.clone(),
-            accepted_capsule_hash: owner.coordinate.accepted_capsule_hash.clone(),
-            qualification_operation_id: owner.qualification_operation_id.clone(),
-            qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
-            channel_binding_digest,
-            process_identity: process_identity.clone(),
-            provider_configuration: configuration_input.clone(),
-            daemon_generation_id: daemon_generation_id.to_owned(),
-            phase: QualificationWorkerProcessPhase::Attached,
-            attached_at_ms: now,
-            terminal_at_ms: None,
-        };
-        record.validate()?;
-        let process_json = lillux::canonical_json(&serde_json::to_value(process_identity)?)?;
-        let configuration_json =
-            lillux::canonical_json(&serde_json::to_value(&record.provider_configuration)?)?;
-        ensure!(
-            configuration_json.len() <= 4096,
-            "provider configuration input exceeds journal bound"
-        );
-        ensure!(
-            process_json.len() <= 64 * 1024,
-            "qualification Worker process identity exceeds journal bound"
-        );
-        tx.execute(
-            "INSERT INTO external_qualification_worker_process VALUES
+                    [placement],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            ensure!(
+                connector_state.as_ref().is_some_and(|(state, binding)| {
+                    state == "prepared" && binding == &channel_binding_digest
+                }),
+                "qualification Worker has no fresh prepared connector"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let record = QualificationWorkerProcessRecord {
+                placement_thread_id: placement.to_owned(),
+                accepted_root_id: owner.coordinate.accepted_root_id.clone(),
+                accepted_capsule_hash: owner.coordinate.accepted_capsule_hash.clone(),
+                qualification_operation_id: owner.qualification_operation_id.clone(),
+                qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
+                channel_binding_digest,
+                process_identity: process_identity.clone(),
+                provider_configuration: configuration_input.clone(),
+                daemon_generation_id: daemon_generation_id.to_owned(),
+                phase: QualificationWorkerProcessPhase::Attached,
+                attached_at_ms: now,
+                terminal_at_ms: None,
+            };
+            record.validate()?;
+            let process_json = lillux::canonical_json(&serde_json::to_value(process_identity)?)?;
+            let configuration_json =
+                lillux::canonical_json(&serde_json::to_value(&record.provider_configuration)?)?;
+            ensure!(
+                configuration_json.len() <= 4096,
+                "provider configuration input exceeds journal bound"
+            );
+            ensure!(
+                process_json.len() <= 64 * 1024,
+                "qualification Worker process identity exceeds journal bound"
+            );
+            tx.execute(
+                "INSERT INTO external_qualification_worker_process VALUES
              (?1,?2,?3,?4,?5,?6,?7,?8,'attached',?9,NULL,?10)",
-            params![
-                record.placement_thread_id,
-                record.accepted_root_id,
-                record.accepted_capsule_hash,
-                record.qualification_operation_id,
-                record.qualification_occurrence_id,
-                record.channel_binding_digest,
-                process_json,
-                record.daemon_generation_id,
-                record.attached_at_ms,
-                configuration_json,
-            ],
-        )?;
-        qualification_local_start::attach_local_worker_tx(
-            &tx,
-            placement,
-            process_identity,
-            daemon_generation_id,
-        )?;
-        tx.commit()?;
-        Ok(record)
+                params![
+                    record.placement_thread_id,
+                    record.accepted_root_id,
+                    record.accepted_capsule_hash,
+                    record.qualification_operation_id,
+                    record.qualification_occurrence_id,
+                    record.channel_binding_digest,
+                    process_json,
+                    record.daemon_generation_id,
+                    record.attached_at_ms,
+                    configuration_json,
+                ],
+            )?;
+            qualification_local_start::attach_local_worker_tx(
+                &tx,
+                placement,
+                process_identity,
+                daemon_generation_id,
+            )?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub(crate) fn settle_qualification_worker_process(
         &self,
         proof: QualificationWorkerDeathProof,
     ) -> Result<QualificationWorkerProcessRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let current = read_process(&tx, &proof.record.placement_thread_id)?
-            .context("qualification Worker death proof lost its attached row")?;
-        ensure!(
-            current == proof.record && current.phase == QualificationWorkerProcessPhase::Attached,
-            "qualification Worker death proof changed its exact process incarnation"
-        );
-        require_retained_process_owner(&tx, &current)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?.max(current.attached_at_ms);
-        ensure!(
-            tx.execute(
-                "UPDATE external_qualification_worker_process
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let current = read_process(&tx, &proof.record.placement_thread_id)?
+                .context("qualification Worker death proof lost its attached row")?;
+            ensure!(
+                current == proof.record && current.phase == QualificationWorkerProcessPhase::Attached,
+                "qualification Worker death proof changed its exact process incarnation"
+            );
+            require_retained_process_owner(&tx, &current)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?.max(current.attached_at_ms);
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_worker_process
                  SET phase='terminal',terminal_at_ms=?2
                  WHERE placement_thread_id=?1 AND phase='attached'",
-                params![current.placement_thread_id, now],
-            )? == 1,
-            "qualification Worker terminal transition lost its one attached row"
-        );
-        let terminal = read_process(&tx, &current.placement_thread_id)?
-            .context("terminal qualification Worker process disappeared")?;
-        tx.commit()?;
-        Ok(terminal)
+                    params![current.placement_thread_id, now],
+                )? == 1,
+                "qualification Worker terminal transition lost its one attached row"
+            );
+            let terminal = read_process(&tx, &current.placement_thread_id)?
+                .context("terminal qualification Worker process disappeared")?;
+            tx.commit()?;
+            Ok(terminal)
+        })
     }
 }
 

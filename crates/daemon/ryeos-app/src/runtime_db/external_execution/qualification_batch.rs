@@ -356,132 +356,134 @@ impl RuntimeDb {
         raw: &Value,
         wire_max_bytes: u32,
     ) -> Result<QualificationWorkerBatchAck> {
-        validate_sha256("Q Worker request", request_digest)?;
-        let batch = prepare_batch(raw, wire_max_bytes)?;
-        let first = i64::try_from(batch.first_sequence)?;
-        let through = i64::try_from(batch.through_sequence)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let command =
-            read_command(&tx, placement)?.context("Q observation has no one-use command")?;
-        require_owner(&tx, &command)?;
-        let process_phase: String = tx.query_row(
-            "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            matches!(
-                command.phase,
-                QualificationWorkerCommandPhase::SetupPossibleContact
-                    | QualificationWorkerCommandPhase::SetupSettled
-                    | QualificationWorkerCommandPhase::PossibleContact
-                    | QualificationWorkerCommandPhase::TurnCompleted
-            ) && command.request_digest == request_digest
-                && process_phase == "attached",
-            "Q observation has no contacted attached Worker"
-        );
-        let existing = tx
-            .query_row(
-                &format!(
-                    "SELECT {BATCH_COLUMNS} FROM external_qualification_worker_observation_batch
-                     WHERE placement_thread_id=?1 AND first_sequence=?2"
-                ),
-                params![placement, first],
-                read_batch_row,
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            let existing = decode_batch_row(existing)?;
-            require_exact_replay(
-                &existing,
-                &command.process_incarnation_digest,
-                request_digest,
-                &batch,
-                raw,
-                wire_max_bytes,
+        self.conn.with_sql(|conn| {
+            validate_sha256("Q Worker request", request_digest)?;
+            let batch = prepare_batch(raw, wire_max_bytes)?;
+            let first = i64::try_from(batch.first_sequence)?;
+            let through = i64::try_from(batch.through_sequence)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let command =
+                read_command(&tx, placement)?.context("Q observation has no one-use command")?;
+            require_owner(&tx, &command)?;
+            let process_phase: String = tx.query_row(
+                "SELECT phase FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
             )?;
-            tx.commit()?;
-            return Ok(QualificationWorkerBatchAck {
-                through_sequence: batch.through_sequence,
-                batch_digest: batch.batch_digest,
-            });
-        }
-        let prior = tx
-            .query_row(
-                "SELECT through_sequence,batch_digest,wire_max_bytes
+            ensure!(
+                matches!(
+                    command.phase,
+                    QualificationWorkerCommandPhase::SetupPossibleContact
+                        | QualificationWorkerCommandPhase::SetupSettled
+                        | QualificationWorkerCommandPhase::PossibleContact
+                        | QualificationWorkerCommandPhase::TurnCompleted
+                ) && command.request_digest == request_digest
+                    && process_phase == "attached",
+                "Q observation has no contacted attached Worker"
+            );
+            let existing = tx
+                .query_row(
+                    &format!(
+                        "SELECT {BATCH_COLUMNS} FROM external_qualification_worker_observation_batch
+                     WHERE placement_thread_id=?1 AND first_sequence=?2"
+                    ),
+                    params![placement, first],
+                    read_batch_row,
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                let existing = decode_batch_row(existing)?;
+                require_exact_replay(
+                    &existing,
+                    &command.process_incarnation_digest,
+                    request_digest,
+                    &batch,
+                    raw,
+                    wire_max_bytes,
+                )?;
+                tx.commit()?;
+                return Ok(QualificationWorkerBatchAck {
+                    through_sequence: batch.through_sequence,
+                    batch_digest: batch.batch_digest,
+                });
+            }
+            let prior = tx
+                .query_row(
+                    "SELECT through_sequence,batch_digest,wire_max_bytes
                  FROM external_qualification_worker_observation_batch
                  WHERE placement_thread_id=?1 ORDER BY first_sequence DESC LIMIT 1",
-                [placement],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        require_next_link(
-            prior
-                .as_ref()
-                .map(|(through, digest, wire)| (*through, digest.as_str(), *wire)),
-            &batch,
-            wire_max_bytes,
-        )?;
-        let prior_bytes: i64 = tx.query_row(
-            "SELECT COALESCE(SUM(LENGTH(CAST(canonical_batch_json AS BLOB))),0)
+                    [placement],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            require_next_link(
+                prior
+                    .as_ref()
+                    .map(|(through, digest, wire)| (*through, digest.as_str(), *wire)),
+                &batch,
+                wire_max_bytes,
+            )?;
+            let prior_bytes: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(LENGTH(CAST(canonical_batch_json AS BLOB))),0)
              FROM external_qualification_worker_observation_batch WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            prior_bytes
-                .checked_add(i64::try_from(batch.canonical_json.len())?)
-                .is_some_and(|total| total <= MAX_JOURNAL_BYTES),
-            "Q observation journal exceeds its cumulative byte bound"
-        );
-        // Clamp only to the durable contact stage: receipt time does not
-        // establish causality, and wall-clock regression must not make a
-        // legitimate post-turn receipt look like a pre-turn observation.
-        let retained_at_ms = i64::try_from(lillux::time::timestamp_millis())?.max(
-            command
-                .contacted_at_ms
-                .or(command.setup_contacted_at_ms)
-                .context("Q observation has no session contact boundary")?,
-        );
-        require_turn_contact_for_batch(raw, command.contacted_at_ms, retained_at_ms)?;
-        ensure!(
-            command
-                .setup_final_wire_max_bytes
-                .is_none_or(|wire| wire == wire_max_bytes),
-            "Q observation changed its setup signed wire maximum"
-        );
-        ensure!(
-            tx.execute(
-                "INSERT INTO external_qualification_worker_observation_batch
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                prior_bytes
+                    .checked_add(i64::try_from(batch.canonical_json.len())?)
+                    .is_some_and(|total| total <= MAX_JOURNAL_BYTES),
+                "Q observation journal exceeds its cumulative byte bound"
+            );
+            // Clamp only to the durable contact stage: receipt time does not
+            // establish causality, and wall-clock regression must not make a
+            // legitimate post-turn receipt look like a pre-turn observation.
+            let retained_at_ms = i64::try_from(lillux::time::timestamp_millis())?.max(
+                command
+                    .contacted_at_ms
+                    .or(command.setup_contacted_at_ms)
+                    .context("Q observation has no session contact boundary")?,
+            );
+            require_turn_contact_for_batch(raw, command.contacted_at_ms, retained_at_ms)?;
+            ensure!(
+                command
+                    .setup_final_wire_max_bytes
+                    .is_none_or(|wire| wire == wire_max_bytes),
+                "Q observation changed its setup signed wire maximum"
+            );
+            ensure!(
+                tx.execute(
+                    "INSERT INTO external_qualification_worker_observation_batch
                  (placement_thread_id,process_incarnation_digest,request_digest,
                   first_sequence,through_sequence,previous_digest,batch_digest,
                   canonical_batch_json,wire_max_bytes,retained_at_ms)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    placement,
-                    &command.process_incarnation_digest,
-                    request_digest,
-                    first,
-                    through,
-                    &batch.previous_digest,
-                    &batch.batch_digest,
-                    &batch.canonical_json,
-                    wire_max_bytes,
-                    retained_at_ms,
-                ],
-            )? == 1,
-            "Q observation insert did not retain one exact batch"
-        );
-        tx.commit()?;
-        Ok(QualificationWorkerBatchAck {
-            through_sequence: batch.through_sequence,
-            batch_digest: batch.batch_digest,
+                    params![
+                        placement,
+                        &command.process_incarnation_digest,
+                        request_digest,
+                        first,
+                        through,
+                        &batch.previous_digest,
+                        &batch.batch_digest,
+                        &batch.canonical_json,
+                        wire_max_bytes,
+                        retained_at_ms,
+                    ],
+                )? == 1,
+                "Q observation insert did not retain one exact batch"
+            );
+            tx.commit()?;
+            Ok(QualificationWorkerBatchAck {
+                through_sequence: batch.through_sequence,
+                batch_digest: batch.batch_digest,
+            })
         })
     }
 
@@ -490,7 +492,9 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Vec<QualificationWorkerObservationBatchRecord>> {
-        read_batches(&self.conn, placement)
+        self.conn.with_sql(|conn| {
+            read_batches(&conn, placement)
+        })
     }
 }
 

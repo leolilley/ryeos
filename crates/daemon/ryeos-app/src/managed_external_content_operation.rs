@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::managed_external_content::ResolvedManagedExternalContentActivation;
-use crate::node_policy::sections::external_content::{
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportPolicyRecord, ManagedExternalContentActivationPolicy,
 };
 
@@ -146,7 +146,7 @@ impl ManagedActivationJobOperation {
                 bail!("online managed activation cannot name an offline archive root")
             }
             (AcquisitionMode::Offline, Some(root), Some(digest)) => {
-                crate::node_policy::sections::external_content::validate_root_name(root)?;
+                ryeos_node_runtime::node_policy::sections::external_content::validate_root_name(root)?;
                 validate_hash("offline activation root authority", digest)?;
             }
             (AcquisitionMode::Offline, None, None) => {}
@@ -199,7 +199,7 @@ fn offline_archive_root_authority_digest(
     policy: &ExternalContentImportPolicyRecord,
     root: &str,
 ) -> anyhow::Result<String> {
-    crate::node_policy::sections::external_content::validate_root_name(root)?;
+    ryeos_node_runtime::node_policy::sections::external_content::validate_root_name(root)?;
     let authority = policy.roots.get(root).ok_or_else(|| {
         anyhow::anyhow!("offline managed activation archive root is not admitted by node policy")
     })?;
@@ -211,7 +211,7 @@ fn offline_archive_root_authority_digest(
 }
 
 pub fn managed_policy_digest(
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     managed: &ManagedExternalContentActivationPolicy,
 ) -> anyhow::Result<String> {
     limits.validate()?;
@@ -232,7 +232,7 @@ pub fn publish_activation_receipt(
     operation.validate_current(
         activation,
         state.node_policy.require::<
-            crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+            ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
         >()?,
         &crate::operator_authority::admitted_operator_authority_digest(
             state,
@@ -440,7 +440,7 @@ pub fn load_current_runtime_qualification_inputs(
     )?;
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let cas = authority.cas_store()?;
     let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
@@ -753,9 +753,9 @@ mod tests {
         }
     }
 
-    fn import_limits() -> crate::node_policy::sections::external_content::ExternalContentImportLimits
+    fn import_limits() -> ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits
     {
-        crate::node_policy::sections::external_content::ExternalContentImportLimits {
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 64,
             max_file_bytes: 8192,
@@ -831,7 +831,7 @@ mod tests {
             roots: std::collections::BTreeMap::from([
                 (
                     "archives".to_owned(),
-                    crate::node_policy::sections::external_content::ExternalContentImportRoot {
+                    ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/ryeos-offline"),
                         containing_device: 7,
                         root_inode: 11,
@@ -839,7 +839,7 @@ mod tests {
                 ),
                 (
                     "unrelated".to_owned(),
-                    crate::node_policy::sections::external_content::ExternalContentImportRoot {
+                    ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/unrelated"),
                         containing_device: 8,
                         root_inode: 12,
@@ -848,7 +848,7 @@ mod tests {
             ]),
             limits: import_limits(),
             managed_activation:
-                crate::node_policy::sections::external_content::ManagedExternalContentPolicy {
+                ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentPolicy {
                     enabled: true,
                     limits: Some(managed_policy()),
                 },

@@ -358,96 +358,104 @@ impl RuntimeDb {
     /// durable upload drops its staging roots, so SQLite must keep the exact
     /// lifecycle closure reachable through provider contact and cleanup.
     pub(crate) fn snapshot_bootstrap_lifecycle_roots(&self) -> Result<Vec<String>> {
-        let mut statement = self.conn.prepare(
-            "SELECT operation_id,root_hash FROM runtime_snapshot_bootstrap_artifacts ORDER BY operation_id",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut roots = Vec::with_capacity(rows.len());
-        for (operation_id, root) in rows {
-            require_lifecycle_root(&root)?;
-            ensure!(
-                read(&self.conn, &operation_id)?
-                    .as_ref()
-                    .and_then(|record| record.lifecycle_artifacts_root.as_deref())
-                    == Some(root.as_str()),
-                "bootstrap lifecycle CAS root lost its authoritative journal"
-            );
-            roots.push(root);
-        }
-        Ok(roots)
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation_id,root_hash FROM runtime_snapshot_bootstrap_artifacts ORDER BY operation_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut roots = Vec::with_capacity(rows.len());
+            for (operation_id, root) in rows {
+                require_lifecycle_root(&root)?;
+                ensure!(
+                    read(&conn, &operation_id)?
+                        .as_ref()
+                        .and_then(|record| record.lifecycle_artifacts_root.as_deref())
+                        == Some(root.as_str()),
+                    "bootstrap lifecycle CAS root lost its authoritative journal"
+                );
+                roots.push(root);
+            }
+            Ok(roots)
+        })
     }
 
     pub(crate) fn retained_snapshot_bootstrap_binding(
         &self,
         operation_id: &str,
     ) -> Result<Option<crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding>>{
-        let raw: Option<String> = self.conn.query_row(
-            "SELECT binding_json FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
-            [operation_id], |row| row.get(0),
-        ).optional()?;
-        raw.map(|raw| validate_retained_binding(&self.conn, operation_id, &raw))
-            .transpose()
+        self.conn.with_sql(|conn| {
+            let raw: Option<String> = conn.query_row(
+                "SELECT binding_json FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
+                [operation_id], |row| row.get(0),
+            ).optional()?;
+            raw.map(|raw| validate_retained_binding(&conn, operation_id, &raw))
+                .transpose()
+        })
     }
 
     pub fn bind_snapshot_bootstrap_readiness(
         &self,
         observation: &RuntimeSnapshotBootstrapReadinessObservation,
     ) -> Result<SnapshotBootstrapRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &observation.operation_id)?
-            .context("bootstrap readiness has no retained source")?;
-        ensure!(
-            record.phase == SnapshotBootstrapPhase::OccurrenceBound,
-            "bootstrap readiness cannot promote cleanup-only source"
-        );
-        let request = RuntimeSnapshotBootstrapReadinessRequest {
-            protocol: BOOTSTRAP_READINESS_PROTOCOL.into(),
-            intent: record.intent.clone(),
-            occurrence: record
-                .occurrence
-                .clone()
-                .context("bound source has no occurrence")?,
-            provider_spec_digest: record.intent.provider_spec_digest.clone(),
-        };
-        observation.validate_for(&request)?;
-        ensure!(
-            request.occurrence.provider_creation_observation["created_at"]
-                == observation.observed_created_at,
-            "bootstrap readiness changed original creation timestamp"
-        );
-        if let Some(existing) = &record.readiness {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &observation.operation_id)?
+                .context("bootstrap readiness has no retained source")?;
             ensure!(
-                existing == observation,
-                "bootstrap readiness replay changed"
+                record.phase == SnapshotBootstrapPhase::OccurrenceBound,
+                "bootstrap readiness cannot promote cleanup-only source"
             );
+            let request = RuntimeSnapshotBootstrapReadinessRequest {
+                protocol: BOOTSTRAP_READINESS_PROTOCOL.into(),
+                intent: record.intent.clone(),
+                occurrence: record
+                    .occurrence
+                    .clone()
+                    .context("bound source has no occurrence")?,
+                provider_spec_digest: record.intent.provider_spec_digest.clone(),
+            };
+            observation.validate_for(&request)?;
+            ensure!(
+                request.occurrence.provider_creation_observation["created_at"]
+                    == observation.observed_created_at,
+                "bootstrap readiness changed original creation timestamp"
+            );
+            if let Some(existing) = &record.readiness {
+                ensure!(
+                    existing == observation,
+                    "bootstrap readiness replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                observation.observed_at_ms <= now
+                    && now.saturating_sub(observation.observed_at_ms) <= 300_000,
+                "bootstrap readiness observation is stale or future-dated"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_bootstrap_readiness(operation_id,observation_json,observed_at_ms) VALUES(?1,?2,?3)",
+                params![observation.operation_id, canonical(observation)?, now],
+            )?;
+            let current =
+                read(&tx, &observation.operation_id)?.context("bootstrap readiness disappeared")?;
             tx.commit()?;
-            return Ok(record);
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            observation.observed_at_ms <= now
-                && now.saturating_sub(observation.observed_at_ms) <= 300_000,
-            "bootstrap readiness observation is stale or future-dated"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_bootstrap_readiness(operation_id,observation_json,observed_at_ms) VALUES(?1,?2,?3)",
-            params![observation.operation_id, canonical(observation)?, now],
-        )?;
-        let current =
-            read(&tx, &observation.operation_id)?.context("bootstrap readiness disappeared")?;
-        tx.commit()?;
-        Ok(current)
+            Ok(current)
+        })
     }
 
     pub fn snapshot_bootstrap_operation(
         &self,
         operation_id: &str,
     ) -> Result<Option<SnapshotBootstrapRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| {
+            read(&conn, operation_id)
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -466,27 +474,29 @@ impl RuntimeDb {
         operation_id: &str,
         root_hash: &str,
     ) -> Result<SnapshotBootstrapRecord> {
-        require_lifecycle_root(root_hash)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("bootstrap was not reserved")?;
-        if let Some(existing) = &record.lifecycle_artifacts_root {
-            ensure!(
-                existing == root_hash,
-                "bootstrap replay changed retained lifecycle closure"
-            );
-        } else {
-            ensure!(
-                record.phase == SnapshotBootstrapPhase::Reserved,
-                "bootstrap lifecycle root cannot be attached after contact"
-            );
-            tx.execute(
-                "INSERT INTO runtime_snapshot_bootstrap_artifacts(operation_id,root_hash) VALUES(?1,?2)",
-                params![operation_id, root_hash],
-            )?;
-        }
-        let current = read(&tx, operation_id)?.context("bootstrap artifact link vanished")?;
-        tx.commit()?;
-        Ok(current)
+        self.conn.with_sql(|conn| {
+            require_lifecycle_root(root_hash)?;
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("bootstrap was not reserved")?;
+            if let Some(existing) = &record.lifecycle_artifacts_root {
+                ensure!(
+                    existing == root_hash,
+                    "bootstrap replay changed retained lifecycle closure"
+                );
+            } else {
+                ensure!(
+                    record.phase == SnapshotBootstrapPhase::Reserved,
+                    "bootstrap lifecycle root cannot be attached after contact"
+                );
+                tx.execute(
+                    "INSERT INTO runtime_snapshot_bootstrap_artifacts(operation_id,root_hash) VALUES(?1,?2)",
+                    params![operation_id, root_hash],
+                )?;
+            }
+            let current = read(&tx, operation_id)?.context("bootstrap artifact link vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub(crate) fn reserve_snapshot_bootstrap_with_binding(
@@ -507,94 +517,98 @@ impl RuntimeDb {
         intent: &RuntimeSnapshotBootstrapIntent,
         binding: Option<&crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding>,
     ) -> Result<SnapshotBootstrapRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
-            ensure!(
-                existing.intent == *intent,
-                "bootstrap reservation replay changed"
-            );
-            if let Some(binding) = binding {
-                let raw: String = tx.query_row(
-                    "SELECT binding_json FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
-                    [&intent.operation_id], |row| row.get(0),
-                ).context("bootstrap replay lost retained cleanup authority")?;
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
                 ensure!(
-                    raw == canonical(binding)?,
-                    "bootstrap replay changed retained cleanup authority"
+                    existing.intent == *intent,
+                    "bootstrap reservation replay changed"
                 );
+                if let Some(binding) = binding {
+                    let raw: String = tx.query_row(
+                        "SELECT binding_json FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
+                        [&intent.operation_id], |row| row.get(0),
+                    ).context("bootstrap replay lost retained cleanup authority")?;
+                    ensure!(
+                        raw == canonical(binding)?,
+                        "bootstrap replay changed retained cleanup authority"
+                    );
+                }
+                tx.commit()?;
+                return Ok(existing);
             }
-            tx.commit()?;
-            return Ok(existing);
-        }
-        intent.validate()?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "bootstrap deadline is outside its admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_bootstrap
+            intent.validate()?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "bootstrap deadline is outside its admission window"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_bootstrap
              (operation_id,intent_json,intent_digest,provider_id,provider_group_id,phase,occurrence_id,occurrence_json,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,?4,?5,'reserved',NULL,NULL,?6,?6)",
-            params![intent.operation_id, canonical(intent)?, intent.digest()?, intent.provider_id, intent.provider_group_id, now],
-        )?;
-        if let Some(binding) = binding {
-            tx.execute(
-                "INSERT INTO runtime_snapshot_bootstrap_authority(operation_id,binding_json) VALUES(?1,?2)",
-                params![intent.operation_id, canonical(binding)?],
+                params![intent.operation_id, canonical(intent)?, intent.digest()?, intent.provider_id, intent.provider_group_id, now],
             )?;
-        }
-        let record = read(&tx, &intent.operation_id)?.context("bootstrap reservation vanished")?;
-        tx.commit()?;
-        Ok(record)
+            if let Some(binding) = binding {
+                tx.execute(
+                    "INSERT INTO runtime_snapshot_bootstrap_authority(operation_id,binding_json) VALUES(?1,?2)",
+                    params![intent.operation_id, canonical(binding)?],
+                )?;
+            }
+            let record = read(&tx, &intent.operation_id)?.context("bootstrap reservation vanished")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn claim_snapshot_bootstrap_attempt(
         &self,
         operation_id: &str,
     ) -> Result<SnapshotBootstrapAttemptClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("bootstrap was not reserved")?;
-        ensure!(
-            record.lifecycle_artifacts_root.is_some(),
-            "bootstrap cannot contact provider without retained lifecycle artifacts"
-        );
-        match record.phase {
-            SnapshotBootstrapPhase::OccurrenceBound => {
-                tx.commit()?;
-                return Ok(SnapshotBootstrapAttemptClaim::OccurrenceBound(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("bootstrap was not reserved")?;
+            ensure!(
+                record.lifecycle_artifacts_root.is_some(),
+                "bootstrap cannot contact provider without retained lifecycle artifacts"
+            );
+            match record.phase {
+                SnapshotBootstrapPhase::OccurrenceBound => {
+                    tx.commit()?;
+                    return Ok(SnapshotBootstrapAttemptClaim::OccurrenceBound(record));
+                }
+                SnapshotBootstrapPhase::LateOccurrenceBound => {
+                    tx.commit()?;
+                    return Ok(SnapshotBootstrapAttemptClaim::LateOccurrenceBound(record));
+                }
+                SnapshotBootstrapPhase::RejectedOccurrenceBound => {
+                    tx.commit()?;
+                    return Ok(SnapshotBootstrapAttemptClaim::RejectedOccurrenceBound(
+                        record,
+                    ));
+                }
+                SnapshotBootstrapPhase::AttemptPending | SnapshotBootstrapPhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(SnapshotBootstrapAttemptClaim::Reconcile(record));
+                }
+                SnapshotBootstrapPhase::Reserved => {}
             }
-            SnapshotBootstrapPhase::LateOccurrenceBound => {
-                tx.commit()?;
-                return Ok(SnapshotBootstrapAttemptClaim::LateOccurrenceBound(record));
-            }
-            SnapshotBootstrapPhase::RejectedOccurrenceBound => {
-                tx.commit()?;
-                return Ok(SnapshotBootstrapAttemptClaim::RejectedOccurrenceBound(
-                    record,
-                ));
-            }
-            SnapshotBootstrapPhase::AttemptPending | SnapshotBootstrapPhase::Quarantined => {
-                tx.commit()?;
-                return Ok(SnapshotBootstrapAttemptClaim::Reconcile(record));
-            }
-            SnapshotBootstrapPhase::Reserved => {}
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms,
-            "bootstrap deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_bootstrap SET phase='attempt_pending',updated_at_ms=?2
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms,
+                "bootstrap deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_bootstrap SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(changed == 1, "bootstrap attempt lost durable CAS");
-        let current = read(&tx, operation_id)?.context("bootstrap attempt vanished")?;
-        tx.commit()?;
-        Ok(SnapshotBootstrapAttemptClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(changed == 1, "bootstrap attempt lost durable CAS");
+            let current = read(&tx, operation_id)?.context("bootstrap attempt vanished")?;
+            tx.commit()?;
+            Ok(SnapshotBootstrapAttemptClaim::StartAttempt(current))
+        })
     }
 
     pub fn bind_snapshot_bootstrap_occurrence(
@@ -610,74 +624,78 @@ impl RuntimeDb {
         occurrence: &RuntimeSnapshotBootstrapOccurrence,
         now: i64,
     ) -> Result<SnapshotBootstrapRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &occurrence.operation_id)?.context("bootstrap attempt is absent")?;
-        occurrence.validate_for(&record.intent)?;
-        if matches!(
-            record.phase,
-            SnapshotBootstrapPhase::OccurrenceBound
-                | SnapshotBootstrapPhase::LateOccurrenceBound
-                | SnapshotBootstrapPhase::RejectedOccurrenceBound
-        ) {
-            ensure!(
-                record.occurrence.as_ref() == Some(occurrence),
-                "bootstrap occurrence changed after binding"
-            );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &occurrence.operation_id)?.context("bootstrap attempt is absent")?;
+            occurrence.validate_for(&record.intent)?;
+            if matches!(
                 record.phase,
-                SnapshotBootstrapPhase::AttemptPending | SnapshotBootstrapPhase::Quarantined
-            ),
-            "bootstrap attempt was not contacted"
-        );
-        let late = record.phase == SnapshotBootstrapPhase::Quarantined
-            || occurrence.contact_deadline_exceeded
-            || now >= record.intent.attempt_deadline_ms;
-        let phase = if !occurrence.creation_attributes_verified {
-            "rejected_occurrence_bound"
-        } else if late {
-            "late_occurrence_bound"
-        } else {
-            "occurrence_bound"
-        };
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_bootstrap SET phase=?2,occurrence_id=?3,occurrence_json=?4,updated_at_ms=?5
+                SnapshotBootstrapPhase::OccurrenceBound
+                    | SnapshotBootstrapPhase::LateOccurrenceBound
+                    | SnapshotBootstrapPhase::RejectedOccurrenceBound
+            ) {
+                ensure!(
+                    record.occurrence.as_ref() == Some(occurrence),
+                    "bootstrap occurrence changed after binding"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                matches!(
+                    record.phase,
+                    SnapshotBootstrapPhase::AttemptPending | SnapshotBootstrapPhase::Quarantined
+                ),
+                "bootstrap attempt was not contacted"
+            );
+            let late = record.phase == SnapshotBootstrapPhase::Quarantined
+                || occurrence.contact_deadline_exceeded
+                || now >= record.intent.attempt_deadline_ms;
+            let phase = if !occurrence.creation_attributes_verified {
+                "rejected_occurrence_bound"
+            } else if late {
+                "late_occurrence_bound"
+            } else {
+                "occurrence_bound"
+            };
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_bootstrap SET phase=?2,occurrence_id=?3,occurrence_json=?4,updated_at_ms=?5
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![occurrence.operation_id, phase, occurrence.occurrence_id, canonical(occurrence)?, now],
-        )?;
-        ensure!(changed == 1, "bootstrap occurrence lost durable CAS");
-        let bound = read(&tx, &occurrence.operation_id)?.context("bound bootstrap vanished")?;
-        tx.commit()?;
-        Ok(bound)
+                params![occurrence.operation_id, phase, occurrence.occurrence_id, canonical(occurrence)?, now],
+            )?;
+            ensure!(changed == 1, "bootstrap occurrence lost durable CAS");
+            let bound = read(&tx, &occurrence.operation_id)?.context("bound bootstrap vanished")?;
+            tx.commit()?;
+            Ok(bound)
+        })
     }
 
     pub fn quarantine_snapshot_bootstrap_attempt(
         &self,
         operation_id: &str,
     ) -> Result<SnapshotBootstrapRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("bootstrap attempt is absent")?;
-        ensure!(
-            matches!(
-                record.phase,
-                SnapshotBootstrapPhase::AttemptPending | SnapshotBootstrapPhase::Quarantined
-            ),
-            "bootstrap attempt is not uncertain"
-        );
-        if record.phase == SnapshotBootstrapPhase::AttemptPending {
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
-            tx.execute(
-                "UPDATE runtime_snapshot_bootstrap SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("bootstrap attempt is absent")?;
+            ensure!(
+                matches!(
+                    record.phase,
+                    SnapshotBootstrapPhase::AttemptPending | SnapshotBootstrapPhase::Quarantined
+                ),
+                "bootstrap attempt is not uncertain"
+            );
+            if record.phase == SnapshotBootstrapPhase::AttemptPending {
+                let now = i64::try_from(lillux::time::timestamp_millis())?;
+                tx.execute(
+                    "UPDATE runtime_snapshot_bootstrap SET phase='quarantined',updated_at_ms=?2
                  WHERE operation_id=?1 AND phase='attempt_pending'",
-                params![operation_id, now],
-            )?;
-        }
-        let current = read(&tx, operation_id)?.context("quarantined bootstrap vanished")?;
-        tx.commit()?;
-        Ok(current)
+                    params![operation_id, now],
+                )?;
+            }
+            let current = read(&tx, operation_id)?.context("quarantined bootstrap vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 
@@ -787,10 +805,10 @@ mod tests {
         let mut switched = occurrence;
         switched.occurrence_id = "sbx-other".into();
         assert!(db.bind_snapshot_bootstrap_occurrence(&switched).is_err());
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_bootstrap SET phase='reserved',occurrence_json=NULL,occurrence_id=NULL WHERE operation_id=?1",
             [&intent.operation_id],
-        ).is_err());
+        )?)).is_err());
         assert_eq!(
             db.snapshot_bootstrap_operation(&intent.operation_id)
                 .unwrap(),
@@ -806,11 +824,10 @@ mod tests {
         db.claim_snapshot_bootstrap_attempt(&first.operation_id)
             .unwrap();
         assert!(
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "UPDATE runtime_snapshot_bootstrap SET phase='reserved' WHERE operation_id=?1",
                     [&first.operation_id],
-                )
+                )?))
                 .is_err()
         );
         let occurrence = RuntimeSnapshotBootstrapOccurrence {
@@ -946,16 +963,15 @@ mod tests {
                 .unwrap(),
                 canonical(&retained).unwrap()
             );
-            assert!(db.conn.execute(
+            assert!(db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE runtime_snapshot_bootstrap_authority SET binding_json='{}' WHERE operation_id=?1",
                 [&intent.operation_id],
-            ).is_err());
+            )?)).is_err());
             assert!(
-                db.conn
-                    .execute(
+                db.conn.with_sql(|connection| Ok(connection.execute(
                         "DELETE FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
                         [&intent.operation_id],
-                    )
+                    )?))
                     .is_err()
             );
         }
@@ -1022,10 +1038,10 @@ mod tests {
                 db.attach_snapshot_bootstrap_artifacts(&intent.operation_id, &"c".repeat(64))
                     .is_err()
             );
-            assert!(db.conn.execute(
+            assert!(db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE runtime_snapshot_bootstrap_artifacts SET root_hash=?2 WHERE operation_id=?1",
                 params![intent.operation_id, "c".repeat(64)],
-            ).is_err());
+            )?)).is_err());
         }
         let db = RuntimeDb::open(&path).unwrap();
         assert_eq!(
@@ -1092,11 +1108,10 @@ mod tests {
             changed.provider_response_sha256 = "c".repeat(64);
             assert!(db.bind_snapshot_bootstrap_readiness(&changed).is_err());
             assert!(
-                db.conn
-                    .execute(
+                db.conn.with_sql(|connection| Ok(connection.execute(
                         "DELETE FROM runtime_snapshot_bootstrap_readiness WHERE operation_id=?1",
                         [&intent.operation_id],
-                    )
+                    )?))
                     .is_err()
             );
         }

@@ -4,6 +4,7 @@
 //! filesystem allowance, or signature payload. Signing does not admit execution:
 //! the normal resolver and product lifecycle must still admit the returned item.
 
+use ryeos_bundle_publication_contract::{PORTABLE_QUALIFIER, SUBSTRATE_QUALIFIER};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,10 +42,8 @@ pub const PORTABLE_BUILD_RECIPE_REF: &str = "config:bundle-release/portable-buil
 pub const CAPTURE_RECIPE_REF: &str = "config:bundle-release/signed-capture-products";
 pub const PORTABLE_CAPTURE_RECIPE_REF: &str =
     "config:bundle-release/portable-signed-capture-products";
-pub const PORTABLE_QUALIFIER: &str = "tool:ryeos/bundle-release/portable-qualify";
 pub const SUBSTRATE_BUILD_RECIPE_REF: &str = "config:bundle-release/substrate-build-products";
 pub const SUBSTRATE_BUILD_GRAPH: &str = "graph:ryeos/bundle-release/substrate-build";
-pub const SUBSTRATE_QUALIFIER: &str = "tool:ryeos/bundle-release/substrate-qualify";
 
 /// The publisher may authorize only this receipt-shaped substrate producer.
 /// No Config body, graph reference, output path, or signing payload is caller supplied.
@@ -953,8 +952,7 @@ mod tests {
         let request = request();
         let temp = tempfile::tempdir().unwrap();
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem"))
-                .unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
         let body = request.config_body().unwrap();
         let signed = lillux::signature::sign_content(&body, identity.signing_key(), "#", None);
         let response = json!({"schema":"ryeos.bundle_build_recipe_authorization.v1",
