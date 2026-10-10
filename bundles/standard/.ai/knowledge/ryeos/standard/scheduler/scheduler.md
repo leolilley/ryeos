@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-10-10T19:41:37Z:79d4b4d16a05724bab767367e9801155b1f8534188f8fad8161f4e385ea8b235:qbZGNyPMABboNw2Apxh+6rj8mHRHPmzrRlR/55Jfyjdp1BTV9hC/Q4T9ZTdeIDHKYkE3NXwxDqNmBV5ErEQICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"

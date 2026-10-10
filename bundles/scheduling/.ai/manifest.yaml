@@ -1,0 +1,8 @@
+# ryeos:signed:2026-10-10T19:41:25Z:3a13af94d360d7376f1692c12339748bd2080560c566aaaf3336e78c7fe879b8:UUlnYmrdWMMK2FWfoZeFkQIkqYQ+q1uWkQdms8EqMvuqmXfhkQI+InBiVmCFb4//ZLEBU8jTWW1ViC6pmTKYAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: scheduling
+version: 0.1.0
+description: Durable schedules, authenticated dispatch, fire history and recovery
+provides_kinds: []
+requires_kinds:
+- service
+uses_kinds: []
