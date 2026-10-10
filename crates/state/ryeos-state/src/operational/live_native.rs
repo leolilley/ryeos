@@ -370,7 +370,7 @@ impl OperationalDb {
                 }
                 migrate_forward_if_owned(connection, &path, Some(references))?;
                 assert_operational_identity(connection, &path)?;
-                enforce_replay_index_epoch(connection, &path, false)?;
+                enforce_replay_index_epoch(connection, &path, false, Some(references.current()))?;
                 assert_current(connection, &path, Some(references.current()))?;
                 assert_integrity(connection, &path)?;
                 let mode: String =

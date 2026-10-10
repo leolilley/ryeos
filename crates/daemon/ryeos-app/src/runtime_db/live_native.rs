@@ -33,6 +33,9 @@ impl Drop for LiveDeadlineScope<'_> {
 }
 
 impl LiveRuntimeConnection {
+    pub(super) fn schema_reference(&self) -> &sqlite_schema::SchemaSqlDefinition {
+        self._schema_reference.definition()
+    }
     pub(super) fn require_close_ready(&self) -> Result<()> {
         self.owner.require_original_process()?;
         ensure!(!self.scope_active.get(), "live Runtime SQL scope remains active");

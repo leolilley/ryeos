@@ -2,6 +2,7 @@
 //! bounded node process; they keep counted region handles, never own its unmap.
 //! The original outside controller retains actual mapping/account custody.
 pub mod backing;
+pub mod region;
 use std::{alloc::Layout, cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop,
     ptr::NonNull, sync::atomic::{AtomicU8, AtomicUsize, Ordering}};
 use crate::native::{NativeResidentState, OriginalNativeBudget};

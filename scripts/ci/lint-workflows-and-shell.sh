@@ -14,6 +14,7 @@ test -x "$shellcheck"
 PATH="$tool_dir:$PATH" "$actionlint" -color
 
 "$shellcheck" --severity=warning \
+    scripts/ci/check-test-support-feature-leak.sh \
     scripts/ci/install-static-linters.sh \
     scripts/ci/lint-workflows-and-shell.sh \
     scripts/ci/test-daemon-image-init-policy.sh \

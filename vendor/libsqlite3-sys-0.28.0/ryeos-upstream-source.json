@@ -46,8 +46,8 @@
     }
   },
   "ryeos_added_files": {
-    "ryeos_instrument.rs": "d4611205edad46b7df53779a757855df0a9b84745861f3b6102f3c31962ba9ea",
-    "sqlite3/ryeos_binding.c": "fe321fb483969240478008657a1acf4ddd24003f3e93bef90e388c07bb89cf90",
+    "ryeos_instrument.rs": "781414a161efd3439e00c7c36bc94e4c4e5a1efc25e7cb8e4f4574c74314506f",
+    "sqlite3/ryeos_binding.c": "968ef453430a418659096cbdff2ea74c82efcc40bb61fa9ce49e6dd32d37bcac",
     "sqlite3/ryeos_binding.h": "0e0a75f0c262da84e359dac7a16250dff548e95fe2e773fa6152580d336909cf"
   },
   "files_sha256": {
@@ -61,7 +61,7 @@
     "bindgen-bindings/bindgen_3.14.0.rs": "21074ddbc5ef6bb7fb7c04ef48c730a2b074b9d695c93c685cf01f870248844b",
     "bindgen-bindings/bindgen_3.14.0_ext.rs": "2988b5f0670d7862166d3820b8a176d3da329b6105567e66e45aafb17d736fa6",
     "build.rs": "db25881cac2b00db603298ae5c580c10de32faf59c2e577252cec940cf4f5997",
-    "ryeos_instrument.rs": "d4611205edad46b7df53779a757855df0a9b84745861f3b6102f3c31962ba9ea",
+    "ryeos_instrument.rs": "781414a161efd3439e00c7c36bc94e4c4e5a1efc25e7cb8e4f4574c74314506f",
     "sqlcipher/LICENSE": "ea4fcb309f14a22065e1ea45362d494d320012249ed865fe9c7c0946db754131",
     "sqlcipher/bindgen_bundled_version.rs": "b90cdb889a74ce82af24a78932979c59df4d9dbb31228d05e6574a2fd852d0ba",
     "sqlcipher/sqlite3.c": "2dc94cbc5f013078ad7e48b65fe1c63cb79b4d25aba9ccaef1699724ae6640f7",
@@ -69,7 +69,7 @@
     "sqlcipher/sqlite3ext.h": "7f9ae3bab94bbc62d909fbb0149861b4a0832299f12d7ccbfecc7f28a8d27aa2",
     "sqlite3/bindgen_bundled_version.rs": "3dda83bd41376847eb3e0fd9e4aa645e6f5b48ebdc5227df051c044ebdce177a",
     "sqlite3/bindgen_bundled_version_ext.rs": "73b54ea41acf310e13555ec925d5eaee6443d0787e6b1e4310f83647967a1a04",
-    "sqlite3/ryeos_binding.c": "fe321fb483969240478008657a1acf4ddd24003f3e93bef90e388c07bb89cf90",
+    "sqlite3/ryeos_binding.c": "968ef453430a418659096cbdff2ea74c82efcc40bb61fa9ce49e6dd32d37bcac",
     "sqlite3/ryeos_binding.h": "0e0a75f0c262da84e359dac7a16250dff548e95fe2e773fa6152580d336909cf",
     "sqlite3/sqlite3.c": "beb670be019aac60c8b30804dcb1c2ec7a2b9028fca7acf9aec9da664543c7ad",
     "sqlite3/sqlite3.h": "0c207567adc631521a353e067cfbc5044ebf11868f3c3fbf3178d6990409740e",
@@ -83,5 +83,5 @@
     "wrapper_ext.h": "fa7a53fea99318ee29d75e6d5fab4d7ed26e9599803268e6a24396265f2a6f3a"
   },
   "wiring": "workspace Cargo.toml: exclude = [\"vendor/libsqlite3-sys-0.28.0\"]; [patch.crates-io] libsqlite3-sys = { path = \"vendor/libsqlite3-sys-0.28.0\" }",
-  "status": "Modified fork of upstream libsqlite3-sys 0.28.0. Three upstream files are patched (Cargo.toml, build.rs, sqlite3/sqlite3.c) and three RyeOS files are added (ryeos_instrument.rs, sqlite3/ryeos_binding.c, sqlite3/ryeos_binding.h), consumed by build.rs. The earlier 'exact upstream source extraction' claim was inaccurate for this tree and is withdrawn. files_sha256 records the actual bytes as of 2026-10-09; the RyeOS delta against upstream has not been independently reviewed; uncompiled."
+  "status": "Modified fork of upstream libsqlite3-sys 0.28.0. Three upstream files are patched (Cargo.toml, build.rs, sqlite3/sqlite3.c) and three RyeOS files are added (ryeos_instrument.rs, sqlite3/ryeos_binding.c, sqlite3/ryeos_binding.h), consumed by build.rs. The earlier 'exact upstream source extraction' claim was inaccurate for this tree and is withdrawn. files_sha256 records the actual bytes as of 2026-10-10; the RyeOS delta against upstream has not been independently reviewed; uncompiled."
 }

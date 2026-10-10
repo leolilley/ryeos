@@ -7270,7 +7270,11 @@ fn discard_predecessor_runtime_schema(tx: &Transaction<'_>) -> Result<()> {
 /// the outer epoch and independent stable lifetime fence are proven before
 /// mutation. No predecessor execution row or embedded launch authority is
 /// interpreted or carried forward; the fence is not an execution-schema decoder.
-fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
+fn reset_owned_runtime_schema(
+    conn: &Connection,
+    path: &Path,
+    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+) -> Result<()> {
     let operator_epoch = runtime_operator_schema_epoch(conn, path)?;
     ensure_scope_lifetime_resettable(conn, operator_epoch)?;
     if operator_epoch >= RUNTIME_OPERATOR_SCHEMA_EPOCH {
@@ -7298,7 +7302,7 @@ fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
         sqlite_schema::init_owned(&tx, &runtime_schema_spec(), &runtime_schema_sql(), path)?;
         tx.execute("DELETE FROM sqlite_sequence", [])
             .context("clear runtime sequence state during explicit reset")?;
-        assert_current_runtime_schema(&tx, path, None)?;
+        assert_current_runtime_schema(&tx, path, reference)?;
         tx.commit()
             .context("commit atomic explicit runtime reset")?;
         Ok(())
@@ -7349,6 +7353,16 @@ impl RuntimeConnection {
             Self::Inspection(owner) => operation(owner.connection()),
             Self::OriginalMutation(owner) | Self::OriginalInspection { owner, .. } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
+        }
+    }
+
+    /// Only the live owner retains a prepared native reference; plain and
+    /// inspection owners use the stock build, original owners carry none.
+    fn schema_reference(&self) -> Option<&sqlite_schema::SchemaSqlDefinition> {
+        match self {
+            Self::Live(owner) => Some(owner.schema_reference()),
+            Self::Plain(_) | Self::Inspection(_) | Self::OriginalMutation(_) => None,
+            Self::OriginalInspection { owner: _, factory: _ } => None,
         }
     }
 
@@ -17531,12 +17545,13 @@ impl RuntimeDb {
         if !self.reset_required {
             return Ok(());
         }
+        let reference = self.conn.schema_reference();
         self.conn.with_sql(|connection| {
             connection
                 .execute_batch("PRAGMA journal_mode=WAL;")
                 .context("establish WAL for explicitly reset runtime store")?;
-            reset_owned_runtime_schema(connection, path)?;
-            validate_current_runtime_store(connection, path, None)
+            reset_owned_runtime_schema(connection, path, reference)?;
+            validate_current_runtime_store(connection, path, reference)
         })?;
         self.reset_required = false;
         Ok(())

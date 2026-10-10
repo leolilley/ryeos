@@ -403,11 +403,10 @@ impl ProjectionDb {
             connection
                 .pragma_update(None, "synchronous", "FULL")
                 .context("configure original transient projection")?;
-            super::init_current_projection_schema(
+            super::init_fresh_transient_projection_schema(
                 connection,
                 &super::projection_schema_spec(),
                 db.path(),
-                None,
             )
         });
         match initialized {
@@ -737,5 +736,48 @@ impl RecoveredOriginalProjectionDurability {
     }
     pub(crate) fn proof(&self) -> &Arc<DurableOriginalProjection> {
         &self.proof
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod native_host_tests {
+    use super::*;
+    use lillux_sqlite::test_host::TestNativeHost;
+    use lillux_sqlite::{OriginalNativeConnectionTerminal, OriginalNativeDomain, OriginalNativeTransientInputs};
+
+    /// The transient skips the stock reference build; its schema must still
+    /// equal a reference prepared natively from the same DDL.
+    #[test]
+    fn fresh_transient_schema_equals_native_projection_reference() {
+        let host = TestNativeHost::acquire();
+        // SAFETY: test-only issuance under the host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, host.destination())
+        }
+        .unwrap();
+        let db = ProjectionDb::open_original_transient(Arc::clone(host.factory()), inputs).unwrap();
+        // SAFETY: as above, for the reference purpose.
+        let reference_inputs = unsafe {
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::NodeProjectionSchemaReference,
+                host.destination(),
+            )
+        }
+        .unwrap();
+        let reference = crate::sqlite_schema::prepare_native_schema_sql_reference(
+            Arc::clone(host.factory()),
+            reference_inputs,
+            OriginalNativeDomain::NodeProjectionSchemaReference,
+            crate::projection::projection_schema_sql(),
+        )
+        .unwrap_or_else(|failure| panic!("schema reference retained: {failure}"));
+        host.retain_terminal(reference.terminal().clone());
+        db.with_sql(|connection| reference.definition().require_matches(connection, db.path()))
+            .unwrap();
+        let closed = db
+            .close_original(host.factory())
+            .unwrap_or_else(|failure| panic!("transient close retained: {failure}"));
+        host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed.native_proof()));
+        assert_eq!(host.ticket_census(), (2, 2));
     }
 }

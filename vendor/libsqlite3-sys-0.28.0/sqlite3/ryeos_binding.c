@@ -102,6 +102,20 @@ static int ryeosNativeCharge(RyeosNativeArena *a,uint64_t steps,int cleanup){
   /* One nonblocking checked CAS. Contention refuses before any effect. */
   return atomic_compare_exchange_strong(counter,&previous,next);
 }
+/* Disposal-only charge: a lost CAS race retries, since another charger made
+   progress; only a real limit (or poison) refuses. */
+static int ryeosNativeChargeDisposal(RyeosNativeArena *a,uint64_t steps,int cleanup){
+  if(!ryeos_native_process_matches()){return 0;}
+  _Atomic uint64_t *counter; uint64_t previous,limit;
+  if(!a || !steps || atomic_load(&a->poisoned)) return 0;
+  counter=cleanup?&a->budget->cleanupSteps:&a->budget->serviceSteps;
+  limit=cleanup?a->budget->cleanupReserved:a->budget->stepLimit-a->budget->cleanupReserved;
+  previous=atomic_load(counter);
+  do{
+    if(previous>limit || steps>limit-previous) return 0;
+  }while(!atomic_compare_exchange_weak(counter,&previous,previous+steps));
+  return 1;
+}
 static int ryeosNativeContext(RyeosNativeArena *a){
   if(!ryeos_native_process_matches()){return 0;}
   return a && a==atomic_load(&ryeosNativeOwner) && ryeosNativeScope==a
@@ -156,7 +170,11 @@ static int ryeosNativeConfigGate(int op){
       return ryeosNativeInitGate() && sqlite3GlobalConfig.m.xMalloc==0;
     case SQLITE_CONFIG_GETMALLOC: case SQLITE_CONFIG_GETPCACHE2:
       return ryeosNativeContext(atomic_load(&ryeosNativeOwner));
-    case SQLITE_CONFIG_PCACHE: case SQLITE_CONFIG_PCACHE2: case SQLITE_CONFIG_HEAP:
+    case SQLITE_CONFIG_PCACHE2:
+      /* Only the first in-scope install sets the default cache;
+         the config body admits nothing but SQLite's own pcache1 methods. */
+      return ryeosNativeInitGate() && sqlite3GlobalConfig.pcache2.xInit==0;
+    case SQLITE_CONFIG_PCACHE: case SQLITE_CONFIG_HEAP:
     case SQLITE_CONFIG_PAGECACHE: case SQLITE_CONFIG_LOOKASIDE:
     case SQLITE_CONFIG_MUTEX: case SQLITE_CONFIG_SINGLETHREAD:
     case SQLITE_CONFIG_MULTITHREAD: case SQLITE_CONFIG_SERIALIZED:
@@ -388,6 +406,24 @@ SQLITE_API int ryeos_native_arena_reclaim(void *handle){
   if(atomic_load(&a->liveBlocks)==0){atomic_store(&a->reclaimed,1);return SQLITE_OK;}
   return SQLITE_BUSY;
 }
+/* Any registered VFS whose struct lies inside the mapping would be walked by
+   the next initialization's unix registration after munmap. With isInit==0 no
+   register/unregister can pass sqlite3_initialize, but binding unlink can run
+   without init, so the walk holds the static main mutex. Mutex methods exist
+   before any VFS is linked; without them no thread can be linking. */
+static int ryeosNativeVfsInArena(RyeosNativeArena *a){
+  if(!ryeos_native_process_matches()){return 1;}
+  uintptr_t start=(uintptr_t)a,end=start+(uintptr_t)a->mappingBytes,p;
+  sqlite3_mutex *mutex; sqlite3_vfs *v; int found=0;
+  mutex=sqlite3GlobalConfig.mutex.xMutexAlloc ? sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN) : 0;
+  sqlite3_mutex_enter(mutex);
+  for(v=vfsList;v && !found;v=v->pNext){
+    p=(uintptr_t)v;
+    if(p>=start && p<end) found=1;
+  }
+  sqlite3_mutex_leave(mutex);
+  return found;
+}
 SQLITE_API int ryeos_native_arena_release(void *handle){
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
   RyeosNativeArena *a=(RyeosNativeArena*)handle;uint64_t mapping;uint32_t i,n;int rc=SQLITE_BUSY;
@@ -395,7 +431,8 @@ SQLITE_API int ryeos_native_arena_release(void *handle){
   if(!a || a!=atomic_load(&ryeosNativeOwner) || sqlite3GlobalConfig.isInit
       || atomic_load(&a->scopes) || atomic_load(&a->liveBlocks) || atomic_load(&a->poisoned)
       || !atomic_load(&a->reclaimed) || atomic_load(&a->bindingContexts)
-      || !ryeosNativeSharedEmpty(a) || !ryeosProjectionLeasesEmpty())goto done;
+      || !ryeosNativeSharedEmpty(a) || !ryeosProjectionLeasesEmpty()
+      || ryeosNativeVfsInArena(a))goto done;
   n=atomic_load(&a->budget->issuedTickets);if(n>a->budget->ticketLimit){rc=SQLITE_MISUSE;goto done;}
   for(i=0;i<n;i++)if(a->phases[i]!=3)goto done;
   if(atomic_load(&a->mutexReady)){
@@ -414,6 +451,20 @@ SQLITE_API int ryeos_native_arena_release(void *handle){
   atomic_store(&ryeosNativeProcessGuardReady,0);
   atomic_store(&ryeosNativeOwner,0);atomic_store(&ryeosNativeInstall,0);
   atomic_store(&ryeosNativeProcessClosing,0);rc=SQLITE_OK;
+ done:pthread_mutex_unlock(&ryeosNativeOwnerMutex);return rc;
+}
+/* Read-only shared-mapping ledger census for tests: recorded bytes and
+   nonempty slots. No effect; order owner mutex -> a->mutex as in release. */
+SQLITE_API int ryeos_native_shared_census(void *handle,uint64_t *bytes,uint32_t *slots){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  RyeosNativeArena *a=(RyeosNativeArena*)handle;int i,rc=SQLITE_MISUSE;uint32_t used=0;
+  if(!bytes || !slots)return SQLITE_MISUSE;
+  if(pthread_mutex_trylock(&ryeosNativeOwnerMutex)!=0)return SQLITE_BUSY;
+  if(!a || a!=atomic_load(&ryeosNativeOwner) || !atomic_load(&a->mutexReady))goto done;
+  if(pthread_mutex_lock(&a->mutex)!=0){rc=SQLITE_BUSY;goto done;}
+  for(i=0;i<RYEOS_NATIVE_MAPS;i++) if(a->shared[i].state!=0) used++;
+  *bytes=a->sharedBytes;*slots=used;
+  pthread_mutex_unlock(&a->mutex);rc=SQLITE_OK;
  done:pthread_mutex_unlock(&ryeosNativeOwnerMutex);return rc;
 }
 SQLITE_API int ryeos_native_layout(uint64_t storage,unsigned int tickets,uint64_t *cleanup){
@@ -507,11 +558,24 @@ static int ryeosNativeShmEnd(unixShmNode *node){
   }
   pthread_mutex_unlock(&a->mutex);return SQLITE_OK;
 }
+/* Invariant: disposal of a recorded mapping does not depend on scope entry.
+   Only the purge of the node's last user calls this, so a WAL connection
+   closed outside every scope reaches it too. The arena cannot be released
+   meanwhile: the node and its inode are live arena blocks, so liveBlocks is
+   nonzero and arena_release refuses. The charge is the one an in-scope close
+   would make (cleanup counter only in a cleanup scope); a lost CAS race is
+   retried and only an exhausted budget refuses. The ledger lock blocks:
+   purge runs under the unix big lock, and no a->mutex holder ever takes a
+   SQLite or unix mutex, so the order big lock -> a->mutex has no inverse.
+   Outside a scope only scope entry is waived; an unrecorded mapping or a
+   refused charge still refuses, as in scope. */
 static int ryeosNativeShmUnmap(unixShmNode *node,void *address){
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
   RyeosNativeArena *a=atomic_load(&ryeosNativeOwner);int i,rc,saved;
-  if(!ryeosNativeContext(a) || !ryeosNativeCharge(a,RYEOS_NATIVE_MAPS+1,ryeosNativeCleanup)
-      || pthread_mutex_trylock(&a->mutex)!=0){
+  if(!a || atomic_load(&a->poisoned)
+      || (ryeosNativeDepth && !ryeosNativeContext(a))
+      || !ryeosNativeChargeDisposal(a,RYEOS_NATIVE_MAPS+1,ryeosNativeCleanup)
+      || pthread_mutex_lock(&a->mutex)!=0){
     if(a) atomic_store(&a->sharedRefused,1);
     return SQLITE_IOERR_SHMMAP;
   }
@@ -560,6 +624,7 @@ typedef struct RyeosBinding {
   void *copyLease; /* opaque Rust owner, never destroyed under Unix mutex */
   struct RyeosBinding *pendingNext;
   int queued;
+  int vfsLinked; /* set only by successful register; cleared only by unlink */
   int callerHeld;
   int retentionReason;
   _Atomic int closeErrno;
@@ -1095,6 +1160,7 @@ static RyeosBinding *ryeosReadyCopies = 0;
 static void ryeosRetireContextLocked(RyeosBinding *c){
   if(!ryeos_native_process_matches()){return;}
   int i;
+  assert(!c->vfsLinked); /* reaper retains every still-linked context */
   ryeosForgetRetirement(c);
   for(i=0;i<3;i++){ sqlite3_free(c->names[i]); sqlite3_free(c->paths[i]); }
   sqlite3_free(c->vfsName);
@@ -1107,6 +1173,7 @@ SQLITE_API void *ryeos_sqlite_take_ready_copy_lease(void){
   unixEnterMutex();
   c=ryeosReadyCopies;
   if(c){
+    assert(!c->vfsLinked); /* entered the ready list only after unlink */
     ryeosReadyCopies=c->pendingNext; lease=c->copyLease;
     ryeosFreeStoppedNodes(c); ryeosNativeBindingDestroyed(c); sqlite3_free(c); /* context is gone before any Rust lease destructor */
   }
@@ -1506,6 +1573,7 @@ static void ryeosReapKeepersLocked(void){
       }
     }
     if(c->trackedNodes){ remaining=1; if(!c->retentionReason) c->retentionReason=3; }
+    if(c->vfsLinked){ if(!c->retentionReason) c->retentionReason=3; remaining=1; }
     if(remaining || c->callerHeld || c->closeErrno){ link=&c->pendingNext; continue; }
     if(c->root>=0){
       int rc=close(c->root); c->root=-1;
@@ -1515,7 +1583,24 @@ static void ryeosReapKeepersLocked(void){
     ryeosRetireContextLocked(c);
   }
 }
-/* Only the unique caller initiates release. VFS unregister precedes taking
+/* Invariant: unlinking a bound VFS does not depend on scope or init state.
+   sqlite3_vfs_unregister runs sqlite3_initialize, which the native init gate
+   refuses outside a scope; a skipped unlink would leave freed context memory
+   on vfsList. The static main mutex comes from methods copied once at the
+   first initialization and never cleared, and a linked binding exists only
+   after that, so this path takes it directly. Idempotent; a context is never
+   freed nor uncounted while vfsLinked is set. */
+static void ryeosBindingUnlink(RyeosBinding *c){
+  if(!ryeos_native_process_matches()){return;}
+  sqlite3_mutex *mutex;
+  if(!c->vfsLinked) return;
+  mutex=sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
+  sqlite3_mutex_enter(mutex);
+  vfsUnlink(&c->vfs);
+  sqlite3_mutex_leave(mutex);
+  c->vfsLinked=0;
+}
+/* Only the unique caller initiates release. VFS unlink precedes taking
    Unix global, avoiding an inverted registry/global mutex order. List and
    caller-held transitions, progress and destruction are global-locked. */
 static void ryeosQueue(RyeosBinding *c,int callerHeld){
@@ -1530,14 +1615,14 @@ SQLITE_API int ryeos_sqlite_binding_release(void *handle,void **lease){
   RyeosBinding *c=(RyeosBinding*)handle; RyeosBinding **link; int i,reason;
   *lease=0;
   if(!c) return 2;
-  if(!c->queued && !c->stoppedIntake) sqlite3_vfs_unregister(&c->vfs);
+  ryeosBindingUnlink(c);
   unixEnterMutex();
   ryeosQueue(c,1);
   ryeosReapKeepersLocked(); /* callerHeld forbids context auto-free */
   reason=c->retentionReason;
   if(!reason){
     for(i=0;i<3;i++) if(c->files[i]>=0 || c->pins[i]>=0) reason=2;
-    if(c->failureFd>=0 || atomic_load(&c->activeFiles)!=0 || c->trackedNodes) reason=3;
+    if(c->failureFd>=0 || atomic_load(&c->activeFiles)!=0 || c->trackedNodes || c->vfsLinked) reason=3;
   }
   if(!reason && c->root>=0){
     int rc=close(c->root); c->root=-1;
@@ -1559,7 +1644,7 @@ SQLITE_API void ryeos_sqlite_binding_drop(void *handle){
   if(!ryeos_native_process_matches()){return;}
   RyeosBinding *c=(RyeosBinding*)handle;
   if(!c) return;
-  if(!c->queued && !c->stoppedIntake) sqlite3_vfs_unregister(&c->vfs);
+  ryeosBindingUnlink(c);
   unixEnterMutex();
   ryeosQueue(c,0); /* fallback native owner, not supervisor testimony */
   ryeosReapKeepersLocked();
@@ -1569,7 +1654,7 @@ SQLITE_API void ryeos_sqlite_binding_abandon(void *handle,sqlite3 *db){
   if(!ryeos_native_process_matches()){return;}
   RyeosBinding *c=(RyeosBinding*)handle;
   if(!c) return;
-  if(!c->queued && !c->stoppedIntake) sqlite3_vfs_unregister(&c->vfs);
+  ryeosBindingUnlink(c);
   unixEnterMutex();
   c->abandonedDb=db; /* private Rust owner passes its exact failed-close DB */
   ryeosQueue(c,0);
@@ -1825,6 +1910,7 @@ SQLITE_API int ryeos_sqlite_binding_create(int root,const char *name,int mode,vo
   c->vfs.xOpen=ryeosBoundOpen; c->vfs.xFullPathname=ryeosBoundFullPath;
   c->vfs.xDelete=ryeosBoundDelete; c->vfs.xAccess=ryeosBoundAccess;
   rc=sqlite3_vfs_register(&c->vfs,0); if(rc!=SQLITE_OK) goto fail;
+  c->vfsLinked=1;
   *out=c; return SQLITE_OK;
 fail: *out=c; return rc; /* caller owns every partially acquired slot */
 }
@@ -1960,6 +2046,7 @@ SQLITE_API int ryeos_native_connection_enroll(void*a,sqlite3*d,unsigned int t){(
 SQLITE_API int ryeos_native_connection_closed(void*a,unsigned int t){(void)a;(void)t;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_arena_reclaim(void*a){(void)a;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_arena_release(void*a){(void)a;return SQLITE_NOTFOUND;}
+SQLITE_API int ryeos_native_shared_census(void*a,sqlite3_uint64*b,unsigned int*s){(void)a;(void)b;(void)s;return SQLITE_NOTFOUND;}
 /* Never silently certify unsupported platforms or SQLite configurations. */
 SQLITE_API int ryeos_sqlite_stopped_create(int r,const char *const *n,int count,const int *s,const sqlite3_uint64 *d,const sqlite3_uint64 *i,const sqlite3_uint64 *l,void **o){ (void)r;(void)n;(void)count;(void)s;(void)d;(void)i;(void)l;*o=0;return SQLITE_NOTFOUND; }
 SQLITE_API int ryeos_sqlite_stopped_acquire(void *h){ (void)h;return SQLITE_NOTFOUND; }

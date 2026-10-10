@@ -201,6 +201,21 @@ fn init_current_projection_schema(
     Ok(())
 }
 
+/// Initializes a transient this code just opened as an empty in-memory DB.
+/// `init_owned` refuses any non-empty connection and then runs exactly
+/// `SCHEMA_SQL`, so a same-library reference comparison cannot differ; it is
+/// skipped because the stock reference open is refused under a native scope.
+pub(crate) fn init_fresh_transient_projection_schema(
+    conn: &Connection,
+    spec: &sqlite_schema::SchemaSpec,
+    path: &Path,
+) -> anyhow::Result<()> {
+    sqlite_schema::init_owned(conn, spec, SCHEMA_SQL, path)?;
+    stamp_projection_schema_epoch(conn)?;
+    sqlite_schema::assert_owned(conn, spec, path)?;
+    Ok(())
+}
+
 fn close_connection(conn: Connection) -> anyhow::Result<()> {
     conn.close()
         .map_err(|(_, err)| err)

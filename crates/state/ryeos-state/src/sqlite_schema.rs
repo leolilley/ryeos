@@ -760,6 +760,10 @@ fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
 /// This is intended for stable source-of-truth stores whose fail-closed exact
 /// schema contract must cover constraints that PRAGMA table/index metadata
 /// does not fully describe.
+///
+/// This opens a stock in-memory reference connection. It must never run
+/// while a native SQL scope is entered: the gate refuses that open with
+/// MISUSE. Native callers pass a prepared [`SchemaSqlDefinition`] instead.
 pub fn assert_complete_schema_sql(conn: &Connection, ddl: &str, path: &Path) -> Result<()> {
     let reference = Connection::open_in_memory().context("open reference SQLite schema")?;
     reference
@@ -891,4 +895,34 @@ pub fn is_empty_or_owned(conn: &Connection, expected_app_id: i32) -> Result<bool
          this file was not created by this daemon. Refusing to modify it; preserve \
          the file and use the owning store's explicit migration or recovery procedure."
     );
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod native_host_tests {
+    use super::*;
+    use lillux_sqlite::test_host::TestNativeHost;
+
+    /// The stock reference open is refused inside a native scope; callers
+    /// there must pass a prepared reference.
+    #[test]
+    fn complete_schema_check_without_reference_refuses_under_native_scope() {
+        let host = TestNativeHost::acquire();
+        let connection = host.open_transient();
+        let refused = connection
+            .with_sql(|connection| {
+                connection.execute_batch("CREATE TABLE t(x INTEGER)")?;
+                assert_complete_schema_sql(connection, "CREATE TABLE t(x INTEGER)", Path::new(":memory:"))
+            })
+            .unwrap_err();
+        let misuse = refused.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::ApiMisuse
+            )
+        });
+        assert!(misuse, "{refused:#}");
+        host.close(connection);
+        assert_eq!(host.ticket_census(), (1, 1));
+    }
 }

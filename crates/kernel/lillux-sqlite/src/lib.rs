@@ -5,6 +5,8 @@ mod binding;
 mod native;
 pub mod original_host_owner;
 pub mod original_physical_custody;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_host;
 use anyhow::{Context, Result, ensure};
 use binding::Binding;
 use lillux::PinnedDirectory;
@@ -4333,6 +4335,10 @@ impl BoundSqliteConnection {
     }
 }
 impl Drop for BoundSqliteConnection {
+    // This owner holds no arena handle, so Drop cannot enter a cleanup scope.
+    // A last WAL user dropped outside any scope charges its SHM unmap to the
+    // service budget; if that is exhausted the mapping stays recorded and
+    // marks the arena refused, so arena release fails closed.
     fn drop(&mut self) {
         if let Some(connection) = self.connection.take() {
             if let Err((_connection, _error)) = connection.close() {
@@ -4449,49 +4455,57 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stock_wal_and_shm_remain_operational() {
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("stock.sqlite3");
-        let writer = Connection::open(&path).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode=WAL; CREATE TABLE value(n); INSERT INTO value VALUES(7);",
-            )
-            .unwrap();
-        let reader = Connection::open(&path).unwrap();
-        assert_eq!(
-            reader
-                .query_row("SELECT n FROM value", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            7
-        );
-        writer.execute_batch("UPDATE value SET n=9;").unwrap();
-        assert_eq!(
-            reader
-                .query_row("SELECT n FROM value", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            9
-        );
+        let (writer, writer_ticket) = armed_stock(&host, &path);
+        host.scope(|| {
+            writer
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL; CREATE TABLE value(n); INSERT INTO value VALUES(7);",
+                )
+                .unwrap()
+        });
+        let (reader, reader_ticket) = armed_stock(&host, &path);
+        host.scope(|| {
+            assert_eq!(
+                reader
+                    .query_row("SELECT n FROM value", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                7
+            );
+            writer.execute_batch("UPDATE value SET n=9;").unwrap();
+            assert_eq!(
+                reader
+                    .query_row("SELECT n FROM value", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                9
+            );
+        });
         assert!(tmp.path().join("stock.sqlite3-wal").is_file());
         assert!(tmp.path().join("stock.sqlite3-shm").is_file());
-        reader.close().unwrap();
-        writer.close().unwrap();
+        close_armed(&host, reader, reader_ticket);
+        close_armed(&host, writer, writer_ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn stock_shm_nofollow_preserves_symlink_target() {
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let target = tmp.path().join("foreign-shm");
         let bytes = vec![0x5a; 32768];
         std::fs::write(&target, &bytes).unwrap();
         std::os::unix::fs::symlink(&target, tmp.path().join("scheduler.sqlite3-shm")).unwrap();
-        let connection = Connection::open(tmp.path().join("scheduler.sqlite3")).unwrap();
-        assert!(
-            connection
-                .query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0))
-                .is_err()
-        );
-        connection.close().unwrap();
+        let (connection, ticket) = armed_stock(&host, &tmp.path().join("scheduler.sqlite3"));
+        host.scope(|| {
+            assert!(
+                connection
+                    .query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0))
+                    .is_err()
+            )
+        });
+        close_armed(&host, connection, ticket);
         assert_eq!(std::fs::read(target).unwrap(), bytes);
         assert!(
             std::fs::symlink_metadata(tmp.path().join("scheduler.sqlite3-shm"))
@@ -4503,58 +4517,205 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn captured_observation_failure_keeps_sealed_generation_and_claim() {
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap();
-        owner.establish_wal_binding().unwrap();
+        let (owner, owner_ticket) = host.armed(|| {
+            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap()
+        });
+        host.scope(|| owner.establish_wal_binding().unwrap());
         FAIL_CAPTURE_OBSERVATION.with(|flag| flag.set(true));
-        let failure = owner
-            .capture_projection_retirement([0x41; 16])
-            .err()
-            .expect("post-claim failure");
+        let failure = host.scope(|| {
+            owner
+                .capture_projection_retirement([0x41; 16])
+                .err()
+                .expect("post-claim failure")
+        });
         assert!(matches!(
             failure.owner(),
             SqliteProjectionRetirementOwner::CapturePending(_)
         ));
-        let failure = failure
-            .retry_capture([0x42; 16])
-            .err()
-            .expect("generation substitution refused");
+        let failure = host.scope(|| {
+            failure
+                .retry_capture([0x42; 16])
+                .err()
+                .expect("generation substitution refused")
+        });
         assert!(matches!(
             failure.owner(),
             SqliteProjectionRetirementOwner::CapturePending(_)
         ));
-        assert!(Connection::open(tmp.path().join("scheduler.sqlite3")).is_err());
-        let captured = failure.retry_capture([0x41; 16]).unwrap();
+        let refused = armed_stock_refusal(&host, &tmp.path().join("scheduler.sqlite3"));
+        assert_eq!(refused.sqlite_error_code(), Some(STOCK_ALIAS_REFUSAL), "{refused}");
+        let captured = host.scope(|| failure.retry_capture([0x41; 16]).unwrap());
         assert_eq!(captured.captured_roles().generation, [0x41; 16]);
         captured.abort().unwrap();
-        let connection = Connection::open(tmp.path().join("scheduler.sqlite3")).unwrap();
+        host.retire_raw(owner_ticket);
+        let (connection, ticket) = armed_stock(&host, &tmp.path().join("scheduler.sqlite3"));
+        host.scope(|| {
+            assert_eq!(
+                connection
+                    .query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            )
+        });
+        close_armed(&host, connection, ticket);
+    }
+    /// A bound VFS context dropped outside every allocator scope must still be
+    /// unlinked from SQLite's VFS list before its memory is freed; otherwise
+    /// the next arena's initialization walks the list into the old mapping.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn binding_dropped_outside_scope_unlinks_before_arena_release() {
+        let mut host = crate::test_host::TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        // Rollback-journal database: no shared-memory mapping is involved, so
+        // the only out-of-scope native effect under test is the VFS unlink.
+        let (seed, seed_ticket) =
+            host.armed(|| Connection::open(tmp.path().join("scheduler.sqlite3")).unwrap());
+        host.scope(|| {
+            seed.execute_batch("CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);")
+                .unwrap()
+        });
+        close_armed(&host, seed, seed_ticket);
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let (owner, owner_ticket) = host.armed(|| {
+            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap()
+        });
+        host.scope(|| {
+            let value: i64 =
+                owner.connection().query_row("SELECT value FROM custody", [], |row| row.get(0)).unwrap();
+            assert_eq!(value, 1);
+        });
+        drop(owner); // Drop for BoundSqliteConnection, no native scope active
+        host.retire_raw(owner_ticket);
+        // Reclaim and release the arena, then install and initialize a fresh one.
+        host.cycle();
+        let connection = host.open_transient();
+        let value: i64 = connection
+            .with_sql(|sql| Ok(sql.query_row("SELECT 6 * 7", [], |row| row.get(0))?))
+            .unwrap();
+        assert_eq!(value, 42);
+        host.close(connection);
+        let (stock, ticket) = armed_stock(&host, &tmp.path().join("scheduler.sqlite3"));
+        host.scope(|| {
+            assert_eq!(
+                stock.query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0)).unwrap(),
+                1
+            )
+        });
+        close_armed(&host, stock, ticket);
+    }
+    /// A WAL connection dropped outside every allocator scope releases its
+    /// shared-memory mapping there; later opens and the arena cycle proceed.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn wal_binding_dropped_outside_scope_releases_shared_memory() {
+        let mut host = crate::test_host::TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        seed_wal_on(&host, tmp.path());
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let (owner, owner_ticket) = host.armed(|| {
+            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap()
+        });
+        host.scope(|| {
+            owner.establish_wal_binding().unwrap();
+            let value: i64 =
+                owner.connection().query_row("SELECT value FROM custody", [], |row| row.get(0)).unwrap();
+            assert_eq!(value, 1);
+        });
+        let (mapped_bytes, mapped_slots) = host.shared_census();
+        assert!(mapped_bytes > 0 && mapped_slots > 0);
+        drop(owner); // last WAL user: SHM purge runs with no native scope active
+        assert_eq!(host.shared_census(), (0, 0), "out-of-scope purge clears bytes and slots");
+        host.retire_raw(owner_ticket);
+        let (stock, ticket) = armed_stock(&host, &tmp.path().join("scheduler.sqlite3"));
+        host.scope(|| {
+            assert_eq!(
+                stock.query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0)).unwrap(),
+                1
+            )
+        });
+        close_armed(&host, stock, ticket);
+        host.cycle();
+        let connection = host.open_transient();
+        host.close(connection);
+    }
+    /// A second in-process WAL user keeps the shared node alive: no mapping
+    /// is released until the last close, which here runs in a cleanup scope
+    /// and releases every mapping group. Bound owners refuse a peer on their
+    /// SHM node, so both users are armed stock connections.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn wal_shared_memory_unmaps_every_group_only_at_last_close_in_cleanup_scope() {
+        let host = crate::test_host::TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("scheduler.sqlite3");
+        let (first, first_ticket) = armed_stock(&host, &path);
+        host.scope(|| {
+            first
+                .execute_batch(
+                    "PRAGMA page_size=512; PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; \
+                     CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1); \
+                     CREATE TABLE filler(body BLOB);",
+                )
+                .unwrap()
+        });
+        let (second, second_ticket) = armed_stock(&host, &path);
+        host.scope(|| {
+            // Grow the WAL index past its first 32 KiB region: no checkpoint
+            // runs, so every frame stays indexed.
+            for _ in 0..150 {
+                first.execute("INSERT INTO filler(body) VALUES (zeroblob(16000))", []).unwrap();
+            }
+            let rows: i64 =
+                second.query_row("SELECT COUNT(*) FROM filler", [], |row| row.get(0)).unwrap();
+            assert_eq!(rows, 150);
+        });
+        let (grown_bytes, grown_slots) = host.shared_census();
+        assert!(grown_slots >= 2, "multiple mapping groups recorded: {grown_slots}");
+        assert!(grown_bytes >= 2 * 32768, "{grown_bytes}");
+        close_armed(&host, first, first_ticket);
         assert_eq!(
-            connection
-                .query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            1
+            host.shared_census(),
+            (grown_bytes, grown_slots),
+            "a live peer keeps every mapping recorded"
         );
-        connection.close().unwrap();
+        host.scope(|| second.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap());
+        host.cleanup_scope(|| second.close().unwrap());
+        assert_eq!(host.shared_census(), (0, 0), "last close clears bytes and slots");
+        host.retire_raw(second_ticket);
+        let (stock, ticket) = armed_stock(&host, &path);
+        host.scope(|| {
+            assert_eq!(
+                stock.query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0)).unwrap(),
+                1
+            )
+        });
+        close_armed(&host, stock, ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn retirement_barriers_survive_stock_alias_refusal_and_purge() {
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap();
-        owner.establish_wal_binding().unwrap();
+        let (owner, owner_ticket) = host.armed(|| {
+            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap()
+        });
+        host.scope(|| owner.establish_wal_binding().unwrap());
         let main_alias = tmp.path().join("alias.sqlite3");
         std::fs::hard_link(tmp.path().join("scheduler.sqlite3"), &main_alias).unwrap();
-        let mut drained = owner
-            .capture_projection_retirement([0x51; 16])
-            .unwrap()
-            .drain_sql()
-            .unwrap();
+        let mut drained = host.scope(|| {
+            owner
+                .capture_projection_retirement([0x51; 16])
+                .unwrap()
+                .drain_sql()
+                .unwrap()
+        });
         assert_external_write_busy(&main_alias);
         for role in SqliteRole::all() {
             let facts = drained.role_facts().roles[role as usize].clone();
@@ -4562,16 +4723,18 @@ mod tests {
             assert!(facts.original.as_ref().unwrap().content_sha256.is_some());
             let alias = tmp.path().join(format!("role-{}.sqlite3", role.label()));
             std::fs::hard_link(tmp.path().join(role.public_name()), &alias).unwrap();
-            assert!(Connection::open(&alias).is_err());
+            let refused = armed_stock_refusal(&host, &alias);
+            assert_eq!(refused.sqlite_error_code(), Some(STOCK_ALIAS_REFUSAL), "{refused}");
             assert_external_write_busy(&main_alias); // refusal close must not release main barrier
             assert_eq!(
-                drained.quarantine_role(role).unwrap(),
+                host.scope(|| drained.quarantine_role(role).unwrap()),
                 SqliteRoleMutationOutcome::QuarantinedDurable
             );
             assert!(!tmp.path().join(role.public_name()).exists());
-            assert!(Connection::open(tmp.path().join(&facts.quarantine_name)).is_err());
+            let refused = armed_stock_refusal(&host, &tmp.path().join(&facts.quarantine_name));
+            assert_eq!(refused.sqlite_error_code(), Some(STOCK_ALIAS_REFUSAL), "{refused}");
             assert_eq!(
-                drained.purge_role(role).unwrap(),
+                host.scope(|| drained.purge_role(role).unwrap()),
                 SqliteRoleMutationOutcome::RemovedDurable
             );
             assert!(!tmp.path().join(&facts.quarantine_name).exists());
@@ -4579,12 +4742,15 @@ mod tests {
             assert_external_write_busy(&main_alias);
         }
         drained.release().unwrap();
-        let connection = Connection::open(main_alias).unwrap();
-        connection.busy_timeout(std::time::Duration::ZERO).unwrap();
-        connection
-            .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
-            .unwrap();
-        connection.close().unwrap();
+        host.retire_raw(owner_ticket);
+        let (connection, ticket) = armed_stock(&host, &main_alias);
+        host.scope(|| {
+            connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+            connection
+                .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+                .unwrap();
+        });
+        close_armed(&host, connection, ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
@@ -4733,18 +4899,23 @@ mod tests {
     }
     #[cfg(target_os = "linux")]
     #[cfg(target_os = "linux")]
-    fn resolution_fixture() -> (tempfile::TempDir, DrainedSqliteProjection) {
+    fn resolution_fixture(host: &crate::test_host::TestNativeHost) -> (tempfile::TempDir, DrainedSqliteProjection) {
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap();
-        owner.establish_wal_binding().unwrap();
-        let drained = owner
-            .capture_projection_retirement([0xc1; 16])
-            .unwrap()
-            .drain_sql()
-            .unwrap();
+        let (owner, ticket) = host.armed(|| {
+            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap()
+        });
+        let drained = host.scope(|| {
+            owner.establish_wal_binding().unwrap();
+            owner
+                .capture_projection_retirement([0xc1; 16])
+                .unwrap()
+                .drain_sql()
+                .unwrap()
+        });
+        // The drain closed the SQL connection this ticket opened.
+        host.retire_raw(ticket);
         (tmp, drained)
     }
     #[cfg(target_os = "linux")]
@@ -4824,379 +4995,399 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn resolution_sync_failure_retains_testimony_and_memoizes_success() {
-        let (_tmp, mut drained) = resolution_fixture();
-        simulate_held_quarantine(&mut drained);
-        let original_error = drained.role_failures[0].original.clone().unwrap();
-        drained.role_failures[0]
-            .latest
-            .as_mut()
-            .unwrap()
-            .error
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit;
-        let contradictory =
-            resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncQuarantine);
-        assert!(matches!(
-            drained.resolve_role(contradictory),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        drained.role_failures[0]
-            .latest
-            .as_mut()
-            .unwrap()
-            .error
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
+        let host = crate::test_host::TestNativeHost::acquire();
+        let (_tmp, mut drained) = resolution_fixture(&host);
+        host.scope(|| {
+            simulate_held_quarantine(&mut drained);
+            let original_error = drained.role_failures[0].original.clone().unwrap();
+            drained.role_failures[0]
+                .latest
+                .as_mut()
+                .unwrap()
+                .error
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit;
+            let contradictory =
+                resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncQuarantine);
+            assert!(matches!(
+                drained.resolve_role(contradictory),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            drained.role_failures[0]
+                .latest
+                .as_mut()
+                .unwrap()
+                .error
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
 
-        let first = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncQuarantine);
-        FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
-        assert!(matches!(
-            drained.resolve_role(first.clone()),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        assert_eq!(
-            drained.role_failures[0].original.as_ref(),
-            Some(&original_error)
-        );
-        assert!(
-            matches!(drained.quarantine_role(SqliteRole::Main), Err(error)
-            if error.disposition == original_error.error.disposition)
-        );
-        let second =
-            resolution_request(&mut drained, 1, SqliteRoleResolutionAction::SyncQuarantine);
-        assert_eq!(second.expected.resolution_coordinates.len(), 1);
-        assert!(matches!(
-            second.expected.resolution_coordinates[0].observation,
-            SqliteRoleCoordinateObservation::Absent
-        ));
-        assert_eq!(
-            drained.resolve_role(second.clone()).unwrap(),
-            SqliteRoleResolutionOutcome::QuarantinedDurable
-        );
-        // Arm sync fault: an acknowledgement retry must NOT call sync again.
-        FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
-        assert_eq!(
-            drained.resolve_role(second).unwrap(),
-            SqliteRoleResolutionOutcome::QuarantinedDurable
-        );
-        assert!(FAIL_RESOLUTION_SYNC.with(|flag| flag.replace(false)));
-        assert!(matches!(
-            drained.resolve_role(first),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        finish_resolution_fixture(drained);
+            let first = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncQuarantine);
+            FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
+            assert!(matches!(
+                drained.resolve_role(first.clone()),
+                Err(SqliteRoleResolutionError::Held(_))
+            ));
+            assert_eq!(
+                drained.role_failures[0].original.as_ref(),
+                Some(&original_error)
+            );
+            assert!(
+                matches!(drained.quarantine_role(SqliteRole::Main), Err(error)
+                if error.disposition == original_error.error.disposition)
+            );
+            let second =
+                resolution_request(&mut drained, 1, SqliteRoleResolutionAction::SyncQuarantine);
+            assert_eq!(second.expected.resolution_coordinates.len(), 1);
+            assert!(matches!(
+                second.expected.resolution_coordinates[0].observation,
+                SqliteRoleCoordinateObservation::Absent
+            ));
+            assert_eq!(
+                drained.resolve_role(second.clone()).unwrap(),
+                SqliteRoleResolutionOutcome::QuarantinedDurable
+            );
+            // Arm sync fault: an acknowledgement retry must NOT call sync again.
+            FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
+            assert_eq!(
+                drained.resolve_role(second).unwrap(),
+                SqliteRoleResolutionOutcome::QuarantinedDurable
+            );
+            assert!(FAIL_RESOLUTION_SYNC.with(|flag| flag.replace(false)));
+            assert!(matches!(
+                drained.resolve_role(first),
+                Err(SqliteRoleResolutionError::Held(_))
+            ));
+            finish_resolution_fixture(drained);
+        });
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn resolution_partial_move_tracks_active_r_and_finishes_without_u_replay() {
-        let (tmp, mut drained) = resolution_fixture();
-        simulate_held_purge_at_u(&mut drained);
-        drained.role_failures[0]
-            .latest
-            .as_mut()
-            .unwrap()
-            .error
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit;
-        let contradictory =
-            resolution_request(&mut drained, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
-        assert!(matches!(
-            drained.resolve_role(contradictory),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        drained.role_failures[0]
-            .latest
-            .as_mut()
-            .unwrap()
-            .error
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
+        let host = crate::test_host::TestNativeHost::acquire();
+        let (tmp, mut drained) = resolution_fixture(&host);
+        host.scope(|| {
+            simulate_held_purge_at_u(&mut drained);
+            drained.role_failures[0]
+                .latest
+                .as_mut()
+                .unwrap()
+                .error
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit;
+            let contradictory =
+                resolution_request(&mut drained, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
+            assert!(matches!(
+                drained.resolve_role(contradictory),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            drained.role_failures[0]
+                .latest
+                .as_mut()
+                .unwrap()
+                .error
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
 
-        let first = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
-        FAIL_RESOLUTION_AFTER_MOVE.with(|flag| flag.set(true));
-        assert!(matches!(
-            drained.resolve_role(first.clone()),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        let after = drained.observe_role_resolution(SqliteRole::Main).unwrap();
-        assert!(matches!(
-            after.purge,
-            SqliteRoleCoordinateObservation::Absent
-        ));
-        assert_eq!(after.resolution_coordinates.len(), 1);
-        assert!(matches!(
-            after.resolution_coordinates[0].observation,
-            SqliteRoleCoordinateObservation::SameOriginal { .. }
-        ));
-        let r = tmp.path().join(&after.resolution_coordinates[0].name);
-        assert!(r.is_file());
-        assert!(matches!(
-            drained.resolve_role(first),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        let wrong = resolution_request(&mut drained, 1, SqliteRoleResolutionAction::FinishPurgeAtU);
-        assert!(matches!(
-            drained.resolve_role(wrong),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        drained.resolutions[0][0]
-            .attempt
-            .effect_failure
-            .as_mut()
-            .unwrap()
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::NamespaceChanged;
-        let contradictory = resolution_request(
-            &mut drained,
-            1,
-            SqliteRoleResolutionAction::FinishPurgeAtResolution { source_ordinal: 0 },
-        );
-        assert!(matches!(
-            drained.resolve_role(contradictory),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        assert!(r.is_file());
-        drained.resolutions[0][0]
-            .attempt
-            .effect_failure
-            .as_mut()
-            .unwrap()
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
-        let next = resolution_request(
-            &mut drained,
-            1,
-            SqliteRoleResolutionAction::FinishPurgeAtResolution { source_ordinal: 0 },
-        );
-        assert_eq!(
-            drained.resolve_role(next.clone()).unwrap(),
-            SqliteRoleResolutionOutcome::RemovedDurable
-        );
-        assert!(!r.exists());
-        let after = drained.observe_role_resolution(SqliteRole::Main).unwrap();
-        assert_eq!(after.resolution_coordinates.len(), 2);
-        assert!(
-            after
-                .resolution_coordinates
-                .iter()
-                .all(|coordinate| matches!(
-                    coordinate.observation,
-                    SqliteRoleCoordinateObservation::Absent
-                ))
-        );
-        assert_eq!(
-            drained.resolve_role(next).unwrap(),
-            SqliteRoleResolutionOutcome::RemovedDurable
-        );
-        finish_resolution_fixture(drained);
+            let first = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
+            FAIL_RESOLUTION_AFTER_MOVE.with(|flag| flag.set(true));
+            assert!(matches!(
+                drained.resolve_role(first.clone()),
+                Err(SqliteRoleResolutionError::Held(_))
+            ));
+            let after = drained.observe_role_resolution(SqliteRole::Main).unwrap();
+            assert!(matches!(
+                after.purge,
+                SqliteRoleCoordinateObservation::Absent
+            ));
+            assert_eq!(after.resolution_coordinates.len(), 1);
+            assert!(matches!(
+                after.resolution_coordinates[0].observation,
+                SqliteRoleCoordinateObservation::SameOriginal { .. }
+            ));
+            let r = tmp.path().join(&after.resolution_coordinates[0].name);
+            assert!(r.is_file());
+            assert!(matches!(
+                drained.resolve_role(first),
+                Err(SqliteRoleResolutionError::Held(_))
+            ));
+            let wrong = resolution_request(&mut drained, 1, SqliteRoleResolutionAction::FinishPurgeAtU);
+            assert!(matches!(
+                drained.resolve_role(wrong),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            drained.resolutions[0][0]
+                .attempt
+                .effect_failure
+                .as_mut()
+                .unwrap()
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::NamespaceChanged;
+            let contradictory = resolution_request(
+                &mut drained,
+                1,
+                SqliteRoleResolutionAction::FinishPurgeAtResolution { source_ordinal: 0 },
+            );
+            assert!(matches!(
+                drained.resolve_role(contradictory),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            assert!(r.is_file());
+            drained.resolutions[0][0]
+                .attempt
+                .effect_failure
+                .as_mut()
+                .unwrap()
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
+            let next = resolution_request(
+                &mut drained,
+                1,
+                SqliteRoleResolutionAction::FinishPurgeAtResolution { source_ordinal: 0 },
+            );
+            assert_eq!(
+                drained.resolve_role(next.clone()).unwrap(),
+                SqliteRoleResolutionOutcome::RemovedDurable
+            );
+            assert!(!r.exists());
+            let after = drained.observe_role_resolution(SqliteRole::Main).unwrap();
+            assert_eq!(after.resolution_coordinates.len(), 2);
+            assert!(
+                after
+                    .resolution_coordinates
+                    .iter()
+                    .all(|coordinate| matches!(
+                        coordinate.observation,
+                        SqliteRoleCoordinateObservation::Absent
+                    ))
+            );
+            assert_eq!(
+                drained.resolve_role(next).unwrap(),
+                SqliteRoleResolutionOutcome::RemovedDurable
+            );
+            finish_resolution_fixture(drained);
+        });
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn resolution_unlink_testimony_survives_sync_failure_and_budget_exhaustion() {
-        let (_positive_tmp, mut positive) = resolution_fixture();
-        simulate_held_purge_at_u(&mut positive);
-        let request =
-            resolution_request(&mut positive, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
-        FAIL_RESOLUTION_AFTER_UNLINK.with(|flag| flag.set(true));
-        assert!(matches!(
-            positive.resolve_role(request),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        positive.resolutions[0][0]
-            .attempt
-            .effect_failure
-            .as_mut()
-            .unwrap()
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit;
-        let contradictory =
-            resolution_request(&mut positive, 1, SqliteRoleResolutionAction::SyncRemoved);
-        assert!(matches!(
-            positive.resolve_role(contradictory),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        positive.resolutions[0][0]
-            .attempt
-            .effect_failure
-            .as_mut()
-            .unwrap()
-            .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
-        let request = resolution_request(&mut positive, 1, SqliteRoleResolutionAction::SyncRemoved);
-        FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
-        assert!(matches!(
-            positive.resolve_role(request),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        let request = resolution_request(&mut positive, 2, SqliteRoleResolutionAction::SyncRemoved);
-        assert_eq!(
-            positive.resolve_role(request.clone()).unwrap(),
-            SqliteRoleResolutionOutcome::RemovedDurable
-        );
-        FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
-        assert_eq!(
-            positive.resolve_role(request).unwrap(),
-            SqliteRoleResolutionOutcome::RemovedDurable
-        );
-        assert!(FAIL_RESOLUTION_SYNC.with(|flag| flag.replace(false)));
-        finish_resolution_fixture(positive);
-        let (_tmp, mut drained) = resolution_fixture();
-        simulate_held_purge_at_u(&mut drained);
-        let first = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
-        FAIL_RESOLUTION_AFTER_UNLINK.with(|flag| flag.set(true));
-        assert!(matches!(
-            drained.resolve_role(first),
-            Err(SqliteRoleResolutionError::Held(_))
-        ));
-        for ordinal in 1..4 {
-            let request = resolution_request(
-                &mut drained,
-                ordinal,
-                SqliteRoleResolutionAction::SyncRemoved,
-            );
-            assert_eq!(request.expected.original_link_count, Some(0));
-            FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
+        let host = crate::test_host::TestNativeHost::acquire();
+        let (_positive_tmp, mut positive) = resolution_fixture(&host);
+        host.scope(|| {
+            simulate_held_purge_at_u(&mut positive);
+            let request =
+                resolution_request(&mut positive, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
+            FAIL_RESOLUTION_AFTER_UNLINK.with(|flag| flag.set(true));
             assert!(matches!(
-                drained.resolve_role(request),
+                positive.resolve_role(request),
                 Err(SqliteRoleResolutionError::Held(_))
             ));
-        }
-        let request = resolution_request(&mut drained, 4, SqliteRoleResolutionAction::SyncRemoved);
-        assert_eq!(
-            request.expected.resolution_coordinates.len(),
-            SQLITE_ROLE_RESOLUTION_LIMIT
-        );
-        assert!(matches!(
-            drained.resolve_role(request),
-            Err(SqliteRoleResolutionError::BudgetExhausted)
-        ));
-        assert!(matches!(
-            drained.states[0],
-            RetirementRoleState::RecoveryRequired
-        ));
-        assert!(Connection::open(_tmp.path().join("scheduler.sqlite3")).is_err());
-        let failure = drained.release().unwrap_err();
-        let SqliteProjectionRetirementOwner::Drained(mut drained) = failure.owner else {
-            panic!("same drained owner")
-        };
-        // Test-only teardown after proving refusal: original is actually unlinked.
-        // This bypass is never part of the public resolution API.
-        drained.states[0] = RetirementRoleState::Removed;
-        finish_resolution_fixture(drained);
+            positive.resolutions[0][0]
+                .attempt
+                .effect_failure
+                .as_mut()
+                .unwrap()
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::BeforeCommit;
+            let contradictory =
+                resolution_request(&mut positive, 1, SqliteRoleResolutionAction::SyncRemoved);
+            assert!(matches!(
+                positive.resolve_role(contradictory),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            positive.resolutions[0][0]
+                .attempt
+                .effect_failure
+                .as_mut()
+                .unwrap()
+                .disposition = lillux::secure_fs::PlannedQuarantineDisposition::DurabilityUncertain;
+            let request = resolution_request(&mut positive, 1, SqliteRoleResolutionAction::SyncRemoved);
+            FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
+            assert!(matches!(
+                positive.resolve_role(request),
+                Err(SqliteRoleResolutionError::Held(_))
+            ));
+            let request = resolution_request(&mut positive, 2, SqliteRoleResolutionAction::SyncRemoved);
+            assert_eq!(
+                positive.resolve_role(request.clone()).unwrap(),
+                SqliteRoleResolutionOutcome::RemovedDurable
+            );
+            FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
+            assert_eq!(
+                positive.resolve_role(request).unwrap(),
+                SqliteRoleResolutionOutcome::RemovedDurable
+            );
+            assert!(FAIL_RESOLUTION_SYNC.with(|flag| flag.replace(false)));
+            finish_resolution_fixture(positive);
+        });
+        let (_tmp, mut drained) = resolution_fixture(&host);
+        host.scope(|| {
+            simulate_held_purge_at_u(&mut drained);
+            let first = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::FinishPurgeAtU);
+            FAIL_RESOLUTION_AFTER_UNLINK.with(|flag| flag.set(true));
+            assert!(matches!(
+                drained.resolve_role(first),
+                Err(SqliteRoleResolutionError::Held(_))
+            ));
+            for ordinal in 1..4 {
+                let request = resolution_request(
+                    &mut drained,
+                    ordinal,
+                    SqliteRoleResolutionAction::SyncRemoved,
+                );
+                assert_eq!(request.expected.original_link_count, Some(0));
+                FAIL_RESOLUTION_SYNC.with(|flag| flag.set(true));
+                assert!(matches!(
+                    drained.resolve_role(request),
+                    Err(SqliteRoleResolutionError::Held(_))
+                ));
+            }
+            let request = resolution_request(&mut drained, 4, SqliteRoleResolutionAction::SyncRemoved);
+            assert_eq!(
+                request.expected.resolution_coordinates.len(),
+                SQLITE_ROLE_RESOLUTION_LIMIT
+            );
+            assert!(matches!(
+                drained.resolve_role(request),
+                Err(SqliteRoleResolutionError::BudgetExhausted)
+            ));
+            assert!(matches!(
+                drained.states[0],
+                RetirementRoleState::RecoveryRequired
+            ));
+        });
+        let refused = armed_stock_refusal(&host, &_tmp.path().join("scheduler.sqlite3"));
+        assert_eq!(refused.sqlite_error_code(), Some(STOCK_ALIAS_REFUSAL), "{refused}");
+        host.scope(|| {
+            let failure = drained.release().unwrap_err();
+            let SqliteProjectionRetirementOwner::Drained(mut drained) = failure.owner else {
+                panic!("same drained owner")
+            };
+            // Test-only teardown after proving refusal: original is actually unlinked.
+            // This bypass is never part of the public resolution API.
+            drained.states[0] = RetirementRoleState::Removed;
+            finish_resolution_fixture(drained);
+        });
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn resolution_refuses_foreign_coordinates_and_absence_without_unlink_testimony() {
-        let (tmp, mut drained) = resolution_fixture();
-        simulate_held_quarantine(&mut drained);
-        let request =
-            resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncQuarantine);
-        let foreign = tmp.path().join("scheduler.sqlite3");
-        std::fs::write(&foreign, b"foreign").unwrap();
-        assert!(matches!(
-            drained.resolve_role(request),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
-        std::fs::remove_file(&foreign).unwrap(); // test owns foreign fixture
-        // Test-only removal creates all-absent+nlink0 but NO original unlink testimony.
-        std::fs::remove_file(tmp.path().join(&drained.facts.roles[0].quarantine_name)).unwrap();
-        let request = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncRemoved);
-        assert_eq!(request.expected.original_link_count, Some(0));
-        assert!(matches!(
-            drained.resolve_role(request),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        assert!(drained.resolutions[0].is_empty());
-        let failure = drained.abort().unwrap_err();
-        let SqliteProjectionRetirementOwner::Drained(mut drained) = failure.owner else {
-            panic!("same drained owner")
-        };
-        // Test-only teardown; the public resolver correctly refused fabricated testimony.
-        drained.states[0] = RetirementRoleState::Removed;
-        finish_resolution_fixture(drained);
+        let host = crate::test_host::TestNativeHost::acquire();
+        let (tmp, mut drained) = resolution_fixture(&host);
+        host.scope(|| {
+            simulate_held_quarantine(&mut drained);
+            let request =
+                resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncQuarantine);
+            let foreign = tmp.path().join("scheduler.sqlite3");
+            std::fs::write(&foreign, b"foreign").unwrap();
+            assert!(matches!(
+                drained.resolve_role(request),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
+            std::fs::remove_file(&foreign).unwrap(); // test owns foreign fixture
+            // Test-only removal creates all-absent+nlink0 but NO original unlink testimony.
+            std::fs::remove_file(tmp.path().join(&drained.facts.roles[0].quarantine_name)).unwrap();
+            let request = resolution_request(&mut drained, 0, SqliteRoleResolutionAction::SyncRemoved);
+            assert_eq!(request.expected.original_link_count, Some(0));
+            assert!(matches!(
+                drained.resolve_role(request),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            assert!(drained.resolutions[0].is_empty());
+            let failure = drained.abort().unwrap_err();
+            let SqliteProjectionRetirementOwner::Drained(mut drained) = failure.owner else {
+                panic!("same drained owner")
+            };
+            // Test-only teardown; the public resolver correctly refused fabricated testimony.
+            drained.states[0] = RetirementRoleState::Removed;
+            finish_resolution_fixture(drained);
+        });
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn resolution_rearm_refuses_namespacechanged_restore_and_unknown_bridge_testimony() {
+        let host = crate::test_host::TestNativeHost::acquire();
         use lillux::secure_fs::{PlannedQuarantineDisposition as D, PlannedQuarantineStage as S};
-        let (_tmp, mut drained) = resolution_fixture();
-        let error = SqliteRoleMutationError {
-            role: SqliteRole::Main,
-            disposition: D::NamespaceChanged,
-            stage: S::RestoredUnexpected,
-            message: "contradictory fixture".into(),
-        };
-        drained.states[0] = RetirementRoleState::RecoveryRequired;
-        drained.retain_role_failure(
-            SqliteRole::Main,
-            SqliteRoleMutationOperation::Quarantine,
-            &error,
-            true,
-        );
-        let request =
-            resolution_request(&mut drained, 0, SqliteRoleResolutionAction::RearmOriginal);
-        assert!(matches!(
-            drained.resolve_role(request),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        let error = SqliteRoleMutationError {
-            disposition: D::BeforeCommit,
-            stage: S::Unchanged,
-            ..error
-        };
-        drained.retain_role_failure(
-            SqliteRole::Main,
-            SqliteRoleMutationOperation::Quarantine,
-            &error,
-            false,
-        );
-        let request =
-            resolution_request(&mut drained, 0, SqliteRoleResolutionAction::RearmOriginal);
-        assert!(matches!(
-            drained.resolve_role(request),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        drained.retain_role_failure(
-            SqliteRole::Main,
-            SqliteRoleMutationOperation::Quarantine,
-            &error,
-            true,
-        );
-        let request =
-            resolution_request(&mut drained, 0, SqliteRoleResolutionAction::RearmOriginal);
-        assert_eq!(
-            drained.resolve_role(request).unwrap(),
-            SqliteRoleResolutionOutcome::RearmedOriginal
-        );
-        drained.quarantine_role(SqliteRole::Main).unwrap();
-        drained.purge_role(SqliteRole::Main).unwrap();
-        drained.states[0] = RetirementRoleState::RecoveryRequired;
-        let contradictory = SqliteRoleMutationError {
-            role: SqliteRole::Main,
-            disposition: D::BeforeCommit,
-            stage: S::UnlinkedOriginal,
-            message: "contradictory ordinary unlink disposition".into(),
-        };
-        drained.retain_role_failure(
-            SqliteRole::Main,
-            SqliteRoleMutationOperation::Purge,
-            &contradictory,
-            true,
-        );
-        let request = resolution_request(&mut drained, 1, SqliteRoleResolutionAction::SyncRemoved);
-        assert!(matches!(
-            drained.resolve_role(request),
-            Err(SqliteRoleResolutionError::Refused(_))
-        ));
-        let observed = SqliteRoleMutationError {
-            disposition: D::DurabilityUncertain,
-            ..contradictory
-        };
-        drained.retain_role_failure(
-            SqliteRole::Main,
-            SqliteRoleMutationOperation::Purge,
-            &observed,
-            true,
-        );
-        let request = resolution_request(&mut drained, 1, SqliteRoleResolutionAction::SyncRemoved);
-        assert_eq!(
-            drained.resolve_role(request).unwrap(),
-            SqliteRoleResolutionOutcome::RemovedDurable
-        );
-        finish_resolution_fixture(drained);
+        let (_tmp, mut drained) = resolution_fixture(&host);
+        host.scope(|| {
+            let error = SqliteRoleMutationError {
+                role: SqliteRole::Main,
+                disposition: D::NamespaceChanged,
+                stage: S::RestoredUnexpected,
+                message: "contradictory fixture".into(),
+            };
+            drained.states[0] = RetirementRoleState::RecoveryRequired;
+            drained.retain_role_failure(
+                SqliteRole::Main,
+                SqliteRoleMutationOperation::Quarantine,
+                &error,
+                true,
+            );
+            let request =
+                resolution_request(&mut drained, 0, SqliteRoleResolutionAction::RearmOriginal);
+            assert!(matches!(
+                drained.resolve_role(request),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            let error = SqliteRoleMutationError {
+                disposition: D::BeforeCommit,
+                stage: S::Unchanged,
+                ..error
+            };
+            drained.retain_role_failure(
+                SqliteRole::Main,
+                SqliteRoleMutationOperation::Quarantine,
+                &error,
+                false,
+            );
+            let request =
+                resolution_request(&mut drained, 0, SqliteRoleResolutionAction::RearmOriginal);
+            assert!(matches!(
+                drained.resolve_role(request),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            drained.retain_role_failure(
+                SqliteRole::Main,
+                SqliteRoleMutationOperation::Quarantine,
+                &error,
+                true,
+            );
+            let request =
+                resolution_request(&mut drained, 0, SqliteRoleResolutionAction::RearmOriginal);
+            assert_eq!(
+                drained.resolve_role(request).unwrap(),
+                SqliteRoleResolutionOutcome::RearmedOriginal
+            );
+            drained.quarantine_role(SqliteRole::Main).unwrap();
+            drained.purge_role(SqliteRole::Main).unwrap();
+            drained.states[0] = RetirementRoleState::RecoveryRequired;
+            let contradictory = SqliteRoleMutationError {
+                role: SqliteRole::Main,
+                disposition: D::BeforeCommit,
+                stage: S::UnlinkedOriginal,
+                message: "contradictory ordinary unlink disposition".into(),
+            };
+            drained.retain_role_failure(
+                SqliteRole::Main,
+                SqliteRoleMutationOperation::Purge,
+                &contradictory,
+                true,
+            );
+            let request = resolution_request(&mut drained, 1, SqliteRoleResolutionAction::SyncRemoved);
+            assert!(matches!(
+                drained.resolve_role(request),
+                Err(SqliteRoleResolutionError::Refused(_))
+            ));
+            let observed = SqliteRoleMutationError {
+                disposition: D::DurabilityUncertain,
+                ..contradictory
+            };
+            drained.retain_role_failure(
+                SqliteRole::Main,
+                SqliteRoleMutationOperation::Purge,
+                &observed,
+                true,
+            );
+            let request = resolution_request(&mut drained, 1, SqliteRoleResolutionAction::SyncRemoved);
+            assert_eq!(
+                drained.resolve_role(request).unwrap(),
+                SqliteRoleResolutionOutcome::RemovedDurable
+            );
+            finish_resolution_fixture(drained);
+        });
     }
     #[cfg(target_os = "linux")]
     fn stopped_plan_fixture(
@@ -5379,8 +5570,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_pending_alias_admission_refuses_while_peer_close_allows_same_pin_retry() {
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let source = StoppedSqliteRoleSource::Quarantine {
             generation: [1; 16],
@@ -5412,24 +5604,27 @@ mod tests {
         );
         let peer_path = tmp.path().join("peer.sqlite3");
         std::fs::hard_link(tmp.path().join(&selected), &peer_path).unwrap();
-        let peer = Connection::open(&peer_path).unwrap();
-        peer.execute_batch("BEGIN; SELECT * FROM custody;").unwrap();
-        let cached_peer = Connection::open(&peer_path).unwrap();
-        cached_peer
-            .query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0))
-            .unwrap();
+        let (peer, peer_ticket) = armed_stock(&host, &peer_path);
+        host.scope(|| peer.execute_batch("BEGIN; SELECT * FROM custody;").unwrap());
+        let (cached_peer, cached_ticket) = armed_stock(&host, &peer_path);
+        host.scope(|| {
+            cached_peer
+                .query_row("SELECT value FROM custody", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        });
         // Closing this second Unix handle while the first holds shared locks
         // leaves a cached/unused descriptor: pending audit must include it.
-        cached_peer.close().unwrap();
+        close_armed(&host, cached_peer, cached_ticket);
 
-        let failure =
-            DrainedSqliteProjection::capture_stopped_projection(runtime, plan.clone()).unwrap_err();
-        let before = match failure.owner() {
+        let failure = host.cleanup_scope(|| {
+            DrainedSqliteProjection::capture_stopped_projection(runtime, plan.clone()).unwrap_err()
+        });
+        let before = host.scope(|| match failure.owner() {
             SqliteProjectionRetirementOwner::Drained(owner) => {
                 owner.observe_stopped_projection().unwrap()
             }
             _ => panic!("same partial context"),
-        };
+        });
         assert!(!before.ready);
         assert_eq!(
             before.roles[0].as_ref().unwrap().inode,
@@ -5437,27 +5632,33 @@ mod tests {
         );
         // xAccess is metadata only: retain ordinary relative and claimed-name
         // existence semantics while opening/reusing the claimed inode refuses.
-        assert_eq!(stock_vfs_exists(c"."), 1);
         let selected_c =
             std::ffi::CString::new(tmp.path().join(&selected).as_os_str().as_encoded_bytes())
                 .unwrap();
-        assert_eq!(stock_vfs_exists(&selected_c), 1);
-        assert!(Connection::open(&peer_path).is_err());
-        assert!(Connection::open(tmp.path().join(&selected)).is_err());
+        host.scope(|| {
+            assert_eq!(stock_vfs_exists(c"."), 1);
+            assert_eq!(stock_vfs_exists(&selected_c), 1);
+        });
+        let refused = armed_stock_refusal(&host, &peer_path);
+        assert_eq!(refused.sqlite_error_code(), Some(STOCK_ALIAS_REFUSAL), "{refused}");
+        let refused = armed_stock_refusal(&host, &tmp.path().join(&selected));
+        assert_eq!(refused.sqlite_error_code(), Some(STOCK_ALIAS_REFUSAL), "{refused}");
         assert!(!tmp.path().join("scheduler.sqlite3").exists());
         let mut wrong = plan.clone();
         wrong.roles[0].source = StoppedSqliteRoleSource::Canonical;
-        let failure = failure.retry_stopped_projection(&wrong).unwrap_err();
-        peer.execute_batch("ROLLBACK;").unwrap();
-        peer.close().unwrap();
-        let owner = failure.retry_stopped_projection(&plan).unwrap();
-        let after = owner.observe_stopped_projection().unwrap();
-        assert!(after.ready);
-        assert_eq!(
-            after.roles[0].as_ref().unwrap().inode,
-            before.roles[0].as_ref().unwrap().inode
-        );
-        owner.abort().unwrap();
+        let failure = host.scope(|| failure.retry_stopped_projection(&wrong).unwrap_err());
+        host.scope(|| peer.execute_batch("ROLLBACK;").unwrap());
+        close_armed(&host, peer, peer_ticket);
+        host.scope(|| {
+            let owner = failure.retry_stopped_projection(&plan).unwrap();
+            let after = owner.observe_stopped_projection().unwrap();
+            assert!(after.ready);
+            assert_eq!(
+                after.roles[0].as_ref().unwrap().inode,
+                before.roles[0].as_ref().unwrap().inode
+            );
+            owner.abort().unwrap();
+        });
         assert!(tmp.path().join(&selected).exists());
     }
     #[test]
@@ -5717,6 +5918,47 @@ mod tests {
         connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
         connection.close().unwrap();
     }
+    /// The binding's refusal of a stock open that would alias a held role.
+    #[cfg(target_os = "linux")]
+    const STOCK_ALIAS_REFUSAL: rusqlite::ErrorCode = rusqlite::ErrorCode::CannotOpen;
+    #[cfg(target_os = "linux")]
+    fn seed_wal_on(host: &crate::test_host::TestNativeHost, root: &std::path::Path) {
+        let (connection, ticket) = host.armed(|| Connection::open(root.join("scheduler.sqlite3")).unwrap());
+        host.scope(|| {
+            connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
+            connection.close().unwrap();
+        });
+        host.retire_raw(ticket);
+    }
+    /// Stock open of `path` on one armed ticket; the open must be refused by
+    /// the binding, not by the unarmed gate.
+    #[cfg(target_os = "linux")]
+    fn armed_stock_refusal(host: &crate::test_host::TestNativeHost, path: &std::path::Path) -> rusqlite::Error {
+        let (opened, ticket) = host.armed(|| Connection::open(path));
+        let error = match opened {
+            Ok(connection) => {
+                host.scope(|| connection.close().unwrap());
+                host.retire_raw(ticket);
+                panic!("armed stock open of {} was admitted", path.display());
+            }
+            Err(error) => error,
+        };
+        host.retire_raw(ticket);
+        assert_ne!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::ApiMisuse),
+            "armed stock open reached the unarmed gate: {error}");
+        error
+    }
+    /// Stock connection on one armed ticket; close it with `close_armed`.
+    #[cfg(target_os = "linux")]
+    fn armed_stock(host: &crate::test_host::TestNativeHost, path: &std::path::Path)
+        -> (Connection, crate::native::RawTestTicket) {
+        host.armed(|| Connection::open(path).unwrap())
+    }
+    #[cfg(target_os = "linux")]
+    fn close_armed(host: &crate::test_host::TestNativeHost, connection: Connection, ticket: crate::native::RawTestTicket) {
+        host.scope(|| connection.close().unwrap());
+        host.retire_raw(ticket);
+    }
     #[test]
     #[cfg(target_os = "linux")]
     fn owned_wal_connection_has_all_three_bindings() {
@@ -5837,12 +6079,16 @@ mod tests {
         let Some(path) = std::env::var_os("LILLUX_SQLITE_KEEPER_PROBE") else {
             return;
         };
-        let connection = Connection::open(path).unwrap();
-        connection.busy_timeout(std::time::Duration::ZERO).unwrap();
-        let error = connection.execute_batch("BEGIN IMMEDIATE;").unwrap_err();
+        let host = crate::test_host::TestNativeHost::acquire();
+        let (connection, ticket) = armed_stock(&host, std::path::Path::new(&path));
+        let error = host.scope(|| {
+            connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE;").unwrap_err()
+        });
         assert!(
             matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DatabaseBusy)
         );
+        close_armed(&host, connection, ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]

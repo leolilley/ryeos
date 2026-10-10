@@ -1452,6 +1452,10 @@ unsafe extern "C" {
     fn ryeos_native_arena_reclaim(arena: *mut c_void) -> c_int;
     fn ryeos_native_arena_release(arena: *mut c_void) -> c_int;
 }
+#[cfg(test)]
+unsafe extern "C" {
+    fn ryeos_native_shared_census(arena: *mut c_void, bytes: *mut u64, slots: *mut u32) -> c_int;
+}
 struct NativeArena(NonNull<c_void>, u32);
 // Native global ownership and bounded native synchronization protect arena.
 unsafe impl Send for NativeArena {}
@@ -5564,4 +5568,63 @@ pub struct OriginalNativeProducerCensus { pub allocated: usize, pub active: usiz
 fn producer_kind_requires_region(factory: &OriginalNativeFactory) -> Result<()> {
     factory.producer.try_lock().map_err(|_| anyhow::anyhow!("original issuer interval busy"))?
         .as_ref().context("original issuer interval absent")?.require_original_region(&factory.region)
+}
+
+/// One admitted ticket armed around a raw open by this crate's own tests.
+/// Retire it once every connection it opened is closed.
+#[cfg(test)]
+pub(crate) struct RawTestTicket {
+    ticket: u32,
+    producer: SqliteInspectionProductionPermit,
+}
+#[cfg(test)]
+impl OriginalNativeFactory {
+    /// Arm one fresh ticket around `open` on this thread. The open gate
+    /// consumes the ticket at the first SQLite open inside `open`.
+    pub(crate) fn arm_raw_for_test<T>(self: &Arc<Self>, open: impl FnOnce() -> T) -> Result<(T, RawTestTicket)> {
+        let admission = self.ticket()?;
+        let ticket = admission.ticket;
+        self.storage()?.tickets[ticket as usize - 1].store(1, Ordering::Release);
+        let raw = RawTestTicket { ticket, producer: admission.producer };
+        let value = {
+            let _scope = self.arena()?.scope(false, ticket)?;
+            open()
+        };
+        Ok((value, raw))
+    }
+    /// Run raw SQLite work inside an unticketed allocator scope.
+    pub(crate) fn raw_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
+        let _scope = self.arena()?.scope(false, 0)?;
+        Ok(work())
+    }
+    /// Recorded shared-mapping bytes and nonempty ledger slots.
+    pub(crate) fn shared_census_for_test(&self) -> Result<(u64, u32)> {
+        let arena = self.arena()?;
+        let (mut bytes, mut slots) = (0u64, 0u32);
+        let rc = unsafe { ryeos_native_shared_census(arena.0.as_ptr(), &mut bytes, &mut slots) };
+        ensure!(rc == libsqlite3_sys::SQLITE_OK, "native shared census refused: {rc}");
+        Ok((bytes, slots))
+    }
+    /// Run raw native cleanup work inside a cleanup allocator scope.
+    pub(crate) fn raw_cleanup_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
+        let _scope = self.arena()?.scope(true, 0)?;
+        Ok(work())
+    }
+    /// Close an armed ticket into a released terminal for the host census.
+    pub(crate) fn retire_raw_for_test(self: &Arc<Self>, raw: RawTestTicket) -> Result<OriginalNativeConnectionTerminal> {
+        let RawTestTicket { ticket, producer } = raw;
+        self.budget.debit_steps(1, true)?;
+        self.mark_closed(ticket, true)?;
+        producer.acknowledge_native_terminal()?;
+        Ok(OriginalNativeConnectionTerminal::Released(Arc::new(ReleasedOriginalNativeAcquisition {
+            domain: None,
+            factory: self.clone(),
+            ticket: Some(ticket),
+            original_error: anyhow!("raw test ticket retired"),
+            inspection: None,
+            closed_inspection: None,
+            destination: Mutex::new(None),
+            destination_authority: None,
+        })))
+    }
 }

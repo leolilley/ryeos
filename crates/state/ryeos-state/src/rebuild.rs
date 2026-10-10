@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::projection::{ProjectionDb, project_event, project_thread_snapshot};
 use crate::refs::{self, TrustStore};
 use crate::state_db::{
-    ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
+    OriginalProjectionBuildContext, ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
 };
 use crate::{ChainState, ThreadEvent, ThreadSnapshot};
 
@@ -438,6 +438,7 @@ pub(crate) fn verify_projection_with_observer(
         RebuildHeads::Path(refs_root),
         trust_store,
         observer,
+        None,
     )
 }
 
@@ -446,6 +447,7 @@ pub(crate) fn verify_projection_with_trust_pinned(
     cas: &lillux::CasStore,
     refs: &lillux::PinnedDirectory,
     trust_store: &TrustStore,
+    original: Option<&mut OriginalProjectionBuildContext>,
 ) -> Result<ProjectionVerificationReport> {
     verify_projection_with_authority(
         projection,
@@ -453,6 +455,7 @@ pub(crate) fn verify_projection_with_trust_pinned(
         RebuildHeads::Pinned(refs),
         trust_store,
         None,
+        original,
     )
 }
 
@@ -462,8 +465,9 @@ fn verify_projection_with_authority(
     refs: RebuildHeads<'_>,
     trust_store: &TrustStore,
     observer: Option<&dyn ProjectionRecoveryObserver>,
+    original: Option<&mut OriginalProjectionBuildContext>,
 ) -> Result<ProjectionVerificationReport> {
-    projection.with_sql(|connection| {
+    let mut report = projection.with_sql(|connection| {
         ensure_not_cancelled(observer)?;
         let mut cursors = BTreeMap::new();
         let mut statement = connection
@@ -527,23 +531,48 @@ fn verify_projection_with_authority(
                 cursor.indexed_chain_state_hash
             );
         }
-
-        // A cursor is a commit marker, not proof that every materialized row is
-        // present and correct. Rebuild the expected head-derived view in memory
-        // under the caller's frozen CAS/head guard, then compare deterministic
-        // semantic fingerprints for every authoritative projection table.
-        let expected = ProjectionDb::open_transient()?;
-        rebuild_projection_with_verified_baseline_inner(&expected, cas, refs, trust_store, observer)
-            .context("rederive expected projection during verification")?;
-        let expected_fingerprints = projection_content_fingerprints_with_observer(&expected, observer)?;
-        verify_projection_matches_fingerprints_with_observer(
-            projection,
-            &expected_fingerprints,
-            observer,
-        )?;
-        report.projection_tables_verified = expected_fingerprints.len();
         Ok(report)
-    })
+    })?;
+
+    // A cursor is a commit marker, not proof that every materialized row is
+    // present and correct. Rebuild the expected head-derived view in memory
+    // under the caller's frozen CAS/head guard, then compare deterministic
+    // semantic fingerprints for every authoritative projection table. The
+    // expected projection opens outside the projection's SQL scope, since a
+    // native ticket cannot be armed inside another scope.
+    let expected_fingerprints = rederive_expected_fingerprints(original, observer, |expected| {
+        rebuild_projection_with_verified_baseline_inner(expected, cas, refs, trust_store, observer)
+            .map(|_| ())
+            .context("rederive expected projection during verification")
+    })?;
+    verify_projection_matches_fingerprints_with_observer(
+        projection,
+        &expected_fingerprints,
+        observer,
+    )?;
+    report.projection_tables_verified = expected_fingerprints.len();
+    Ok(report)
+}
+
+/// Rederive the expected projection on a transient ticket of the original
+/// State context, fingerprint it, then close it into the context's terminals
+/// before the caller compares or publishes anything.
+fn rederive_expected_fingerprints(
+    original: Option<&mut OriginalProjectionBuildContext>,
+    observer: Option<&dyn ProjectionRecoveryObserver>,
+    rederive: impl FnOnce(&ProjectionDb) -> Result<()>,
+) -> Result<Vec<ProjectionTableFingerprint>> {
+    let context = original
+        .context("projection verification requires the original native State context")?;
+    let expected = context.open_expected_projection()?;
+    let fingerprints = match rederive(&expected)
+        .and_then(|()| projection_content_fingerprints_with_observer(&expected, observer))
+    {
+        Ok(fingerprints) => fingerprints,
+        Err(error) => return Err(expected.retain_operation_failure(error)),
+    };
+    context.retain_closed_expected_projection(expected)?;
+    Ok(fingerprints)
 }
 
 /// Verify a staged projection against the exact head set that already passed
@@ -576,6 +605,7 @@ pub(crate) fn verify_preverified_projection(
         trust_store,
         baseline,
         observer,
+        None,
     )
 }
 
@@ -591,6 +621,7 @@ pub(crate) fn verify_preverified_projection_pinned(
     cas_mutation_guard: &crate::recovery::CasMutationGuard,
     runtime: &lillux::PinnedDirectory,
     observer: Option<&dyn ProjectionRecoveryObserver>,
+    original: Option<&mut OriginalProjectionBuildContext>,
 ) -> Result<(
     ProjectionVerificationReport,
     Vec<ProjectionTableFingerprint>,
@@ -606,6 +637,7 @@ pub(crate) fn verify_preverified_projection_pinned(
         trust_store,
         baseline,
         observer,
+        original,
     )
 }
 
@@ -616,6 +648,7 @@ fn verify_preverified_projection_inner(
     trust_store: &TrustStore,
     baseline: &VerifiedBaseline,
     observer: Option<&dyn ProjectionRecoveryObserver>,
+    original: Option<&mut OriginalProjectionBuildContext>,
 ) -> Result<(
     ProjectionVerificationReport,
     Vec<ProjectionTableFingerprint>,
@@ -664,10 +697,10 @@ fn verify_preverified_projection_inner(
     // immutable hash checks and exact cursor comparisons still run here.
     // This pass polls cancellation but deliberately publishes no progress, so
     // operator counters never reset during internal verification.
-    let expected = ProjectionDb::open_transient()?;
-    rederive_projection_from_verified_baseline(&expected, cas, baseline, observer)
-        .context("rederive expected projection from preverified baseline")?;
-    let expected_fingerprints = projection_content_fingerprints_with_observer(&expected, observer)?;
+    let expected_fingerprints = rederive_expected_fingerprints(original, observer, |expected| {
+        rederive_projection_from_verified_baseline(expected, cas, baseline, observer)
+            .context("rederive expected projection from preverified baseline")
+    })?;
     verify_projection_matches_fingerprints_with_observer(
         projection,
         &expected_fingerprints,
@@ -3163,5 +3196,173 @@ mod tests {
                 .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Verify/rebuild on a real native host. Every expected-projection ticket
+    /// lands in the context's terminals and, with the subject projection's
+    /// terminal, in the host census whose Drop proves nothing leaked.
+    #[cfg(feature = "test-support")]
+    mod native_host {
+        use super::*;
+        use crate::state_db::{PreparedOfflineProjection, TestProjectionLeaseAuthority};
+        use lillux_sqlite::test_host::TestNativeHost;
+        use lillux_sqlite::OriginalNativeConnectionTerminal;
+        use std::sync::Arc;
+
+        struct Fixture {
+            _tmp: tempfile::TempDir,
+            cas_root: std::path::PathBuf,
+            refs_root: std::path::PathBuf,
+            trust: TrustStore,
+            context: OriginalProjectionBuildContext,
+            _lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+            _namespace: lillux::PinnedDirectoryLock,
+        }
+
+        fn fixture(host: &TestNativeHost) -> Fixture {
+            let tmp = tempfile::tempdir().unwrap();
+            for name in ["objects", "refs", "locators", "recovery/thread-projection"] {
+                std::fs::create_dir_all(tmp.path().join(name)).unwrap();
+            }
+            let cas_root = tmp.path().join("objects");
+            let refs_root = tmp.path().join("refs");
+            write_created_chain(&cas_root, &refs_root, "T-root", None);
+            let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+            let namespace = root.lock_exclusive().unwrap();
+            let prepared =
+                PreparedOfflineProjection::capture(root, Arc::new(test_trust_store()), &namespace).unwrap();
+            let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
+                Arc::new(TestProjectionLeaseAuthority);
+            let context = OriginalProjectionBuildContext::for_test(host, prepared, &lease).unwrap();
+            Fixture { _tmp: tmp, cas_root, refs_root, trust: test_trust_store(), context, _lease: lease,
+                _namespace: namespace }
+        }
+
+        fn open_subject(host: &TestNativeHost) -> ProjectionDb {
+            // SAFETY: test-only issuance under the host's own funded factory.
+            let inputs = unsafe {
+                lillux_sqlite::OriginalNativeTransientInputs::issued(
+                    lillux_sqlite::OriginalNativeDomain::StateTransient,
+                    host.destination(),
+                )
+            }
+            .unwrap();
+            ProjectionDb::open_original_transient(Arc::clone(host.factory()), inputs).unwrap()
+        }
+
+        fn finish(host: &TestNativeHost, subject: ProjectionDb, context: OriginalProjectionBuildContext) {
+            let closed = subject
+                .close_original(host.factory())
+                .unwrap_or_else(|failure| panic!("subject close retained: {failure}"));
+            host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed.native_proof()));
+            let terminals = context
+                .into_test_terminals()
+                .unwrap_or_else(|_| panic!("test context retained non-transient custody"));
+            for terminal in terminals {
+                host.retain_terminal(terminal);
+            }
+            let (issued, recorded) = host.ticket_census();
+            assert_eq!(issued as usize, recorded);
+        }
+
+        #[test]
+        fn verify_and_preverified_close_each_expected_ticket_into_the_context() {
+            let host = TestNativeHost::acquire();
+            let mut fixture = fixture(&host);
+            let subject = open_subject(&host);
+            let cas = lillux::CasStore::new(fixture.cas_root.clone());
+            let heads = RebuildHeads::Path(&fixture.refs_root);
+            let (rebuilt, baseline) =
+                rebuild_projection_with_verified_baseline_inner(&subject, &cas, heads, &fixture.trust, None)
+                    .unwrap();
+            assert_eq!(rebuilt.chains_rebuilt, 1);
+            let report = verify_projection_with_authority(
+                &subject, &cas, heads, &fixture.trust, None, Some(&mut fixture.context),
+            )
+            .unwrap();
+            assert_eq!((report.signed_heads_verified, report.projection_cursors_verified), (1, 1));
+            assert!(report.projection_tables_verified > 0);
+            assert_eq!(fixture.context.test_terminal_count(), 1);
+            let (report, fingerprints) = verify_preverified_projection_inner(
+                &subject, &cas, heads, &fixture.trust, &baseline, None, Some(&mut fixture.context),
+            )
+            .unwrap();
+            assert_eq!(report.projection_tables_verified, fingerprints.len());
+            assert_eq!(fixture.context.test_terminal_count(), 2);
+            let Fixture { _tmp, cas_root, refs_root, trust, context, _lease, _namespace } = fixture;
+            drop((cas_root, refs_root, trust));
+            finish(&host, subject, context);
+            assert_eq!(host.ticket_census(), (3, 3));
+        }
+
+        #[test]
+        fn refusals_open_no_ticket_and_mismatch_still_closes_the_expected_ticket() {
+            let host = TestNativeHost::acquire();
+            let mut fixture = fixture(&host);
+            let subject = open_subject(&host);
+            let cas = lillux::CasStore::new(fixture.cas_root.clone());
+            let heads = RebuildHeads::Path(&fixture.refs_root);
+            rebuild_projection_with_verified_baseline_inner(&subject, &cas, heads, &fixture.trust, None).unwrap();
+            let refused = verify_projection_with_authority(&subject, &cas, heads, &fixture.trust, None, None)
+                .unwrap_err();
+            assert!(format!("{refused:#}").contains("original native State context"), "{refused:#}");
+            assert_eq!(host.ticket_census(), (1, 0));
+            subject
+                .with_sql(|connection| Ok(connection.execute("DELETE FROM threads", [])?))
+                .unwrap();
+            let mismatch = verify_projection_with_authority(
+                &subject, &cas, heads, &fixture.trust, None, Some(&mut fixture.context),
+            )
+            .unwrap_err();
+            assert!(!format!("{mismatch:#}").contains("original native State context"), "{mismatch:#}");
+            assert_eq!(fixture.context.test_terminal_count(), 1);
+            let Fixture { _tmp, cas_root, refs_root, trust, context, _lease, _namespace } = fixture;
+            drop((cas_root, refs_root, trust));
+            finish(&host, subject, context);
+            assert_eq!(host.ticket_census(), (2, 2));
+        }
+
+        /// Admits the offline transient; any generation lease still refuses.
+        struct AdmittedTransientLease;
+        impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for AdmittedTransientLease {
+            fn require_original(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
+                -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn fork_deadline(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
+                -> anyhow::Result<lillux::time::MonotonicDeadline> {
+                anyhow::bail!("offline transient test admits no projection lease")
+            }
+        }
+
+        #[test]
+        fn offline_open_projection_initializes_transient_and_closes_into_census() {
+            let host = TestNativeHost::acquire();
+            let tmp = tempfile::tempdir().unwrap();
+            for name in ["objects", "refs", "locators", "recovery/thread-projection"] {
+                std::fs::create_dir_all(tmp.path().join(name)).unwrap();
+            }
+            let guard = crate::recovery::CasMutationGuard::acquire_exclusive(tmp.path()).unwrap();
+            let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+            let namespace = root.lock_exclusive().unwrap();
+            let prepared =
+                PreparedOfflineProjection::capture(root, Arc::new(test_trust_store()), &namespace).unwrap();
+            let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
+                Arc::new(AdmittedTransientLease);
+            // SAFETY: test-only admission under the host's own funded factory;
+            // the namespace lock and exclusive guard outlive the State owner.
+            let state = unsafe { prepared.open_projection(Arc::clone(host.factory()), Arc::clone(&lease), &guard) }
+                .unwrap();
+            assert_eq!(host.ticket_census(), (1, 0));
+            let closed = state
+                .close_original_projection(Arc::clone(host.factory()), &guard, None)
+                .unwrap_or_else(|failure| panic!("offline State close retained: {failure}"));
+            for terminal in closed.native_terminals().unwrap() {
+                host.retain_terminal(terminal);
+            }
+            assert_eq!(host.ticket_census(), (1, 1));
+            drop(closed);
+            drop((lease, guard, namespace));
+        }
     }
 }

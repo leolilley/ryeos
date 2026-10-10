@@ -1172,7 +1172,7 @@ thread_local! {
 
 impl PreparedReplayIndexReset {
     fn new(db: OperationalDb, read_only: bool) -> Result<Self> {
-        let report = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path))?;
+        let report = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path, db.current_schema_reference()))?;
         Ok(Self {
             db: Some(db),
             report,
@@ -1211,7 +1211,7 @@ impl PreparedReplayIndexReset {
             .as_ref()
             .context("replay reset database already transferred")?;
         ensure_operational_bindings(db)?;
-        let current = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path))?;
+        let current = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path, db.current_schema_reference()))?;
         let own_committed_retry = self.activation != ReplayResetActivationPhase::Prepared
             && current.stored_epoch == self.report.current_epoch
             && current.current_epoch == self.report.current_epoch
@@ -1220,12 +1220,12 @@ impl PreparedReplayIndexReset {
             anyhow::bail!("replay-index retirement decision changed after preparation");
         }
         self.activation = ReplayResetActivationPhase::MutationEntered;
-        db.with_sql(|connection| enforce_replay_index_epoch(connection, &db.path, true))?;
+        db.with_sql(|connection| enforce_replay_index_epoch(connection, &db.path, true, db.current_schema_reference()))?;
         #[cfg(test)]
         if FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.replace(false)) {
             anyhow::bail!("injected replay activation acknowledgement failure after commit");
         }
-        db.with_sql(|connection| assert_current(connection, &db.path, None))?;
+        db.with_sql(|connection| assert_current(connection, &db.path, db.current_schema_reference()))?;
         ensure_operational_bindings(db)?;
         self.activation = ReplayResetActivationPhase::Validated;
         Ok(self.report)
@@ -1266,6 +1266,16 @@ impl OperationalDb {
             OperationalConnection::Plain(connection) => operation(connection),
             OperationalConnection::Original { owner, .. } => owner.with_sql(operation),
             OperationalConnection::Live(live) => live.owner.with_sql(operation),
+        }
+    }
+
+    /// Live owners carry a prepared native reference; plain owners use the
+    /// stock reference build. Original replay-reset owners carry none.
+    fn current_schema_reference(&self) -> Option<&sqlite_schema::SchemaSqlDefinition> {
+        match &self.conn {
+            OperationalConnection::Live(live) => Some(live.references.current()),
+            OperationalConnection::Plain(_) => None,
+            OperationalConnection::Original { owner: _, factory: _ } => None,
         }
     }
 
@@ -1586,9 +1596,9 @@ impl OperationalDb {
         if matches!(mode, OperationalOpenMode::PrepareReplayReset { .. }) {
             // This handle remains private to PreparedReplayIndexReset. Validate
             // the reset scope without exposing or interpreting stale replay.
-            inspect_replay_index_reset(&conn, &path)?;
+            inspect_replay_index_reset(&conn, &path, None)?;
         } else {
-            enforce_replay_index_epoch(&conn, &path, false)?;
+            enforce_replay_index_epoch(&conn, &path, false, None)?;
             assert_current(&conn, &path, None)?;
         }
         let journal_mode: String = conn
@@ -2543,10 +2553,14 @@ fn assert_exact_legacy_replay_layout(conn: &Connection, path: &Path) -> Result<(
     Ok(())
 }
 
-fn inspect_replay_index_reset(conn: &Connection, path: &Path) -> Result<ReplayIndexResetReport> {
+fn inspect_replay_index_reset(
+    conn: &Connection,
+    path: &Path,
+    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+) -> Result<ReplayIndexResetReport> {
     let stored = replay_index_epoch(conn)?;
     if stored == REPLAY_INDEX_EPOCH {
-        assert_current(conn, path, None)?;
+        assert_current(conn, path, reference)?;
         return Ok(ReplayIndexResetReport {
             stored_epoch: stored,
             current_epoch: REPLAY_INDEX_EPOCH,
@@ -2572,7 +2586,7 @@ fn inspect_replay_index_reset(conn: &Connection, path: &Path) -> Result<ReplayIn
     if has_unified_replay_index {
         // Epoch contents may be stale, but a unified predecessor must retain
         // the exact current physical schema before any row is discarded.
-        assert_current(conn, path, None).context("validate unified replay predecessor before reset")?;
+        assert_current(conn, path, reference).context("validate unified replay predecessor before reset")?;
     } else {
         // The only admitted pre-unified shape is the exact v2/v3 pair. Do not
         // let DROP TABLE normalize an unknown/corrupt table into something
@@ -2590,7 +2604,12 @@ fn inspect_replay_index_reset(conn: &Connection, path: &Path) -> Result<ReplayIn
     })
 }
 
-fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bool) -> Result<()> {
+fn enforce_replay_index_epoch(
+    conn: &Connection,
+    path: &Path,
+    explicit_reset: bool,
+    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+) -> Result<()> {
     let stored = replay_index_epoch(conn)?;
     if stored == REPLAY_INDEX_EPOCH {
         return Ok(());
@@ -2608,7 +2627,7 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
         }
         .into());
     }
-    let report = inspect_replay_index_reset(conn, path)?;
+    let report = inspect_replay_index_reset(conn, path, reference)?;
     let has_unified_replay_index: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'replay_records')",
         [], |row| row.get(0),
@@ -2630,7 +2649,7 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
         rusqlite::params![REPLAY_INDEX_EPOCH],
     )
     .context("stamp current replay-index epoch")?;
-    assert_current(&tx, path, None).context("validate replay-index reset before commit")?;
+    assert_current(&tx, path, reference).context("validate replay-index reset before commit")?;
     if replay_index_epoch(&tx)? != REPLAY_INDEX_EPOCH {
         anyhow::bail!("replay-index reset did not establish the current epoch");
     }

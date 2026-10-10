@@ -348,6 +348,7 @@ fn rebuild_and_install_projection(
             active_cas_mutation_guard,
             runtime_directory,
             observer,
+            original.as_deref_mut(),
         )
         .context("verify staged projection baseline before publication")?;
         Ok((report, staged_fingerprints))
@@ -2258,7 +2259,7 @@ impl std::error::Error for OriginalProjectionSchemaAdmissionFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
 }
 
-struct OriginalProjectionBuildContext {
+pub(crate) struct OriginalProjectionBuildContext {
     factory: Arc<lillux_sqlite::OriginalNativeFactory>,
     authority: OriginalProjectionStateOwner,
     terminals: Vec<Arc<lillux_sqlite::ClosedOriginalNativeConnection>>,
@@ -2270,6 +2271,65 @@ struct OriginalProjectionBuildContext {
     // Concrete identities of every destination authority this context issued,
     // so a taken `dyn` input can be routed to its typed State leaf.
     issued_destinations: Mutex<Vec<StateIssuedDestination>>,
+}
+/// Test lease authority: verification and rebuild open only transient
+/// projections, so every lease request refuses.
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) struct TestProjectionLeaseAuthority;
+#[cfg(all(test, feature = "test-support"))]
+impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for TestProjectionLeaseAuthority {
+    fn require_original(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool) -> anyhow::Result<()> {
+        anyhow::bail!("test State context admits no projection lease")
+    }
+    fn fork_deadline(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
+        -> anyhow::Result<lillux::time::MonotonicDeadline> {
+        anyhow::bail!("test State context admits no projection lease")
+    }
+}
+#[cfg(all(test, feature = "test-support"))]
+impl OriginalProjectionBuildContext {
+    /// Offline State context on a test host's factory. The caller retains
+    /// `lease_authority` for the context's lifetime.
+    pub(crate) fn for_test(
+        host: &lillux_sqlite::test_host::TestNativeHost,
+        preparation: PreparedOfflineProjection,
+        lease_authority: &Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+    ) -> anyhow::Result<Self> {
+        let factory = Arc::clone(host.factory());
+        factory.require_original_process()?;
+        preparation.require_custody()?;
+        anyhow::ensure!(preparation.namespace_lock.is_some(), "test State context needs retained namespace exclusion");
+        factory.require_runtime_binding(&preparation.runtime_state_directory)?;
+        let native_owner = Arc::new(OriginalPreparedProjectionAuthority {
+            preparation: Mutex::new(Some(preparation)),
+            factory: Arc::downgrade(&factory),
+            lease_authority: Arc::downgrade(lease_authority),
+            outside_join: Mutex::new(std::sync::Weak::new()),
+        });
+        native_owner.require_binding(&factory)?;
+        let issued_destinations = Self::issued_destination_slots(&factory)?;
+        Ok(Self {
+            factory, authority: OriginalProjectionStateOwner::Offline(native_owner), terminals: Vec::new(),
+            durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()),
+            generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+            issued_destinations,
+        })
+    }
+    /// Closed terminals for the test host's census. Refuses, returning the
+    /// context, while it holds any bound, selected, schema or lease custody.
+    pub(crate) fn into_test_terminals(self)
+        -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, Self> {
+        let transient_only = self.durable.is_empty() && self.retired_selected.is_empty()
+            && self.schema_references.try_lock().is_ok_and(|references| references.is_empty())
+            && self.generation_leases.try_lock().is_ok_and(|leases| leases.is_empty());
+        if !transient_only { return Err(self); }
+        let Self { factory, authority, terminals, durable, retired_selected, schema_references,
+            generation_leases, generation_lease_attempts, issued_destinations } = self;
+        drop((factory, authority, durable, retired_selected, schema_references, generation_leases,
+            generation_lease_attempts, issued_destinations));
+        Ok(terminals.into_iter().map(lillux_sqlite::OriginalNativeConnectionTerminal::Closed).collect())
+    }
+    pub(crate) fn test_terminal_count(&self) -> usize { self.terminals.len() }
 }
 /// Non-owning record of one destination authority issued by a State context.
 enum StateIssuedDestination {
@@ -2311,7 +2371,7 @@ impl OriginalProjectionBuildContext {
         Ok(())
     }
     /// Concrete Generated authority issued here for this `dyn` allocation.
-    pub(super) fn issued_generated(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
+    fn issued_generated(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
         -> anyhow::Result<Option<Arc<OriginalGeneratedProjectionAuthority>>> {
         let address = Arc::as_ptr(authority).cast::<()>();
         let slots = self.issued_destinations.try_lock()
@@ -2323,7 +2383,7 @@ impl OriginalProjectionBuildContext {
         }))
     }
     /// Concrete schema-reference authority issued here for this allocation.
-    pub(super) fn issued_schema(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
+    fn issued_schema(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
         -> anyhow::Result<Option<Arc<OriginalProjectionStateOwner>>> {
         let address = Arc::as_ptr(authority).cast::<()>();
         let slots = self.issued_destinations.try_lock()
@@ -2338,6 +2398,29 @@ impl OriginalProjectionBuildContext {
     pub(super) fn issued_destination_count(&self) -> anyhow::Result<usize> {
         Ok(self.issued_destinations.try_lock()
             .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?.len())
+    }
+    /// Open the transient expected projection that verification rederives,
+    /// on a fresh State ticket under this context's State owner. The issued
+    /// authority is recorded before any native effect.
+    pub(crate) fn open_expected_projection(&self) -> anyhow::Result<ProjectionDb> {
+        self.authority.require_binding(&self.factory)?;
+        let owner = Arc::new(self.authority.clone());
+        self.record_issued_destination(StateIssuedDestination::Schema(Arc::downgrade(&owner)))?;
+        let authority: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = owner;
+        // SAFETY: the actual prepared State owner retains all roots, recovery,
+        // trust and namespace; this purpose admits only a transient in-memory
+        // projection that never reaches State storage.
+        let inputs = unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
+            lillux_sqlite::OriginalNativeDomain::StateTransient, authority,
+        )? };
+        ProjectionDb::open_original_transient(Arc::clone(&self.factory), inputs)
+    }
+    /// Close the expected projection and retain its genuine terminal here.
+    /// A refused close keeps the actual connection in the returned error.
+    pub(crate) fn retain_closed_expected_projection(&mut self, expected: ProjectionDb) -> anyhow::Result<()> {
+        let closed = expected.close_original(&self.factory).map_err(anyhow::Error::new)?;
+        self.terminals.push(closed.native_proof());
+        closed.require_original(&self.factory)
     }
     fn open(
         &self,
@@ -3728,7 +3811,7 @@ impl StateDb {
     /// otherwise mutating state. Callers must hold CAS/head mutation exclusion
     /// across this full scan.
     pub fn verify_projection_generation(
-        &self,
+        &mut self,
     ) -> anyhow::Result<crate::rebuild::ProjectionVerificationReport> {
         let generation = self
             .recovery
@@ -3781,6 +3864,7 @@ impl StateDb {
             &cas,
             &self._refs_directory,
             self.trust_store.as_ref(),
+            self.original_projection_context.as_mut(),
         )
     }
 

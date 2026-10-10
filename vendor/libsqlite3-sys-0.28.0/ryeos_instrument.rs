@@ -50,7 +50,14 @@ pub fn prepare(manifest_dir: &Path, out_dir: &Path) -> io::Result<PathBuf> {
     replace(
         &mut s,
         "      sqlite3GlobalConfig.m = *va_arg(ap, sqlite3_mem_methods*);",
-        "      sqlite3_mem_methods *original=va_arg(ap,sqlite3_mem_methods*);\n      if(original->xMalloc!=ryeosNativeMalloc || original->xFree!=ryeosNativeFree || original->xRealloc!=ryeosNativeRealloc || original->xSize!=ryeosNativeSize || original->xRoundup!=ryeosNativeRoundup || original->xInit!=ryeosNativeInit || original->xShutdown!=ryeosNativeShutdown || original->pAppData){ rc=SQLITE_MISUSE; break; }\n      sqlite3GlobalConfig.m = *original;",
+        "      sqlite3_mem_methods *original=va_arg(ap,sqlite3_mem_methods*);\n      if(!original || original->xMalloc!=ryeosNativeMalloc || original->xFree!=ryeosNativeFree || original->xRealloc!=ryeosNativeRealloc || original->xSize!=ryeosNativeSize || original->xRoundup!=ryeosNativeRoundup || original->xInit!=ryeosNativeInit || original->xShutdown!=ryeosNativeShutdown || original->pAppData){ rc=SQLITE_MISUSE; break; }\n      sqlite3GlobalConfig.m = *original;",
+    )?;
+    // Initialization installs only SQLite's own default page cache, whose
+    // pages come from the gated allocator above; any other cache refuses.
+    replace(
+        &mut s,
+        "      sqlite3GlobalConfig.pcache2 = *va_arg(ap, sqlite3_pcache_methods2*);",
+        "      sqlite3_pcache_methods2 *original=va_arg(ap,sqlite3_pcache_methods2*);\n      if(!original || original->iVersion!=1 || original->pArg || original->xInit!=pcache1Init || original->xShutdown!=pcache1Shutdown || original->xCreate!=pcache1Create || original->xCachesize!=pcache1Cachesize || original->xPagecount!=pcache1Pagecount || original->xFetch!=pcache1Fetch || original->xUnpin!=pcache1Unpin || original->xRekey!=pcache1Rekey || original->xTruncate!=pcache1Truncate || original->xDestroy!=pcache1Destroy || original->xShrink!=pcache1Shrink){ rc=SQLITE_MISUSE; break; }\n      sqlite3GlobalConfig.pcache2 = *original;",
     )?;
     replace(
         &mut s,

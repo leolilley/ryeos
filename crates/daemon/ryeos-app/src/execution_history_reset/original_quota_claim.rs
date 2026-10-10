@@ -26,9 +26,8 @@ use super::offline_policy::OfflineResetPolicyOwner;
 use super::original_operation::OriginalOperation;
 use ryeos_node_runtime::identity::NodeIdentity;
 
-#[path = "offline_resident.rs"]
-mod offline_resident;
-use offline_resident::OfflineResident;
+use lillux_sqlite::original_host_owner::region::NativeHostRegion;
+pub(super) const HOST_RELEASE_ATTEMPTS: u64 = 8;
 static OFFLINE_RESIDENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 const PREFIX: &str = "reserved.";
@@ -203,7 +202,7 @@ pub(super) struct OriginalQuotaClaim {
     copy_issuer: Mutex<Option<std::sync::Weak<OriginalCopyWork>>>,
     native_factory: Mutex<Option<std::sync::Weak<lillux_sqlite::OriginalNativeFactory>>>,
     native_admission: Mutex<Option<std::sync::Weak<OriginalNativeQuotaAdmission>>>,
-    resident: Mutex<OfflineResident>,
+    resident: Mutex<NativeHostRegion>,
     _prior_operation: Option<Arc<OriginalOperation>>,
     _source_roots: [lillux::PinnedDirectory; 2],
     _source_pins: Vec<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>,
@@ -1951,7 +1950,16 @@ impl OriginalQuotaClaim {
                 _policy: std::mem::ManuallyDrop::new(policy), _production: std::mem::ManuallyDrop::new(production), raw_budget: Mutex::new(Some(budget)),
             })),
         };
-        let budget = match resident.initialize(budget, |_| self.require_published(owner, identity)) {
+        let initialized = (|| -> Result<Arc<lillux_sqlite::OriginalNativeBudgetOwner>> {
+            let mut checkpoint = || self.require_published(owner, identity);
+            resident.enter(budget, HOST_RELEASE_ATTEMPTS, &mut checkpoint)?;
+            resident.map_resident(&mut checkpoint)?;
+            // SAFETY: the signed offline reservation durably debited this
+            // exact resident extent within its memory cap; its generation was
+            // bound at claim creation from a nonrecycled process counter.
+            unsafe { resident.initialize(self.record.resident_generation) }
+        })();
+        let budget = match initialized {
             Ok(budget) => budget,
             Err(error) => return Err(anyhow::Error::new(OriginalNativeQuotaPreparationFailure {
                 error, _claim: std::mem::ManuallyDrop::new(self.clone()), _state_lifetime: std::mem::ManuallyDrop::new(state_lifetime),
@@ -2024,7 +2032,7 @@ impl OriginalQuotaClaim {
         let cleanup = lillux_sqlite::OriginalNativeFactory::required_cleanup_steps(
             quota.max_native_storage_bytes,
             quota.max_native_connections,
-        )?.checked_add(offline_resident::HOST_RELEASE_ATTEMPTS)
+        )?.checked_add(HOST_RELEASE_ATTEMPTS)
             .context("offline native/physical cleanup quote overflow")?;
         let admission = self.issue_native_quota_admission(
             owner,
@@ -2942,7 +2950,7 @@ impl OriginalQuotaClaim {
             copy_issuer: Mutex::new(None),
             native_factory: Mutex::new(None),
             native_admission: Mutex::new(None),
-            resident: Mutex::new(OfflineResident::empty(resident_generation, resident_layout)),
+            resident: Mutex::new(NativeHostRegion::new(resident_layout)),
             _prior_operation: prior.cloned(),
             _source_roots: source_roots,
             // Safety: actual ordered O_PATH metadata owners captured under
@@ -5380,7 +5388,7 @@ mod clock_controls {
                 .is_err()
         );
         let admission = claim
-            .issue_native_quota_admission(&policy, &identity, limits.max_native_storage_bytes, 8 + offline_resident::HOST_RELEASE_ATTEMPTS)
+            .issue_native_quota_admission(&policy, &identity, limits.max_native_storage_bytes, 8 + HOST_RELEASE_ATTEMPTS)
             .unwrap();
         assert!(
             claim
@@ -5388,7 +5396,7 @@ mod clock_controls {
                     &policy,
                     &identity,
                     limits.max_native_storage_bytes,
-                    8 + offline_resident::HOST_RELEASE_ATTEMPTS
+                    8 + HOST_RELEASE_ATTEMPTS
                 )
                 .is_err()
         );
@@ -5398,7 +5406,7 @@ mod clock_controls {
             assert_eq!(issuer.kind, OriginalProducerKind::NativeQuotaIssuer);
             assert!(!issuer.completed.load(Ordering::Acquire));
         }
-        let cleanup_reserved = 8 + offline_resident::HOST_RELEASE_ATTEMPTS;
+        let cleanup_reserved = 8 + HOST_RELEASE_ATTEMPTS;
         let remaining_service = limits.max_native_allocator_steps - cleanup_reserved;
         let preparation_steps = admission.budget.snapshot().unwrap().allocator_steps;
         admission.debit_allocator_steps(remaining_service - preparation_steps).unwrap();

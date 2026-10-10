@@ -1482,7 +1482,7 @@ impl PreparedReplayIndexReset {
                 unreachable!()
             };
             ensure_operational_bindings(db)?;
-            db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path))
+            db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path, db.current_schema_reference()))
         })();
         let report = match prepared {
             Ok(report) => report,

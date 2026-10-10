@@ -7,7 +7,7 @@ description = "CAS-as-truth persistence plane for RyeOS"
 
 [features]
 default = []
-test-support = []
+test-support = ["lillux-sqlite/test-support"]
 
 [dependencies]
 lillux = { workspace = true }

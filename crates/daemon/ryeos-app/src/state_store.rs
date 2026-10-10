@@ -8055,7 +8055,7 @@ impl StateStore {
             .map_err(|error| {
                 anyhow!("cannot acquire write permit for projection verification: {error}")
             })?;
-        let g = self.lock()?;
+        let mut g = self.lock()?;
         g.state_db.verify_projection_generation()
     }
 

@@ -13,5 +13,9 @@ lillux = { path = "../lillux" }
 rusqlite = { workspace = true }
 libsqlite3-sys = { version = "0.28.0", features = ["ryeos-bound-vfs"] }
 
+[features]
+# Test-only native host; never enable outside [dev-dependencies].
+test-support = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
