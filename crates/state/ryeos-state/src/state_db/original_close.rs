@@ -1832,7 +1832,7 @@ impl StateDb {
                 .context("original State namespace absent")?
                 .ensure_protects(&self._runtime_state_directory)?;
             anyhow::ensure!(
-                self.recovery.thread_history_discard_operation()?.as_ref() == operation,
+                self.recovery.thread_history_discard_operation_scoped(&factory)?.as_ref() == operation,
                 "original State retirement operation differs from active marker"
             );
             Ok(())

@@ -2101,16 +2101,18 @@ impl LiveNativeCapacityReservation {
             physical_registry: Mutex::new(None),
         };
         let result = (|| -> Result<()> {
-            let mut account = original
+            let mut account_guard = original
                 .account
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("original capacity account busy"))?;
-            let account = account
+            let account = account_guard
                 .as_mut()
                 .context("original capacity account owner absent")?;
             account.debit(&original.inputs)?;
             account.require_original_debit(&original.inputs, false)?;
-            drop(account);
+            // Release the lock itself, not only the borrowed owner, before
+            // later original-authority checks reacquire the same account.
+            drop(account_guard);
             // SAFETY: the same original verified allowance durably and
             // irreversibly paid precisely these dimensions before conversion;
             // this retained owner holds original inputs/exclusion/clock and

@@ -191,10 +191,11 @@ impl OperationalMarkerSource {
                 .context("original Operational marker disappeared after funding")?;
             // SAFETY: this is the exact descriptor captured from the admitted
             // Operational marker path, and this owner registers and retires it
-            // under the same original outside funding and registry.
+            // under the same original outside funding and registry. The marker
+            // is pinned metadata-only, so it retires as a metadata pin.
             let owner = unsafe { lillux_sqlite::RetainedOriginalFinalizerFile::issued(
                 file,
-                lillux_sqlite::OriginalFinalizerFileKind::ControlRecord,
+                lillux_sqlite::OriginalFinalizerFileKind::MetadataPin,
             ) };
             self.state = OperationalMarkerState::Pending(owner);
         }
@@ -230,9 +231,8 @@ impl OperationalMarkerSource {
             "Operational marker source descriptor remains outside the registry");
         match &self.state {
             OperationalMarkerState::Registered { registration, owner } => {
-                registry.require_membership(registration)?;
-                anyhow::ensure!(Arc::ptr_eq(&registration.owner()?, owner),
-                    "Operational marker registration changed its actual owner");
+                registry.require_control_record_source(registration, owner)
+                    .context("Operational marker registration changed its actual owner")?;
                 anyhow::ensure!(matches!(registration.observed_source_identity()?,
                     lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::ControlRecord { .. }),
                     "Operational marker registration changed role");
@@ -1692,7 +1692,12 @@ mod outside_quote_tests {
 
     #[test]
     fn live_marker_uses_same_registry_and_exact_retired_close_receipt() {
-        let mut marker = Some(tempfile::tempfile().unwrap());
+        // The live marker is a metadata-only pin, exactly as Operational
+        // startup captures it.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("marker"), b"m").unwrap();
+        let pinned = lillux::PinnedDirectory::open(directory.path()).unwrap().unwrap();
+        let mut marker = Some(pinned.open_mount_entry(std::ffi::OsStr::new("marker")).unwrap().unwrap());
         let mut source = OperationalMarkerSource::new();
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
 

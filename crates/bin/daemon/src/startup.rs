@@ -347,6 +347,10 @@ fn advance_startup_stage(current: StartupStage, phase: StartupPhase) -> Result<S
         }
 
         (Stage::InitialHeadReplay, Phase::ReplayingHeadChanges) => Stage::InitialHeadReplay,
+        // Without scheduling there is no scheduler projection recovery, so the
+        // terminal-history replay stays in this stage and threads follow it.
+        #[cfg(not(feature = "scheduling"))]
+        (Stage::InitialHeadReplay, Phase::ReconcilingThreads) => Stage::ReconcilingThreads,
         (Stage::InitialHeadReplay, Phase::RecoveringSchedulerProjection) => {
             Stage::RecoveringSchedulerProjection
         }
@@ -385,6 +389,24 @@ fn advance_startup_stage(current: StartupStage, phase: StartupPhase) -> Result<S
         ),
     };
     Ok(next)
+}
+
+/// The last reconciliation stage before Ready. Scheduling builds end in
+/// scheduler reconciliation; without scheduling, startup ends after follow
+/// reconciliation or its post-reconcile projection repair.
+fn ready_stage_complete(stage: StartupStage, phase: StartupPhase) -> bool {
+    #[cfg(feature = "scheduling")]
+    {
+        stage == StartupStage::ReconcilingScheduler && phase == StartupPhase::ReconcilingScheduler
+    }
+    #[cfg(not(feature = "scheduling"))]
+    {
+        matches!(
+            (stage, phase),
+            (StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow)
+                | (StartupStage::PostReconcileHeadReplay, StartupPhase::ReplayingHeadChanges)
+        )
+    }
 }
 
 /// Publishes one monotonic lifecycle stream to both stable front doors.
@@ -692,10 +714,8 @@ impl StartupCoordinator {
             .state
             .lock()
             .map_err(|_| anyhow!("startup coordinator poisoned"))?;
-        if state.stage != StartupStage::ReconcilingScheduler
-            || state.snapshot.phase != StartupPhase::ReconcilingScheduler
-        {
-            anyhow::bail!("Ready requires completed scheduler reconciliation");
+        if !ready_stage_complete(state.stage, state.snapshot.phase) {
+            anyhow::bail!("Ready requires completed startup reconciliation");
         }
         let previous_phase = state.snapshot.phase;
         let previous_duration = state.phase_started.elapsed();
@@ -974,6 +994,51 @@ mod tests {
             stage = advance_startup_stage(stage, phase).unwrap();
         }
         assert_eq!(stage, StartupStage::ReconcilingScheduler);
+    }
+
+    #[cfg(not(feature = "scheduling"))]
+    #[test]
+    fn startup_stage_without_scheduling_reconciles_after_terminal_replay() {
+        let mut stage = StartupStage::Bootstrapping;
+        for phase in [
+            StartupPhase::OpeningProjection,
+            StartupPhase::ReplayingHeadChanges,
+            StartupPhase::ReplayingHeadChanges,
+            StartupPhase::ReconcilingThreads,
+            StartupPhase::ReconcilingFollow,
+            StartupPhase::ReplayingHeadChanges,
+        ] {
+            stage = advance_startup_stage(stage, phase).unwrap();
+        }
+        assert_eq!(stage, StartupStage::PostReconcileHeadReplay);
+    }
+
+    #[test]
+    fn ready_requires_the_build_s_final_reconciliation_stage() {
+        assert!(!ready_stage_complete(StartupStage::ReconcilingThreads, StartupPhase::ReconcilingThreads));
+        assert!(!ready_stage_complete(StartupStage::InitialHeadReplay, StartupPhase::ReplayingHeadChanges));
+        #[cfg(not(feature = "scheduling"))]
+        {
+            assert!(ready_stage_complete(StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow));
+            assert!(ready_stage_complete(StartupStage::PostReconcileHeadReplay, StartupPhase::ReplayingHeadChanges));
+        }
+        #[cfg(feature = "scheduling")]
+        {
+            assert!(!ready_stage_complete(StartupStage::ReconcilingFollow, StartupPhase::ReconcilingFollow));
+            assert!(ready_stage_complete(StartupStage::ReconcilingScheduler, StartupPhase::ReconcilingScheduler));
+        }
+    }
+
+    #[cfg(feature = "scheduling")]
+    #[test]
+    fn startup_stage_with_scheduling_requires_scheduler_recovery_before_threads() {
+        assert!(
+            advance_startup_stage(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::ReconcilingThreads,
+            )
+            .is_err()
+        );
     }
 
     #[test]

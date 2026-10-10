@@ -178,6 +178,11 @@ impl TestNativeHost {
         self.live().terminals.borrow_mut().push(terminal);
     }
 
+    /// Record a closed projection lease for the final census.
+    pub fn retain_lease(&self, lease: Arc<crate::ClosedOriginalProjectionLease>) {
+        self.live().leases.borrow_mut().push(lease);
+    }
+
     /// Issued ticket count and recorded terminals.
     pub fn ticket_census(&self) -> (u32, usize) {
         let live = self.live();
@@ -224,6 +229,7 @@ struct LiveTestHost {
     destination: Arc<TestDestination>,
     factory: Arc<OriginalNativeFactory>,
     terminals: RefCell<Vec<OriginalNativeConnectionTerminal>>,
+    leases: RefCell<Vec<Arc<crate::ClosedOriginalProjectionLease>>>,
 }
 
 impl LiveTestHost {
@@ -280,13 +286,15 @@ impl LiveTestHost {
             destination,
             factory,
             terminals: RefCell::new(Vec::new()),
+            leases: RefCell::new(Vec::new()),
         })
     }
 
     /// Drain, finish, seal and release. A refusal returns the census text.
     fn finish(self) -> std::result::Result<(), String> {
-        let LiveTestHost { mut region, admission, destination, factory, terminals } = self;
+        let LiveTestHost { mut region, admission, destination, factory, terminals, leases } = self;
         let terminals = terminals.into_inner();
+        let leases = leases.into_inner();
         let resident_bytes = region.bytes();
         let census = || {
             let issued = factory.budget_snapshot().map(|snapshot| snapshot.connections_issued);
@@ -304,7 +312,7 @@ impl LiveTestHost {
             Ok(inputs) => inputs,
             Err(error) => return Err(format!("drain refused: {error:#}; {}", census())),
         };
-        let terminal = match factory.finish_live_backend(&terminals, &[], &drained) {
+        let terminal = match factory.finish_live_backend(&terminals, &leases, &drained) {
             Ok(terminal) => terminal,
             Err(failure) => return Err(format!("finish refused: {failure}; {}", census())),
         };
@@ -315,6 +323,7 @@ impl LiveTestHost {
         drop(terminal);
         drop(drained);
         drop(terminals);
+        drop(leases);
         drop(destination);
         drop(factory);
         drop(admission);
@@ -534,5 +543,184 @@ mod tests {
             .expect("absent bound database refused");
         host.retire_open_failure(failure);
         assert_eq!(host.ticket_census(), (1, 1));
+    }
+
+    /// Native allocation cost must not grow with the blocks other
+    /// connections keep live, and freed blocks must be reused.
+    #[test]
+    fn allocation_cost_is_independent_of_live_blocks() {
+        let host = TestNativeHost::acquire();
+        let ddl: String = (0..60)
+            .map(|n| format!("CREATE TABLE t{n}(a INTEGER PRIMARY KEY, b TEXT, c BLOB); CREATE INDEX i{n} ON t{n}(b, c);"))
+            .collect();
+        let steps = || host.factory().budget_snapshot().unwrap().allocator_steps;
+        let mut held = Vec::new();
+        let mut costs = Vec::new();
+        for _ in 0..6 {
+            let before = steps();
+            let connection = host.open_transient();
+            connection.with_sql(|sql| Ok(sql.execute_batch(&ddl)?)).unwrap();
+            costs.push(steps() - before);
+            held.push(connection);
+        }
+        assert!(costs.iter().all(|cost| *cost <= costs[0] + costs[0] / 4), "{costs:?}");
+        let churn = held.pop().unwrap();
+        for _ in 0..50 {
+            churn
+                .with_sql(|sql| {
+                    Ok(sql.execute_batch(
+                        "CREATE TABLE scratch(x BLOB); INSERT INTO scratch VALUES(zeroblob(65536)); DROP TABLE scratch;",
+                    )?)
+                })
+                .unwrap();
+        }
+        held.push(churn);
+        for connection in held {
+            host.close(connection);
+        }
+    }
+
+    /// The bound VFS has no rollback-journal role, so a database the native
+    /// factory creates must already be in WAL when it is handed over, and
+    /// ordinary writes must then succeed.
+    #[test]
+    fn created_bound_database_is_writable_in_wal() {
+        for mode in [OriginalNativeBoundMode::CreateExclusive, OriginalNativeBoundMode::OpenOrCreate] {
+            let host = TestNativeHost::acquire();
+            let tmp = tempfile::tempdir().unwrap();
+            let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+            let connection = match host.open_bound(root, OsStr::new("runtime.sqlite3"), mode,
+                OriginalNativeDomain::NodeRuntime) {
+                Ok(connection) => connection,
+                Err(failure) => {
+                    let error = failure.to_string();
+                    host.retire_open_failure(failure);
+                    panic!("{mode:?} bound create refused: {error}");
+                }
+            };
+            let (journal, value) = connection
+                .with_sql(|sql| {
+                    sql.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")?;
+                    let journal: String = sql.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+                    let value: i64 = sql.query_row("SELECT x FROM t", [], |row| row.get(0))?;
+                    Ok((journal, value))
+                })
+                .unwrap();
+            assert_eq!((journal.as_str(), value), ("wal", 7), "{mode:?}");
+            assert!(!tmp.path().join("runtime.sqlite3-journal").exists());
+            host.close(connection);
+        }
+    }
+
+    /// A generated projection's closed-main durability gate consults the
+    /// native lease census; a held generation lease must not read as an
+    /// alias of the projection it guards.
+    struct AdmittedLease;
+    impl crate::OriginalNativeProjectionLeaseAuthority for AdmittedLease {
+        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+            Ok(())
+        }
+        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
+            -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(Duration::from_secs(60)))
+        }
+    }
+
+    #[test]
+    fn generated_bound_durability_succeeds_while_a_projection_lease_is_held() {
+        let host = TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
+        let metadata = root.open_mount_entry(OsStr::new("generated.sqlite3.lease")).unwrap().unwrap();
+        let authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        // SAFETY: test-only lease under this host's own funded factory; the
+        // metadata inode is a fresh regular file no SQLite role uses.
+        let inputs = unsafe {
+            crate::OriginalProjectionLeaseInputs::issued(
+                Arc::clone(&root), metadata, crate::OriginalProjectionLeaseMode::Exclusive, authority,
+            )
+        };
+        let lease = match host.factory().acquire_projection_lease(inputs) {
+            Ok(lease) => lease,
+            Err(failure) => panic!("test lease refused: {failure}"),
+        };
+        let connection = match host.open_bound(root, OsStr::new("generated.sqlite3"),
+            OriginalNativeBoundMode::CreateExclusive, OriginalNativeDomain::StateGeneratedProjection) {
+            Ok(connection) => connection,
+            Err(failure) => {
+                let error = failure.to_string();
+                host.retire_open_failure(failure);
+                panic!("generated bound create refused: {error}");
+            }
+        };
+        connection
+            .with_sql(|sql| {
+                sql.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")?;
+                let (busy, frames, checkpointed): (i64, i64, i64) = sql
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                ensure!(busy == 0 && frames == checkpointed, "checkpoint incomplete");
+                Ok(())
+            })
+            .unwrap();
+        let closed = match connection.close() {
+            Ok(closed) => closed,
+            Err(failure) => panic!("generated close retained: {failure}"),
+        };
+        let synced = closed.sync_generated_bound().map(|_| ()).map_err(|failure| failure.to_string());
+        host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed));
+        match lease.close() {
+            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => host.retain_lease(closed),
+            Ok(_) => panic!("held lease closed as never acquired"),
+            Err(failure) => panic!("test lease close retained: {failure}"),
+        }
+        synced.unwrap();
+    }
+    /// A guarded evidence read under a held projection lease succeeds only
+    /// inside the owning factory's native scope. Unscoped, the lease census
+    /// has no owner to answer for and the read refuses; scoped, a lease on
+    /// the read inode itself still refuses.
+    #[test]
+    fn guarded_read_succeeds_under_a_held_projection_lease_only_when_scoped() {
+        let host = TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
+        std::fs::write(tmp.path().join("generation.json"), b"{}").unwrap();
+        let metadata = root.open_mount_entry(OsStr::new("generated.sqlite3.lease")).unwrap().unwrap();
+        let authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        // SAFETY: test-only lease under this host's own funded factory; the
+        // metadata inode is a fresh regular file no SQLite role uses.
+        let inputs = unsafe {
+            crate::OriginalProjectionLeaseInputs::issued(
+                Arc::clone(&root), metadata, crate::OriginalProjectionLeaseMode::Exclusive, authority,
+            )
+        };
+        let lease = match host.factory().acquire_projection_lease(inputs) {
+            Ok(lease) => lease,
+            Err(failure) => panic!("test lease refused: {failure}"),
+        };
+        let unscoped = crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64)
+            .map_err(|error| error.to_string());
+        let scoped = host.factory()
+            .read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64)
+            .map_err(|error| error.to_string());
+        let scoped_leased = host.factory()
+            .read_regular_without_sqlite_alias(&root, OsStr::new("generated.sqlite3.lease"), 64)
+            .map_err(|error| error.to_string());
+        match lease.close() {
+            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => host.retain_lease(closed),
+            Ok(_) => panic!("held lease closed as never acquired"),
+            Err(failure) => panic!("test lease close retained: {failure}"),
+        }
+        let refused = unscoped.expect_err("unscoped guarded read must refuse under a held lease");
+        assert!(refused.contains("refused (5)"), "{refused}");
+        assert_eq!(scoped.unwrap(), Some(b"{}".to_vec()));
+        let refused = scoped_leased.expect_err("scoped read of the leased inode must refuse");
+        assert!(refused.contains("refused (5)"), "{refused}");
+        assert_eq!(
+            crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64).unwrap(),
+            Some(b"{}".to_vec())
+        );
     }
 }

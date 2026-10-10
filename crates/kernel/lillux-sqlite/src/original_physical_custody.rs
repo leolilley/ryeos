@@ -198,7 +198,9 @@ impl OriginalPhysicalRegistration {
             .owner
             .get()
             .cloned()
-            .context("original physical owner not transferred")
+            .with_context(|| format!(
+                "original physical owner not transferred (slot {}, operator {}, source {:?})",
+                self.observation.slot_index, self.observation.operator, self.observation.source_identity))
     }
     pub fn receipt(&self) -> Result<Arc<RetiredOriginalFinalizerFile>> {
         ensure!(
@@ -518,7 +520,9 @@ impl OriginalPhysicalRegistry {
         owner: Arc<RetainedOriginalFinalizerFile>,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> std::result::Result<OriginalPhysicalRegistration, (Arc<RetainedOriginalFinalizerFile>, anyhow::Error)> {
-        if owner.kind() != OriginalFinalizerFileKind::ControlRecord {
+        if !matches!(owner.kind(),
+            OriginalFinalizerFileKind::ControlRecord | OriginalFinalizerFileKind::MetadataPin)
+        {
             return Err((owner, anyhow::anyhow!("physical control registration has a foreign role")));
         }
         match self.register(Source::ControlRecord(owner), prepay) {
@@ -676,6 +680,7 @@ impl OriginalPhysicalRegistry {
     ) -> Result<()> {
         self.require_process()?;
         ensure!(self.sealed, "original physical inventory still open");
+        let mut shared = None;
         for slot in self.slots.iter_mut() {
             if slot.observation.owner.get().is_some() {
                 continue;
@@ -737,12 +742,20 @@ impl OriginalPhysicalRegistry {
                     assert!(slot.observation.owner.set(owner).is_ok());
                 }
                 Err(source) => {
+                    let holders = match &source {
+                        Source::Directory(actual) => Arc::strong_count(actual),
+                        _ => 0,
+                    };
                     slot.source = Some(source);
-                    anyhow::bail!(
-                        "original physical source still shared outside complete inventory"
-                    );
+                    shared = Some((slot.observation.slot_index, slot.observation.source_identity, holders));
+                    break;
                 }
             }
+        }
+        if let Some((index, identity, holders)) = shared {
+            anyhow::bail!(
+                "original physical source still shared outside complete inventory (slot {index}, source {identity:?}, strong holders {holders})"
+            );
         }
         Ok(())
     }
@@ -832,6 +845,27 @@ impl OriginalPhysicalRegistry {
         ensure!(matches!(slot.source.as_ref(), Some(Source::Directory(actual))
             if Arc::ptr_eq(actual, directory)),
             "original directory source is foreign or already transferred");
+        Ok(())
+    }
+    /// Borrowed proof that `owner` is the exact control-record owner of this
+    /// membership: still retained as the registry source before descriptor
+    /// preparation, or moved into the sealed observation afterwards. A copied
+    /// identity or another owner allocation never qualifies.
+    pub fn require_control_record_source(
+        &self,
+        registration: &OriginalPhysicalRegistration,
+        owner: &Arc<RetainedOriginalFinalizerFile>,
+    ) -> Result<()> {
+        self.require_membership(registration)?;
+        let slot = self.slots.iter().find(|slot|
+            Arc::ptr_eq(&slot.observation, &registration.observation))
+            .context("actual original control-record membership slot absent")?;
+        let retained = match slot.source.as_ref() {
+            Some(Source::ControlRecord(actual)) => Arc::ptr_eq(actual, owner),
+            Some(_) => false,
+            None => slot.observation.owner.get().is_some_and(|actual| Arc::ptr_eq(actual, owner)),
+        };
+        ensure!(retained, "original control-record source is foreign or changed owner");
         Ok(())
     }
     /// Prove that `lock` is the exact live allocation retained by this
@@ -983,7 +1017,11 @@ impl OriginalPhysicalRegistry {
                     if let Some(receipt) = owner.completed_close_receipt()? {
                         self.retain_retirement(&registration, Arc::new(receipt))?;
                     }
-                    return Err(error);
+                    return Err(error.context(format!(
+                        "retire original descriptor (slot {}, role {:?}, source {:?})",
+                        registration.observation.slot_index, owner.kind(),
+                        registration.observation.source_identity,
+                    )));
                 }
             };
             self.retain_retirement(&registration, Arc::new(receipt))?;
@@ -1052,7 +1090,11 @@ impl OriginalPhysicalRegistry {
                     if let Some(receipt) = owner.completed_close_receipt()? {
                         self.retain_retirement(&registration, Arc::new(receipt))?;
                     }
-                    return Err(error);
+                    return Err(error.context(format!(
+                        "retire original descriptor (slot {}, role {:?}, source {:?})",
+                        registration.observation.slot_index, owner.kind(),
+                        registration.observation.source_identity,
+                    )));
                 }
             };
             self.retain_retirement(&registration, Arc::new(receipt))?;
@@ -1123,6 +1165,77 @@ mod tests {
             Ok(())
         }
         fn debit_original_steps(&self, _work: u64) -> Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn control_record_owner_joins_before_and_after_descriptor_preparation() {
+        let issued = || unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                tempfile::tempfile().unwrap(),
+                crate::OriginalFinalizerFileKind::ControlRecord,
+            )
+        };
+        let owner = issued();
+        let foreign = issued();
+        let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
+        let membership = unsafe {
+            registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(()))
+        }.map_err(|(_, error)| error).unwrap();
+        // Before sealing, the owner is still the registry source and has not
+        // been published to the observation.
+        assert!(membership.owner().is_err());
+        registry.require_control_record_source(&membership, &owner).unwrap();
+        assert!(registry.require_control_record_source(&membership, &foreign).is_err());
+        unsafe { registry.seal_inventory() }.unwrap();
+        unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
+        assert!(Arc::ptr_eq(&membership.owner().unwrap(), &owner));
+        registry.require_control_record_source(&membership, &owner).unwrap();
+        assert!(registry.require_control_record_source(&membership, &foreign).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn metadata_pin_retires_only_through_the_metadata_close_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("marker"), b"m").unwrap();
+        let directory = lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let metadata_pin = || directory
+            .open_mount_entry(std::ffi::OsStr::new("marker")).unwrap().unwrap();
+        let inputs = |owner: Arc<RetainedOriginalFinalizerFile>| {
+            let authority = Arc::new(FixtureClose {
+                owner: owner.clone(),
+                work: std::sync::Mutex::new(32),
+            });
+            Arc::new(unsafe {
+                crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)
+            }.unwrap())
+        };
+
+        // A metadata-only pin cannot pass as a data control record, and a data
+        // descriptor cannot pass as a metadata pin. Neither refusal consumes.
+        let mislabeled_pin = unsafe { RetainedOriginalFinalizerFile::issued(
+            metadata_pin(), crate::OriginalFinalizerFileKind::ControlRecord) };
+        assert!(mislabeled_pin.retire_after_outside_handoff(&inputs(mislabeled_pin.clone())).is_err());
+        assert!(mislabeled_pin.completed_close_receipt().unwrap().is_none());
+        let mislabeled_data = unsafe { RetainedOriginalFinalizerFile::issued(
+            std::fs::File::open(temporary.path().join("marker")).unwrap(),
+            crate::OriginalFinalizerFileKind::MetadataPin) };
+        assert!(mislabeled_data.retire_after_outside_handoff(&inputs(mislabeled_data.clone())).is_err());
+        assert!(mislabeled_data.completed_close_receipt().unwrap().is_none());
+
+        let owner = unsafe { RetainedOriginalFinalizerFile::issued(
+            metadata_pin(), crate::OriginalFinalizerFileKind::MetadataPin) };
+        let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
+        unsafe { registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(())) }
+            .map_err(|(_, error)| error).unwrap();
+        unsafe { registry.seal_inventory() }.unwrap();
+        unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
+        unsafe {
+            registry.retire_non_operator_descriptors(&|_, _| Ok(()), &|_, owner| Ok(inputs(owner)))
+        }.unwrap();
+        assert!(registry.descriptors_retired());
+        assert!(owner.completed_close_receipt().unwrap().is_some());
+        assert!(registry.retire().is_ok());
     }
 
     #[cfg(target_os = "linux")]

@@ -1777,6 +1777,30 @@ impl OriginalNativeFactory {
         self.require_process()?;
         self.storage()?.arena.get().context("original native arena absent")
     }
+    /// Guarded evidence read run inside this factory's native scope. The
+    /// alias gate's projection-lease census then answers for this genuine
+    /// owner, so a lease this factory holds on another inode no longer
+    /// refuses the read; a lease on the read inode still does. The unscoped
+    /// free function keeps refusing whenever any lease is listed.
+    pub fn read_regular_without_sqlite_alias(
+        &self,
+        runtime: &PinnedDirectory,
+        name: &std::ffi::OsStr,
+        maximum_bytes: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        self.require_original(false)?;
+        let result = {
+            let _scope = self.arena()?.scope(false, 0)?;
+            crate::read_regular_without_sqlite_alias(runtime, name, maximum_bytes)
+        };
+        let post = self.require_original(false);
+        match (result, post) {
+            (Err(original), Err(post)) => Err(original.context(post)),
+            (Err(original), _) => Err(original),
+            (Ok(_), Err(post)) => Err(post),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
     pub fn initialize_original_backend(
         self: &Arc<Self>,
     ) -> std::result::Result<(), OriginalNativeFactoryFailure> {
@@ -1999,6 +2023,19 @@ impl OriginalNativeFactory {
             body.connection().busy_timeout(std::time::Duration::ZERO)?;
             body.connection().pragma_update(None, "mmap_size", 0)?;
             body.connection().pragma_update(None, "threads", 0)?;
+            // The bound VFS admits main and WAL roles only, never a rollback
+            // journal file, so a database this owner just created cannot take
+            // its first write through one. It enters WAL through an in-memory
+            // rollback journal; there is no prior content for that to protect.
+            if let NativeConnectionBody::Bound(owner) = body {
+                if owner.origin() == crate::BoundSqliteOrigin::Created {
+                    let staged: String = owner.connection()
+                        .query_row("PRAGMA journal_mode=MEMORY", [], |row| row.get(0))?;
+                    let mode: String = owner.connection()
+                        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+                    ensure!(staged == "memory" && mode == "wal", "created bound database did not enter WAL");
+                }
+            }
             self.require_original(false)?;
             Ok(())
         })();
@@ -3318,6 +3355,10 @@ impl ClosedOriginalNativeConnection {
                     self.factory.require_original(false)?;
                     inputs.authority.require_original(&self.factory)?;
                     self.factory.budget.debit_steps(1, false)?;
+                    // The closed-main gate consults the native projection
+                    // lease census, which only answers inside a service scope;
+                    // outside one every listed lease reads as blocking.
+                    let _scope = self.factory.arena()?.scope(false, 0)?;
                     let outcome = body.main.with_original_file(|main| {
                         if let Some(wal) = &body.wal {
                             wal.with_original_file(|wal| {
@@ -4836,6 +4877,10 @@ pub enum OriginalFinalizerFileKind {
     Directory = 1,
     DirectoryLock = 2,
     StateLock = 3,
+    /// Actual metadata-only (`O_PATH`) regular control pin. It can carry no
+    /// data lock, so it closes through the metadata-pin path, which refuses
+    /// any data descriptor; the data-descriptor path refuses this one.
+    MetadataPin = 4,
 }
 pub trait OriginalFinalizerFileRetirementAuthority: Send + Sync {
     fn require_original(
@@ -5014,7 +5059,8 @@ impl RetainedOriginalFinalizerFile {
     fn require_kind(&self, metadata: std::fs::Metadata) -> Result<bool> {
         require_current_native_process()?;
         Ok(match self.kind {
-            OriginalFinalizerFileKind::ControlRecord | OriginalFinalizerFileKind::StateLock => {
+            OriginalFinalizerFileKind::ControlRecord | OriginalFinalizerFileKind::StateLock
+            | OriginalFinalizerFileKind::MetadataPin => {
                 metadata.is_file()
             }
             OriginalFinalizerFileKind::Directory | OriginalFinalizerFileKind::DirectoryLock => {
@@ -5121,12 +5167,19 @@ impl RetainedOriginalFinalizerFile {
                 .identity
                 .get()
                 .context("original finalizer identity absent")?;
-            let result = crate::binding::close_original_finalizer_file(
-                *fd,
-                identity.device(),
-                identity.inode(),
-                self.kind as i32,
-            );
+            let result = match self.kind {
+                OriginalFinalizerFileKind::MetadataPin => crate::binding::close_original_metadata_pin(
+                    *fd,
+                    identity.device(),
+                    identity.inode(),
+                ),
+                kind => crate::binding::close_original_finalizer_file(
+                    *fd,
+                    identity.device(),
+                    identity.inode(),
+                    kind as i32,
+                ),
+            };
             if result.consumed {
                 *state = if result.code == libsqlite3_sys::SQLITE_OK && result.observed_errno == 0 {
                     OriginalMetadataPinState::Retired

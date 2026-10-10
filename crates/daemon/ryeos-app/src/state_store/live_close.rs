@@ -861,16 +861,21 @@ impl ClosedLiveStateStore {
         super::live_outside::retire_original_packet_metadata_pins(&mut p.operational_packet_parts,
             factory, aggregate, super::live_outside::OriginalPacketSourceKind::Operational,
             prepay, &registry_identity, issue_metadata_pin_inputs)?;
-        super::live_outside::register_original_packet_destination_roots(
-            &mut p.scheduler_packet_parts, super::live_outside::OriginalPacketSourceKind::Scheduler,
-            registry, prepay)?;
-        super::live_outside::require_original_packet_root_handoffs(&p.scheduler_packet_parts,
-            factory, aggregate, super::live_outside::OriginalPacketSourceKind::Scheduler)?;
-        super::live_outside::retire_original_packet_native_references(&mut p.scheduler_packet_parts,
-            factory, aggregate, super::live_outside::OriginalPacketSourceKind::Scheduler, prepay)?;
-        super::live_outside::retire_original_packet_metadata_pins(&mut p.scheduler_packet_parts,
-            factory, aggregate, super::live_outside::OriginalPacketSourceKind::Scheduler,
-            prepay, &registry_identity, issue_metadata_pin_inputs)?;
+        // A Store with no selected Scheduler database has no Scheduler packet
+        // inventory; the same optional census applies on the failed-startup
+        // path and in the pre-seal/transfer checks.
+        if p.scheduler_packet_parts.is_some() {
+            super::live_outside::register_original_packet_destination_roots(
+                &mut p.scheduler_packet_parts, super::live_outside::OriginalPacketSourceKind::Scheduler,
+                registry, prepay)?;
+            super::live_outside::require_original_packet_root_handoffs(&p.scheduler_packet_parts,
+                factory, aggregate, super::live_outside::OriginalPacketSourceKind::Scheduler)?;
+            super::live_outside::retire_original_packet_native_references(&mut p.scheduler_packet_parts,
+                factory, aggregate, super::live_outside::OriginalPacketSourceKind::Scheduler, prepay)?;
+            super::live_outside::retire_original_packet_metadata_pins(&mut p.scheduler_packet_parts,
+                factory, aggregate, super::live_outside::OriginalPacketSourceKind::Scheduler,
+                prepay, &registry_identity, issue_metadata_pin_inputs)?;
+        }
         let registry = p.physical_registry.as_mut()
             .context("actual Store physical registry absent before retirement permit")?;
         super::live_outside::prepare_original_packet_destination_retirements(
@@ -1139,7 +1144,7 @@ impl std::fmt::Debug for LiveStateStoreCloseFailure {
     }
 }
 impl std::fmt::Display for LiveStateStoreCloseFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "live Store close retained: {}", self.error) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "live Store close retained: {:#}", self.error) }
 }
 impl std::error::Error for LiveStateStoreCloseFailure {}
 impl LiveStateStoreCloseFailure {
@@ -1187,10 +1192,13 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
                 Ok(())
             })();
             if let Err(error) = checked { return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Store(store))); }
-            let StateStore { live_native_open, state_authority, thread_runtime_authority, inner, projection_health,
-                read_only, allow_projection_rebuild, write_barrier, process_attachment_admission_open,
-                process_attachment_admission_closed, attached_thread_ids, selected_invocations,
-                launch_task_abort_handles, active_in_process_handlers } = store;
+            let StateStore { live_native_open, state_authority, bundle_admission_trust, thread_runtime_authority,
+                inner, projection_health, read_only, allow_projection_rebuild, write_barrier,
+                process_attachment_admission_open, process_attachment_admission_closed, attached_thread_ids,
+                selected_invocations, launch_task_abort_handles, active_in_process_handlers } = store;
+            // Admitting trust is an immutable signer snapshot with no native
+            // custody; it ends with the Store's admission surface.
+            drop(bundle_admission_trust);
             // The sole Store has passed its actual ownership audit. No Store
             // retention/SQL mutex is held through the consuming close below.
             let Inner { state_db, runtime_db, signer, active_launch_owners } = inner.into_inner().unwrap_or_else(|p| p.into_inner());

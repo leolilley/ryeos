@@ -222,6 +222,16 @@ pub fn quote_live_state_host_alias_retirement(
     )
 }
 
+/// Quote retirement of the State parent's RecoveryStore alias once its two
+/// roots are registered: two membership checks plus the owner transition.
+pub fn quote_live_state_parent_recovery_owner_retirement(
+    registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+) -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    registry.membership_work_bound(2, 0)?.checked_add(
+        lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 4 },
+    )
+}
+
 /// Quote preparation of the actual State destination join.
 pub fn quote_live_state_destination_join() -> lillux_sqlite::original_physical_custody::OutsideWork {
     lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 2 }
@@ -1316,6 +1326,31 @@ impl LiveRecoveryPhysicalRegistrations {
         Ok(())
     }
 }
+/// End a State parent's RecoveryStore alias while the registry is still
+/// live. Its two roots must already be registered as the SAME allocations, so
+/// the registry becomes their sole owner before descriptor preparation
+/// requires unique custody. Refusal keeps the alias for retry.
+fn retire_parent_recovery_owner(
+    recovery: &mut std::mem::ManuallyDrop<RecoveryStore>,
+    consumed: &mut bool,
+    registrations: &LiveRecoveryPhysicalRegistrations,
+    registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+    prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if *consumed {
+        return registrations.require_registered_sources(registry);
+    }
+    let quote = quote_live_state_parent_recovery_owner_retirement(registry)?;
+    registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
+    registrations.require_registered(&recovery.borrow_original_directory_custody(), registry)?;
+    // SAFETY: `consumed` is set in the same step, and every later reader
+    // checks it before touching the moved-out shell.
+    let owner = unsafe { std::mem::ManuallyDrop::take(recovery) };
+    drop(owner.into_original_directory_custody());
+    *consumed = true;
+    Ok(())
+}
+
 pub(crate) struct LiveStatePhysicalParent {
     process: u32,
     runtime: Option<Arc<lillux::PinnedDirectory>>,
@@ -1365,7 +1400,7 @@ impl LiveStatePhysicalParent {
                 && std::sync::Weak::ptr_eq(&retired.store, &Arc::downgrade(store))
                 && std::sync::Weak::ptr_eq(&retired.lease, &Arc::downgrade(lease)),
                 "retired State host aliases changed canonical owner");
-            return Ok(());
+            return self.retire_recovery_owner(registry, prepay);
         }
         let host = self._host.as_ref().context("actual State native host absent without transfer")?;
         anyhow::ensure!(Arc::ptr_eq(&host.factory, factory)
@@ -1381,7 +1416,15 @@ impl LiveStatePhysicalParent {
         // outside factory before these redundant edges end. No owner disposal,
         // expiry renewal or terminal acknowledgement follows from this fact.
         drop(lease_authority); drop(authority); drop(original_factory);
-        Ok(())
+        self.retire_recovery_owner(registry, prepay)
+    }
+
+    fn retire_recovery_owner(&mut self,
+        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign State parent recovery owner");
+        retire_parent_recovery_owner(&mut self._recovery, &mut self.recovery_owner_consumed,
+            &self.recovery_registrations, registry, prepay)
     }
 
     /// This body is the live parent `join` transferred out, is registered in
@@ -1396,8 +1439,9 @@ impl LiveStatePhysicalParent {
             anyhow::ensure!(std::sync::Weak::ptr_eq(&link, &Arc::downgrade(join)),
                 "live State parent body belongs to another destination join");
         }
-        anyhow::ensure!(self._host.is_none() && self.retired_host.is_some(),
-            "live State parent host aliases remain before completion");
+        anyhow::ensure!(self._host.is_none() && self.retired_host.is_some()
+            && self.recovery_owner_consumed,
+            "live State parent host or recovery aliases remain before completion");
         self.require_registered(registry)?;
         for binding in &self.recovery_registrations.bindings {
             registry.require_membership(binding.as_ref().context("actual State recovery membership absent")?)?;
@@ -1427,9 +1471,19 @@ impl LiveStatePhysicalParent {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         anyhow::ensure!(self.process == std::process::id(), "foreign live State physical parent");
-        anyhow::ensure!(!self.retired_root_sources_consumed && !self.recovery_owner_consumed,
+        anyhow::ensure!(!self.retired_root_sources_consumed,
             "retired live State parent roots cannot be reopened");
         bind_root_receipt_registry(&mut self.registry_identity, registry)?;
+        if self.recovery_owner_consumed {
+            // The RecoveryStore alias ends only after every root joined this
+            // registry, so a retry can only revalidate complete membership.
+            let quote = quote_live_state_parent_root_membership(registry, 0)?;
+            registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
+            anyhow::ensure!(self.process == std::process::id(),
+                "foreign State parent after consumed-recovery validation debit");
+            self.require_registered(registry)?;
+            return self.recovery_registrations.require_registered_sources(registry);
+        }
         if self.runtime.is_none() && self.namespace.is_none()
             && self.roots.iter().all(Option::is_none)
             && self.registrations.iter().all(Option::is_some) {
@@ -1511,6 +1565,8 @@ impl LiveStatePhysicalParent {
         require_retired_root_receipt_registry(self.registry_identity.as_ref(), registry)?;
         anyhow::ensure!(self._host.is_none() && self.retired_host.is_some(),
             "State parent host aliases remain before root receipt consumption");
+        anyhow::ensure!(self.recovery_owner_consumed,
+            "State parent RecoveryStore alias survived descriptor retirement");
         let quote = quote_state_root_receipt_owner(5, 1)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
@@ -1540,16 +1596,7 @@ impl LiveStatePhysicalParent {
                 && self.roots.iter().all(Option::is_none),
                 "consumed State parent roots reappeared");
         }
-        self.recovery_registrations.consume_retired_sources(registry, prepay)?;
-        if !self.recovery_owner_consumed {
-            let owner_quote = lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 4 };
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
-                prepay(owner_quote.bytes, owner_quote.steps))?;
-            let recovery = unsafe { std::mem::ManuallyDrop::take(&mut self._recovery) };
-            drop(recovery.into_original_directory_custody());
-            self.recovery_owner_consumed = true;
-        }
-        Ok(())
+        self.recovery_registrations.consume_retired_sources(registry, prepay)
     }
 
     pub(crate) fn require_registered_with_prepay(&self,
@@ -2775,7 +2822,7 @@ impl LiveStatePhysicalParent {
     }
 
     /// Infallible consumption after `require_exhausted`. The RecoveryStore
-    /// was moved out by the root receipt stage; its emptied shell is not
+    /// was moved out by host-alias retirement; its emptied shell is not
     /// dropped again.
     pub(crate) fn exhaust(self) {
         let Self { process: _, runtime, namespace, roots, registrations, registry_identity: _,
@@ -2854,5 +2901,88 @@ impl ReleasedLiveStatePhysicalCustody {
         drop(metadata_pins);
         drop(native_retired);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_owner_tests {
+    use super::{LiveRecoveryPhysicalRegistrations, retire_parent_recovery_owner};
+    use crate::recovery::RecoveryStore;
+    use lillux_sqlite::{
+        OriginalOutsideFinalizerFileRetirementAuthority,
+        OriginalOutsideFinalizerFileRetirementInputs, RetainedOriginalFinalizerFile,
+    };
+    use lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry;
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+
+    struct FixtureRetirementAuthority {
+        owner: Arc<RetainedOriginalFinalizerFile>,
+        remaining: AtomicU64,
+    }
+
+    unsafe impl OriginalOutsideFinalizerFileRetirementAuthority for FixtureRetirementAuthority {
+        fn require_original(&self, owner: &Arc<RetainedOriginalFinalizerFile>) -> anyhow::Result<()> {
+            anyhow::ensure!(Arc::ptr_eq(owner, &self.owner), "fixture selected a foreign owner");
+            Ok(())
+        }
+
+        fn debit_original_steps(&self, steps: u64) -> anyhow::Result<()> {
+            self.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining|
+                remaining.checked_sub(steps))
+                .map(|_| ())
+                .map_err(|_| anyhow::anyhow!("fixture retirement authority exhausted"))
+        }
+    }
+
+    // A State parent's RecoveryStore alias held past root registration keeps
+    // the runtime-state root shared, so descriptor preparation refuses. The
+    // parent must end that alias in its live stage, before preparation.
+    #[test]
+    fn parent_recovery_alias_must_end_before_descriptor_preparation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let recovery = RecoveryStore::from_runtime_state_dir(temporary.path()).unwrap();
+        let mut recovery = std::mem::ManuallyDrop::new(recovery);
+        let mut consumed = false;
+        let mut registrations = LiveRecoveryPhysicalRegistrations::empty();
+        let mut registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
+        unsafe { registrations.register(&recovery, &mut registry, &|_, _| Ok(())) }.unwrap();
+        unsafe { registry.seal_inventory() }.unwrap();
+
+        let refused = unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }
+            .expect_err("a retained parent RecoveryStore alias must keep the root shared");
+        assert!(refused.to_string().contains("still shared outside complete inventory"), "{refused}");
+
+        assert!(retire_parent_recovery_owner(&mut recovery, &mut consumed, &registrations,
+            &registry, &|_, _| anyhow::bail!("funding unavailable")).is_err());
+        assert!(!consumed, "a funding refusal must keep the alias for retry");
+
+        retire_parent_recovery_owner(&mut recovery, &mut consumed, &registrations,
+            &registry, &|_, _| Ok(())).unwrap();
+        assert!(consumed);
+        retire_parent_recovery_owner(&mut recovery, &mut consumed, &registrations,
+            &registry, &|_, _| Ok(())).unwrap();
+
+        unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }.unwrap();
+        unsafe {
+            registry.retire_non_operator_descriptors(
+                &|_, _| Ok(()),
+                &|_, owner| {
+                    let authority = Arc::new(FixtureRetirementAuthority {
+                        owner: Arc::clone(&owner),
+                        remaining: AtomicU64::new(64),
+                    });
+                    let inputs = unsafe {
+                        OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
+                    };
+                    Ok(Arc::new(inputs))
+                },
+            ).unwrap();
+        }
+        let retired = match registry.retire() {
+            Ok(retired) => retired,
+            Err(_) => panic!("fully retired fixture registry must produce a receipt"),
+        };
+        registrations.consume_retired_sources(&retired, &|_, _| Ok(())).unwrap();
+        registrations.require_exhausted(&retired).unwrap();
     }
 }

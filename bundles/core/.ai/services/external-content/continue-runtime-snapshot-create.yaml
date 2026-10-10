@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-10T04:34:12Z:52a5a8141dcca64c309b2d04ab869b97c66f3b7dfd06eb830e44e5b7c0b196e7:2yook/CFc/tKCCn5jSRvk6TOMqLL5N6DAV5RfdCNj+wA+OjrJUCUZlH7aLQwH9XDO/8EL0BSjFJIFubdOnDsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.continue-runtime-snapshot-create
 required_caps: ["ryeos.execute.service.external-content/continue-runtime-snapshot-create"]

@@ -1881,9 +1881,36 @@ enum SelectedMetadataAccess {
     Return,
 }
 
+/// Current signer trust that admits installed Bundles and their native
+/// executors at launch. Retained Bundle member-source proofs are revalidated
+/// against this authority, never against head trust, which authenticates only
+/// state-chain and execution-realization signatures. A store opened without
+/// this binding refuses every retained Bundle executor.
+#[derive(Clone, Debug)]
+pub struct BundleAdmissionTrust(Option<Arc<ryeos_engine::trust::TrustStore>>);
+
+impl BundleAdmissionTrust {
+    /// Bind the exact node trust snapshot the launch path admits Bundles with.
+    pub fn bound(node_trust: ryeos_engine::trust::TrustStore) -> Self {
+        Self(Some(Arc::new(node_trust)))
+    }
+
+    /// No admitting trust: offline and fixture stores.
+    pub fn unbound() -> Self {
+        Self(None)
+    }
+
+    fn require(&self) -> Result<&ryeos_engine::trust::TrustStore> {
+        self.0.as_deref().ok_or_else(|| {
+            anyhow!("this StateStore has no Bundle admission trust; retained Bundle executors are refused")
+        })
+    }
+}
+
 pub struct StateStore {
     live_native_open: Option<Arc<live_native::LiveStateOpen>>,
     state_authority: ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: BundleAdmissionTrust,
     thread_runtime_authority: Option<ThreadRuntimeAuthority>,
     inner: Mutex<Inner>,
     projection_health: Arc<ThreadProjectionHealth>,
@@ -2362,13 +2389,20 @@ fn attach_admitted_launch_capsule(
 
 fn load_admitted_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     capsule_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
-    Ok(load_admitted_launch_capsule_with_realization(state_authority, capsule_hash)?.0)
+    Ok(load_admitted_launch_capsule_with_realization(
+        state_authority,
+        bundle_admission_trust,
+        capsule_hash,
+    )?
+    .0)
 }
 
 fn load_admitted_launch_capsule_with_realization(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     capsule_hash: &str,
 ) -> Result<(
     ryeos_state::objects::AdmittedLaunchCapsule,
@@ -2393,14 +2427,14 @@ fn load_admitted_launch_capsule_with_realization(
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
-    verify_rooted_bundle_member_source_proof(&capsule, state_authority.trust_store())
+    verify_rooted_bundle_member_source_proof(&capsule, bundle_admission_trust)
         .context("revalidate rooted retained Bundle member-source signatures")?;
     Ok((capsule, realization))
 }
 
 fn verify_rooted_bundle_member_source_proof(
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
-    trust_store: &ryeos_state::refs::TrustStore,
+    bundle_admission_trust: &BundleAdmissionTrust,
 ) -> Result<()> {
     let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
         executable_identity:
@@ -2420,7 +2454,9 @@ fn verify_rooted_bundle_member_source_proof(
     // signed Bundle manifest bytes needed to authenticate that identity alone.
     // Revalidate the retained executor-manifest ref and ItemSource sidecar,
     // while requiring the runtime-owner, Bundle-selection and executor-
-    // manifest signer identities to remain in current trust.
+    // manifest signer identities to remain in the current trust that admits
+    // Bundles at launch.
+    let trust_store = bundle_admission_trust.require()?;
     let owner = &member_source_proof.runtime_selection.definition_owner;
     if !matches!(
         owner.trust_class,
@@ -2430,16 +2466,17 @@ fn verify_rooted_bundle_member_source_proof(
     ) || owner
         .signer_fingerprint
         .as_ref()
-        .map_or(true, |fingerprint| !trust_store.contains_key(fingerprint))
+        .map_or(true, |fingerprint| !trust_store.is_trusted(fingerprint))
     {
         bail!("retained Bundle runtime owner is no longer trusted");
     }
-    if !trust_store.contains_key(&member_source_proof.selected_bundle.signer_fingerprint) {
+    if !trust_store.is_trusted(&member_source_proof.selected_bundle.signer_fingerprint) {
         bail!("retained Bundle selection signer is no longer trusted");
     }
-    let verifier = trust_store
+    let verifier = &trust_store
         .get(executor_manifest_signer_fingerprint)
-        .ok_or_else(|| anyhow!("retained executor manifest signer was revoked"))?;
+        .ok_or_else(|| anyhow!("retained executor manifest signer was revoked"))?
+        .verifying_key;
     ryeos_engine::binary_resolver::verify_retained_bundle_executor_member_proof(
         member_source_proof,
         executor_manifest_hash,
@@ -2460,6 +2497,7 @@ struct ContinuationCapsuleTransition<'a> {
 
 fn attach_continuation_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     cas_guard: &ryeos_state::CasMutationGuard,
     inner: &Inner,
     snapshot: ThreadSnapshot,
@@ -2484,6 +2522,7 @@ fn attach_continuation_launch_capsule(
             })?;
         verify_admitted_launch_capsule(
             state_authority,
+            bundle_admission_trust,
             &source_snapshot,
             Some(&source_metadata),
         )
@@ -2531,7 +2570,13 @@ fn attach_continuation_launch_capsule(
     let source_capsule = source_snapshot
         .admitted_launch_capsule_hash
         .as_deref()
-        .map(|hash| load_admitted_launch_capsule_with_realization(state_authority, hash))
+        .map(|hash| {
+            load_admitted_launch_capsule_with_realization(
+                state_authority,
+                bundle_admission_trust,
+                hash,
+            )
+        })
         .transpose()?;
     let successor_capsule = launch_metadata
         .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
@@ -2582,6 +2627,7 @@ fn attach_continuation_launch_capsule(
 
 fn verify_admitted_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     snapshot: &ThreadSnapshot,
     launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
 ) -> Result<()> {
@@ -2601,7 +2647,7 @@ fn verify_admitted_launch_capsule(
         ),
         (Some(rooted_hash), Some(expected)) => {
             let expected_hash = expected.content_hash()?;
-            let rooted = load_admitted_launch_capsule(state_authority, rooted_hash)?;
+            let rooted = load_admitted_launch_capsule(state_authority, bundle_admission_trust, rooted_hash)?;
             if rooted.schema == expected.schema && rooted_hash != expected_hash {
                 bail!(
                     "thread {} admitted capsule drift: authoritative {}, attempted {}",
@@ -4817,6 +4863,7 @@ impl StateStore {
             signer,
             write_barrier,
             head_trust,
+            BundleAdmissionTrust::unbound(),
             None,
             None,
         )
@@ -4839,6 +4886,7 @@ impl StateStore {
         Ok(Self {
             live_native_open: None,
             state_authority,
+            bundle_admission_trust: BundleAdmissionTrust::unbound(),
             thread_runtime_authority: None,
             inner: Mutex::new(Inner {
                 state_db,
@@ -4887,6 +4935,7 @@ impl StateStore {
         Ok(Self {
             live_native_open: None,
             state_authority,
+            bundle_admission_trust: BundleAdmissionTrust::unbound(),
             thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
                 state_db,
@@ -4928,6 +4977,7 @@ impl StateStore {
             signer,
             write_barrier,
             head_trust,
+            BundleAdmissionTrust::unbound(),
             Some(recovery_observer),
             None,
         )
@@ -4948,6 +4998,7 @@ impl StateStore {
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
         recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
         exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
         factory: Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -4959,7 +5010,7 @@ impl StateStore {
             Arc::clone(&signer), Arc::clone(&head_trust), deadline,
         )?;
         Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
-            write_barrier, head_trust, Some(recovery_observer), Some(original))
+            write_barrier, head_trust, bundle_admission_trust, Some(recovery_observer), Some(original))
     }
 
     fn open(
@@ -4969,6 +5020,7 @@ impl StateStore {
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
         recovery_observer: Option<Arc<dyn ryeos_state::ProjectionRecoveryObserver>>,
         live: Option<Arc<live_native::LiveStateOpen>>,
     ) -> Result<Self> {
@@ -5075,6 +5127,7 @@ impl StateStore {
         Ok(Self {
             live_native_open,
             state_authority,
+            bundle_admission_trust,
             thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
                 state_db,
@@ -10187,6 +10240,7 @@ impl StateStore {
         )?;
         verify_admitted_launch_capsule(
             &self.state_authority,
+            &self.bundle_admission_trust,
             &authoritative_snapshot,
             runtime.launch_metadata.as_ref(),
         )?;
@@ -10643,7 +10697,7 @@ impl StateStore {
         let capsule = snapshot
             .admitted_launch_capsule_hash
             .as_deref()
-            .map(|hash| load_admitted_launch_capsule(&self.state_authority, hash))
+            .map(|hash| load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, hash))
             .transpose()?;
         let is_external = capsule
             .as_ref()
@@ -11072,6 +11126,7 @@ impl StateStore {
         }
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            &self.bundle_admission_trust,
             permit.cas_guard(),
             &g,
             build_snapshot(&successor_with_upstream),
@@ -11672,7 +11727,7 @@ impl StateStore {
                 .as_deref()
                 .ok_or_else(|| anyhow!("remote adoption source has no admitted launch capsule"))?;
             let source_capsule =
-                load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
+                load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, source_capsule_hash)?;
             source_capsule.validate_durable_handoff_eligibility()?;
             let source_sealed =
                 crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
@@ -11964,7 +12019,7 @@ impl StateStore {
                 }
                 verify_rooted_bundle_member_source_proof(
                     &target_capsule,
-                    self.state_authority.trust_store(),
+                    &self.bundle_admission_trust,
                 )
                 .context("revalidate transferred rooted Bundle member-source signatures")?;
                 target_capsule
@@ -11981,7 +12036,7 @@ impl StateStore {
                         anyhow!("remote adoption source has no admitted launch capsule")
                     })?;
                 let source_capsule =
-                    load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
+                    load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, source_capsule_hash)?;
                 let target_sealed =
                     crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
                         &target_capsule,
@@ -12146,6 +12201,7 @@ impl StateStore {
             } else {
                 attach_continuation_launch_capsule(
                     &self.state_authority,
+                    &self.bundle_admission_trust,
                     permit.cas_guard(),
                     &g,
                     build_continuation_snapshot(
@@ -12575,6 +12631,7 @@ impl StateStore {
         };
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            &self.bundle_admission_trust,
             permit.cas_guard(),
             &g,
             base_successor_snapshot,
@@ -14016,7 +14073,7 @@ impl StateStore {
                     bail!("state-anchor execution subject contradicts its authoritative thread");
                 }
                 let capsule =
-                    load_admitted_launch_capsule(&self.state_authority, launch_capsule_hash)?;
+                    load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, launch_capsule_hash)?;
                 if &capsule.exact_program_hash != exact_program_hash {
                     bail!("state-anchor execution subject contradicts its admitted program");
                 }
@@ -15207,7 +15264,7 @@ impl StateStore {
         else {
             return Ok(None);
         };
-        let capsule = load_admitted_launch_capsule(&self.state_authority, &capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, &capsule_hash)?;
         Ok(Some((chain_root_id, capsule_hash, capsule)))
     }
 
@@ -15250,7 +15307,7 @@ impl StateStore {
             return Ok(None);
         };
         let (capsule, execution_realization) =
-            load_admitted_launch_capsule_with_realization(&self.state_authority, &capsule_hash)?;
+            load_admitted_launch_capsule_with_realization(&self.state_authority, &self.bundle_admission_trust, &capsule_hash)?;
         capsule.validate()?;
         let request: crate::thread_lifecycle::SealedRootExecutionRequest =
             serde_json::from_value(capsule.sealed_invocation.clone())
@@ -15298,7 +15355,7 @@ impl StateStore {
             .ok_or_else(|| {
                 anyhow!("thread {thread_id} has no authoritative admitted launch capsule")
             })?;
-        let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, capsule_hash)?;
         if &capsule.artifact_identity != attempted {
             bail!(
                 "thread {thread_id} recovery artifact identity differs from its authoritative \
@@ -15523,7 +15580,7 @@ impl StateStore {
             capsule_hash == reservation.admitted_capsule_hash,
             "external direct allocation changed its born capsule"
         );
-        let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, capsule_hash)?;
         anyhow::ensure!(
             capsule.project_authority == snapshot.project_authority
                 && capsule.executor_ref == snapshot.executor_ref
@@ -23410,8 +23467,7 @@ mod tests {
     fn rooted_bundle_member_proof_rechecks_current_owner_and_signatures() {
         let key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
         let fingerprint = lillux::crypto::fingerprint(&key.verifying_key());
-        let trust =
-            ryeos_state::refs::TrustStore::from([(fingerprint.clone(), key.verifying_key())]);
+        let trust = bundle_admission_trust_for(&[&key]);
         let capsule = rooted_bundle_proof_fixture(&key, &fingerprint);
         verify_rooted_bundle_member_source_proof(&capsule, &trust)
             .expect("rooted proof verifies with current owner and source signer");
@@ -23463,6 +23519,50 @@ mod tests {
             .definition_owner
             .signer_fingerprint = Some("0".repeat(64));
         assert!(verify_rooted_bundle_member_source_proof(&revoked_owner, &trust).is_err());
+    }
+
+    fn bundle_admission_trust_for(keys: &[&lillux::crypto::SigningKey]) -> BundleAdmissionTrust {
+        BundleAdmissionTrust::bound(ryeos_engine::trust::TrustStore::from_signers(
+            keys.iter()
+                .map(|key| ryeos_engine::trust::TrustedSigner {
+                    fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
+                    verifying_key: key.verifying_key(),
+                    label: None,
+                })
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn rooted_bundle_member_proof_follows_admitting_trust_not_head_trust() {
+        let bundle_key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let node_key = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
+        let bundle_fingerprint = lillux::crypto::fingerprint(&bundle_key.verifying_key());
+        let capsule = rooted_bundle_proof_fixture(&bundle_key, &bundle_fingerprint);
+
+        verify_rooted_bundle_member_source_proof(
+            &capsule,
+            &bundle_admission_trust_for(&[&node_key, &bundle_key]),
+        )
+        .expect("Bundle-signed capsule verifies under the trust that admitted the Bundle");
+
+        let removed = verify_rooted_bundle_member_source_proof(
+            &capsule,
+            &bundle_admission_trust_for(&[&node_key]),
+        )
+        .expect_err("Bundle signer removed from admitting trust must refuse");
+        assert!(
+            removed.to_string().contains("no longer trusted"),
+            "unexpected refusal: {removed:#}"
+        );
+
+        let unbound =
+            verify_rooted_bundle_member_source_proof(&capsule, &BundleAdmissionTrust::unbound())
+                .expect_err("a store without admitting trust must refuse Bundle executors");
+        assert!(
+            unbound.to_string().contains("no Bundle admission trust"),
+            "unexpected refusal: {unbound:#}"
+        );
     }
 
     #[test]

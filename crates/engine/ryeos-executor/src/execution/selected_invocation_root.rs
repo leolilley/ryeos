@@ -463,6 +463,31 @@ impl SelectedInvocationCompositionBarrier {
         }
     }
 
+    /// After a Closed observation, release the Store generation this barrier
+    /// registered, so the sole live Store owner can perform its consuming
+    /// close. Refuses while admission is open or any selected owner remains,
+    /// and leaves both registrations in place if they disagree.
+    pub fn release_closed_store_generation(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.root.closed.load(Ordering::Acquire),
+            "selected root admission is still open");
+        anyhow::ensure!(!self.root.has_unresolved_owners(),
+            "selected invocation owners remain unresolved");
+        let mut generation = self.root.generation.lock()
+            .map_err(|_| anyhow::anyhow!("selected root generation poisoned"))?;
+        let consistent = match (generation.as_ref(), self.registered_generation.as_ref()) {
+            (None, None) => true,
+            (Some((root_store, _)), Some((barrier_store, _))) => Arc::ptr_eq(root_store, barrier_store),
+            _ => false,
+        };
+        anyhow::ensure!(consistent,
+            "selected root and barrier disagree on the registered Store generation");
+        let root_registration = generation.take();
+        drop(generation);
+        let barrier_registration = self.registered_generation.take();
+        drop(root_registration);
+        drop(barrier_registration);
+        Ok(())
+    }
 }
 
 /// Closes new selected attachments only. Holds no root, Store or owner; a
@@ -790,6 +815,23 @@ mod tests {
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+    }
+
+    #[test]
+    fn closed_empty_root_releases_its_store_generation_only_after_close() {
+        let root = tempfile::tempdir().unwrap();
+        let store = actual_store(root.path());
+        let (mut barrier, _attachment) = SelectedInvocationCompositionBarrier::bootstrap();
+        barrier.register_from_store(&store).unwrap();
+        assert_eq!(Arc::strong_count(&store), 3);
+        assert!(barrier.release_closed_store_generation().is_err());
+        assert_eq!(Arc::strong_count(&store), 3);
+        assert_eq!(barrier.close(), SelectedRootClose::Closed);
+        barrier.release_closed_store_generation().unwrap();
+        assert!(barrier.registered_generation.is_none());
+        assert!(barrier.root.generation.lock().unwrap().is_none());
+        assert_eq!(Arc::strong_count(&store), 1);
+        barrier.release_closed_store_generation().unwrap();
     }
 
     #[test]

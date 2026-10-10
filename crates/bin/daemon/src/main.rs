@@ -802,7 +802,11 @@ impl DaemonSelectedComposition {
                     // Only failures after an actual reservation checkout carry
                     // this affine owner. Quote/input refusals have no such owner.
                     self.native_reservation_close_failure = Some(failure);
-                    anyhow::bail!("live native reservation refused; original recovery custody retained");
+                    // Describe the refusal only after its owner is retained.
+                    let detail = self.native_reservation_close_failure.as_ref()
+                        .map(|failure| format!("{failure:?}"))
+                        .unwrap_or_default();
+                    anyhow::bail!("live native reservation refused; original recovery custody retained: {detail}");
                 }
                 Err(error) => return Err(error),
             }
@@ -866,15 +870,15 @@ impl DaemonSelectedComposition {
         {
             let settled = self.native_settled_reservation.as_mut()
                 .context("settled native reservation absent")?;
-            settled.require_original_process()?;
+            settled.require_original_process().context("settled finalization: require_original_process")?;
             if !settled.finalization_registry_retired() {
-                settled.prepare_account_finalization_sources()?;
-                settled.prepare_input_finalization_sources(&mut self.native_inputs)?;
+                settled.prepare_account_finalization_sources().context("settled finalization: prepare_account_finalization_sources")?;
+                settled.prepare_input_finalization_sources(&mut self.native_inputs).context("settled finalization: prepare_input_finalization_sources")?;
                 if let Some(outside) = &mut self.native_outside_store {
-                    settled.register_finalization_sources_in_store(outside)?;
-                    settled.retire_non_account_finalization_descriptors_in_store(outside)?;
+                    settled.register_finalization_sources_in_store(outside).context("settled finalization: register_finalization_sources_in_store")?;
+                    settled.retire_non_account_finalization_descriptors_in_store(outside).context("settled finalization: retire_non_account_finalization_descriptors_in_store")?;
                 } else {
-                    settled.register_finalization_sources_in_reservation()?;
+                    settled.register_finalization_sources_in_reservation().context("settled finalization: register_finalization_sources_in_reservation")?;
                     #[cfg(target_os = "linux")]
                     if !self.native_operator_lock_registered {
                         if self.native_operator_lock.is_none() {
@@ -891,52 +895,52 @@ impl DaemonSelectedComposition {
                         }
                         settled.register_operator_lock_in_reservation(
                             &mut self.native_operator_lock,
-                        )?;
+                        ).context("settled finalization: register_operator_lock_in_reservation")?;
                         anyhow::ensure!(self.native_operator_lock.is_none(),
                             "registered no-Store operator lock still has a caller alias");
                         self.native_operator_lock_registered = true;
                     }
-                    settled.retire_non_account_finalization_descriptors_in_reservation()?;
+                    settled.retire_non_account_finalization_descriptors_in_reservation().context("settled finalization: retire_non_account_finalization_descriptors_in_reservation")?;
                 }
                 #[cfg(target_os = "linux")]
                 record_staged_exit_before_operator_retirement(&mut self.lifecycle_exit,
                     &self.staged_exit_record, &mut self.operator_target_retirement_entered);
                 #[cfg(target_os = "linux")]
                 if let Some(outside) = &mut self.native_outside_store {
-                    settled.retire_operator_finalization_descriptors_in_store(outside)?;
+                    settled.retire_operator_finalization_descriptors_in_store(outside).context("settled finalization: retire_operator_finalization_descriptors_in_store")?;
                 } else {
-                    settled.retire_operator_finalization_descriptors_in_reservation()?;
+                    settled.retire_operator_finalization_descriptors_in_reservation().context("settled finalization: retire_operator_finalization_descriptors_in_reservation")?;
                 }
                 if let Some(outside) = &mut self.native_outside_store {
-                    settled.retire_finalization_registry_in_store(outside)?;
+                    settled.retire_finalization_registry_in_store(outside).context("settled finalization: retire_finalization_registry_in_store")?;
                 } else {
-                    settled.retire_finalization_registry_in_reservation()?;
+                    settled.retire_finalization_registry_in_reservation().context("settled finalization: retire_finalization_registry_in_reservation")?;
                 }
             }
             settled.resume_finalization_registry_phase(self.native_outside_store.is_some())?;
             if let Some(outside) = &mut self.native_outside_store {
-                settled.consume_finalization_packet_destinations_in_store(outside)?;
-                settled.consume_finalization_store_packet_bound_roots(outside)?;
-                settled.consume_finalization_store_packet_metadata_pins(outside)?;
+                settled.consume_finalization_packet_destinations_in_store(outside).context("settled finalization: consume_finalization_packet_destinations_in_store")?;
+                settled.consume_finalization_store_packet_bound_roots(outside).context("settled finalization: consume_finalization_store_packet_bound_roots")?;
+                settled.consume_finalization_store_packet_metadata_pins(outside).context("settled finalization: consume_finalization_store_packet_metadata_pins")?;
                 // Packet source frames must be exhausted before State and
                 // Operational root retirement validates their receipts.
-                settled.consume_finalization_store_packet_source_parts(outside)?;
-                settled.consume_finalization_store_metadata_sources(outside)?;
-                settled.consume_finalization_store_parent_sources(outside)?;
-                settled.consume_finalization_store_state_projection_sources(outside)?;
-                settled.consume_finalization_store_state_root_sources(outside)?;
-                settled.consume_finalization_store_runtime_shared_roots(outside)?;
-                settled.consume_finalization_store_scheduler_sources(outside)?;
-                settled.consume_finalization_store_owner_frames(outside)?;
+                settled.consume_finalization_store_packet_source_parts(outside).context("settled finalization: consume_finalization_store_packet_source_parts")?;
+                settled.consume_finalization_store_metadata_sources(outside).context("settled finalization: consume_finalization_store_metadata_sources")?;
+                settled.consume_finalization_store_parent_sources(outside).context("settled finalization: consume_finalization_store_parent_sources")?;
+                settled.consume_finalization_store_state_projection_sources(outside).context("settled finalization: consume_finalization_store_state_projection_sources")?;
+                settled.consume_finalization_store_state_root_sources(outside).context("settled finalization: consume_finalization_store_state_root_sources")?;
+                settled.consume_finalization_store_runtime_shared_roots(outside).context("settled finalization: consume_finalization_store_runtime_shared_roots")?;
+                settled.consume_finalization_store_scheduler_sources(outside).context("settled finalization: consume_finalization_store_scheduler_sources")?;
+                settled.consume_finalization_store_owner_frames(outside).context("settled finalization: consume_finalization_store_owner_frames")?;
             }
             if self.native_outside_store.is_some() {
                 // Cleared only on success; a refusal restores the graph.
-                settled.exhaust_finalization_store(&mut self.native_outside_store)?;
+                settled.exhaust_finalization_store(&mut self.native_outside_store).context("settled finalization: exhaust_finalization_store")?;
             } else {
                 anyhow::ensure!(settled.finalization_registry_retired(),
                     "no-Store finalization destination phase precedes the original registry retirement");
             }
-            settled.consume_finalization_control_sources()?;
+            settled.consume_finalization_control_sources().context("settled finalization: consume_finalization_control_sources")?;
             // The clock outlives every outside-graph consumer that prepays
             // from it; the Store graph was exhausted above.
             anyhow::ensure!(self.native_outside_store.is_none(),
@@ -951,7 +955,7 @@ impl DaemonSelectedComposition {
             #[cfg(target_os = "linux")]
             anyhow::ensure!(self.native_operator_lock.is_none(),
                 "settled native finalization retains an unregistered operator lock alias");
-            settled.retire_finalization_clock()?;
+            settled.retire_finalization_clock().context("settled finalization: retire_finalization_clock")?;
         }
         anyhow::ensure!(self.native_outside_store.is_none() && self.native_inputs.is_none()
             && self.native_reservation.is_none() && self.native_reservation_close_failure.is_none()
@@ -1014,11 +1018,11 @@ impl DaemonSelectedComposition {
         let outside = self.native_outside_store.as_mut()
             .context("actual Store outside graph disappeared during Scheduler handoff")?;
         outside.prepare_destination_join(&factory, terminal, &|bytes, steps|
-            producer.prepay_outside_control(terminal, bytes, steps))?;
+            producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal destination join")?;
         outside.advance_state_projection_sources(&factory, terminal, &|bytes, steps|
-            producer.prepay_outside_control(terminal, bytes, steps))?;
+            producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal State projection sources")?;
         outside.advance_runtime_physical_sources(&factory, terminal, &|bytes, steps|
-            producer.prepay_outside_control(terminal, bytes, steps))?;
+            producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal Runtime physical sources")?;
         #[cfg(target_os = "linux")]
         if !self.native_operator_lock_registered {
             if self.native_operator_lock.is_none() {
@@ -1042,7 +1046,7 @@ impl DaemonSelectedComposition {
             // Any refusal leaves the whole primary cached here and the
             // same Store/registry in outside custody. No replacement grant.
             outside.register_operator_lock_alias(owner, &factory, terminal, &|bytes, steps|
-                producer.prepay_outside_control(terminal, bytes, steps))?;
+                producer.prepay_outside_control(terminal, bytes, steps)).context("Store pre-seal operator lock alias")?;
             self.native_operator_lock_registered = true;
         }
         // The operator-lock and Store-parent joins below are Linux-only, so
@@ -1059,14 +1063,16 @@ impl DaemonSelectedComposition {
             // Nested packet continuations remain behind that barrier.
             outside.complete_store_parent_join(&factory, terminal, &|bytes, steps|
                 producer.prepay_outside_control(terminal, bytes, steps),
-                &|leaf, pins| producer.packet_metadata_pin_retirement_inputs(terminal, leaf, pins))?;
+                &|leaf, pins| producer.packet_metadata_pin_retirement_inputs(terminal, leaf, pins))
+                .context("Store pre-seal parent join")?;
             // State-generated Bound pins live on State's closed connections,
             // not in packets. Retire them with the same issuer while the
             // factory and terminal remain valid, then end State's strong
             // native owners; only non-owning receipts stay in State.
             outside.retire_state_native_sources(&factory, terminal, &|bytes, steps|
                 producer.prepay_outside_control(terminal, bytes, steps),
-                &|leaf, pins| producer.packet_metadata_pin_retirement_inputs(terminal, leaf, pins))?;
+                &|leaf, pins| producer.packet_metadata_pin_retirement_inputs(terminal, leaf, pins))
+                .context("Store pre-seal State native sources")?;
             // The registry now retains the canonical lock owner and the
             // Store frame retains its original lease through settlement.
             if let Some(owner) = self.native_operator_lock.take() {
@@ -1077,7 +1083,7 @@ impl DaemonSelectedComposition {
             // repeatable on the same terminal; region release, account
             // settlement and descriptor retirement remain separate later
             // stages owned by the consuming finalizer.
-            producer.retire_native_budget_handle(terminal)?;
+            producer.retire_native_budget_handle(terminal).context("Store pre-seal budget handle")?;
             // Every pre-seal stage must be complete before the producer and
             // reservation may be released; the seal is the zero-handle census.
             self.native_outside_store.as_ref()
@@ -1144,7 +1150,7 @@ impl DaemonSelectedComposition {
             self.retry_scheduler_close_and_transfer()?;
         }
         if self.native_outside_store.is_some() {
-            return self.advance_store_outside();
+            return self.advance_store_outside().context("advance retained Store outside custody");
         }
         if self.native_failure.as_ref().is_some_and(|error| error.is::<state_store::LiveStateStoreOpenFailure>())
             || self.native_startup_recovery_failure.is_some() || self.native_released_startup.is_some() {
@@ -1198,7 +1204,7 @@ impl DaemonSelectedComposition {
             // The whole graph is cached; continue its disposal join in this
             // same pass. Any refusal leaves it in outside custody.
             drop(factory);
-            return self.advance_store_outside();
+            return self.advance_store_outside().context("advance retained Store outside custody");
         }
         // A factory-install preparation failure can retain a second reference
         // to this same reservation before any lower factory exists. Transfer
@@ -1376,6 +1382,9 @@ impl DaemonSelectedComposition {
             #[cfg(feature = "scheduling")]
             anyhow::ensure!(!self.app_state_holds_scheduler_service(),
                 "retained AppState still holds the selected Scheduler service");
+            // The closed, empty selected root still holds the Store generation
+            // it registered; release it so the Store has one consuming owner.
+            self.root.release_closed_store_generation()?;
             if let Some(app) = self.app_state_custody.take() {
                 self.native_admission_fence.register_store(&app.state_store);
                 self.live_state_store_custody = Some(Arc::clone(&app.state_store));
@@ -1392,8 +1401,9 @@ impl DaemonSelectedComposition {
                 match result {
                     Ok(closed) => self.native_closed_store = Some(closed),
                     Err(failure) => {
+                        let cause = failure.to_string();
                         self.native_store_close_failure = Some(failure);
-                        anyhow::bail!("actual live Store close pending; original custody retained");
+                        anyhow::bail!("actual live Store close pending; original custody retained: {cause}");
                     }
                 }
             }
@@ -1436,7 +1446,7 @@ impl DaemonSelectedComposition {
                     anyhow::bail!("actual closed Store graph transfer refused; original custody retained");
                 }
             }
-            return self.advance_store_outside();
+            return self.advance_store_outside().context("advance retained Store outside custody");
         }
         // Without a Store graph there is no receiver for Scheduler owners.
         anyhow::ensure!(!self.has_scheduler_custody(),
@@ -2845,6 +2855,10 @@ async fn run(
                 composition.prepare_live_native(&config, &identity, &node_policy_snapshot)?;
             let native_lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
                 composition.native_factory.as_ref().context("actual native issuer absent before State startup")?.clone();
+            // Retained Bundle executors are revalidated against the same node
+            // trust snapshot this engine admits Bundles with at launch.
+            let bundle_admission_trust =
+                state_store::BundleAdmissionTrust::bound(engine.node_trust_store.clone());
             let state_store = tokio::task::spawn_blocking(move || {
                 // SAFETY: prepare_live_native authenticated/reserved this
                 // incarnation; the selected composition retains its original
@@ -2857,6 +2871,7 @@ async fn run(
                     signer,
                     write_barrier.clone(),
                     head_trust,
+                    bundle_admission_trust,
                     state_open_observer,
                     native_exclusion,
                     native_factory,
@@ -3841,6 +3856,13 @@ async fn run(
         daemon_result.as_ref().err().map(|error| format!("{error:#}"))));
     let native_result = composition.advance_native_shutdown();
     if composition.has_unresolved_custody() {
+        // The custody exit below does not return, so name both causes first.
+        if let Err(error) = &daemon_result {
+            tracing::error!(error = %format!("{error:#}"), "daemon work failed before native custody hold");
+        }
+        if let Err(error) = &native_result {
+            tracing::error!(error = %format!("{error:#}"), "native shutdown left custody unresolved");
+        }
         if let Err(custody) = composition.hold_unresolved_custody().await {
             return Err(anyhow::Error::new(custody));
         }

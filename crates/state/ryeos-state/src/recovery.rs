@@ -237,14 +237,37 @@ impl RecoveryAcknowledgementCustody {
     }
 }
 
+/// Guarded evidence read. With the owning native factory the read runs in
+/// that factory's scope, so its own held projection leases answer for their
+/// owner; without one the read refuses whenever any lease is listed.
+pub(crate) fn guarded_evidence_read(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    maximum_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    match factory {
+        Some(factory) => factory.read_regular_without_sqlite_alias(directory, name, maximum_bytes),
+        None => lillux_sqlite::read_regular_without_sqlite_alias(directory, name, maximum_bytes),
+    }
+}
+
 fn read_thread_history_discard_operation(
+    directory: &lillux::PinnedDirectory,
+) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+    read_thread_history_discard_operation_in(None, directory)
+}
+
+fn read_thread_history_discard_operation_in(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     directory: &lillux::PinnedDirectory,
 ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
     let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
     if directory.entry_no_follow(name)?.is_none() {
         return Ok(None);
     }
-    let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
+    let bytes = guarded_evidence_read(
+        factory,
         directory,
         name,
         THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
@@ -2228,6 +2251,22 @@ impl RecoveryStore {
         read_thread_history_discard_operation(&self.directory)
     }
 
+    /// The same locator read inside the owning native factory's scope, for
+    /// callers that may hold projection leases.
+    pub fn thread_history_discard_operation_scoped(
+        &self,
+        factory: &lillux_sqlite::OriginalNativeFactory,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        self.thread_history_discard_operation_in(Some(factory))
+    }
+
+    pub(crate) fn thread_history_discard_operation_in(
+        &self,
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        read_thread_history_discard_operation_in(factory, &self.directory)
+    }
+
     /// Ordinary startup refuses any active marker, including malformed or
     /// unsupported evidence. Re-entry must verify the exact staged operation
     /// before a projection preview can manufacture new accounting.
@@ -2734,10 +2773,29 @@ impl RecoveryStore {
         })
     }
 
+    /// Unscoped read, for processes that hold no projection lease. Any
+    /// listed lease refuses it; lease holders use `read_generation_scoped`.
     pub fn read_generation(&self) -> Result<Option<ProjectionRecoveryGeneration>> {
+        self.read_generation_in(None)
+    }
+
+    /// The generation read inside the owning native factory's scope, for
+    /// callers that may hold that factory's projection leases.
+    pub fn read_generation_scoped(
+        &self,
+        factory: &lillux_sqlite::OriginalNativeFactory,
+    ) -> Result<Option<ProjectionRecoveryGeneration>> {
+        self.read_generation_in(Some(factory))
+    }
+
+    pub(crate) fn read_generation_in(
+        &self,
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    ) -> Result<Option<ProjectionRecoveryGeneration>> {
         // Intake remains bounded and the native alias gate spans every data
         // open/read/close. Metadata observations alone cannot safely read JSON.
-        let Some(bytes) = lillux_sqlite::read_regular_without_sqlite_alias(
+        let Some(bytes) = guarded_evidence_read(
+            factory,
             &self.directory,
             std::ffi::OsStr::new("generation.json"),
             65_536,

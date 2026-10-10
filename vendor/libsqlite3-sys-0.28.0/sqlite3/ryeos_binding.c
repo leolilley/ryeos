@@ -15,6 +15,10 @@
 #define RYEOS_NATIVE_CONTROL 65536ULL
 #define RYEOS_NATIVE_BLOCK 256ULL
 #define RYEOS_NATIVE_MAGIC 0x7279656f736e6174ULL
+/* Free blocks are segregated by floor(log2(span/RYEOS_NATIVE_BLOCK)). */
+#define RYEOS_NATIVE_BINS 64
+/* Bounded probes of the request's own bin while a larger bin can serve it. */
+#define RYEOS_NATIVE_BIN_PROBES 8
 /* ABI mirrored by repr(C) OriginalNativeBudget; limits immutable. */
 typedef struct RyeosNativeBudget {
   uint64_t storageBytes,stepLimit,cleanupReserved;
@@ -27,6 +31,13 @@ typedef struct RyeosNativeBlock {
   _Atomic int state; /* 0 free, 1 live, 2 deferred free; never Drop proof */
   uint32_t reserved;
 } RyeosNativeBlock;
+/* Arena offsets of neighbouring free blocks in the same bin, 0 for none. They
+   live in the payload of a free block, which is never handed to SQLite. */
+typedef struct RyeosNativeFreeLinks {
+  uint64_t next,previous;
+} RyeosNativeFreeLinks;
+_Static_assert(sizeof(RyeosNativeBlock)+sizeof(RyeosNativeFreeLinks)<=RYEOS_NATIVE_BLOCK,
+  "free links exceed one block");
 /* Fixed prepaid ledger: node is an identity token, never dereferenced after
    stock purge. Actual OS mapping custody outlives node/FD/connection disposal.
    state: 0 empty, 1 reserved/no mapping, 2 actual mapping, 3 failed disposal.
@@ -45,6 +56,9 @@ typedef struct RyeosNativeArena {
   _Atomic int sharedRefused;
   RyeosNativeMap shared[RYEOS_NATIVE_MAPS];
   pthread_mutex_t mutex;
+  /* Under mutex: every state-0 block is on exactly the bin list its span
+     selects, and freeMap has bit i set iff bin i is non-empty. */
+  uint64_t freeBins[RYEOS_NATIVE_BINS],freeMap;
   _Atomic uint64_t liveBlocks;
   _Atomic uint32_t scopes,bindingContexts;
   _Atomic int poisoned,mutexReady,reclaimed;
@@ -193,31 +207,89 @@ static int ryeosNativeBlockValid(RyeosNativeArena *a,RyeosNativeBlock *b){
     && b->magic==RYEOS_NATIVE_MAGIC && b->span>=RYEOS_NATIVE_BLOCK
     && (b->span%RYEOS_NATIVE_BLOCK)==0 && b->span<=end-p;
 }
+static unsigned ryeosNativeBin(uint64_t span){
+  return 63u-(unsigned)__builtin_clzll(span/RYEOS_NATIVE_BLOCK);
+}
+static RyeosNativeFreeLinks *ryeosNativeLinks(RyeosNativeBlock *b){
+  return (RyeosNativeFreeLinks*)(b+1);
+}
+static uint64_t ryeosNativeOffset(RyeosNativeArena *a,RyeosNativeBlock *b){
+  return (uint64_t)((unsigned char*)b-(unsigned char*)a);
+}
+/* A listed offset must name a valid free block; anything else poisons. */
+static RyeosNativeBlock *ryeosNativeListed(RyeosNativeArena *a,uint64_t offset){
+  RyeosNativeBlock *b;
+  if(offset<a->startOffset || offset>=a->mappingBytes) return 0;
+  b=(RyeosNativeBlock*)((unsigned char*)a+offset);
+  if(!ryeosNativeBlockValid(a,b) || atomic_load(&b->state)!=0) return 0;
+  return b;
+}
+/* Caller holds a->mutex; b is free with its final span. */
+static void ryeosNativeListInsert(RyeosNativeArena *a,RyeosNativeBlock *b){
+  unsigned bin=ryeosNativeBin(b->span); uint64_t head=a->freeBins[bin];
+  RyeosNativeFreeLinks *links=ryeosNativeLinks(b); RyeosNativeBlock *first;
+  links->previous=0; links->next=head;
+  if(head){
+    first=ryeosNativeListed(a,head);
+    if(!first){atomic_store(&a->poisoned,1);return;}
+    ryeosNativeLinks(first)->previous=ryeosNativeOffset(a,b);
+  }
+  a->freeBins[bin]=ryeosNativeOffset(a,b); a->freeMap|=1ULL<<bin;
+}
+/* Caller holds a->mutex; b is listed under its current span. Returns 0 and
+   poisons on a corrupt neighbour. */
+static int ryeosNativeListRemove(RyeosNativeArena *a,RyeosNativeBlock *b){
+  unsigned bin=ryeosNativeBin(b->span); RyeosNativeFreeLinks *links=ryeosNativeLinks(b);
+  RyeosNativeBlock *previous=0,*next=0;
+  if(links->previous && !(previous=ryeosNativeListed(a,links->previous))){atomic_store(&a->poisoned,1);return 0;}
+  if(links->next && !(next=ryeosNativeListed(a,links->next))){atomic_store(&a->poisoned,1);return 0;}
+  if(!previous && a->freeBins[bin]!=ryeosNativeOffset(a,b)){atomic_store(&a->poisoned,1);return 0;}
+  if(previous) ryeosNativeLinks(previous)->next=links->next; else a->freeBins[bin]=links->next;
+  if(next) ryeosNativeLinks(next)->previous=links->previous;
+  if(!a->freeBins[bin]) a->freeMap&=~(1ULL<<bin);
+  links->next=0; links->previous=0; return 1;
+}
+/* Allocation cost is bounded by the bin probes plus one, independent of how
+   many blocks are live: a full arena walk per request would make the paid
+   work grow with every block other connections retain. */
 static void *ryeosNativeMalloc(int request){
   if(!ryeos_native_process_matches()){return 0;}
-  RyeosNativeArena *a=atomic_load(&ryeosNativeOwner); RyeosNativeBlock *b,*next;
-  uint64_t need,remainder; unsigned char *end;
+  RyeosNativeArena *a=atomic_load(&ryeosNativeOwner); RyeosNativeBlock *b,*found=0,*next;
+  uint64_t need,remainder,offset,larger; unsigned char *end; unsigned bin,probes=0;
   if(request<=0 || !ryeosNativeContext(a)
       || !ryeosNativeCharge(a,1,ryeosNativeCleanup)) return 0;
   need=((uint64_t)request+sizeof(*b)+RYEOS_NATIVE_BLOCK-1)&~(RYEOS_NATIVE_BLOCK-1);
   if(need>(uint64_t)INT_MAX || pthread_mutex_trylock(&a->mutex)!=0) return 0;
   end=(unsigned char*)a+a->mappingBytes;
-  for(b=ryeosNativeFirst(a);(unsigned char*)b<end;b=(RyeosNativeBlock*)((unsigned char*)b+b->span)){
-    if(!ryeosNativeCharge(a,1,ryeosNativeCleanup)) break;
-    if(!ryeosNativeBlockValid(a,b)){atomic_store(&a->poisoned,1);break;}
-    if(atomic_load(&b->state)!=0 || b->span<need) continue;
-    remainder=b->span-need;
-    if(remainder>=RYEOS_NATIVE_BLOCK){
-      next=(RyeosNativeBlock*)((unsigned char*)b+need);
-      next->magic=RYEOS_NATIVE_MAGIC; next->span=remainder; next->previous=need;
-      next->reserved=0; atomic_store(&next->state,0);
-      b->span=need;
-      if((unsigned char*)next+remainder<end)
-        ((RyeosNativeBlock*)((unsigned char*)next+remainder))->previous=remainder;
-    }
-    atomic_store(&b->state,1); atomic_fetch_add(&a->liveBlocks,1);
-    pthread_mutex_unlock(&a->mutex); return b+1;
+  bin=ryeosNativeBin(need);
+  /* Every block in a strictly larger bin is at least twice need's bin floor. */
+  larger=bin+1<RYEOS_NATIVE_BINS?a->freeMap&~((2ULL<<bin)-1):0;
+  for(offset=a->freeBins[bin];offset;offset=ryeosNativeLinks(b)->next){
+    if(larger && probes>=RYEOS_NATIVE_BIN_PROBES) break;
+    if(!ryeosNativeCharge(a,1,ryeosNativeCleanup)) goto refused;
+    probes++;
+    if(!(b=ryeosNativeListed(a,offset))){atomic_store(&a->poisoned,1);goto refused;}
+    if(b->span>=need){found=b;break;}
   }
+  if(!found && larger){
+    if(!ryeosNativeCharge(a,1,ryeosNativeCleanup)) goto refused;
+    found=ryeosNativeListed(a,a->freeBins[__builtin_ctzll(larger)]);
+    if(!found || found->span<need){atomic_store(&a->poisoned,1);goto refused;}
+  }
+  if(!found || !ryeosNativeListRemove(a,found)) goto refused;
+  b=found; remainder=b->span-need;
+  if(remainder>=RYEOS_NATIVE_BLOCK){
+    next=(RyeosNativeBlock*)((unsigned char*)b+need);
+    next->magic=RYEOS_NATIVE_MAGIC; next->span=remainder; next->previous=need;
+    next->reserved=0; atomic_store(&next->state,0);
+    b->span=need;
+    if((unsigned char*)next+remainder<end)
+      ((RyeosNativeBlock*)((unsigned char*)next+remainder))->previous=remainder;
+    ryeosNativeListInsert(a,next);
+  }
+  atomic_store(&b->state,1); atomic_fetch_add(&a->liveBlocks,1);
+  pthread_mutex_unlock(&a->mutex); return b+1;
+ refused:
   pthread_mutex_unlock(&a->mutex); return 0;
 }
 static void ryeosNativeFreeLocked(RyeosNativeArena *a,RyeosNativeBlock *b){
@@ -226,16 +298,19 @@ static void ryeosNativeFreeLocked(RyeosNativeArena *a,RyeosNativeBlock *b){
   atomic_store(&b->state,0); atomic_fetch_sub(&a->liveBlocks,1);
   next=(RyeosNativeBlock*)((unsigned char*)b+b->span);
   if((unsigned char*)next<end && ryeosNativeBlockValid(a,next) && atomic_load(&next->state)==0){
+    if(!ryeosNativeListRemove(a,next)) return;
     b->span+=next->span; next->magic=0;
   }
   if(b->previous){
     previous=(RyeosNativeBlock*)((unsigned char*)b-b->previous);
     if(ryeosNativeBlockValid(a,previous) && atomic_load(&previous->state)==0){
+      if(!ryeosNativeListRemove(a,previous)) return;
       previous->span+=b->span; b->magic=0; b=previous;
     }
   }
   next=(RyeosNativeBlock*)((unsigned char*)b+b->span);
   if((unsigned char*)next<end) next->previous=b->span;
+  ryeosNativeListInsert(a,b);
 }
 static void ryeosNativeFree(void *pointer){
   if(!ryeos_native_process_matches()){return;}
@@ -322,6 +397,7 @@ SQLITE_API int ryeos_native_arena_create(const RyeosNativeBudget *budget,void **
   atomic_store(&a->mutexReady,1);
   first=ryeosNativeFirst(a);first->magic=RYEOS_NATIVE_MAGIC;first->span=mapping-offset;
   first->previous=0;first->reserved=0;atomic_store(&first->state,0);
+  ryeosNativeListInsert(a,first);
   atomic_store(&ryeosNativeOwner,a);return SQLITE_OK;
 }
 SQLITE_API int ryeos_native_scope_enter(void *handle,int cleanup,uint32_t ticket){
@@ -398,6 +474,7 @@ SQLITE_API int ryeos_native_arena_reclaim(void *handle){
       if(!ryeosNativeCharge(a,1,1)){pthread_mutex_unlock(&a->mutex);return SQLITE_BUSY;}
       /* No coalescing during this census: stable original forward extent. */
       atomic_store(&b->state,0);atomic_fetch_sub(&a->liveBlocks,1);
+      ryeosNativeListInsert(a,b);
     }
     if(atomic_load(&b->state)!=0){pthread_mutex_unlock(&a->mutex);return SQLITE_BUSY;}
     b=(RyeosNativeBlock*)((unsigned char*)b+b->span);

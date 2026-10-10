@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-10T04:34:13Z:6031ea37d6a6db1be2e95e7ad0c63a7072330b31ff7881401f71fcc419f9a97e:T5/NISDKr/HGnQ97VTyQhTWmTABbLbrC9g3eFeA4Q11OUScns9IykD6bP2i/fmalnFUOHl7o+QX3adRCnbXxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.run-product-qualification-worker
 required_caps: ["ryeos.execute.service.external-content/run-product-qualification-worker"]

@@ -185,7 +185,10 @@ fn open_recovered_projection(
         },
     )?;
     let expected_epoch = ProjectionDb::current_schema_epoch();
-    let generation = match recovery.read_generation() {
+    // A live context holds generation leases; its guarded reads run inside
+    // the owning factory's native scope.
+    let native_factory = original.as_deref().map(|context| Arc::clone(&context.factory));
+    let generation = match recovery.read_generation_in(native_factory.as_deref()) {
         Ok(generation) => generation,
         Err(error) => {
             tracing::warn!(error = %error, "invalid projection recovery generation; rebuilding baseline");
@@ -212,7 +215,8 @@ fn open_recovered_projection(
                     let selected_work = (|| -> anyhow::Result<()> {
                         replay_pending_into(&db, cas_root, refs_root, recovery, trust_store,
                             runtime_liveness, true, observer)?;
-                        let deleted = cleanup_superseded_projection_instances(recovery, &projection_path)?;
+                        let deleted = cleanup_superseded_projection_instances(recovery,
+                            native_factory.as_deref(), &projection_path)?;
                         if deleted != 0 { tracing::info!(deleted, "removed superseded projection instances"); }
                         Ok(())
                     })();
@@ -290,6 +294,7 @@ fn rebuild_and_install_projection(
         }
     };
 
+    let native_factory = original.as_deref().map(|context| Arc::clone(&context.factory));
     let instance_id = recovery.new_projection_instance_id();
     let projection_file = format!("projection.{instance_id}.sqlite3");
     let instance_path = runtime_state_dir.join(&projection_file);
@@ -415,7 +420,11 @@ fn rebuild_and_install_projection(
                 true,
                 observer,
             )?;
-            let deleted = cleanup_superseded_projection_instances(recovery, &instance_path)?;
+            let deleted = cleanup_superseded_projection_instances(
+                recovery,
+                native_factory.as_deref(),
+                &instance_path,
+            )?;
             if deleted != 0 {
                 tracing::info!(deleted, "removed superseded projection instances");
             }
@@ -456,10 +465,12 @@ const SUPERSEDED_PROJECTION_DIRECTORY_ENTRIES_PER_PASS: usize = 64;
 
 fn cleanup_superseded_projection_instances(
     recovery: &RecoveryStore,
+    native_factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     selected_path: &Path,
 ) -> anyhow::Result<usize> {
     cleanup_projection_instances(
         recovery,
+        native_factory,
         selected_path,
         SUPERSEDED_PROJECTION_INSTANCES_TO_KEEP,
         Some(SUPERSEDED_PROJECTION_DIRECTORY_ENTRIES_PER_PASS),
@@ -475,10 +486,11 @@ fn cleanup_superseded_projection_instances(
 /// unselected generation or fail while the durable discard marker remains.
 fn cleanup_all_superseded_projection_instances(
     recovery: &RecoveryStore,
+    native_factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     selected_path: &Path,
 ) -> anyhow::Result<usize> {
     let generated =
-        cleanup_projection_instances(recovery, selected_path, 0, None, None, None, true)?;
+        cleanup_projection_instances(recovery, native_factory, selected_path, 0, None, None, None, true)?;
     let obsolete_fixed = cleanup_obsolete_fixed_projection(recovery)?;
     generated
         .checked_add(obsolete_fixed)
@@ -565,8 +577,11 @@ fn inspect_projection_history_discard(recovery: &RecoveryStore) -> anyhow::Resul
     Ok(instances)
 }
 
+// Bounded housekeeping knobs plus the guarded-read owner stay explicit here.
+#[allow(clippy::too_many_arguments)]
 fn cleanup_projection_instances(
     recovery: &RecoveryStore,
+    native_factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     selected_path: &Path,
     instances_to_keep: usize,
     directory_entry_limit: Option<usize>,
@@ -578,7 +593,7 @@ fn cleanup_projection_instances(
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("selected projection path has no filename"))?;
     let generation_file = recovery
-        .read_generation()?
+        .read_generation_in(native_factory)?
         .map(|generation| generation.projection_file);
     let runtime_directory = recovery.runtime_directory().try_clone()?;
     let mut candidates = Vec::new();
@@ -3802,6 +3817,15 @@ impl StateDb {
     }
 
     /// Exact generation-selected projection instance.
+    /// Owner of this State's projection leases, when it has native custody.
+    /// Guarded evidence reads run inside its scope; without one they stay
+    /// unscoped, which is sound only while this process lists no lease.
+    fn guarded_read_factory(&self) -> Option<&lillux_sqlite::OriginalNativeFactory> {
+        self.original_projection_context
+            .as_ref()
+            .map(|context| context.factory.as_ref())
+    }
+
     pub fn selected_projection_path(&self) -> &Path {
         self.projection.path()
     }
@@ -3815,7 +3839,9 @@ impl StateDb {
     ) -> anyhow::Result<crate::rebuild::ProjectionVerificationReport> {
         let generation = self
             .recovery
-            .read_generation()?
+            .read_generation_in(
+                self.guarded_read_factory(),
+            )?
             .ok_or_else(|| anyhow::anyhow!("projection recovery generation is absent"))?;
         if generation.projection_schema_epoch != ProjectionDb::current_schema_epoch() {
             anyhow::bail!(
@@ -3905,8 +3931,11 @@ impl StateDb {
         } else {
             drop(old_projection);
         }
-        let deleted =
-            cleanup_superseded_projection_instances(&self.recovery, self.projection.path())?;
+        let deleted = cleanup_superseded_projection_instances(
+            &self.recovery,
+            self.guarded_read_factory(),
+            self.projection.path(),
+        )?;
         if deleted != 0 {
             tracing::info!(deleted, "removed superseded projection instances");
         }
@@ -3933,7 +3962,7 @@ impl StateDb {
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<Option<crate::recovery::ThreadHistoryDiscardOperationRef>> {
         self.ensure_cas_mutation_guard(cas_mutation_guard)?;
-        self.recovery.thread_history_discard_operation()
+        self.recovery.thread_history_discard_operation_in(self.guarded_read_factory())
     }
 
     pub fn finish_thread_history_discard_admitted(
@@ -3976,7 +4005,12 @@ impl StateDb {
         if !cas_mutation_guard.is_exclusive() {
             anyhow::bail!("thread-history discard requires the exclusive CAS guard");
         }
-        if !dry_run && !self.recovery.thread_history_discard_in_progress()? {
+        if !dry_run
+            && self
+                .recovery
+                .thread_history_discard_operation_in(self.guarded_read_factory())?
+                .is_none()
+        {
             anyhow::bail!("thread-history discard intent was not durably published");
         }
 
@@ -4032,7 +4066,11 @@ impl StateDb {
         progress(AuthoritativeThreadHistoryDiscardProgress::RebuildingProjection);
         let rebuilt_projection =
             self.rebuild_projection_generation_admitted(None, cas_mutation_guard)?;
-        cleanup_all_superseded_projection_instances(&self.recovery, self.projection.path())?;
+        cleanup_all_superseded_projection_instances(
+            &self.recovery,
+            self.guarded_read_factory(),
+            self.projection.path(),
+        )?;
         Ok(AuthoritativeThreadHistoryDiscardReport {
             chain_heads: heads.len(),
             chain_ref_artifacts,

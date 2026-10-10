@@ -477,10 +477,10 @@ impl ClosedLiveStatePhysicalCustody {
         // The registry now owns the exact registered roots. Consume both
         // semantic RecoveryStore frames through their typed owner transition;
         // their moved Arc aliases end here while the physical directory owners
-        // remain in the registry until matching close receipts.
-        let (paths, recovery) = unsafe { std::mem::ManuallyDrop::take(&mut self._recovery) };
-        drop(paths);
-        if let Some(recovery) = recovery {
+        // remain in the registry until matching close receipts. Only the
+        // RecoveryStore leaves the frame; its emptied slot is what later
+        // stages check, and exhaustion drops the remaining paths once.
+        if let Some(recovery) = self._recovery.1.take() {
             drop(recovery.into_original_directory_custody());
         }
         if let Some(authority) = authority_recovery.take() {

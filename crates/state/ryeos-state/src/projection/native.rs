@@ -780,4 +780,54 @@ mod native_host_tests {
         host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed.native_proof()));
         assert_eq!(host.ticket_census(), (2, 2));
     }
+
+    /// Under the signed 64 MiB / 20M-step incarnation envelope, the schema
+    /// reference must still build while other connections hold their schemas
+    /// live. A per-allocation walk over every live block once exhausted the
+    /// service steps on the fourth build.
+    #[test]
+    fn schema_reference_cost_is_flat_with_live_connections_under_production_envelope() {
+        use lillux_sqlite::test_host::TestNativeEnvelope;
+        let host = TestNativeHost::acquire_with(TestNativeEnvelope {
+            storage_bytes: 64 * 1024 * 1024,
+            allocator_steps: 20_000_000,
+            tickets: 64,
+        });
+        let steps = || host.factory().budget_snapshot().unwrap().allocator_steps;
+        let mut held = Vec::new();
+        let mut costs = Vec::new();
+        for _ in 0..4 {
+            let before = steps();
+            let connection = host.open_transient();
+            connection
+                .with_sql(|sql| Ok(sql.execute_batch(crate::projection::projection_schema_sql())?))
+                .unwrap();
+            costs.push(steps() - before);
+            held.push(connection);
+        }
+        // SAFETY: test-only issuance under the host's own funded factory.
+        let reference_inputs = unsafe {
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::NodeProjectionSchemaReference,
+                host.destination(),
+            )
+        }
+        .unwrap();
+        let before = steps();
+        let reference = crate::sqlite_schema::prepare_native_schema_sql_reference(
+            Arc::clone(host.factory()),
+            reference_inputs,
+            OriginalNativeDomain::NodeProjectionSchemaReference,
+            crate::projection::projection_schema_sql(),
+        )
+        .unwrap_or_else(|failure| panic!("schema reference retained: {failure}"));
+        costs.push(steps() - before);
+        host.retain_terminal(reference.terminal().clone());
+        for connection in held {
+            host.close(connection);
+        }
+        let first = costs[0];
+        assert!(costs.iter().all(|cost| *cost <= first * 2), "per-build cost grew with live blocks: {costs:?}");
+        assert!(first < 200_000, "one projection schema build costs {first} steps");
+    }
 }

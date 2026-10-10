@@ -47,7 +47,7 @@
   },
   "ryeos_added_files": {
     "ryeos_instrument.rs": "781414a161efd3439e00c7c36bc94e4c4e5a1efc25e7cb8e4f4574c74314506f",
-    "sqlite3/ryeos_binding.c": "968ef453430a418659096cbdff2ea74c82efcc40bb61fa9ce49e6dd32d37bcac",
+    "sqlite3/ryeos_binding.c": "20b799570898821f99a7ba31d70d3e636700beb129a5abcdd6a8e24320b1ffc5",
     "sqlite3/ryeos_binding.h": "0e0a75f0c262da84e359dac7a16250dff548e95fe2e773fa6152580d336909cf"
   },
   "files_sha256": {
@@ -69,7 +69,7 @@
     "sqlcipher/sqlite3ext.h": "7f9ae3bab94bbc62d909fbb0149861b4a0832299f12d7ccbfecc7f28a8d27aa2",
     "sqlite3/bindgen_bundled_version.rs": "3dda83bd41376847eb3e0fd9e4aa645e6f5b48ebdc5227df051c044ebdce177a",
     "sqlite3/bindgen_bundled_version_ext.rs": "73b54ea41acf310e13555ec925d5eaee6443d0787e6b1e4310f83647967a1a04",
-    "sqlite3/ryeos_binding.c": "968ef453430a418659096cbdff2ea74c82efcc40bb61fa9ce49e6dd32d37bcac",
+    "sqlite3/ryeos_binding.c": "20b799570898821f99a7ba31d70d3e636700beb129a5abcdd6a8e24320b1ffc5",
     "sqlite3/ryeos_binding.h": "0e0a75f0c262da84e359dac7a16250dff548e95fe2e773fa6152580d336909cf",
     "sqlite3/sqlite3.c": "beb670be019aac60c8b30804dcb1c2ec7a2b9028fca7acf9aec9da664543c7ad",
     "sqlite3/sqlite3.h": "0c207567adc631521a353e067cfbc5044ebf11868f3c3fbf3178d6990409740e",

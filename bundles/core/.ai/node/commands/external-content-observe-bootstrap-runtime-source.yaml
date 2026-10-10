@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-10T04:34:03Z:c9130b058d5e3955eceb895df14b4c6b525bf553ee6bc6f350013e3f00d6397b:PFGYtp9ekkBvKFEbZykiaOqM+Zmm23cyH5+/wsKz2EH+/4jJSDDLpG3IuyFgwdXZzL8i5SN/yPBR0C50M9mWCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, observe-bootstrap-runtime-source]
 description: Observe readiness of the exact retained runtime-source bootstrap
 parameter_binding:

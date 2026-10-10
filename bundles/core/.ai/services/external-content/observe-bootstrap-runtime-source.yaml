@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-10T04:34:12Z:468767bab9c56481f303230dc58f19c10c08ad8672e8953d603aeb8fb8e0400e:qMSL3yqFThrabZkX+Pj8Pn4GfMxkhuDh4ozwt/JDElxBnUzHYczj0zak7GGvj0MFlEJHZRN1Dxx6AXd5anEdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.observe-bootstrap-runtime-source
 required_caps: ["ryeos.execute.service.external-content/observe-bootstrap-runtime-source"]
