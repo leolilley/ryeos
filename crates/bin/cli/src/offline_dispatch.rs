@@ -771,6 +771,7 @@ fn exec_tool(
                 target_channels: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
+                verbatim_env_names: &[],
             },
         )
         .map_err(|error| CliError::Local {

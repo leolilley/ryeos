@@ -91,28 +91,20 @@ pub async fn handle(
         .validate(&format!(" for '{}' validation", req.provider_id))
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let credential = match setup.credential {
-        Some(credential) => {
-            let mut secrets = state
-                .vault
-                .read_all(&ctx.fingerprint)
-                .map_err(|error| HandlerError::Internal(error.to_string()))?;
-            let selected = match secrets.remove(&credential.secret_name) {
-                Some(selected) => selected,
-                None => {
-                    for other in secrets.values_mut() {
-                        other.zeroize();
-                    }
-                    return Err(HandlerError::BadRequest(format!(
-                        "provider '{}' credential '{}' is not configured",
-                        req.provider_id, credential.secret_name
-                    )));
-                }
-            };
-            for other in secrets.values_mut() {
-                other.zeroize();
-            }
-            Some(Zeroizing::new(selected))
-        }
+        Some(credential) => Some(
+            ryeos_app::vault::read_named_secret(
+                state.vault.as_ref(),
+                &ctx.fingerprint,
+                &credential.secret_name,
+            )
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                HandlerError::BadRequest(format!(
+                    "provider '{}' credential '{}' is not configured",
+                    req.provider_id, credential.secret_name
+                ))
+            })?,
+        ),
         None => None,
     };
     let model = req.model.as_deref().unwrap_or_default();

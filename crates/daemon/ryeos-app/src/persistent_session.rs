@@ -7711,6 +7711,7 @@ while True:
             }),
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
+            secret_env: None,
         };
         let pending = ryeos_engine::dispatch::spawn_plan(&plan, &context)
             .map_err(|error| anyhow!("spawn fake persistent-session worker: {error}"))?;

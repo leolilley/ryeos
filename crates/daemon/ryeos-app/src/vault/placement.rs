@@ -139,8 +139,8 @@ impl PlacementCredential {
 mod tests {
     use super::*;
     use crate::vault::{
-        NodeVault, SealedEnvelopeVault, VaultScope, read_explicit_secret, read_named_secret,
-        read_required_secrets,
+        NodeVault, NodeVaultReadAll as _, SealedEnvelopeVault, VaultScope,
+        authorize_secret_delivery, read_named_secret,
     };
 
     #[test]
@@ -191,8 +191,22 @@ mod tests {
         assert!(vault.set_secret("operator", name, "overwrite").is_err());
         assert!(vault.delete_secret("operator", name).is_err());
         assert!(read_named_secret(&vault, "operator", name).is_err());
-        assert!(read_explicit_secret(&vault, "operator", name, &[]).is_err());
-        assert!(read_required_secrets(&vault, "operator", &[name.to_owned()], &[]).is_err());
+        assert!(
+            authorize_secret_delivery(
+                &vault,
+                "operator",
+                &[name.to_owned()],
+                &ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                ryeos_state::objects::EnvironmentAuthority::Vault {
+                    namespace: "operator".to_string(),
+                    name_authority:
+                        ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                },
+            )
+            .unwrap(),
+            )
+            .is_err()
+        );
         let runtime = VaultScope::runtime_bundle("codex", "placement").unwrap();
         assert!(vault.get_scoped_secret(&runtime, name).is_err());
         assert!(vault.list_scoped_secret_keys(&runtime).unwrap().is_empty());

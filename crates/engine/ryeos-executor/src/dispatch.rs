@@ -2624,6 +2624,7 @@ pub(crate) async fn dispatch_method(
                     target_channels: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
+                    verbatim_env_names: &[],
                 },
             )
             .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
@@ -2774,6 +2775,13 @@ pub(crate) async fn dispatch_method(
     // callers do not end up with a bare "failed" thread and no cause.
     let lifecycle_settled = match &outcome {
         Ok(_) => true,
+        // Unproved physical cleanup keeps the row attached and non-terminal;
+        // the armed lifecycle owner's drop stop or reconcile settles it.
+        Err(DispatchError::Internal(error))
+            if crate::execution::process_attachment::is_unsettled_launch_cleanup(error) =>
+        {
+            false
+        }
         Err(err) => match finalize_method_thread_if_needed(
             state,
             &thread_id,
@@ -4629,13 +4637,12 @@ fn require_prepared_launch_secret_availability(
     );
     names.sort();
     names.dedup();
-    ryeos_app::vault::read_required_secrets_with_authority(
+    ryeos_app::vault::check_secret_availability(
         state.vault.as_ref(),
         &ctx.principal_fingerprint,
         &names,
         project_authority,
     )
-    .map(|_| ())
     .map_err(|error| match error {
         ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
             let name = names

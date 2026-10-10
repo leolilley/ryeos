@@ -842,6 +842,9 @@ pub struct IsolationLaunchContext<'a> {
     pub target_channels: &'a [IsolationTargetChannelAuthority],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
+    /// Environment names delivered verbatim to the target. Their values are
+    /// never inspected for code-path rewriting and never echoed in refusals.
+    pub verbatim_env_names: &'a [String],
 }
 
 #[cfg(test)]

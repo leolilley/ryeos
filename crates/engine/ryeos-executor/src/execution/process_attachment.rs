@@ -173,38 +173,6 @@ pub(crate) struct AttachedProcessGuard {
     settled: bool,
 }
 
-/// Keep the actual caller's durable attachment untouched unless Lillux's
-/// consuming release owner proves both the child/wrapper and selected scope
-/// cleanup. PID/group absence and diagnostic text do not establish that proof.
-trait CallbackReleaseTestimony {
-    fn cleanup_is_settled(&self) -> bool;
-}
-impl CallbackReleaseTestimony for lillux::exec::AttachmentReleaseError {
-    fn cleanup_is_settled(&self) -> bool {
-        lillux::exec::AttachmentReleaseError::cleanup_is_settled(self)
-    }
-}
-
-fn callback_release_failure<E>(
-    error: E,
-    settle: impl FnOnce() -> Result<()>,
-) -> anyhow::Error
-where
-    E: CallbackReleaseTestimony + std::error::Error + Send + Sync + 'static,
-{
-    if !error.cleanup_is_settled() {
-        return anyhow::Error::new(error)
-            .context("callback subprocess release cleanup is unproved; retaining authority");
-    }
-    match settle() {
-        Ok(()) => anyhow::Error::new(error)
-            .context("release callback subprocess after durable attachment"),
-        Err(settlement) => anyhow::Error::new(error).context(format!(
-            "release failed; exact attachment retained: {settlement:#}"
-        )),
-    }
-}
-
 impl AttachedProcessGuard {
     pub(crate) fn new(
         state: &AppState,
@@ -360,6 +328,8 @@ pub(crate) fn run_lillux_attached(
     run_spawned_lillux_attached(state, thread_id, launch_owner, spawned, workspace_lifeline)
 }
 
+/// Class B composition. Every failure after process contact is a typed
+/// [`LaunchFailure`]; callers must not finalize one whose cleanup is unsettled.
 pub(crate) fn run_spawned_lillux_attached(
     state: &AppState,
     thread_id: &str,
@@ -393,98 +363,699 @@ pub(crate) fn run_spawned_lillux_attached(
             });
         }
     };
-
-    if let Err(error) = state.threads.attach_new_process_owned(
-        &ThreadAttachProcessParams {
-            thread_id: thread_id.to_string(),
-            pid: spawned.pid() as i64,
-            pgid: spawned.pgid(),
-            process_identity: Some(identity.clone()),
-            metadata: None,
-            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-        },
-        launch_owner,
-    ) {
-        let cleanup = spawned.abort_and_reap().err();
-        if let Some(cleanup) = cleanup {
-            return Err(error.context(format!(
-                "pending-process cleanup failed; retaining authority: {cleanup}"
-            )));
-        }
-        let stop_settlement = finalize_requested_stop_if_present(state, thread_id);
-        let error = match stop_settlement {
-            Ok(true) => error.context(
-                "callback subprocess attachment refused after durable stop request",
-            ),
-            Ok(false) => error.context("attach held callback subprocess identity"),
-            Err(stop_error) => error.context(format!(
-                "attach held callback subprocess identity; stop settlement also failed: {stop_error:#}"
-            )),
-        };
-        return Err(error);
-    }
-    let mut attachment =
-        AttachedProcessGuard::new(state, thread_id, launch_owner, identity.clone())?;
-    if let Err(error) =
-        state
-            .threads
-            .authorize_process_release_owned(thread_id, &identity, launch_owner)
-    {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| attachment.settle_after_reap())
-            .err();
-        if let Some(cleanup) = cleanup {
-            return Err(error.context(format!(
-                "pending-process cleanup failed; retaining authority: {cleanup}"
-            )));
-        }
-        let stop_settlement = finalize_requested_stop_if_present(state, thread_id);
-        let error = match stop_settlement {
-            Ok(true) => {
-                anyhow::anyhow!("callback subprocess stopped before attachment release: {error}")
-            }
-            Ok(false) => {
-                error.context("authorize callback subprocess release after durable attachment")
-            }
-            Err(stop_error) => error.context(format!(
-                "authorize callback subprocess release after durable attachment; stop settlement also failed: {stop_error:#}"
-            )),
-        };
-        return Err(error);
-    }
-    let spawned = match spawned.release_after_attachment() {
-        Ok(spawned) => spawned,
-        Err(error) => return Err(callback_release_failure(error, || attachment.settle_after_reap())),
-    };
-    let result = spawned.wait();
-    attachment.settle_after_reap()?;
+    let held = HeldLaunch::new(
+        state,
+        LaunchOwnerCoordinate::thread(thread_id, launch_owner),
+        identity,
+        spawned,
+    );
+    let launch = held
+        .attach(AttachOptions::default())
+        .and_then(AttachedLaunch::authorize_release)
+        .and_then(AuthorizedLaunch::release)
+        .map_err(anyhow::Error::new)?;
+    let ReleasedLaunch {
+        running,
+        mut settlement,
+    } = launch;
+    let result = running.wait();
+    settlement
+        .settle_after_reap()
+        .map_err(|error| anyhow::Error::new(settlement.into_unsettled_failure(error)))?;
     Ok(result)
+}
+
+// ── Admitted execution owner ─────────────────────────────────────────────
+
+/// Durable coordinate that owns one launch attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchOwnerCoordinate {
+    Thread {
+        thread_id: String,
+        launch_owner: String,
+    },
+}
+
+impl LaunchOwnerCoordinate {
+    pub(crate) fn thread(thread_id: &str, launch_owner: &str) -> Self {
+        Self::Thread {
+            thread_id: thread_id.to_owned(),
+            launch_owner: launch_owner.to_owned(),
+        }
+    }
+
+    pub(crate) fn thread_id(&self) -> &str {
+        match self {
+            Self::Thread { thread_id, .. } => thread_id,
+        }
+    }
+
+    pub(crate) fn launch_owner(&self) -> &str {
+        match self {
+            Self::Thread { launch_owner, .. } => launch_owner,
+        }
+    }
+}
+
+/// Keep the caller's durable attachment untouched unless the consuming
+/// release owner proves both the child/wrapper and selected scope cleanup.
+/// PID/group absence and diagnostic text do not establish that proof.
+pub(crate) trait ReleaseTestimony {
+    fn cleanup_is_settled(&self) -> bool;
+}
+
+impl ReleaseTestimony for lillux::exec::AttachmentReleaseError {
+    fn cleanup_is_settled(&self) -> bool {
+        lillux::exec::AttachmentReleaseError::cleanup_is_settled(self)
+    }
+}
+
+impl ReleaseTestimony for ryeos_app::thread_lifecycle::ItemReleaseError {
+    fn cleanup_is_settled(&self) -> bool {
+        ryeos_app::thread_lifecycle::ItemReleaseError::cleanup_is_settled(self)
+    }
+}
+
+/// One held (not yet released) process class.
+pub(crate) trait HeldProcess: Sized {
+    type Running;
+    type ReleaseError: ReleaseTestimony + std::error::Error + Send + Sync + 'static;
+    fn pid(&self) -> u32;
+    fn pgid(&self) -> i64;
+    /// Abort and reap before durable attachment, retiring class-owned
+    /// reservations for this exact identity.
+    fn abort_unattached(
+        self,
+        state: &AppState,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> Result<()>;
+    /// Abort and reap after durable attachment. Attachment settlement follows.
+    fn abort_attached(self) -> Result<()>;
+    fn release(
+        self,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> std::result::Result<Self::Running, Self::ReleaseError>;
+}
+
+impl HeldProcess for lillux::ProcessAwaitingAttachment {
+    type Running = lillux::RunningProcess;
+    type ReleaseError = lillux::exec::AttachmentReleaseError;
+    fn pid(&self) -> u32 {
+        lillux::ProcessAwaitingAttachment::pid(self)
+    }
+    fn pgid(&self) -> i64 {
+        lillux::ProcessAwaitingAttachment::pgid(self)
+    }
+    fn abort_unattached(
+        self,
+        _state: &AppState,
+        _identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        self.abort_attached()
+    }
+    fn abort_attached(self) -> Result<()> {
+        self.abort_and_reap()
+            .map(drop)
+            .map_err(anyhow::Error::from)
+            .context("abort and reap held process")
+    }
+    fn release(
+        self,
+        _identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> std::result::Result<lillux::RunningProcess, lillux::exec::AttachmentReleaseError> {
+        self.release_after_attachment()
+    }
+}
+
+impl HeldProcess for ryeos_app::thread_lifecycle::SpawnedItemAwaitingAttachment {
+    type Running = ryeos_app::thread_lifecycle::RunningItem;
+    type ReleaseError = ryeos_app::thread_lifecycle::ItemReleaseError;
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn pgid(&self) -> i64 {
+        self.pgid
+    }
+    fn abort_unattached(
+        self,
+        _state: &AppState,
+        _identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        self.abort_attached()
+    }
+    fn abort_attached(self) -> Result<()> {
+        self.abort_and_reap()
+            .context("abort and reap attachment-pending item")
+    }
+    fn release(
+        self,
+        _identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> std::result::Result<Self::Running, Self::ReleaseError> {
+        self.release_after_attachment()
+    }
+}
+
+/// The transition at which a held launch failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchStage {
+    /// A class-specific check before durable attachment.
+    PreAttach,
+    Attach,
+    WorkspaceActivation,
+    /// A class-specific step on the attached launch.
+    Attached,
+    IssueResources,
+    AuthorizeRelease,
+    Release,
+    /// Post-wait settlement of a released process.
+    Settlement,
+}
+
+impl LaunchStage {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PreAttach => "validate held launch",
+            Self::Attach => "attach process",
+            Self::WorkspaceActivation => "activate workspace",
+            Self::Attached => "attached launch step",
+            Self::IssueResources => "issue resource operations",
+            Self::AuthorizeRelease => "authorize release",
+            Self::Release => "release attached process",
+            Self::Settlement => "settle reaped process",
+        }
+    }
+}
+
+/// What physical cleanup proved for a failed launch.
+#[derive(Debug)]
+pub(crate) enum PhysicalDisposition {
+    /// Abort and reap were proved and any attachment was compare-cleared.
+    Aborted { stop_settled: bool },
+    /// Cleanup was not proved; the row stays attached and non-terminal.
+    UnsettledCleanup(UnsettledLaunchCleanup),
+}
+
+/// Names the recovery coordinate of a launch whose cleanup is unproved. The
+/// owner-drop stop or reconcile settles it; this value settles nothing.
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct UnsettledLaunchCleanup {
+    coord: LaunchOwnerCoordinate,
+    identity: ryeos_app::process::ExecutionProcessIdentity,
+}
+
+impl UnsettledLaunchCleanup {
+    pub(crate) fn coordinate(&self) -> &LaunchOwnerCoordinate {
+        &self.coord
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(coord: LaunchOwnerCoordinate) -> Self {
+        Self {
+            coord,
+            identity: release_failure_controls::identity(),
+        }
+    }
+}
+
+impl Drop for UnsettledLaunchCleanup {
+    fn drop(&mut self) {
+        tracing::error!(
+            thread_id = %self.coord.thread_id(),
+            target_pid = self.identity.target_pid,
+            "launch cleanup is unproved; exact attachment retained for owner stop or reconcile"
+        );
+    }
+}
+
+/// A failed launch transition with its original error and physical outcome.
+#[derive(Debug)]
+pub(crate) struct LaunchFailure {
+    pub error: anyhow::Error,
+    pub stage: LaunchStage,
+    pub disposition: PhysicalDisposition,
+}
+
+impl LaunchFailure {
+    pub(crate) fn is_unsettled(&self) -> bool {
+        matches!(self.disposition, PhysicalDisposition::UnsettledCleanup(_))
+    }
+
+    fn unsettled(
+        coord: &LaunchOwnerCoordinate,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+        stage: LaunchStage,
+        error: anyhow::Error,
+    ) -> Self {
+        Self {
+            error,
+            stage,
+            disposition: PhysicalDisposition::UnsettledCleanup(UnsettledLaunchCleanup {
+                coord: coord.clone(),
+                identity: identity.clone(),
+            }),
+        }
+    }
+
+    /// Physical cleanup is proved; classify a durable stop that may have won.
+    fn aborted(stage: LaunchStage, error: anyhow::Error, stop: Result<bool>) -> Self {
+        let (error, stop_settled) = match stop {
+            Ok(true) => (error.context("launch stopped by a durable stop request"), true),
+            Ok(false) => (error, false),
+            Err(stop_error) => (
+                error.context(format!("durable stop settlement also failed: {stop_error:#}")),
+                false,
+            ),
+        };
+        Self {
+            error,
+            stage,
+            disposition: PhysicalDisposition::Aborted { stop_settled },
+        }
+    }
+}
+
+impl std::fmt::Display for LaunchFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.error)?;
+        match &self.disposition {
+            PhysicalDisposition::Aborted { stop_settled: true } => {
+                write!(formatter, " (durable stop settled)")
+            }
+            PhysicalDisposition::Aborted { stop_settled: false } => Ok(()),
+            PhysicalDisposition::UnsettledCleanup(cleanup) => write!(
+                formatter,
+                " (physical cleanup unproved; attachment of {} retained)",
+                cleanup.coordinate().thread_id()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LaunchFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// True when `error` carries a launch failure whose cleanup is unproved.
+/// Such a row must stay non-terminal and its lifecycle owner armed.
+pub(crate) fn is_unsettled_launch_cleanup(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<LaunchFailure>().is_some_and(LaunchFailure::is_unsettled))
+}
+
+/// Inputs of the durable attachment transition.
+#[derive(Default)]
+pub(crate) struct AttachOptions<'a> {
+    pub workspace_lifeline: Option<&'a Arc<TempDirGuard>>,
+    pub owns_workspace: bool,
+    pub launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    pub rearm_resume_budget: bool,
+}
+
+/// A held process with its exact identity, before durable attachment.
+pub(crate) struct HeldLaunch<P: HeldProcess> {
+    state: AppState,
+    coord: LaunchOwnerCoordinate,
+    identity: ryeos_app::process::ExecutionProcessIdentity,
+    process: P,
+}
+
+/// A durably attached process; its guard settles the attachment after reap.
+pub(crate) struct AttachedLaunch<P: HeldProcess> {
+    state: AppState,
+    coord: LaunchOwnerCoordinate,
+    identity: ryeos_app::process::ExecutionProcessIdentity,
+    process: P,
+    guard: AttachedProcessGuard,
+}
+
+/// An attached launch whose single-use store release fence was consumed.
+/// Only [`AttachedLaunch::authorize_release`] constructs it.
+pub(crate) struct AuthorizedLaunch<P: HeldProcess>(AttachedLaunch<P>);
+
+/// A released process and its attachment settlement owner.
+pub(crate) struct ReleasedLaunch<R> {
+    pub running: R,
+    pub settlement: AttachedProcessGuard,
+}
+
+impl<P: HeldProcess> HeldLaunch<P> {
+    pub(crate) fn new(
+        state: &AppState,
+        coord: LaunchOwnerCoordinate,
+        identity: ryeos_app::process::ExecutionProcessIdentity,
+        process: P,
+    ) -> Self {
+        Self {
+            state: state.clone(),
+            coord,
+            identity,
+            process,
+        }
+    }
+
+    pub(crate) fn process(&self) -> &P {
+        &self.process
+    }
+
+    pub(crate) fn process_mut(&mut self) -> &mut P {
+        &mut self.process
+    }
+
+    /// Refuse before durable attachment: abort/reap, then classify any stop.
+    pub(crate) fn abort(self, stage: LaunchStage, error: anyhow::Error) -> LaunchFailure {
+        let Self {
+            state,
+            coord,
+            identity,
+            process,
+        } = self;
+        match process.abort_unattached(&state, &identity) {
+            Err(cleanup) => LaunchFailure::unsettled(
+                &coord,
+                &identity,
+                stage,
+                error.context(format!(
+                    "held-process cleanup failed; retaining authority: {cleanup:#}"
+                )),
+            ),
+            Ok(()) => LaunchFailure::aborted(
+                stage,
+                error,
+                finalize_requested_stop_if_present(&state, coord.thread_id()),
+            ),
+        }
+    }
+
+    /// Durably attach the held identity, activate an owned workspace, and
+    /// only then build the settlement guard over the activated binding.
+    pub(crate) fn attach(
+        self,
+        options: AttachOptions<'_>,
+    ) -> std::result::Result<AttachedLaunch<P>, LaunchFailure> {
+        let attach_params = ThreadAttachProcessParams {
+            thread_id: self.coord.thread_id().to_owned(),
+            pid: self.process.pid() as i64,
+            pgid: self.process.pgid(),
+            process_identity: Some(self.identity.clone()),
+            metadata: None,
+            launch_metadata: options.launch_metadata,
+        };
+        let attached = if options.rearm_resume_budget {
+            self.state
+                .threads
+                .attach_new_process_owned_rearming_resume_budget(
+                    &attach_params,
+                    self.coord.launch_owner(),
+                )
+        } else {
+            self.state
+                .threads
+                .attach_new_process_owned(&attach_params, self.coord.launch_owner())
+        };
+        if let Err(error) = attached {
+            return Err(self.abort(
+                LaunchStage::Attach,
+                error.context("attach held process identity"),
+            ));
+        }
+        if let Err(error) = super::runner::activate_workspace_after_process_attachment(
+            &self.state,
+            options.workspace_lifeline,
+            options.owns_workspace,
+            self.coord.thread_id(),
+            self.coord.launch_owner(),
+            &self.identity,
+        ) {
+            return Err(self.abort_without_guard(
+                LaunchStage::WorkspaceActivation,
+                error.context("activate workspace after process attachment"),
+            ));
+        }
+        match AttachedProcessGuard::new(
+            &self.state,
+            self.coord.thread_id(),
+            self.coord.launch_owner(),
+            self.identity.clone(),
+        ) {
+            Ok(guard) => Ok(AttachedLaunch {
+                state: self.state,
+                coord: self.coord,
+                identity: self.identity,
+                process: self.process,
+                guard,
+            }),
+            Err(error) => Err(self.abort_without_guard(
+                LaunchStage::Attach,
+                error.context("build attached-process owner"),
+            )),
+        }
+    }
+
+    /// Attached, but no settlement guard exists yet.
+    fn abort_without_guard(self, stage: LaunchStage, error: anyhow::Error) -> LaunchFailure {
+        let Self {
+            state,
+            coord,
+            identity,
+            process,
+        } = self;
+        let cleanup = process.abort_attached().and_then(|()| {
+            clear_finished_process(&state, coord.thread_id(), &identity, coord.launch_owner())
+        });
+        match cleanup {
+            Err(cleanup) => LaunchFailure::unsettled(
+                &coord,
+                &identity,
+                stage,
+                error.context(format!(
+                    "attached-process cleanup failed; retaining authority: {cleanup:#}"
+                )),
+            ),
+            Ok(()) => LaunchFailure::aborted(
+                stage,
+                error,
+                finalize_requested_stop_if_present(&state, coord.thread_id()),
+            ),
+        }
+    }
+}
+
+impl<P: HeldProcess> AttachedLaunch<P> {
+    /// Refuse after durable attachment: abort/reap, settle the exact
+    /// attachment, then classify any stop.
+    pub(crate) fn abort(self, stage: LaunchStage, error: anyhow::Error) -> LaunchFailure {
+        let Self {
+            state,
+            coord,
+            identity,
+            process,
+            mut guard,
+        } = self;
+        match process
+            .abort_attached()
+            .and_then(|()| guard.settle_after_reap())
+        {
+            Err(cleanup) => LaunchFailure::unsettled(
+                &coord,
+                &identity,
+                stage,
+                error.context(format!(
+                    "attached-process cleanup failed; retaining authority: {cleanup:#}"
+                )),
+            ),
+            Ok(()) => LaunchFailure::aborted(
+                stage,
+                error,
+                finalize_requested_stop_if_present(&state, coord.thread_id()),
+            ),
+        }
+    }
+
+    /// Issue resource operations and consume the single-use release fence.
+    pub(crate) fn authorize_release(
+        self,
+    ) -> std::result::Result<AuthorizedLaunch<P>, LaunchFailure> {
+        if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
+            &self.state,
+            &self.identity.resource_operations,
+        ) {
+            return Err(self.abort(
+                LaunchStage::IssueResources,
+                error.context("issue process resource operations"),
+            ));
+        }
+        if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
+            &self.state,
+            &self.identity.resource_operations,
+        )
+        .and_then(|()| {
+            self.state.threads.authorize_process_release_owned(
+                self.coord.thread_id(),
+                &self.identity,
+                self.coord.launch_owner(),
+            )
+        }) {
+            return Err(self.abort(
+                LaunchStage::AuthorizeRelease,
+                error.context("authorize release after durable attachment"),
+            ));
+        }
+        Ok(AuthorizedLaunch(self))
+    }
+}
+
+impl<P: HeldProcess> AuthorizedLaunch<P> {
+    /// One-shot release. An unproved release cleanup is never settled,
+    /// compare-cleared, or terminalized.
+    pub(crate) fn release(
+        self,
+    ) -> std::result::Result<ReleasedLaunch<P::Running>, LaunchFailure> {
+        let AttachedLaunch {
+            state,
+            coord,
+            identity,
+            process,
+            mut guard,
+        } = self.0;
+        match process.release(&identity) {
+            Ok(running) => Ok(ReleasedLaunch {
+                running,
+                settlement: guard,
+            }),
+            Err(error) => Err(release_failure(
+                &coord,
+                &identity,
+                error,
+                || guard.settle_after_reap(),
+                || finalize_requested_stop_if_present(&state, coord.thread_id()),
+            )),
+        }
+    }
+}
+
+impl AttachedProcessGuard {
+    /// Classify a failed post-wait settlement. The row stays attached.
+    pub(crate) fn into_unsettled_failure(self, error: anyhow::Error) -> LaunchFailure {
+        let coord = LaunchOwnerCoordinate::thread(&self.thread_id, &self.launch_owner);
+        LaunchFailure::unsettled(
+            &coord,
+            &self.identity,
+            LaunchStage::Settlement,
+            error.context("settle exact attachment after reap"),
+        )
+    }
+}
+
+fn release_failure<E>(
+    coord: &LaunchOwnerCoordinate,
+    identity: &ryeos_app::process::ExecutionProcessIdentity,
+    error: E,
+    settle: impl FnOnce() -> Result<()>,
+    settle_stop: impl FnOnce() -> Result<bool>,
+) -> LaunchFailure
+where
+    E: ReleaseTestimony + std::error::Error + Send + Sync + 'static,
+{
+    if !error.cleanup_is_settled() {
+        return LaunchFailure::unsettled(
+            coord,
+            identity,
+            LaunchStage::Release,
+            anyhow::Error::new(error)
+                .context("subprocess release cleanup is unproved; retaining authority"),
+        );
+    }
+    match settle() {
+        Ok(()) => LaunchFailure::aborted(
+            LaunchStage::Release,
+            anyhow::Error::new(error).context("release subprocess after durable attachment"),
+            settle_stop(),
+        ),
+        Err(settlement) => LaunchFailure::unsettled(
+            coord,
+            identity,
+            LaunchStage::Release,
+            anyhow::Error::new(error).context(format!(
+                "release failed; exact attachment retained: {settlement:#}"
+            )),
+        ),
+    }
+}
+
+/// Guard-construction-failure cleanup for an attached identity that has no
+/// settlement guard yet. Waited processes settle through their guard.
+pub(crate) fn clear_finished_process(
+    state: &AppState,
+    thread_id: &str,
+    process_identity: &ryeos_app::process::ExecutionProcessIdentity,
+    launch_owner: &str,
+) -> Result<()> {
+    let settled = (|| -> Result<bool> {
+        ryeos_app::process::assert_reaped_process_group_absent(process_identity)?;
+        let proposed =
+            ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(process_identity)?;
+        let evidence = state.state_store.prove_thread_resource_owner_cleanup(
+            thread_id,
+            process_identity,
+            &proposed,
+        )?;
+        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+            state,
+            process_identity,
+            &evidence,
+        )?;
+        if let Some(binding) = state.state_store.thread_workspace_binding(thread_id)? {
+            state.state_store.settle_reaped_thread_workspace_owned(
+                thread_id,
+                &binding,
+                process_identity,
+            )
+        } else {
+            state.state_store.clear_thread_process_if_matches_owned(
+                thread_id,
+                process_identity,
+                launch_owner,
+            )
+        }
+    })();
+    match settled {
+        Ok(true) => Ok(()),
+        Ok(false) => anyhow::bail!(
+            "finished process retains changed identity or unsettled workspace descendants"
+        ),
+        Err(error) => Err(error.context("settle exact finished process and workspace membership")),
+    }
 }
 
 #[cfg(test)]
 mod release_failure_controls {
-    use super::callback_release_failure;
+    use super::*;
     use lillux::exec::SubprocessResult;
 
     #[derive(Debug)]
-    struct UnprovedRelease {
+    struct ReleaseFixture {
+        settled: bool,
         result: SubprocessResult,
     }
-    impl std::fmt::Display for UnprovedRelease {
+    impl std::fmt::Display for ReleaseFixture {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.result.stderr)
         }
     }
-    impl std::error::Error for UnprovedRelease {}
-    impl super::CallbackReleaseTestimony for UnprovedRelease {
-        fn cleanup_is_settled(&self) -> bool { false }
+    impl std::error::Error for ReleaseFixture {}
+    impl ReleaseTestimony for ReleaseFixture {
+        fn cleanup_is_settled(&self) -> bool {
+            self.settled
+        }
     }
 
-    #[test]
-    fn absent_target_without_wrapper_and_scope_cleanup_proof_keeps_attachment() {
-        let error = UnprovedRelease {
+    fn fixture(settled: bool) -> ReleaseFixture {
+        ReleaseFixture {
+            settled,
             result: SubprocessResult {
                 success: false,
                 stdout: String::new(),
@@ -499,16 +1070,106 @@ mod release_failure_controls {
                 stdout_truncated: false,
                 stderr_truncated: false,
             },
-        };
+        }
+    }
+
+    pub(super) fn identity() -> ryeos_app::process::ExecutionProcessIdentity {
+        ryeos_app::process::ExecutionProcessIdentity {
+            schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            boot_id: "test-boot".to_owned(),
+            target_pid: 4242,
+            target_start_time_ticks: 10,
+            group_leader_pid: 4242,
+            group_leader_start_time_ticks: 10,
+            process_scope: None,
+            resource_selections: Vec::new(),
+            resource_settlement_authority: None,
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        }
+    }
+
+    fn coord() -> LaunchOwnerCoordinate {
+        LaunchOwnerCoordinate::thread("T-release-control", "owner")
+    }
+
+    #[test]
+    fn absent_target_without_wrapper_and_scope_cleanup_proof_keeps_attachment() {
+        let error = fixture(false);
         assert_eq!(error.result.pid, 0);
         assert!(error.result.aborted_before_attachment.is_none());
         let mut settlement_called = false;
-        let reported = callback_release_failure(error, || {
-            settlement_called = true;
-            Ok(())
-        });
+        let mut stop_called = false;
+        let failure = release_failure(
+            &coord(),
+            &identity(),
+            error,
+            || {
+                settlement_called = true;
+                Ok(())
+            },
+            || {
+                stop_called = true;
+                Ok(false)
+            },
+        );
         assert!(!settlement_called, "unproved physical cleanup must not clear durable attachment");
-        assert!(reported.downcast_ref::<UnprovedRelease>().is_some());
-        assert!(reported.to_string().contains("cleanup is unproved"));
+        assert!(!stop_called, "unproved physical cleanup must not settle a durable stop");
+        assert!(failure.is_unsettled());
+        assert_eq!(failure.stage, LaunchStage::Release);
+        assert!(failure.error.downcast_ref::<ReleaseFixture>().is_some());
+        assert!(failure.error.to_string().contains("cleanup is unproved"));
+        let carried = anyhow::Error::new(failure);
+        assert!(is_unsettled_launch_cleanup(&carried));
+        assert!(
+            is_unsettled_launch_cleanup(&carried.context("spawn/attach")),
+            "classification must survive added context"
+        );
+    }
+
+    #[test]
+    fn proved_release_with_failed_settlement_is_unsettled() {
+        let mut stop_called = false;
+        let failure = release_failure(
+            &coord(),
+            &identity(),
+            fixture(true),
+            || anyhow::bail!("workspace binding changed"),
+            || {
+                stop_called = true;
+                Ok(false)
+            },
+        );
+        assert!(!stop_called);
+        assert!(failure.is_unsettled());
+        assert!(failure.error.downcast_ref::<ReleaseFixture>().is_some());
+        assert!(format!("{:#}", failure.error).contains("workspace binding changed"));
+    }
+
+    #[test]
+    fn proved_release_and_settlement_is_aborted_with_stop_classified() {
+        let failure = release_failure(&coord(), &identity(), fixture(true), || Ok(()), || Ok(true));
+        assert!(matches!(
+            failure.disposition,
+            PhysicalDisposition::Aborted { stop_settled: true }
+        ));
+        assert!(!is_unsettled_launch_cleanup(&anyhow::Error::new(failure)));
+    }
+
+    #[test]
+    fn class_c_release_error_keeps_engine_testimony() {
+        use ryeos_app::thread_lifecycle::ItemReleaseError;
+        let incomplete = ItemReleaseError::IncompleteOccupancyContract;
+        assert!(!ReleaseTestimony::cleanup_is_settled(&incomplete));
+        let opaque = ItemReleaseError::Release(ryeos_engine::error::EngineError::ExecutionFailed {
+            reason: "no process remains".to_owned(),
+        });
+        assert!(!ReleaseTestimony::cleanup_is_settled(&opaque));
+        let failure = release_failure(&coord(), &identity(), opaque, || Ok(()), || Ok(false));
+        assert!(failure.is_unsettled());
+        assert!(failure.error.downcast_ref::<ItemReleaseError>().is_some());
     }
 }

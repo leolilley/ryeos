@@ -293,6 +293,7 @@ impl LaunchPreparerRunner {
                 target_channels: &[],
                 item_ref: &item_ref,
                 thread_id: "launch-preparer",
+                verbatim_env_names: &[],
             },
         )?;
         let result = lillux::run(subprocess);

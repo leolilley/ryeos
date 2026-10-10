@@ -934,41 +934,10 @@ async fn dispatch_tool_subprocess(
         )?;
     }
 
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(request.provenance.original_project_path()));
-    let vault_bindings = ryeos_app::vault::read_required_secrets(
-        state.vault.as_ref(),
-        request.acting_principal,
-        &resolved.resolved_item.metadata.required_secrets,
-        &dotenv_dirs,
-    )
-    .map_err(|e| match e {
-        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
-            let env_var = names
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            DispatchError::RequiredSecretMissing {
-                item_ref: item_ref_for_error.clone(),
-                env_var: env_var.clone(),
-                source_kind: "declared".to_string(),
-                source_name: "item metadata".to_string(),
-                remediation: crate::dispatch_error::required_secret_remediation(&env_var),
-            }
-        }
-        error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
-            DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
-        }
-        ryeos_app::vault::VaultReadError::Internal(e) => {
-            DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))
-        }
-    })?;
-
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
         handler_context,
-        vault_bindings,
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
@@ -1116,6 +1085,34 @@ fn validate_direct_source_closure(
 }
 
 fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
+    // The runner reads declared secrets only after admission verification;
+    // their refusal keeps its public class rather than a subprocess failure.
+    if let Some(vault_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ryeos_app::vault::VaultReadError>())
+    {
+        return match vault_error {
+            ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+                let env_var = names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                DispatchError::RequiredSecretMissing {
+                    item_ref,
+                    env_var: env_var.clone(),
+                    source_kind: "declared".to_string(),
+                    source_name: "item metadata".to_string(),
+                    remediation: crate::dispatch_error::required_secret_remediation(&env_var),
+                }
+            }
+            error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+            }
+            ryeos_app::vault::VaultReadError::Internal(error) => {
+                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error}"))
+            }
+        };
+    }
     if let Some(eligibility) = error.chain().find_map(|cause| {
         cause.downcast_ref::<crate::execution::runner::ExecutionNotRestartEligible>()
     }) {
@@ -1148,6 +1145,24 @@ mod runner_error_tests {
         };
         assert_eq!(item_ref, "tool:test/run");
         assert_eq!(detail, "spawn item: lillux refused exact mount authority");
+    }
+
+    #[test]
+    fn post_admission_missing_secret_keeps_its_public_class() {
+        let error = anyhow::Error::new(ryeos_app::vault::VaultReadError::MissingSecrets {
+            principal: "fp:test".to_owned(),
+            names: vec!["API_TOKEN".to_owned()],
+        })
+        .context("authorize declared secrets for the admitted waiting root");
+        let mapped = map_runner_error("tool:test/run".to_owned(), error);
+        let DispatchError::RequiredSecretMissing {
+            item_ref, env_var, ..
+        } = mapped
+        else {
+            panic!("missing declared secret must keep its public error class");
+        };
+        assert_eq!(item_ref, "tool:test/run");
+        assert_eq!(env_var, "API_TOKEN");
     }
 }
 

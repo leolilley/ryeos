@@ -1706,7 +1706,7 @@ async fn admit_execution_with_publication(
                     .into());
             }
         }
-        if let Err(err) = ryeos_app::vault::read_required_secrets_with_authority(
+        if let Err(err) = ryeos_app::vault::check_secret_availability(
             state.vault.as_ref(),
             &caller_principal_id,
             &accepted_preflight

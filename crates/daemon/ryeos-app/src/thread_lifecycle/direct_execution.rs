@@ -267,8 +267,30 @@ pub struct SpawnedItemAwaitingAttachment {
     spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
 }
 
+/// Typed release failure that keeps the engine's cleanup testimony.
+#[derive(Debug, thiserror::Error)]
+pub enum ItemReleaseError {
+    /// Refused before Lillux release; the held process was dropped without
+    /// abort proof, so its cleanup is unproved.
+    #[error("resource occupancy release contract is incomplete")]
+    IncompleteOccupancyContract,
+    #[error("release item after durable attachment")]
+    Release(#[source] ryeos_engine::error::EngineError),
+}
+
+impl ItemReleaseError {
+    /// True only when Lillux proved child/wrapper and scope cleanup.
+    pub fn cleanup_is_settled(&self) -> bool {
+        matches!(
+            self,
+            Self::Release(ryeos_engine::error::EngineError::AttachmentReleaseFailed { source })
+                if source.cleanup_is_settled()
+        )
+    }
+}
+
 impl SpawnedItemAwaitingAttachment {
-    pub fn release_after_attachment(self) -> Result<RunningItem> {
+    pub fn release_after_attachment(self) -> std::result::Result<RunningItem, ItemReleaseError> {
         let running = match (
             self.process_identity.resource_occupancy_limit.clone(),
             self.process_identity.resource_cleanup_allowance_ms,
@@ -280,10 +302,9 @@ impl SpawnedItemAwaitingAttachment {
                 )
             }
             (None, None) => self.spawned.release_after_attachment(),
-            _ => return Err(anyhow!("resource occupancy release contract is incomplete")),
+            _ => return Err(ItemReleaseError::IncompleteOccupancyContract),
         }
-        .map_err(anyhow::Error::new)
-        .context("release item after durable attachment")?;
+        .map_err(ItemReleaseError::Release)?;
         Ok(RunningItem {
             process_identity: self.process_identity,
             launch_metadata: self.launch_metadata,
@@ -2130,6 +2151,7 @@ impl PreparedItemPlan {
             ),
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
+            secret_env: None,
         };
         let effective_scope = match process_scope {
             Some(scope) => Some(scope),
@@ -3364,7 +3386,9 @@ pub struct SpawnItemParams<'a> {
     /// operations retain it as their launch-generation fence.
     pub launch_owner: &'a str,
     pub accounting_scope: Option<&'a ryeos_state::objects::AdmittedAccountingScope>,
-    pub vault_bindings: std::collections::HashMap<String, String>,
+    /// Authorized declared-secret values. The plan spec receives their names
+    /// only; values join the final process request inside the engine.
+    pub secret_env: ryeos_engine::contracts::DeliveredSecretEnv,
     /// Exact signed-protocol environment, with each injection retaining its
     /// typed vocabulary source through final composition.
     pub protocol_env_bindings: Vec<EnvBinding>,
@@ -3455,7 +3479,7 @@ pub fn spawn_item(
             chain_root_id,
             launch_owner,
             accounting_scope,
-            vault_bindings,
+            secret_env,
             protocol_env_bindings,
             roots,
             isolation,
@@ -3483,20 +3507,16 @@ pub fn spawn_item(
             .as_deref()
             .map(std::path::PathBuf::from)
             .context("spawn roots missing RYEOS_APP_ROOT")?;
-        // vault_bindings: user-provided secret/capability env vars.
+        // secret_env: authorized declared-secret values, delivered by name.
         // protocol_env_bindings: the verified terminator protocol's exact signed
         // env contract. Values are produced from daemon-owned launch facts by the
         // runner, never inherited from the daemon's process environment.
         let mut plan = prepared_plan.plan;
 
         // Compose every subprocess node from allowlisted parent env, daemon roots,
-        // declared secrets, engine-plan bindings, and the verified terminator
+        // declared secret names, engine-plan bindings, and the verified terminator
         // protocol's exact typed injections. No callback key is manufactured here;
         // callback-free protocols therefore stay callback-free through `env_clear`.
-        let secret_map: std::collections::BTreeMap<String, String> = vault_bindings
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
 
         // Allocate native-resume env before final env composition so the
         // builder remains the final authority. Preserve the existing
@@ -3566,10 +3586,7 @@ pub fn spawn_item(
                             }),
                     )?
                     .with_daemon_roots(roots.clone())?
-                    .with_bindings(
-                        EnvSourceKind::DeclaredSecret,
-                        secret_map.iter().map(|(k, v)| (k.clone(), v.clone())),
-                    )?;
+                    .with_declared_secret_names(secret_env.names())?;
 
                 builder = builder.with_typed_bindings([
                     EnvBinding::new(
@@ -3693,6 +3710,7 @@ pub fn spawn_item(
             } else {
                 LaunchMode::Wait
             },
+            secret_env: (!secret_env.is_empty()).then(|| Arc::new(secret_env)),
         };
 
         // Derive spawn-time launch metadata from the first DispatchSubprocess

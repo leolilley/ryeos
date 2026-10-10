@@ -10,7 +10,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail, EnvSourceKind};
+use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail};
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
@@ -52,7 +52,7 @@ mod validation;
 #[cfg(test)]
 pub(crate) use direct_execution::external_direct_program_test_fixture;
 pub use direct_execution::{
-    ADMITTED_DIRECT_PROJECT_ROOT, PreparedExternalDirectProjectFile, PreparedItemPlan, RunningItem,
+    ADMITTED_DIRECT_PROJECT_ROOT, ItemReleaseError, PreparedExternalDirectProjectFile, PreparedItemPlan, RunningItem,
     SpawnItemFailure, SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
     SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
     effective_child_external_content_declarations, external_direct_environment,

@@ -241,6 +241,9 @@ pub struct EngineContext {
     /// bindings before this context is constructed; no ambient descriptor is
     /// inherited.
     pub inherited_fds: Vec<lillux::InheritedDescriptorAuthority>,
+    /// Authorized secret values appended to the final process request only.
+    /// They never enter the serializable plan spec or its debug capture.
+    pub secret_env: Option<Arc<super::DeliveredSecretEnv>>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,

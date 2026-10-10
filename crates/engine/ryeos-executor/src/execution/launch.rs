@@ -3635,7 +3635,7 @@ impl LaunchHandoff {
 struct PreparedManagedLaunchAuthority {
     effective_program: ryeos_engine::effective_program::FinalizedEffectiveProgram,
     prepared_launch: super::launch_preparation::PreparedRuntimeLaunch,
-    effective_vault: HashMap<String, String>,
+    secret_env: ryeos_engine::contracts::DeliveredSecretEnv,
     effective_caps: Vec<String>,
     selected_runtime: ryeos_engine::runtime_registry::VerifiedRuntime,
     verified_protocol: ryeos_engine::protocols::VerifiedProtocol,
@@ -5067,7 +5067,7 @@ async fn prepare_managed_launch_authority(
         .iter()
         .map(|requirement| requirement.name.clone())
         .collect();
-    let effective_vault = ryeos_app::vault::read_required_secrets_with_authority(
+    let secret_env = ryeos_app::vault::authorize_secret_delivery(
         params.state.vault.as_ref(),
         params.acting_principal,
         &secret_names,
@@ -5326,7 +5326,7 @@ async fn prepare_managed_launch_authority(
     Ok(PreparedManagedLaunchAuthority {
         effective_program,
         prepared_launch,
-        effective_vault,
+        secret_env,
         effective_caps,
         selected_runtime,
         verified_protocol,
@@ -6140,7 +6140,7 @@ async fn run_claimed_thread_row_inner(
     let PreparedManagedLaunchAuthority {
         effective_program,
         prepared_launch,
-        effective_vault,
+        secret_env,
         effective_caps,
         selected_runtime,
         verified_protocol,
@@ -6813,10 +6813,9 @@ async fn run_claimed_thread_row_inner(
                     .required_secrets
                     .iter()
                     .map(|required| {
-                        effective_vault
+                        secret_env
                             .get(&required.name)
-                            .cloned()
-                            .map(|value| (required.name.clone(), value))
+                            .map(|value| (required.name.as_str(), value))
                             .ok_or_else(|| {
                                 BuildAndLaunchError::Internal(anyhow::anyhow!(
                                     "prepared financial launch secret `{}` disappeared before \
@@ -7022,15 +7021,6 @@ async fn run_claimed_thread_row_inner(
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
     let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
-    // The native-runtime spawn pipe must include vault_bindings the
-    // same way `services::thread_lifecycle::spawn_item` does for
-    // generic plan-node subprocesses. Without this, operator secrets
-    // never reach the runtime — the trait machinery in `vault.rs`
-    // gets called and discarded.
-    let vault_owned: Vec<(String, String)> = effective_vault
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
 
     if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
         return Err(BuildAndLaunchError::LaunchCancelled {
@@ -7177,7 +7167,7 @@ async fn run_claimed_thread_row_inner(
             launch_owner: &launch_owner_owned,
             chain_root_id: &chain_root_id_for_spawn,
             accounting_scope: accounting_scope_for_spawn.as_ref(),
-            vault_bindings: &vault_owned,
+            secret_env: &secret_env,
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
             isolation: isolation.as_ref(),
@@ -8326,7 +8316,6 @@ async fn prepare_follow_child_launch_inner(
         resolved: admitted_request,
         acting_principal,
         handler_context,
-        vault_bindings: HashMap::new(),
         parameters: resume.parameters.clone(),
         pre_minted_thread_id: None,
         effective_caps: operational_resume.effective_caps.clone(),

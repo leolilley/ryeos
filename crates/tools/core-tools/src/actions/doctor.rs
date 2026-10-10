@@ -466,6 +466,7 @@ fn import_one(
             target_channels: &[],
             item_ref,
             thread_id: "offline-doctor",
+            verbatim_env_names: &[],
         },
     ))
 }

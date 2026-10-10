@@ -16,7 +16,7 @@
 //! the spawned task so background-task panic, error, and success exits
 //! all revoke the per-thread tokens.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,13 +43,17 @@ use ryeos_app::state_store::{
 };
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{
-    self, ResolvedExecutionRequest, SealedRootExecutionRequest, ThreadAttachProcessParams,
+    self, ResolvedExecutionRequest, SealedRootExecutionRequest,
     ThreadFinalizeParams,
 };
 
 use super::launch::RecoveryLaunchOutcome;
 use super::admitted_callback_authority::{admitted_qualification_root, admitted_remote_consumer_grant};
 use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
+use super::process_attachment::{
+    AttachOptions, AuthorizedLaunch, HeldLaunch, LaunchFailure, LaunchOwnerCoordinate,
+    LaunchStage, ReleasedLaunch,
+};
 
 mod external_direct;
 
@@ -81,7 +85,6 @@ pub struct ExecutionParams {
     /// through such a boundary. This is invocation authority, not program
     /// identity, and remains absent for node-internal launches.
     pub handler_context: Option<ryeos_app::handler_context::HandlerContext>,
-    pub vault_bindings: HashMap<String, String>,
     pub parameters: Value,
     /// Caller-supplied thread id. When `Some(id)`, the new thread row
     /// uses that id (so an external subscriber registered against `id`
@@ -2063,108 +2066,89 @@ fn release_snapshot_publication(
     }
 }
 
-/// Attach a held process to the runtime ledger and activate any workspace.
-/// This helper never kills or settles lifecycle state: its caller still owns
-/// the pending process and must prove abort/reap before terminal settlement.
-struct PendingAttachParams<'a> {
-    state: &'a AppState,
-    thread_id: &'a str,
-    spawned_pid: u32,
-    spawned_pgid: i64,
-    process_identity: &'a ryeos_app::process::ExecutionProcessIdentity,
-    launch_metadata: &'a ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-    failed_outcome_code: &'a str,
-    launch_owner: &'a str,
-    workspace_lifeline: Option<&'a Arc<TempDirGuard>>,
-    owns_workspace: bool,
+/// Class C failure after process contact, mapped by its physical disposition.
+enum DirectLaunchFailure {
+    /// Abort was proved and terminal settlement ran with the outcome code.
+    Settled(ExecutionCleanupFailure),
+    /// Cleanup is unproved: the row stays attached and non-terminal, and the
+    /// typed [`LaunchFailure`] remains downcastable from the error.
+    Unsettled(anyhow::Error),
 }
 
-#[derive(Debug)]
-struct PendingAttachFailure {
-    operation: &'static str,
-    outcome_code: String,
-    process_attached: bool,
-    error: anyhow::Error,
-}
-
-fn attach_pending_process(
-    params: PendingAttachParams<'_>,
-) -> std::result::Result<(), PendingAttachFailure> {
-    let PendingAttachParams {
-        state,
-        thread_id,
-        spawned_pid,
-        spawned_pgid,
-        process_identity,
-        launch_metadata,
-        failed_outcome_code,
-        launch_owner,
-        workspace_lifeline,
-        owns_workspace,
-    } = params;
-    if let Err(err) = state.threads.attach_new_process_owned(
-        &ThreadAttachProcessParams {
-            thread_id: thread_id.to_string(),
-            pid: spawned_pid as i64,
-            pgid: spawned_pgid,
-            process_identity: Some(process_identity.clone()),
-            metadata: None,
-            launch_metadata: launch_metadata.clone(),
-        },
-        launch_owner,
-    ) {
-        return Err(PendingAttachFailure {
-            operation: "attach process",
-            outcome_code: failed_outcome_code.to_string(),
-            process_attached: false,
-            error: err,
-        });
-    }
-    let workspace_activation = activate_workspace_after_process_attachment(
-        state,
-        workspace_lifeline,
-        owns_workspace,
-        thread_id,
-        launch_owner,
-        process_identity,
-    );
-    if let Err(error) = workspace_activation {
-        return Err(PendingAttachFailure {
-            operation: "activate workspace",
-            outcome_code: "workspace_activation_failed".to_string(),
-            process_attached: true,
-            error,
-        });
-    }
-    Ok(())
-}
-
-fn abort_and_settle_pending_attach_failure(
+/// Only a proved abort may finalize. An unsettled failure is never marked
+/// failed while its process or scope may still live.
+fn settle_direct_launch_failure(
     state: &AppState,
     thread_id: &str,
     launch_owner: &str,
-    spawned: ryeos_app::thread_lifecycle::SpawnedItemAwaitingAttachment,
-    failure: PendingAttachFailure,
-) -> ExecutionCleanupFailure {
-    let identity = spawned.process_identity.clone();
-    let cleanup = match spawned.abort_and_reap() {
-        Err(error) => {
-            Err(error
-                .context("abort and reap attachment-pending process before lifecycle settlement"))
-        }
-        Ok(()) => (|| {
-            if failure.process_attached {
-                // Settle membership and attachment together. Clearing the PID
-                // first would discard the exact reaped-process authority.
-                clear_finished_process(state, thread_id, &identity, launch_owner)?;
+    outcome_code: &str,
+    failure: LaunchFailure,
+) -> DirectLaunchFailure {
+    if failure.is_unsettled() {
+        return DirectLaunchFailure::Unsettled(anyhow::Error::new(failure));
+    }
+    let LaunchFailure { error, stage, .. } = failure;
+    DirectLaunchFailure::Settled(ExecutionCleanupFailure {
+        operation: stage.label(),
+        operation_error: error,
+        cleanup: fail_settled_unattached_thread(state, thread_id, outcome_code, launch_owner),
+    })
+}
+
+/// Outcome code for a class C launch failure. Attachment and release
+/// transitions carry their own codes; `step_code` names the caller's step.
+fn direct_outcome_code<'a>(stage: LaunchStage, attach_code: &'a str, step_code: &'a str) -> &'a str {
+    match stage {
+        LaunchStage::Attach => attach_code,
+        LaunchStage::WorkspaceActivation => "workspace_activation_failed",
+        LaunchStage::IssueResources => "resource_operation_issue_failed",
+        LaunchStage::AuthorizeRelease => "launch_release_not_authorized",
+        LaunchStage::Release => "launch_release_after_attachment_failed",
+        LaunchStage::PreAttach | LaunchStage::Attached | LaunchStage::Settlement => step_code,
+    }
+}
+
+/// Waiting owner: a settled failure disarms per its cleanup outcome; an
+/// unsettled one leaves the guard armed so its owner-drop stop runs before
+/// any workspace cleanup.
+fn wait_launch_failure(guard: &mut ExecutionGuard, failure: DirectLaunchFailure) -> anyhow::Error {
+    match failure {
+        DirectLaunchFailure::Settled(failure) => {
+            if failure.cleanup_disarms_guard() {
+                guard.mark_finalized();
             }
-            fail_settled_unattached_thread(state, thread_id, &failure.outcome_code, launch_owner)
-        })(),
-    };
-    ExecutionCleanupFailure {
-        operation: failure.operation,
-        operation_error: failure.error,
-        cleanup,
+            guard.cleanup();
+            anyhow::Error::new(failure)
+        }
+        DirectLaunchFailure::Unsettled(error) => error,
+    }
+}
+
+/// Detached owner: an unsettled failure durably requests a Kill so live
+/// reconcile kills the exact group, compare-clears and finalizes it.
+fn report_detached_launch_failure(state: &AppState, thread_id: &str, failure: DirectLaunchFailure) {
+    match failure {
+        DirectLaunchFailure::Settled(failure) => {
+            tracing::error!(thread_id, %failure, "pending launch refused");
+        }
+        DirectLaunchFailure::Unsettled(error) => {
+            match state
+                .state_store
+                .request_thread_stop_if_admission_open(thread_id, StopIntent::Kill)
+            {
+                Ok(_) => tracing::error!(
+                    thread_id,
+                    %error,
+                    "launch cleanup unproved; durable kill requested for reconcile"
+                ),
+                Err(stop_error) => tracing::error!(
+                    thread_id,
+                    %error,
+                    %stop_error,
+                    "launch cleanup unproved and durable kill request failed"
+                ),
+            }
+        }
     }
 }
 
@@ -2196,57 +2180,6 @@ fn fail_settled_unattached_thread(
         }
     }
     Ok(outcome)
-}
-
-pub(crate) fn clear_finished_process(
-    state: &AppState,
-    thread_id: &str,
-    process_identity: &ryeos_app::process::ExecutionProcessIdentity,
-    launch_owner: &str,
-) -> Result<()> {
-    let settled = (|| -> Result<bool> {
-        ryeos_app::process::assert_reaped_process_group_absent(process_identity)?;
-        let proposed =
-            ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(process_identity)?;
-        let evidence = state.state_store.prove_thread_resource_owner_cleanup(
-            thread_id,
-            process_identity,
-            &proposed,
-        )?;
-        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
-            state,
-            process_identity,
-            &evidence,
-        )?;
-        if let Some(binding) = state.state_store.thread_workspace_binding(thread_id)? {
-            state.state_store.settle_reaped_thread_workspace_owned(
-                thread_id,
-                &binding,
-                process_identity,
-            )
-        } else {
-            state.state_store.clear_thread_process_if_matches_owned(
-                thread_id,
-                process_identity,
-                launch_owner,
-            )
-        }
-    })();
-    match settled {
-        Ok(true) => Ok(()),
-        Ok(false) => anyhow::bail!(
-            "finished process retains changed identity or unsettled workspace descendants"
-        ),
-        Err(error) => Err(error.context("settle exact finished process and workspace membership")),
-    }
-}
-
-fn release_cleanup_is_settled(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<ryeos_engine::error::EngineError>(),
-        Some(ryeos_engine::error::EngineError::AttachmentReleaseFailed { source })
-            if source.cleanup_is_settled()
-    )
 }
 
 /// Finalize a thread from its completion result.
@@ -3518,6 +3451,48 @@ fn build_protocol_launch_env(
         thread_auth_token,
         isolation_daemon_socket_path,
     })
+}
+
+/// Which verification bound a direct secret read to its admitted subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretReadAdmission {
+    /// `verify_fresh_root_admission` has just matched the exact root.
+    FreshRoot,
+    /// The recovered plan matched its CAS-rooted admitted capsule.
+    RevalidatedCapsule,
+}
+
+/// Read the declared secrets of an admitted direct launch through its sealed
+/// environment authority. Call only after the admission named by `admission`
+/// has been verified: substituted code must never use the read as an oracle.
+fn read_admitted_direct_secrets(
+    state: &AppState,
+    params: &ExecutionParams,
+    admission: SecretReadAdmission,
+) -> std::result::Result<ryeos_engine::contracts::DeliveredSecretEnv, ryeos_app::vault::VaultReadError>
+{
+    let names: Vec<String> = crate::execution::launch::build_secret_requirements(
+        &params.resolved.resolved_item.metadata.required_secrets,
+    )
+    .into_iter()
+    .map(|requirement| requirement.name)
+    .collect();
+    if names.is_empty() {
+        return Ok(ryeos_engine::contracts::DeliveredSecretEnv::empty());
+    }
+    // Fresh verification is a no-op without an exact root admission, so a
+    // fresh launch with no admission has nothing that bound its subject.
+    if admission == SecretReadAdmission::FreshRoot && params.resolved.root_admission.is_none() {
+        return Err(ryeos_app::vault::VaultReadError::AuthorityViolation(
+            "declared secrets require an exact admitted root execution".to_string(),
+        ));
+    }
+    ryeos_app::vault::authorize_secret_delivery(
+        state.vault.as_ref(),
+        &params.acting_principal,
+        &names,
+        params.provenance.project_authority(),
+    )
 }
 
 fn verify_fresh_root_admission(params: &ExecutionParams) -> Result<()> {
@@ -5049,6 +5024,9 @@ pub async fn run_and_wait(
         mut tree_publication,
     } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
     verify_fresh_root_admission(&params).context("revalidate exact admitted waiting root")?;
+    let secret_env =
+        read_admitted_direct_secrets(&state, &params, SecretReadAdmission::FreshRoot)
+            .context("authorize declared secrets for the admitted waiting root")?;
     let wait_project_authority = params.provenance.project_authority().clone();
     let admission_isolation_live_access_authority =
         params.provenance.isolation_live_access_authority()?;
@@ -5127,7 +5105,6 @@ pub async fn run_and_wait(
             .metadata
             .required_secrets
             .is_empty()
-            || !params.vault_bindings.is_empty()
         {
             anyhow::bail!(
                 "durable execution refused: the callee uses late-bound secret values with no sealed generation authority"
@@ -5392,7 +5369,6 @@ pub async fn run_and_wait(
     let tid = created.thread_id.clone();
     let crid = created.chain_root_id.clone();
     let resolved = params.resolved.clone();
-    let vault = params.vault_bindings.clone();
 
     // Resolve the terminator's signed protocol and materialize exactly its env
     // contract. Callback authority exists only when that descriptor asks for
@@ -5615,7 +5591,7 @@ pub async fn run_and_wait(
             chain_root_id: &crid,
             launch_owner: &wait_spawn_launch_owner,
             accounting_scope: wait_accounting_scope.as_ref(),
-            vault_bindings: vault,
+            secret_env,
             protocol_env_bindings,
             roots: wait_roots,
             isolation: wait_isolation,
@@ -5647,7 +5623,7 @@ pub async fn run_and_wait(
         handoff.publish(created.thread_id.clone());
     }
 
-    let mut spawned = match spawn_handle.await {
+    let spawned = match spawn_handle.await {
         Ok(Ok(s)) => s,
         Ok(Err(err)) => {
             tracing::error!(error = ?err, "engine error while spawning waited execution");
@@ -5674,64 +5650,58 @@ pub async fn run_and_wait(
             return Err(anyhow::anyhow!("spawn task panic: {join_err}"));
         }
     };
-    spawned.launch_metadata = match wait_launch_metadata
-        .merge_for_process_attach(&spawned.launch_metadata)
-    {
-        Ok(metadata) => metadata,
+    let wait_coord = LaunchOwnerCoordinate::thread(&created.thread_id, &wait_launch_owner);
+    let wait_identity = spawned.process_identity.clone();
+    let mut held = HeldLaunch::new(&state, wait_coord, wait_identity, spawned);
+    match wait_launch_metadata.merge_for_process_attach(&held.process().launch_metadata) {
+        Ok(metadata) => held.process_mut().launch_metadata = metadata,
         Err(error) => {
             tracing::error!(%error, "spawn attempt contradicted admitted waiting launch metadata");
-            let failure = abort_and_settle_pending_attach_failure(
-                &state,
-                &created.thread_id,
-                &wait_launch_owner,
-                spawned,
-                PendingAttachFailure {
-                    operation: "merge admitted launch metadata",
-                    outcome_code: "launch_metadata_conflict".to_string(),
-                    process_attached: false,
-                    error,
-                },
+            let failure = held.abort(
+                LaunchStage::PreAttach,
+                error.context("merge admitted launch metadata"),
             );
-            if failure.cleanup_disarms_guard() {
-                guard.mark_finalized();
-            }
-            guard.cleanup();
-            return Err(anyhow::Error::new(failure));
+            return Err(wait_launch_failure(
+                &mut guard,
+                settle_direct_launch_failure(
+                    &state,
+                    &created.thread_id,
+                    &wait_launch_owner,
+                    "launch_metadata_conflict",
+                    failure,
+                ),
+            ));
         }
-    };
+    }
 
     // Validate restart authority before attach. This boundary never changes a
     // live execution into a pinned execution.
     let snapshot_publication = if !params.provenance.is_borrowed_child() {
         match validate_resume_project_authority(
             &state,
-            &mut spawned.launch_metadata,
+            &mut held.process_mut().launch_metadata,
             &pre_tree_hash,
             &pre_policy_hash,
             &resume_snapshot_hash,
             &mut tree_publication,
         ) {
-            Ok(Some(publication)) => Some(publication),
-            Ok(None) => None,
+            Ok(publication) => publication,
             Err(err) => {
                 tracing::error!(error = %err, "native-resume project authority validation failed");
-                let failure = abort_and_settle_pending_attach_failure(
-                    &state,
-                    &created.thread_id,
-                    &wait_launch_owner,
-                    spawned,
-                    PendingAttachFailure {
-                        operation: "validate native-resume project authority",
-                        outcome_code: "resume_project_authority_invalid".to_string(),
-                        process_attached: false,
-                        error: err,
-                    },
+                let failure = held.abort(
+                    LaunchStage::PreAttach,
+                    err.context("validate native-resume project authority"),
                 );
-                if failure.cleanup_disarms_guard() {
-                    guard.mark_finalized();
-                }
-                guard.cleanup();
-                return Err(anyhow::Error::new(failure));
+                return Err(wait_launch_failure(
+                    &mut guard,
+                    settle_direct_launch_failure(
+                        &state,
+                        &created.thread_id,
+                        &wait_launch_owner,
+                        "resume_project_authority_invalid",
+                        failure,
+                    ),
+                ));
             }
         }
     } else {
@@ -5739,134 +5709,74 @@ pub async fn run_and_wait(
     };
 
     // Attach the held process. Failure is settled only after checked abort/reap.
-    if let Err(failure) = attach_pending_process(PendingAttachParams {
-        state: &state,
-        thread_id: &created.thread_id,
-        spawned_pid: spawned.pid,
-        spawned_pgid: spawned.pgid,
-        process_identity: &spawned.process_identity,
-        launch_metadata: &spawned.launch_metadata,
-        failed_outcome_code: "attach_failed",
-        launch_owner: &wait_launch_owner,
+    let launch_metadata = held.process().launch_metadata.clone();
+    let attached = match held.attach(AttachOptions {
         workspace_lifeline: guard.temp_dir.as_ref(),
         owns_workspace: wait_owns_workspace,
+        launch_metadata,
+        rearm_resume_budget: false,
     }) {
-        let failure = abort_and_settle_pending_attach_failure(
-            &state,
-            &created.thread_id,
-            &wait_launch_owner,
-            spawned,
-            failure,
-        );
-        if failure.cleanup_disarms_guard() {
-            guard.mark_finalized();
+        Ok(attached) => attached,
+        Err(failure) => {
+            let code = direct_outcome_code(failure.stage, "attach_failed", "attach_failed");
+            return Err(wait_launch_failure(
+                &mut guard,
+                settle_direct_launch_failure(
+                    &state,
+                    &created.thread_id,
+                    &wait_launch_owner,
+                    code,
+                    failure,
+                ),
+            ));
         }
-        guard.cleanup();
-        return Err(anyhow::Error::new(failure));
-    }
+    };
     let running = match state.threads.mark_running(&created.thread_id) {
         Ok(running) => running,
         Err(error) => {
-            let failure = abort_and_settle_pending_attach_failure(
-                &state,
-                &created.thread_id,
-                &wait_launch_owner,
-                spawned,
-                PendingAttachFailure {
-                    operation: "mark attached execution running",
-                    outcome_code: "launch_mark_running_failed".to_string(),
-                    process_attached: true,
-                    error,
-                },
+            let failure = attached.abort(
+                LaunchStage::Attached,
+                error.context("mark attached execution running"),
             );
-            if failure.cleanup_disarms_guard() {
-                guard.mark_finalized();
-            }
-            guard.cleanup();
-            return Err(anyhow::Error::new(failure));
+            return Err(wait_launch_failure(
+                &mut guard,
+                settle_direct_launch_failure(
+                    &state,
+                    &created.thread_id,
+                    &wait_launch_owner,
+                    "launch_mark_running_failed",
+                    failure,
+                ),
+            ));
         }
     };
-    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
-        &state,
-        &spawned.process_identity.resource_operations,
-    ) {
-        let failure = abort_and_settle_pending_attach_failure(
-            &state,
-            &created.thread_id,
-            &wait_launch_owner,
-            spawned,
-            PendingAttachFailure {
-                operation: "issue waiting execution resource operations",
-                outcome_code: "resource_operation_issue_failed".to_string(),
-                process_attached: true,
-                error,
-            },
-        );
-        if failure.cleanup_disarms_guard() {
-            guard.mark_finalized();
-        }
-        guard.cleanup();
-        return Err(anyhow::Error::new(failure));
-    }
-    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
-        &state,
-        &spawned.process_identity.resource_operations,
-    )
-    .and_then(|()| {
-        state.threads.authorize_process_release_owned(
-            &created.thread_id,
-            &spawned.process_identity,
-            &wait_launch_owner,
-        )
-    }) {
-        let failure = abort_and_settle_pending_attach_failure(
-            &state,
-            &created.thread_id,
-            &wait_launch_owner,
-            spawned,
-            PendingAttachFailure {
-                operation: "authorize waiting execution release",
-                outcome_code: "launch_release_not_authorized".to_string(),
-                process_attached: true,
-                error,
-            },
-        );
-        if failure.cleanup_disarms_guard() {
-            guard.mark_finalized();
-        }
-        guard.cleanup();
-        return Err(anyhow::Error::new(failure));
-    }
-    let release_identity = spawned.process_identity.clone();
-    let spawned = match spawned.release_after_attachment() {
-        Ok(running) => running,
-        Err(error) => {
-            if release_cleanup_is_settled(&error) {
-                let _ = clear_finished_process(
-                &state,
-                &created.thread_id,
-                &release_identity,
-                &wait_launch_owner,
-            ).inspect_err(|error| tracing::error!(%error, "failed launch retains unresolved process authority"));
-            }
-            let cleanup = fail_thread_static_owned(
-                &state,
-                &created.thread_id,
+    let released = match attached
+        .authorize_release()
+        .and_then(AuthorizedLaunch::release)
+    {
+        Ok(released) => released,
+        Err(failure) => {
+            let code = direct_outcome_code(
+                failure.stage,
+                "attach_failed",
                 "launch_release_after_attachment_failed",
-                &wait_launch_owner,
             );
-            if let Err(cleanup_error) = cleanup {
-                tracing::error!(
-                    thread_id = %created.thread_id,
-                    error = %cleanup_error,
-                    "waiting execution release failure cleanup did not settle"
-                );
-            }
-            guard.mark_finalized();
-            guard.cleanup();
-            return Err(error.context("release waiting execution after durable attachment"));
+            return Err(wait_launch_failure(
+                &mut guard,
+                settle_direct_launch_failure(
+                    &state,
+                    &created.thread_id,
+                    &wait_launch_owner,
+                    code,
+                    failure,
+                ),
+            ));
         }
     };
+    let ReleasedLaunch {
+        running: spawned,
+        settlement: mut wait_settlement,
+    } = released;
     release_snapshot_publication(snapshot_publication, "waiting launch metadata attachment");
     release_tree_publication(
         tree_publication.take(),
@@ -5875,7 +5785,6 @@ pub async fn run_and_wait(
 
     // Wait
     let wait_workspace_lifeline = guard.process_workspace_lifeline();
-    let waited_identity = spawned.process_identity.clone();
     let mut completion = match super::direct_output::wait(
         spawned,
         stdout_shape,
@@ -5888,22 +5797,21 @@ pub async fn run_and_wait(
     .await
     {
         Ok(c) => {
-            clear_finished_process(
-                &state,
-                &running.thread_id,
-                &waited_identity,
-                &wait_launch_owner,
-            )?;
+            // Unproved settlement keeps the guard armed: its owner-drop stop
+            // runs before any workspace cleanup.
+            if let Err(error) = wait_settlement.settle_after_reap() {
+                return Err(anyhow::Error::new(
+                    wait_settlement.into_unsettled_failure(error),
+                ));
+            }
             c
         }
         Err(join_err) => {
-            let _ = clear_finished_process(
-                &state,
-                &running.thread_id,
-                &waited_identity,
-                &wait_launch_owner,
-            ).inspect_err(|error| tracing::error!(%error, "failed launch retains unresolved process authority"));
             tracing::error!(error = %join_err, "failed to observe waiting execution");
+            if let Err(error) = wait_settlement.settle_after_reap() {
+                return Err(anyhow::Error::new(wait_settlement.into_unsettled_failure(error))
+                    .context(format!("observe waiting execution: {join_err:#}")));
+            }
             guard.fail_thread("process_observation_failed");
             guard.cleanup();
             return Err(join_err);
@@ -6237,6 +6145,9 @@ pub async fn run_detached(
         tree_publication,
     } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
     verify_fresh_root_admission(&params).context("revalidate exact admitted detached root")?;
+    let bg_secret_env =
+        read_admitted_direct_secrets(&state, &params, SecretReadAdmission::FreshRoot)
+            .context("authorize declared secrets for the admitted detached root")?;
     let bg_project_authority = params.provenance.project_authority().clone();
     let bg_candidate_operation_authority = params
         .provenance
@@ -6547,7 +6458,6 @@ pub async fn run_detached(
     let bg_stdout_shape = protocol.descriptor.stdout.shape;
     // Per-request engine (pushed_head overlay or daemon startup engine).
     let bg_engine = engine;
-    let bg_vault = params.vault_bindings.clone();
     let bg_protocol_env_bindings = protocol_env_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_tree_hash = pre_tree_hash;
@@ -6577,7 +6487,7 @@ pub async fn run_detached(
         bg_resolved,
         bg_prepared_plan,
         bg_engine,
-        bg_vault,
+        bg_secret_env,
         bg_protocol_env_bindings,
         bg_stdout_shape,
         bg_acting_principal,
@@ -6675,7 +6585,7 @@ impl DetachedDispatchKind {
 #[tracing::instrument(
     name = "thread:dispatch",
     skip(
-        bg_state, bg_chain_root_id, bg_resolved, bg_prepared_plan, bg_engine, bg_vault,
+        bg_state, bg_chain_root_id, bg_resolved, bg_prepared_plan, bg_engine, bg_secret_env,
         bg_protocol_env_bindings, bg_acting_principal, bg_pre_tree_hash,
         bg_pre_policy_hash,
         bg_resume_snapshot_hash, bg_tree_publication,
@@ -6704,7 +6614,7 @@ async fn dispatch_detached_bg_task(
     bg_resolved: ResolvedExecutionRequest,
     bg_prepared_plan: thread_lifecycle::PreparedItemPlan,
     bg_engine: std::sync::Arc<ryeos_engine::engine::Engine>,
-    bg_vault: HashMap<String, String>,
+    bg_secret_env: ryeos_engine::contracts::DeliveredSecretEnv,
     bg_protocol_env_bindings: Vec<EnvBinding>,
     bg_stdout_shape: ryeos_engine::protocol_vocabulary::StdoutShape,
     bg_acting_principal: String,
@@ -6862,7 +6772,7 @@ async fn dispatch_detached_bg_task(
     let crid_for_spawn = bg_chain_root_id.clone();
     let res_for_spawn = bg_resolved.clone();
     let eng_for_spawn = bg_engine.clone();
-    let vault_for_spawn = bg_vault;
+    let secret_env_for_spawn = bg_secret_env;
     let protocol_env_for_spawn = bg_protocol_env_bindings;
     let snap_for_spawn = bg_resume_snapshot_hash.clone();
     let bg_requires_foldback =
@@ -7064,7 +6974,7 @@ async fn dispatch_detached_bg_task(
             chain_root_id: &crid_for_spawn,
             launch_owner: &bg_spawn_launch_owner,
             accounting_scope: bg_accounting_scope.as_ref(),
-            vault_bindings: vault_for_spawn,
+            secret_env: secret_env_for_spawn,
             protocol_env_bindings: protocol_env_for_spawn,
             roots,
             isolation: isolation_for_spawn,
@@ -7090,7 +7000,7 @@ async fn dispatch_detached_bg_task(
     })
     .await;
 
-    let mut spawned = match spawn_result {
+    let spawned = match spawn_result {
         Ok(Ok(s)) => s,
         Ok(Err(err)) => {
             tracing::error!(
@@ -7139,65 +7049,70 @@ async fn dispatch_detached_bg_task(
             return;
         }
     };
-    spawned.launch_metadata =
-        match admitted_launch_metadata.merge_for_process_attach(&spawned.launch_metadata) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                tracing::error!(
-                    phase = log_phase,
-                    thread_id = %bg_thread_id,
-                    %error,
-                    "spawn attempt contradicted admitted launch metadata"
-                );
-                let failure = abort_and_settle_pending_attach_failure(
+    let detached_coord = LaunchOwnerCoordinate::thread(&bg_thread_id, &launch_owner);
+    let detached_identity = spawned.process_identity.clone();
+    let mut held = HeldLaunch::new(&bg_state, detached_coord, detached_identity, spawned);
+    match admitted_launch_metadata.merge_for_process_attach(&held.process().launch_metadata) {
+        Ok(metadata) => held.process_mut().launch_metadata = metadata,
+        Err(error) => {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                %error,
+                "spawn attempt contradicted admitted launch metadata"
+            );
+            let failure = held.abort(
+                LaunchStage::PreAttach,
+                error.context("merge admitted launch metadata"),
+            );
+            report_detached_launch_failure(
+                &bg_state,
+                &bg_thread_id,
+                settle_direct_launch_failure(
                     &bg_state,
                     &bg_thread_id,
                     &launch_owner,
-                    spawned,
-                    PendingAttachFailure {
-                        operation: "merge admitted launch metadata",
-                        outcome_code: "launch_metadata_conflict".to_string(),
-                        process_attached: false,
-                        error,
-                    },
-                );
-                tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
-                drop(bg_temp_dir.take());
-                return;
-            }
-        };
+                    "launch_metadata_conflict",
+                    failure,
+                ),
+            );
+            drop(bg_temp_dir.take());
+            return;
+        }
+    }
 
     // Validate restart authority before attach without changing its mode.
     let snapshot_publication = if !bg_skip_resume_snapshot_pin {
         match validate_resume_project_authority(
             &bg_state,
-            &mut spawned.launch_metadata,
+            &mut held.process_mut().launch_metadata,
             &bg_pre_tree_hash,
             &bg_pre_policy_hash,
             &bg_resume_snapshot_hash,
             &mut bg_tree_publication,
         ) {
-            Ok(Some(publication)) => Some(publication),
-            Ok(None) => None,
+            Ok(publication) => publication,
             Err(err) => {
                 tracing::error!(
                     phase = log_phase,
                     error = %err,
                     "native-resume project authority validation failed"
                 );
-                let failure = abort_and_settle_pending_attach_failure(
+                let failure = held.abort(
+                    LaunchStage::PreAttach,
+                    err.context("validate native-resume project authority"),
+                );
+                report_detached_launch_failure(
                     &bg_state,
                     &bg_thread_id,
-                    &launch_owner,
-                    spawned,
-                    PendingAttachFailure {
-                        operation: "validate native-resume project authority",
-                        outcome_code: "resume_project_authority_invalid".to_string(),
-                        process_attached: false,
-                        error: err,
-                    },
+                    settle_direct_launch_failure(
+                        &bg_state,
+                        &bg_thread_id,
+                        &launch_owner,
+                        "resume_project_authority_invalid",
+                        failure,
+                    ),
                 );
-                tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
                 drop(bg_temp_dir.take());
                 return;
             }
@@ -7207,35 +7122,33 @@ async fn dispatch_detached_bg_task(
     };
 
     // Attach the held process. Failure is settled only after checked abort/reap.
-    if let Err(failure) = attach_pending_process(PendingAttachParams {
-        state: &bg_state,
-        thread_id: &bg_thread_id,
-        spawned_pid: spawned.pid,
-        spawned_pgid: spawned.pgid,
-        process_identity: &spawned.process_identity,
-        launch_metadata: &spawned.launch_metadata,
-        failed_outcome_code: attach_outcome_code,
-        launch_owner: &launch_owner,
+    let launch_metadata = held.process().launch_metadata.clone();
+    let attached = match held.attach(AttachOptions {
         workspace_lifeline: bg_temp_dir.as_ref(),
         owns_workspace: bg_requires_foldback,
+        launch_metadata,
+        rearm_resume_budget: false,
     }) {
-        let failure = abort_and_settle_pending_attach_failure(
-            &bg_state,
-            &bg_thread_id,
-            &launch_owner,
-            spawned,
-            failure,
-        );
-        tracing::error!(
-            phase = log_phase,
-            thread_id = %bg_thread_id,
-            error = %failure,
-            "{}: attach cleanup failed or settled with the reported outcome",
-            attach_outcome_code,
-        );
-        drop(bg_temp_dir.take());
-        return;
-    }
+        Ok(attached) => attached,
+        Err(failure) => {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                error = %failure,
+                "{}: held launch attachment refused",
+                attach_outcome_code,
+            );
+            let code =
+                direct_outcome_code(failure.stage, attach_outcome_code, attach_outcome_code);
+            report_detached_launch_failure(
+                &bg_state,
+                &bg_thread_id,
+                settle_direct_launch_failure(&bg_state, &bg_thread_id, &launch_owner, code, failure),
+            );
+            drop(bg_temp_dir.take());
+            return;
+        }
+    };
     release_snapshot_publication(snapshot_publication, "detached launch metadata attachment");
     release_tree_publication(
         bg_tree_publication.take(),
@@ -7253,112 +7166,57 @@ async fn dispatch_detached_bg_task(
             error = %err,
             "failed to transition recovered created thread to running; terminating its process"
         );
-        let failure = abort_and_settle_pending_attach_failure(
+        let failure = attached.abort(
+            LaunchStage::Attached,
+            err.context("mark recovered execution running"),
+        );
+        report_detached_launch_failure(
             &bg_state,
             &bg_thread_id,
-            &launch_owner,
-            spawned,
-            PendingAttachFailure {
-                operation: "mark recovered execution running",
-                outcome_code: "recovery_mark_running_failed".to_string(),
-                process_attached: true,
-                error: err,
-            },
+            settle_direct_launch_failure(
+                &bg_state,
+                &bg_thread_id,
+                &launch_owner,
+                "recovery_mark_running_failed",
+                failure,
+            ),
         );
-        tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
         drop(bg_temp_dir.take());
         return;
     }
 
-    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
-        &bg_state,
-        &spawned.process_identity.resource_operations,
-    ) {
-        tracing::error!(phase = log_phase, thread_id = %bg_thread_id, %error, "issue detached execution resource operations");
-        let failure = abort_and_settle_pending_attach_failure(
-            &bg_state,
-            &bg_thread_id,
-            &launch_owner,
-            spawned,
-            PendingAttachFailure {
-                operation: "issue detached execution resource operations",
-                outcome_code: "resource_operation_issue_failed".to_string(),
-                process_attached: true,
-                error,
-            },
-        );
-        tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
-        drop(bg_temp_dir.take());
-        return;
-    }
-
-    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
-        &bg_state,
-        &spawned.process_identity.resource_operations,
-    )
-    .and_then(|()| {
-        bg_state.threads.authorize_process_release_owned(
-            &bg_thread_id,
-            &spawned.process_identity,
-            &launch_owner,
-        )
-    }) {
-        tracing::error!(
-            phase = log_phase,
-            thread_id = %bg_thread_id,
-            %error,
-            "detached execution release was not authorized after attachment"
-        );
-        let failure = abort_and_settle_pending_attach_failure(
-            &bg_state,
-            &bg_thread_id,
-            &launch_owner,
-            spawned,
-            PendingAttachFailure {
-                operation: "authorize detached execution release",
-                outcome_code: "launch_release_not_authorized".to_string(),
-                process_attached: true,
-                error,
-            },
-        );
-        tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
-        drop(bg_temp_dir.take());
-        return;
-    }
-
-    let release_identity = spawned.process_identity.clone();
-    let spawned = match spawned.release_after_attachment() {
-        Ok(running) => running,
-        Err(error) => {
+    let released = match attached
+        .authorize_release()
+        .and_then(AuthorizedLaunch::release)
+    {
+        Ok(released) => released,
+        Err(failure) => {
             tracing::error!(
                 phase = log_phase,
                 thread_id = %bg_thread_id,
-                %error,
-                "failed to release detached execution after durable attachment"
+                error = %failure,
+                "detached execution was not released after attachment"
             );
-            if release_cleanup_is_settled(&error) {
-                let _ = clear_finished_process(&bg_state, &bg_thread_id, &release_identity, &launch_owner).inspect_err(|error| tracing::error!(%error, "failed launch retains unresolved process authority"));
-            }
-            if let Err(cleanup_error) = fail_thread_static_owned(
+            let code = direct_outcome_code(
+                failure.stage,
+                attach_outcome_code,
+                "launch_release_after_attachment_failed",
+            );
+            report_detached_launch_failure(
                 &bg_state,
                 &bg_thread_id,
-                "launch_release_after_attachment_failed",
-                &launch_owner,
-            ) {
-                tracing::error!(
-                    phase = log_phase,
-                    thread_id = %bg_thread_id,
-                    error = %cleanup_error,
-                    "detached release failure cleanup did not settle"
-                );
-            }
+                settle_direct_launch_failure(&bg_state, &bg_thread_id, &launch_owner, code, failure),
+            );
             drop(bg_temp_dir.take());
             return;
         }
     };
+    let ReleasedLaunch {
+        running: spawned,
+        settlement: mut detached_settlement,
+    } = released;
 
     let wait_workspace_lifeline = bg_process_input_dir.clone().or_else(|| bg_temp_dir.clone());
-    let waited_identity = spawned.process_identity.clone();
     let wait_result = super::direct_output::wait(
         spawned,
         bg_stdout_shape,
@@ -7369,15 +7227,13 @@ async fn dispatch_detached_bg_task(
         wait_workspace_lifeline,
     )
     .await;
-    if let Err(error) =
-        clear_finished_process(&bg_state, &bg_thread_id, &waited_identity, &launch_owner)
-    {
+    if let Err(error) = detached_settlement.settle_after_reap() {
         tracing::error!(thread_id = %bg_thread_id, %error, "detached process settlement refused; no capture or publication");
-        let _ = fail_thread_static_owned(
+        let failure = detached_settlement.into_unsettled_failure(error);
+        report_detached_launch_failure(
             &bg_state,
             &bg_thread_id,
-            "process_settlement_unproved",
-            &launch_owner,
+            DirectLaunchFailure::Unsettled(anyhow::Error::new(failure)),
         );
         return;
     }
@@ -8564,7 +8420,6 @@ pub fn execution_params_from_sealed_root_request(
         resolved,
         acting_principal,
         handler_context: sealed.handler_context().cloned(),
-        vault_bindings: HashMap::new(),
         pre_minted_thread_id: None,
         effective_caps: operational_resume.effective_caps.clone(),
         provenance,
@@ -9175,59 +9030,48 @@ async fn run_existing_recovered_thread(
     // executable authority match the CAS-rooted admitted capsule. Secret
     // overlays remain operator input outside immutable project snapshots, but
     // substituted code can never use admission as a credential oracle.
-    {
+    let recovered_secret_env = {
         let secret_requirements = crate::execution::launch::build_secret_requirements(
             &params.resolved.resolved_item.metadata.required_secrets,
         );
-        let secret_names: Vec<String> = secret_requirements
-            .iter()
-            .map(|req| req.name.clone())
-            .collect();
-        let vault_bindings = ryeos_app::vault::read_required_secrets_with_authority(
-            state.vault.as_ref(),
-            &params.acting_principal,
-            &secret_names,
-            params.provenance.project_authority(),
-        )
-        .map_err(|e| match e {
-            ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
-                let missing = crate::execution::launch::missing_secrets_from_requirements(
-                    &names,
-                    &secret_requirements,
-                );
-                if let Some(first) = missing.first() {
-                    let payload = crate::execution::launch::required_secret_missing_payload(
-                        &params.resolved.item_ref,
-                        first,
+        read_admitted_direct_secrets(&state, &params, SecretReadAdmission::RevalidatedCapsule)
+            .map_err(|e| match e {
+                ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+                    let missing = crate::execution::launch::missing_secrets_from_requirements(
+                        &names,
+                        &secret_requirements,
                     );
-                    guard.fail_thread_with_error("required_secret_missing", payload);
-                } else {
-                    guard.fail_thread("vault_read_failed");
+                    if let Some(first) = missing.first() {
+                        let payload = crate::execution::launch::required_secret_missing_payload(
+                            &params.resolved.item_ref,
+                            first,
+                        );
+                        guard.fail_thread_with_error("required_secret_missing", payload);
+                    } else {
+                        guard.fail_thread("vault_read_failed");
+                    }
+                    ResumeError::VaultRead(
+                        guard.fail_before_spawn(
+                            ryeos_app::vault::VaultReadError::MissingSecrets {
+                                principal: params.acting_principal.clone(),
+                                names,
+                            }
+                            .into(),
+                        ),
+                    )
                 }
-                ResumeError::VaultRead(
-                    guard.fail_before_spawn(
-                        ryeos_app::vault::VaultReadError::MissingSecrets {
-                            principal: params.acting_principal.clone(),
-                            names,
-                        }
-                        .into(),
-                    ),
-                )
-            }
-            error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
-                guard.fail_thread("vault_read_failed");
-                ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
-            }
-            ryeos_app::vault::VaultReadError::Internal(e) => {
-                guard.fail_thread("vault_read_failed");
-                ResumeError::VaultRead(
-                    guard.fail_before_spawn(ryeos_app::vault::VaultReadError::Internal(e).into()),
-                )
-            }
-        })?;
-
-        params.vault_bindings = vault_bindings;
-    }
+                error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                    guard.fail_thread("vault_read_failed");
+                    ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
+                }
+                ryeos_app::vault::VaultReadError::Internal(e) => {
+                    guard.fail_thread("vault_read_failed");
+                    ResumeError::VaultRead(
+                        guard.fail_before_spawn(ryeos_app::vault::VaultReadError::Internal(e).into()),
+                    )
+                }
+            })?
+    };
     if super::process_attachment::finalize_requested_stop_if_present(&state, &thread_id)
         .map_err(|error| guard.fail_before_spawn(error))?
     {
@@ -9312,7 +9156,7 @@ async fn run_existing_recovered_thread(
     let bg_stdout_shape = protocol.descriptor.stdout.shape;
     // Per-request engine selected from the sealed project authority.
     let bg_engine = engine;
-    let bg_vault = params.vault_bindings.clone();
+    let bg_secret_env = recovered_secret_env;
     let bg_protocol_env_bindings = protocol_env_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_tree_hash = pre_tree_hash;
@@ -9340,7 +9184,7 @@ async fn run_existing_recovered_thread(
         bg_resolved,
         bg_prepared_plan,
         bg_engine,
-        bg_vault,
+        bg_secret_env,
         bg_protocol_env_bindings,
         bg_stdout_shape,
         bg_acting_principal,
@@ -9462,16 +9306,50 @@ mod tests {
         assert!(state.callback_tokens.validate_token_and_thread(&callback.token, "T-first-mint").is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn release_diagnostics_never_substitute_for_kernel_cleanup_testimony() {
-        assert!(!release_cleanup_is_settled(&anyhow::anyhow!(
-            "cleanup completed synchronously"
-        )));
-        assert!(!release_cleanup_is_settled(&anyhow::Error::new(
-            ryeos_engine::error::EngineError::ExecutionFailed {
-                reason: "no process remains".to_owned(),
-            },
-        )));
+    fn unsettled_direct_launch_cleanup_never_finalizes_or_disarms() {
+        let (_temp, state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        let store = &state.state_store;
+        let child = "T-runtime-child";
+        let claim = store.get_launch_claim(child).unwrap().unwrap();
+        let before = store.get_thread(child).unwrap().unwrap().status;
+        let failure = LaunchFailure {
+            error: anyhow::anyhow!("release cleanup is unproved"),
+            stage: LaunchStage::Release,
+            disposition: super::super::process_attachment::PhysicalDisposition::UnsettledCleanup(
+                super::super::process_attachment::UnsettledLaunchCleanup::for_test(
+                    LaunchOwnerCoordinate::thread(child, &claim.claimed_by),
+                ),
+            ),
+        };
+        let mapped = settle_direct_launch_failure(
+            &state,
+            child,
+            &claim.claimed_by,
+            "launch_release_after_attachment_failed",
+            failure,
+        );
+        let DirectLaunchFailure::Unsettled(error) = mapped else {
+            panic!("unproved cleanup must not reach terminal settlement");
+        };
+        assert!(super::super::process_attachment::is_unsettled_launch_cleanup(&error));
+        let after = store.get_thread(child).unwrap().unwrap().status;
+        assert_eq!(after, before);
+        assert!(!is_terminal_status(&after));
+
+        let mut guard = ExecutionGuard::new(state.clone());
+        guard.track_thread(child);
+        guard.track_launch_owner(claim.claimed_by.clone());
+        let returned = wait_launch_failure(&mut guard, DirectLaunchFailure::Unsettled(error));
+        assert!(super::super::process_attachment::is_unsettled_launch_cleanup(&returned));
+        assert!(!guard.thread_finalized, "unsettled cleanup must leave the owner armed");
+        assert!(!is_terminal_status(&store.get_thread(child).unwrap().unwrap().status));
+        // The armed guard's owner-drop stop is the settlement path; detach it
+        // here so this control observes only the mapping.
+        guard.thread_id = None;
     }
 
     #[cfg(target_os = "linux")]

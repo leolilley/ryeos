@@ -1844,7 +1844,9 @@ mod workload_binding_tests {
 #[cfg(test)]
 mod persistent_placement_credential_tests {
     use super::*;
-    use crate::vault::{NodeVault as _, SealedEnvelopeVault, default_sealed_store_path};
+    use crate::vault::{
+        NodeVault as _, NodeVaultReadAll as _, SealedEnvelopeVault, default_sealed_store_path,
+    };
 
     fn fixture() -> (tempfile::TempDir, InstalledExternalExecutionBinding) {
         let root = tempfile::tempdir().unwrap();

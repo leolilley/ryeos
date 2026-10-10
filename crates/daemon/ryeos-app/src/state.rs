@@ -118,11 +118,10 @@ pub struct AppState {
         Arc<crate::external_candidate_import::ExternalCandidateImportPool>,
     /// Exact atomic node-owned semantic policy generation loaded at startup.
     pub node_policy: Arc<NodePolicySnapshot>,
-    /// Operator-secret store. Read at request-build time and merged
-    /// into the spawned subprocess env via the `vault_bindings`
-    /// pipeline (see `thread_lifecycle::spawn_item`). The daemon stays
-    /// vendor-agnostic — this trait moves opaque `String -> String`
-    /// pairs and never enumerates provider names.
+    /// Operator-secret store. Delivering launches read it only through
+    /// `vault::authorize_secret_delivery` after admission verification. The
+    /// daemon stays vendor-agnostic — this trait moves opaque
+    /// `String -> String` pairs and never enumerates provider names.
     pub vault: Arc<dyn NodeVault>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.

@@ -320,6 +320,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine
@@ -459,6 +460,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine
@@ -588,6 +590,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine

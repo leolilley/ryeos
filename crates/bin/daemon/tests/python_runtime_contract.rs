@@ -208,6 +208,7 @@ fn run_tool_with_hints(
             path: project_dir.to_path_buf(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     engine

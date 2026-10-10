@@ -1,13 +1,13 @@
-//! `tool/env-check` — report which source would satisfy each declared secret
-//! of an item, WITHOUT running it. Names and sources only, never values.
+//! `tool/env-check` — report whether each declared secret of an item would be
+//! delivered, WITHOUT running it. Names and presence only, never values.
 //!
 //! Resolves the item against the live engine + the caller's project, reads its
-//! declared `required_secrets`, and reports per-secret provenance
-//! (vault / host env / which `.env` / missing) via
-//! `vault::resolve_secret_sources` — which mirrors the real launch precedence.
+//! declared `required_secrets`, derives the environment authority of the
+//! standard local-live launch for that project, and asks the same authority
+//! reader that delivery uses (`vault::report_secret_presence`).
 //!
-//! DaemonOnly: the authoritative host-env source is the daemon's process
-//! environment, so the report must come from the daemon, not an offline CLI.
+//! DaemonOnly: the operator vault belongs to the daemon, so the report must
+//! come from the daemon, not an offline CLI.
 //!
 //! Scope: item `required_secrets` plus symbolic requirements returned by the
 //! target's signed generic launch contract. The same threadless preparation
@@ -23,7 +23,6 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::{HandlerError, HandlerResult};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
-use ryeos_app::vault::SecretSource;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
@@ -164,28 +163,37 @@ pub async fn handle(
     }
     names.sort();
     names.dedup();
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path.as_path()));
-    let report = ryeos_app::vault::resolve_secret_sources(
+    // Describe what a standard local-live launch of this project would
+    // deliver: its admitted project-overlay authority, not ambient sources.
+    let project_authority = {
+        use ryeos_app::execution_policy::ExecutionPolicyResolution as _;
+        ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        )
+        .resolve_live_project_authority(
+            &project_path,
+            ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
+                state.isolation.inspection(),
+            ),
+            ctx.scopes.clone(),
+        )
+        .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
+    };
+    let report = ryeos_app::vault::report_secret_presence(
         state.vault.as_ref(),
         &ctx.fingerprint,
         &names,
-        &dotenv_dirs,
+        &project_authority,
     )
     .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     let secrets: Vec<Value> = report
         .iter()
-        .map(|(name, source)| {
-            let mut obj = serde_json::json!({ "name": name, "source": source.label() });
-            if let SecretSource::Dotenv(dir) = source {
-                obj["dotenv_dir"] = Value::String(dir.display().to_string());
-            }
-            obj
-        })
+        .map(|(name, present)| serde_json::json!({ "name": name, "present": present }))
         .collect();
     let missing: Vec<&str> = report
         .iter()
-        .filter(|(_, s)| matches!(s, SecretSource::Missing))
+        .filter(|(_, present)| !present)
         .map(|(n, _)| n.as_str())
         .collect();
 
@@ -234,6 +242,7 @@ pub async fn handle(
                     target_channels: &[],
                     item_ref: &isolation_item_ref,
                     thread_id: "tool-env-check",
+                    verbatim_env_names: &[],
                 },
             )
         })

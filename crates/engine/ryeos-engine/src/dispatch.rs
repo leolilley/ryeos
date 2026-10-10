@@ -1190,7 +1190,8 @@ fn isolation_plan_request(
     network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
-    let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    let (request, project_path, verified_code, verbatim_env_names) =
+        isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
         .isolation_filesystem_authority_ceiling
         .intersect(filesystem_authority_ceiling);
@@ -1240,6 +1241,7 @@ fn isolation_plan_request(
             target_channels: &ctx.isolation_target_channels,
             item_ref,
             thread_id: &ctx.thread_id,
+            verbatim_env_names: &verbatim_env_names,
         },
     )
 }
@@ -1260,7 +1262,8 @@ fn isolation_plan_request_awaiting_attachment(
     ),
     EngineError,
 > {
-    let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    let (request, project_path, verified_code, verbatim_env_names) =
+        isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
         .isolation_filesystem_authority_ceiling
         .intersect(filesystem_authority_ceiling);
@@ -1309,6 +1312,7 @@ fn isolation_plan_request_awaiting_attachment(
             target_channels: &ctx.isolation_target_channels,
             item_ref,
             thread_id: &ctx.thread_id,
+            verbatim_env_names: &verbatim_env_names,
         },
     );
     if let Some(original_window) = original_window {
@@ -1395,10 +1399,24 @@ fn isolation_plan_request_parts<'a>(
         lillux::SubprocessRequest,
         &'a std::path::Path,
         Vec<crate::isolation::IsolationVerifiedCode>,
+        Vec<String>,
     ),
     EngineError,
 > {
     let mut request = spec_to_request(spec)?;
+    // Secret values join only this final request, after the serializable spec
+    // was converted. A name the plan already binds is refused, never replaced.
+    let mut verbatim_env_names = Vec::new();
+    if let Some(secret_env) = ctx.secret_env.as_deref() {
+        secret_env
+            .append_to(&mut request.envs)
+            .map_err(|name| EngineError::ExecutionFailed {
+                reason: format!(
+                    "delivered secret `{name}` collides with an environment name already bound by the plan"
+                ),
+            })?;
+        verbatim_env_names.extend(secret_env.names().map(str::to_owned));
+    }
     request.limits = ctx.subprocess_limits;
     request
         .inherited_fds
@@ -1435,7 +1453,7 @@ fn isolation_plan_request_parts<'a>(
             }
         }
     };
-    Ok((request, project_path, verified_code))
+    Ok((request, project_path, verified_code, verbatim_env_names))
 }
 
 /// Truncate a string for inclusion in error payloads.
@@ -1561,6 +1579,7 @@ mod tests {
             }),
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
+            secret_env: None,
         }
     }
 

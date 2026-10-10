@@ -402,6 +402,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
+                verbatim_env_names: &[],
             },
         )
     }

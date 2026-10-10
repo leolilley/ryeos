@@ -287,6 +287,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine

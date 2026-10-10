@@ -658,6 +658,7 @@ pub async fn run(
         //        token revocation and failure-finalization below then run
         //        regardless, so a pre-spawn failure can no longer leak tokens
         //        or leave the child thread non-terminal.
+        let unsettled_cleanup = std::sync::atomic::AtomicBool::new(false);
         let spawn_outcome: Result<
         ryeos_engine::method_wire::MethodCallResult,
         LaunchAugmentationError,
@@ -845,6 +846,7 @@ pub async fn run(
                     target_channels: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
+                    verbatim_env_names: &[],
                 },
             )
             .map_err(|error| LaunchAugmentationError::Threads(format!("isolation: {error}")))?;
@@ -872,7 +874,13 @@ pub async fn run(
         })
         .await
         .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?
-        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}")))?;
+        .map_err(|e| {
+            // Classify before the typed failure is rendered to text.
+            if crate::execution::process_attachment::is_unsettled_launch_cleanup(&e) {
+                unsettled_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}"))
+        })?;
 
         if !result.success {
             return Err(LaunchAugmentationError::ChildBootstrap {
@@ -923,6 +931,11 @@ pub async fn run(
 
         let batch_result = match spawn_outcome {
             Ok(br) => br,
+            // Unproved cleanup: keep the row non-terminal and the lifecycle
+            // owner armed so its drop stop or reconcile settles the child.
+            Err(e) if unsettled_cleanup.load(std::sync::atomic::Ordering::SeqCst) => {
+                return Err(e);
+            }
             Err(e) => {
                 match crate::dispatch::finalize_method_thread_if_needed(
                     state,
@@ -2512,11 +2525,6 @@ pub(crate) mod tests {
                     .expect("test command registry"),
             ),
             authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-            scheduler_db: Arc::new(
-                ryeos_scheduler::db::SchedulerDb::new_in_memory().expect("test scheduler db"),
-            ),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(
                 ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                     patterns: Vec::new(),

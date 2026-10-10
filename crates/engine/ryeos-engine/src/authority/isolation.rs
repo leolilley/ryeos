@@ -3043,6 +3043,7 @@ impl IsolationRuntime {
                         rewrite_descriptor_bound_code_references(
                             &mut request.args,
                             &mut request.envs,
+                            context.verbatim_env_names,
                             &identity.source_path,
                             &destination,
                         )?;
@@ -3050,6 +3051,7 @@ impl IsolationRuntime {
                         rewrite_verified_code_references(
                             &mut request.args,
                             &mut request.envs,
+                            context.verbatim_env_names,
                             &identity.source_path,
                             &canonical_source,
                             &destination,
@@ -3730,6 +3732,7 @@ impl IsolationRuntime {
                 rewrite_descriptor_bound_code_references(
                     &mut args,
                     &mut envs,
+                    context.verbatim_env_names,
                     &verified.source_path,
                     &prepared.artifact.destination,
                 )?;
@@ -3737,6 +3740,7 @@ impl IsolationRuntime {
                 rewrite_verified_code_references(
                     &mut args,
                     &mut envs,
+                    context.verbatim_env_names,
                     &verified.source_path,
                     &prepared.canonical_source,
                     &prepared.artifact.destination,
@@ -6154,6 +6158,7 @@ fn push_verified_code_handoff(
 fn rewrite_descriptor_bound_code_references(
     args: &mut [String],
     envs: &mut [(String, String)],
+    verbatim_env_names: &[String],
     source: &Path,
     destination: &Path,
 ) -> Result<(), EngineError> {
@@ -6169,25 +6174,56 @@ fn rewrite_descriptor_bound_code_references(
             destination.display()
         ))
     })?;
-    for value in args
-        .iter_mut()
-        .chain(envs.iter_mut().map(|(_, value)| value))
-    {
+    for (site, value) in rewrite_sites(args, envs, verbatim_env_names) {
         if let Some(rewritten) = replace_delimited_path(value, source, destination) {
             *value = rewritten;
         }
         if value.contains(source) {
             return Err(refused(format!(
-                "descriptor-bound code reference cannot be rewritten safely: {value:?}"
+                "descriptor-bound code reference in {site} cannot be rewritten safely"
             )));
         }
     }
     Ok(())
 }
 
+/// One rewritable argument or environment value, labelled by position or name
+/// only. Refusals never echo the value itself.
+enum RewriteSite<'a> {
+    Argument(usize),
+    Environment(&'a str),
+}
+
+impl std::fmt::Display for RewriteSite<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Argument(index) => write!(formatter, "argument {index}"),
+            Self::Environment(name) => write!(formatter, "environment variable {name}"),
+        }
+    }
+}
+
+/// Arguments plus environment values that are subject to code-path rewriting.
+/// Verbatim names are delivered exactly as admitted and are never inspected.
+fn rewrite_sites<'a>(
+    args: &'a mut [String],
+    envs: &'a mut [(String, String)],
+    verbatim_env_names: &'a [String],
+) -> impl Iterator<Item = (RewriteSite<'a>, &'a mut String)> {
+    args.iter_mut()
+        .enumerate()
+        .map(|(index, value)| (RewriteSite::Argument(index), value))
+        .chain(
+            envs.iter_mut()
+                .filter(move |(name, _)| !verbatim_env_names.contains(name))
+                .map(|(name, value)| (RewriteSite::Environment(name.as_str()), value)),
+        )
+}
+
 fn rewrite_verified_code_references(
     args: &mut [String],
     envs: &mut [(String, String)],
+    verbatim_env_names: &[String],
     source: &Path,
     canonical_source: &Path,
     destination: &Path,
@@ -6208,10 +6244,7 @@ fn rewrite_verified_code_references(
         && canonical_source
             .to_str()
             .is_some_and(|canonical| canonical == destination);
-    for value in args
-        .iter_mut()
-        .chain(envs.iter_mut().map(|(_, value)| value))
-    {
+    for (site, value) in rewrite_sites(args, envs, verbatim_env_names) {
         if let Some(rewritten) = replace_delimited_path(value, source, destination) {
             *value = rewritten;
         } else {
@@ -6256,7 +6289,7 @@ fn rewrite_verified_code_references(
             || contains_canonical_path_reference(value, canonical_source)
         {
             return Err(refused(format!(
-                "verified code reference in argument or environment value cannot be rewritten safely: {value:?}"
+                "verified code reference in {site} cannot be rewritten safely"
             )));
         }
     }
@@ -7986,6 +8019,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -8072,6 +8106,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -8140,6 +8175,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -8270,6 +8306,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -8682,6 +8719,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/immutable-project",
                     thread_id: "T-immutable-project",
+                    verbatim_env_names: &[],
                 };
                 let applied = narrowed.apply_with_provenance(request(), context);
                 if !readable_project && !writable_project {
@@ -8822,6 +8860,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
+                verbatim_env_names: &[],
             };
             // These host fixture paths are below /tmp, which is refused by
             // configuration admission before the planner can consider overlap.
@@ -9069,6 +9108,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9190,6 +9230,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "tool:tests/external-mount",
                 thread_id: "T-external-mount",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("disabled isolation accepted a descriptor mount"),
@@ -9254,6 +9295,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-disabled",
                     thread_id: "T-runtime-view-disabled",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9350,6 +9392,7 @@ mod tests {
             target_channels: &[],
             item_ref: "worker:tests/runtime-view",
             thread_id: "T-runtime-view",
+            verbatim_env_names: &[],
         };
         let applied = runtime.apply_with_provenance(request(), context).unwrap();
         let (request_bytes, _) = applied
@@ -9608,6 +9651,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -9686,6 +9730,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9744,6 +9789,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "worker:tests/captured",
                 thread_id: "T-captured",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("captured execution accepted ambient node filesystem policy"),
@@ -9800,6 +9846,7 @@ mod tests {
                 target_channels: std::slice::from_ref(&channel),
                 item_ref: "worker:tests/channel",
                 thread_id: "T-channel",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("typed target channel accepted competing stdin"),
@@ -9907,6 +9954,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "graph:tests/native-cow",
                     thread_id: "T-native-cow",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -9956,6 +10004,7 @@ mod tests {
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
+            verbatim_env_names: &[],
         };
         let request = lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
@@ -10016,6 +10065,7 @@ mod tests {
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
+            verbatim_env_names: &[],
         };
         let error = runtime
             .apply_awaiting_attachment(request, context)
@@ -10067,6 +10117,7 @@ mod tests {
             target_channels: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
+            verbatim_env_names: &[],
         };
         runtime
             .apply_with_provenance(request(), context(Some(&unconfined)))
@@ -10146,6 +10197,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -10749,6 +10801,7 @@ mod tests {
         rewrite_verified_code_references(
             &mut namespace_preserving,
             &mut namespace_environment,
+            &[],
             logical,
             logical,
             logical,
@@ -10765,6 +10818,7 @@ mod tests {
             rewrite_verified_code_references(
                 &mut embedded_noop,
                 &mut no_environment,
+                &[],
                 logical,
                 logical,
                 logical,
@@ -10784,6 +10838,7 @@ mod tests {
             rewrite_verified_code_references(
                 &mut arguments,
                 &mut environment,
+                &[],
                 &source,
                 &canonical_source,
                 Path::new("/run/verified/entry.py"),
@@ -10792,6 +10847,62 @@ mod tests {
             .to_string()
             .contains("cannot be rewritten safely")
         );
+    }
+
+    #[test]
+    fn verbatim_secret_values_are_neither_rewritten_nor_echoed() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("entry.py");
+        std::fs::write(&source, b"verified\n").unwrap();
+        let canonical_source = std::fs::canonicalize(&source).unwrap();
+        let destination = Path::new("/run/verified/entry.py");
+        let secret = format!("synthetic-secret-{}.backup", source.display());
+        let verbatim = vec!["API_TOKEN".to_string()];
+
+        let mut arguments = Vec::new();
+        let mut environment = vec![("API_TOKEN".to_string(), secret.clone())];
+        rewrite_verified_code_references(
+            &mut arguments,
+            &mut environment,
+            &verbatim,
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap();
+        rewrite_descriptor_bound_code_references(
+            &mut arguments,
+            &mut environment,
+            &verbatim,
+            &source,
+            destination,
+        )
+        .unwrap();
+        assert_eq!(environment[0].1, secret);
+
+        let refusal = rewrite_verified_code_references(
+            &mut arguments,
+            &mut environment,
+            &[],
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("API_TOKEN"), "{refusal}");
+        assert!(!refusal.contains("synthetic-secret"), "{refusal}");
+        let refusal = rewrite_descriptor_bound_code_references(
+            &mut arguments,
+            &mut environment,
+            &[],
+            &source,
+            destination,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("API_TOKEN"), "{refusal}");
+        assert!(!refusal.contains("synthetic-secret"), "{refusal}");
     }
 
     #[test]

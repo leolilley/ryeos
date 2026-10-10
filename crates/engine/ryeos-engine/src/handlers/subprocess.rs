@@ -160,6 +160,7 @@ pub(crate) fn run_handler_subprocess_bounded(
             target_channels: &[],
             item_ref: &canonical_ref,
             thread_id: "handler",
+            verbatim_env_names: &[],
         },
     )?;
 

@@ -321,6 +321,7 @@ pub fn start_scoped_producer(
             target_channels: &target_channels,
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,
+            verbatim_env_names: &[],
         };
         let (
             mut held,
