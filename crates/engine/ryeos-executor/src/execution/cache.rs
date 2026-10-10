@@ -94,7 +94,10 @@ impl GenerationRetirement<'_> {
         let name = OsStr::new(&self.construction.generation);
         if let Some(directory) = root.open_child_directory(name)? {
             directory.remove_contents_recursive()?;
-            if !root.remove_empty_child_if_same(name, &directory)? {
+            if !root
+                .remove_empty_child_if_same(name, &directory)
+                .map(|receipt| receipt.is_some())?
+            {
                 anyhow::bail!("materialization generation changed during retirement");
             }
         }
@@ -390,7 +393,10 @@ impl MaterializationCache {
             Err(error) => {
                 if !error.namespace_committed() && self.verify_complete(snapshot_hash).is_ok() {
                     staging.remove_contents_recursive()?;
-                    if !cache_root.remove_empty_child_if_same(staging_name, staging)? {
+                    if !cache_root
+                        .remove_empty_child_if_same(staging_name, staging)
+                        .map(|receipt| receipt.is_some())?
+                    {
                         anyhow::bail!("materialization staging directory remained non-empty");
                     }
                     Ok(())

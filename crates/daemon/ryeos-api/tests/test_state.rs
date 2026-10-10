@@ -83,8 +83,7 @@ fn build_test_state_at(
     // exercise the production identity check instead of failing before the
     // claim contract is reached.
     if create_identity {
-        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
@@ -188,10 +187,10 @@ fn build_test_state_with_hosted_policy_choices(
 ) -> (tempfile::TempDir, AppState) {
     let (tmpdir, mut state) = build_test_state();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(test_object_closure_policy()),
-            Arc::new(ryeos_app::node_policy::sections::hosted::HostedNodePolicy {
+            Arc::new(ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy {
                 schema: 1,
                 admission_enabled,
                 admission_token_ttl_secs: admission_enabled.then_some(token_ttl_secs),
@@ -267,7 +266,7 @@ fn build_app_state(
         external_provider_configurations: Arc::new(Default::default()),
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: Arc::new(
-            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+            ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),
@@ -301,8 +300,8 @@ fn build_app_state(
 }
 
 fn test_object_closure_policy()
--> ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
-    ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+-> ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+    ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
         schema: 1,
         max_roots: 256,
         max_objects: 32_768,

@@ -81,16 +81,16 @@ impl RemoteAuthority {
             None,
             &app_root.join(ryeos_engine::AI_DIR).join("config"),
         )?;
-        let table = ryeos_app::node_policy::NodePolicyTable::new();
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let generation =
-            ryeos_app::node_policy::generation::load_policy_generation(app_root, &trust, &table)?;
-        let snapshot = ryeos_app::node_policy::compile_generation(
+            ryeos_node_runtime::node_policy::generation::load_policy_generation(app_root, &trust, &table)?;
+        let snapshot = ryeos_node_runtime::node_policy::compile_generation(
             app_root,
             &table,
             &generation,
             &completion.node_fingerprint,
         )?;
-        let closure_policy = snapshot.require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+        let closure_policy = snapshot.require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
         let closure_options = NodeAdmittedObjectsClosureRequestOptions::for_policy(
             closure_policy,
             ObjectsClosureRequestOptions::default(),
@@ -349,11 +349,10 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
             .join("transactions/bundle-set-prepared")
             .join(&transaction_id);
         std::fs::create_dir_all(&prep_root)?;
-        let config =
-            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-                app_root: Some(app_root.to_owned()),
-                ..Default::default()
-            })?;
+        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_owned()),
+            ..Default::default()
+        })?;
         let mut actions = Vec::new();
         let mut future = live.clone();
         for entry in &plan.entries {

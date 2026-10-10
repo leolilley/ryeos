@@ -193,7 +193,7 @@ pub async fn handle_files_tree(
     let max_entries = req.max_entries.clamp(1, MAX_TREE_ENTRIES);
     let ignore = &state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
         .matcher;
     let mut entries = Vec::new();
     let mut truncated = false;

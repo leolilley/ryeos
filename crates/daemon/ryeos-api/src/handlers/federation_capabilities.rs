@@ -16,7 +16,7 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let transfer = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
     )?;
     Ok(serde_json::json!({
         "protocol": {

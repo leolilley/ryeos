@@ -1,11 +1,12 @@
 [workspace]
 members = [
-    "crates/engine/ryeos-node-runtime",
     "crates/kernel/lillux",
+    "crates/kernel/lillux-sqlite",
     "crates/daemon/ryeos-api",
     "crates/daemon/ryeos-app",
     "crates/daemon/ryeos-bundle",
     "crates/daemon/ryeos-node",
+    "crates/daemon/ryeos-scheduler-service",
     "crates/bin/cli",
     "crates/bin/daemon",
     "crates/daemon/ryeos-ui",
@@ -33,6 +34,7 @@ members = [
     "crates/engine/ryeos-project-capture",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
+    "crates/engine/ryeos-node-runtime",
     "crates/engine/ryeos-scheduler-contract",
     "crates/state/ryeos-scheduler",
     "crates/state/ryeos-state",
@@ -59,6 +61,7 @@ members = [
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
 ]
+exclude = ["vendor/libsqlite3-sys-0.28.0"]
 resolver = "2"
 
 [workspace.package]
@@ -84,7 +87,7 @@ opt-level = 3
 opt-level = 3
 
 [workspace.dependencies]
-ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
+lillux-sqlite = { path = "crates/kernel/lillux-sqlite" }
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }
 ryeos-accounting = { path = "crates/engine/ryeos-accounting" }
@@ -95,6 +98,7 @@ ryeos-external-execution = { path = "crates/engine/ryeos-external-execution" }
 ryeos-http-transport = { path = "crates/engine/ryeos-http-transport" }
 ryeos-api = { path = "crates/daemon/ryeos-api" }
 ryeos-app = { path = "crates/daemon/ryeos-app" }
+ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
@@ -111,6 +115,7 @@ ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
 ryeos-scheduler-contract = { path = "crates/engine/ryeos-scheduler-contract" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
+ryeos-scheduler-service = { path = "crates/daemon/ryeos-scheduler-service" }
 ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }
 ryeos-gpu-loader-owner-contract = { path = "crates/tools/gpu-loader-owner-contract" }
@@ -175,3 +180,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 unicode-width = "0.2"
 zeroize = "1"
+
+# One maintained, pinned SQLite implementation; optional bound host backend.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.28.0" }

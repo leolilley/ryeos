@@ -502,8 +502,7 @@ fn store_project_file(
 
 fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let scopes = vec!["*".to_owned()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
@@ -528,8 +527,7 @@ fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
 
 fn install_active_test_credential_profile(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let profile_id = "credential:fixture";
     let home_id = "external-candidate-fixture-home";
     let lock_owner = "fixture-credential-enrollment";
@@ -742,8 +740,7 @@ fn publish_external_runtime_product_witness(
         admitted_parameters_digest: relationship.producer.admitted_parameters_digest().unwrap(),
     };
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let manifest_hash = declaration.expected_manifest_hash.clone().unwrap();
     let evidence = ProductCaptureEvidence {
         schema: PRODUCT_CAPTURE_EVIDENCE_SCHEMA,
@@ -835,8 +832,7 @@ fn bind_external_runtimes_to_qualification_verifier(
     )
     .unwrap();
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &state.config.authorized_keys_dir,
@@ -924,8 +920,7 @@ async fn prepare_external_worker_program_and_binding(
     let pre_selection_digest =
         ryeos_engine::external_content::pre_product_selection_consumer_digest(&resolution).unwrap();
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let context = ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
         vec!["*".into()],
@@ -3323,8 +3318,7 @@ async fn run_production_tls_candidate(
         &[&runtime_manifest_hash, &qualification_runtime_manifest_hash],
     );
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
         vec!["*".into()],
@@ -4750,10 +4744,7 @@ async fn close_test_composition_before_uds_stop<T>(
     app: Arc<ryeos_app::state::AppState>,
     server: &tokio::task::JoinHandle<T>,
 ) {
-    if matches!(
-        composition.close(),
-        ryeos_executor::SelectedRootClose::Unresolved
-    ) {
+    if matches!(composition.close(), ryeos_executor::SelectedRootClose::Unresolved) {
         // Preserve the exact root, AppState and listener task if any selected
         // owner remains. The fixture must not turn an unresolved close into a
         // successful teardown by aborting its only callback surface.

@@ -3,7 +3,7 @@
 
 use super::super::launch_preparation::PreparedRuntimeLaunch;
 use anyhow::{Context as _, bail};
-use ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
+use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
 use ryeos_app::state::AppState;
 use ryeos_engine::external_content::{
     ExternalContentMountRoot, authored_external_content_shape, declaring_authority,

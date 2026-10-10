@@ -199,7 +199,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             }
         })?;
     let command_registration = node_policy
-        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()
         .map_err(|error| CliError::Local {
             detail: format!("load command-registration policy: {error:#}"),
         })?;
@@ -2005,7 +2005,7 @@ mod tests {
             runtime_snapshot_production: Vec::new(),
             guest_runtime_materialization: Vec::new(),
             runtime_snapshot_qualification: Vec::new(),
-            bundles: vec![ryeos_app::node_config::BundleRecord {
+            bundles: vec![ryeos_node_runtime::node_config_source::BundleRecord {
                 name: "core".into(),
                 path: core,
                 source_file: root.path().join("core-registration.yaml"),

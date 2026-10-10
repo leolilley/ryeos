@@ -2664,7 +2664,7 @@ fn validate_session_process_control(
     if session.resource_cleanup_contract.is_some() {
         let node = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
         )?;
         // The caller uses a verified protocol (or the reverified retained
         // capsule), and the node snapshot is independently node-signed. An
@@ -2765,7 +2765,7 @@ impl AdmittedTrustedResourceCleanupContract {
 }
 
 fn admit_session_resource_cleanup_contract(
-    node: Option<&ryeos_app::node_policy::sections::execution::NodeExecutionResourcePolicy>,
+    node: Option<&ryeos_node_runtime::node_policy::sections::execution::NodeExecutionResourcePolicy>,
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<Option<AdmittedTrustedResourceCleanupContract>> {
     ryeos_engine::protocols::descriptor::validate_session_resource_cleanup_contract(session)
@@ -4985,7 +4985,7 @@ mod tests {
 
     #[test]
     fn trusted_resource_cleanup_agreement_requires_exact_node_and_product() {
-        use ryeos_app::node_policy::sections::execution::NodeExecutionResourcePolicy;
+        use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionResourcePolicy;
         use ryeos_engine::contracts::{
             ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
             ExecutionTargetLimits,

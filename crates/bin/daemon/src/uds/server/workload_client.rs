@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use ryeos_app::callback_token::{
     AdmittedWorkloadClientGrant, CallbackCapability, CallbackRuntimeMethodSurface,
 };
-use ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
+use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
 use ryeos_app::runtime_db::{WorkerProcessState, daemon_generation_id};
 use ryeos_app::state::AppState;
 use ryeos_executor::execution::persistent_session::ExclusivePersistentSessionIdentity;

@@ -69,7 +69,7 @@ fn run_consumer_runtime_verification_transport_for_invocation(
     )?;
     let limits = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     if ryeos_app::external_qualification_guest_scratch::prove_retained_qualification_transport_completed_for_invocation(
         state,

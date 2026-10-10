@@ -22,12 +22,24 @@ const MAX_MARKER_BYTES: u64 = 64 * 1024;
 /// Warn when the state filesystem has less free space than this (bytes).
 const LOW_DISK_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchRoute {
+    Direct,
+    Supervised,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum LifecycleMarker {
     /// The daemon is (or was) up. If the pid is dead and no `Exited` marker
     /// followed, the run ended uncleanly.
-    Running { pid: u32, started_at: String },
+    Running {
+        pid: u32,
+        started_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_route: Option<LaunchRoute>,
+    },
     /// The daemon shut down via a handled path, recording why.
     Exited {
         reason: String,
@@ -35,6 +47,8 @@ pub enum LifecycleMarker {
         started_at: String,
         exited_at: String,
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_route: Option<LaunchRoute>,
     },
 }
 
@@ -108,20 +122,27 @@ fn write(state_dir: &Path, marker: &LifecycleMarker) {
 /// Record this exact daemon startup attempt. Call after the state lock is held
 /// and after [`report_previous_exit`] has inspected the prior run's marker;
 /// readiness remains the lifecycle protocol's separate authority.
-pub fn record_running(state_dir: &Path) -> String {
+pub fn record_running(state_dir: &Path, launch_route: LaunchRoute) -> String {
     let started_at = lillux::time::iso8601_now();
     write(
         state_dir,
         &LifecycleMarker::Running {
             pid: std::process::id(),
             started_at: started_at.clone(),
+            launch_route: Some(launch_route),
         },
     );
     started_at
 }
 
 /// Record a clean/handled shutdown with its `reason` (e.g. `"signal"`).
-pub fn record_exit(state_dir: &Path, reason: &str, started_at: &str, error: Option<&str>) {
+pub fn record_exit(
+    state_dir: &Path,
+    reason: &str,
+    started_at: &str,
+    error: Option<&str>,
+    launch_route: LaunchRoute,
+) {
     const MAX_ERROR_BYTES: usize = 8 * 1024;
     let error = error.map(|value| {
         let mut end = value.len().min(MAX_ERROR_BYTES);
@@ -138,6 +159,7 @@ pub fn record_exit(state_dir: &Path, reason: &str, started_at: &str, error: Opti
             started_at: started_at.to_owned(),
             exited_at: lillux::time::iso8601_now(),
             error,
+            launch_route: Some(launch_route),
         },
     );
 }
@@ -152,16 +174,18 @@ pub fn report_previous_exit(state_dir: &Path) {
         }) => {
             tracing::info!(reason = %reason, at = %exited_at, "previous ryeosd run exited cleanly");
         }
-        Some(LifecycleMarker::Running { pid, started_at }) => {
+        Some(LifecycleMarker::Running { pid, started_at, launch_route }) => {
             if process_alive(pid) {
                 tracing::warn!(
                     pid,
+                    ?launch_route,
                     "lifecycle marker shows a running ryeosd (pid {pid}) — another instance may be active"
                 );
             } else {
                 tracing::warn!(
                     pid,
                     started_at = %started_at,
+                    ?launch_route,
                     "previous ryeosd run did not shut down cleanly (no exit marker; pid {pid} is gone) — a crash, SIGKILL, or failed startup"
                 );
             }
@@ -214,7 +238,7 @@ mod tests {
     #[test]
     fn clean_exit_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
-        let started_at = record_running(tmp.path());
+        let started_at = record_running(tmp.path(), LaunchRoute::Direct);
         assert!(matches!(
             read(tmp.path()),
             Some(LifecycleMarker::Running { .. })
@@ -224,17 +248,20 @@ mod tests {
             "startup_failed",
             &started_at,
             Some("failed to bind 127.0.0.1:7400"),
+            LaunchRoute::Direct,
         );
         match read(tmp.path()) {
             Some(LifecycleMarker::Exited {
                 reason,
                 started_at: retained_start,
                 error,
+                launch_route,
                 ..
             }) => {
                 assert_eq!(reason, "startup_failed");
                 assert_eq!(retained_start, started_at);
                 assert_eq!(error.as_deref(), Some("failed to bind 127.0.0.1:7400"));
+                assert_eq!(launch_route, Some(LaunchRoute::Direct));
             }
             other => panic!("expected exited marker, got {other:?}"),
         }
@@ -243,19 +270,20 @@ mod tests {
     #[test]
     fn startup_failure_acknowledgement_removes_only_the_pinned_failed_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let started_at = record_running(tmp.path());
+        let started_at = record_running(tmp.path(), LaunchRoute::Supervised);
         record_exit(
             tmp.path(),
             "startup_failed",
             &started_at,
             Some("fixture failure"),
+            LaunchRoute::Supervised,
         );
         acknowledge_startup_failure(tmp.path()).unwrap();
         assert!(read(tmp.path()).is_none());
         assert!(acknowledge_startup_failure(tmp.path()).is_err());
 
-        let started_at = record_running(tmp.path());
-        record_exit(tmp.path(), "signal", &started_at, None);
+        let started_at = record_running(tmp.path(), LaunchRoute::Supervised);
+        record_exit(tmp.path(), "signal", &started_at, None, LaunchRoute::Supervised);
         assert!(acknowledge_startup_failure(tmp.path()).is_err());
         assert!(matches!(
             read(tmp.path()),
@@ -272,7 +300,7 @@ mod tests {
         let victim = tmp.path().join("victim");
         std::fs::write(&victim, b"retained").unwrap();
         symlink(&victim, tmp.path().join(MARKER_FILE)).unwrap();
-        let _ = record_running(tmp.path());
+        let _ = record_running(tmp.path(), LaunchRoute::Direct);
         assert_eq!(std::fs::read(victim).unwrap(), b"retained");
         assert!(read(tmp.path()).is_none());
     }
@@ -284,6 +312,7 @@ mod tests {
         let marker = LifecycleMarker::Running {
             pid: u32::MAX - 1,
             started_at: "2026-01-01T00:00:00Z".into(),
+            launch_route: Some(LaunchRoute::Direct),
         };
         write(tmp.path(), &marker);
         // The reporter must not panic and must classify it as not-alive.

@@ -168,8 +168,10 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .map(|access| access.path().to_path_buf());
     let project_identity = crate::seat_auth::attachment_project_query_identity(&attachment)?;
 
+    let schedules = load_schedule_summary(&state).await;
     let projection = build_dimension_projection(
         &state,
+        schedules,
         &session,
         &attachment,
         project_path.as_ref(),
@@ -181,6 +183,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 
 fn build_dimension_projection(
     state: &AppState,
+    schedules: (usize, usize),
     session: &crate::browser_session::BrowserSession,
     attachment: &crate::browser_session::AdmittedBindingAttachment,
     project_path: Option<&PathBuf>,
@@ -286,7 +289,7 @@ fn build_dimension_projection(
     let active_threads = state.state_store.active_thread_count().unwrap_or(0);
 
     // ── Schedules ──
-    let (total_schedules, enabled_schedules) = load_schedule_summary(state);
+    let (total_schedules, enabled_schedules) = schedules;
 
     // ── GC ──
     let gc = load_gc_summary(state);
@@ -355,8 +358,23 @@ fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteS
 }
 
 /// Load schedule summary counts. Returns (total, enabled).
-fn load_schedule_summary(state: &AppState) -> (usize, usize) {
-    match state.scheduler_db.list_specs_filtered(false, None, None) {
+#[cfg(not(feature = "scheduling"))]
+async fn load_schedule_summary(_state: &AppState) -> (usize, usize) {
+    (0, 0)
+}
+
+#[cfg(feature = "scheduling")]
+async fn load_schedule_summary(state: &AppState) -> (usize, usize) {
+    let Some(scheduler) = state
+        .extensions
+        .get::<ryeos_scheduler_service::SchedulerService>()
+    else {
+        return (0, 0);
+    };
+    let Ok(_read_guard) = scheduler.acquire_read().await else {
+        return (0, 0);
+    };
+    match scheduler.scheduler_db().list_specs_filtered(false, None, None) {
         Ok(specs) => {
             let total = specs.len();
             let enabled = specs.iter().filter(|s| s.enabled).count();

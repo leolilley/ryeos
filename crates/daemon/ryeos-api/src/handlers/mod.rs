@@ -58,6 +58,7 @@ pub mod items_effective;
 pub mod launch_cancel;
 pub mod launch_status;
 pub mod maintenance_gc;
+#[cfg(feature = "model-provider-setup")]
 pub mod model_providers_validate;
 pub mod node_status;
 pub mod objects_closure_describe;
@@ -97,12 +98,19 @@ pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_explain;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_list;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_pause;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_register;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_resume;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_show_fires;
 pub mod seat;
 pub mod sign;
@@ -146,6 +154,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     node_status::DESCRIPTOR,
+    #[cfg(feature = "model-provider-setup")]
     model_providers_validate::DESCRIPTOR,
     system_routes::DESCRIPTOR,
     ingest_ignore::DESCRIPTOR,
@@ -285,12 +294,19 @@ pub const ALL: &[ServiceDescriptor] = &[
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
     authorize_client::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_register::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_deregister::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_explain::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_list::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_show_fires::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_pause::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_resume::DESCRIPTOR,
     sync_jobs_list::DESCRIPTOR,
     sync_jobs_inspect::DESCRIPTOR,

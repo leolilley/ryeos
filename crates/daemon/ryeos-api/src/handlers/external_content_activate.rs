@@ -1093,7 +1093,7 @@ fn reset_activation_staging(staging: &lillux::PinnedDirectory) -> Result<()> {
 fn require_staging_capacity(
     staging: &lillux::PinnedDirectory,
     activation: &ResolvedManagedExternalContentActivation,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     let component_ceiling = activation
         .components
@@ -1192,7 +1192,8 @@ fn cleanup_staging(directories: ActivationDirectories) -> Result<()> {
         })?;
     if !directories
         .staging
-        .remove_empty_child_if_same(OsStr::new(&directories.job_name), &directories.job)?
+        .remove_empty_child_if_same(OsStr::new(&directories.job_name), &directories.job)
+        .map(|receipt| receipt.is_some())?
     {
         bail!("managed activation staging remained non-empty after bounded cleanup");
     }
@@ -1215,7 +1216,7 @@ fn obtain_archive(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
     mode: AcquisitionMode,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
     offline_archive_root: Option<&lillux::PinnedDirectory>,
 ) -> Result<lillux::PinnedRegularFile> {
     let name = OsStr::new(&source.sha256);
@@ -1360,7 +1361,7 @@ fn import_offline_archive(
     cache: &lillux::PinnedDirectory,
     root: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<lillux::PinnedRegularFile> {
     let archive_name = offline_archive_name(source)?;
     let archive_name = OsStr::new(&archive_name);
@@ -1435,7 +1436,7 @@ fn offline_archive_name(source: &ManagedActivationSource) -> Result<String> {
 fn reserve_archive_cache(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
     entry_limit: usize,
 ) -> Result<()> {
     if entry_limit == 0 {
@@ -1499,7 +1500,7 @@ fn retain_verified_archive(
 
 fn admit_redirect_url(
     url: &reqwest::Url,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     if url.scheme() != "https"
         || !url.username().is_empty()
@@ -1528,7 +1529,7 @@ fn extract_archive(
     source: &ManagedActivationSource,
     activation: &ResolvedManagedExternalContentActivation,
     staging: &lillux::PinnedDirectory,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     archive_file.seek(SeekFrom::Start(0))?;
     let decoder = flate2::read::MultiGzDecoder::new(archive_file);
@@ -2281,22 +2282,22 @@ fn settle_retryable_attempt_failure(
 fn managed_policy(
     state: &AppState,
 ) -> Result<
-    &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 > {
     state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
         .managed_activation
         .require_enabled()
 }
 
 fn external_content_policy(
     state: &AppState,
-) -> Result<&ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>
+) -> Result<&ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>
 {
     state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
 }
 
 fn bounded_error(value: &str) -> String {
@@ -2504,7 +2505,10 @@ where
             ryeos_app::managed_external_content::MAX_MANAGED_ACTIVATION_STAGING_ENTRIES,
             ryeos_state::external_content::MAX_CAPTURE_DEPTH,
         ))?;
-        if !staging.remove_empty_child_if_same(&entry.name, &child)? {
+        if !staging
+            .remove_empty_child_if_same(&entry.name, &child)
+            .map(|receipt| receipt.is_some())?
+        {
             bail!("managed activation terminal staging remained non-empty");
         }
         removed += 1;
@@ -2575,9 +2579,9 @@ mod tests {
     }
 
     fn test_policy()
-    -> ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy
+    -> ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy
     {
-        ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy {
+        ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy {
             allow_online: false,
             allowed_https_hosts: vec!["releases.example.test".to_owned()],
             max_redirects: 0,
@@ -2755,8 +2759,7 @@ mod tests {
 
     fn test_state_store(root: &std::path::Path) -> ryeos_app::state_store::StateStore {
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem"))
-                .unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
@@ -2923,10 +2926,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let runtime_state = root.path().join(".ai/state");
         let runtime_db = root.path().join("runtime.sqlite3");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
-            &root.path().join("identity/node-key.pem"),
-        )
-        .unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
+                .unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );

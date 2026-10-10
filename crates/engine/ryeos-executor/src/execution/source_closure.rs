@@ -358,24 +358,33 @@ impl BoundSourceClosure {
             source.execution_entry_path() == source.records.runtime_entry_path(),
             "source runtime association requires exact runtime entry"
         );
-        source.custody_cache_root.ensure_path_binding()
+        source
+            .custody_cache_root
+            .ensure_path_binding()
             .context("source runtime association cache path binding changed")?;
-        source.source_directory.ensure_path_binding()
+        source
+            .source_directory
+            .ensure_path_binding()
             .context("source runtime association original source path binding changed")?;
         // A descriptor-only pin may have no path-binding obligation. Always
         // join the named generation under the actual retained cache FD, too.
-        let named = source.custody_cache_root.open_child_directory(
-            OsStr::new(source.records.content_manifest_hash()),
-        )?.context("source runtime association named generation is missing")?;
+        let named = source
+            .custody_cache_root
+            .open_child_directory(OsStr::new(source.records.content_manifest_hash()))?
+            .context("source runtime association named generation is missing")?;
         anyhow::ensure!(
             named.is_same_directory(&source.source_directory)?,
             "source runtime association named generation identity differs"
         );
         // Recheck path obligations after the named-child identity observation.
         // A future runtime/cache/State parent-chain proof remains separate.
-        source.custody_cache_root.ensure_path_binding()
+        source
+            .custody_cache_root
+            .ensure_path_binding()
             .context("source runtime association cache path binding changed")?;
-        source.source_directory.ensure_path_binding()
+        source
+            .source_directory
+            .ensure_path_binding()
             .context("source runtime association original source path binding changed")?;
         Ok(SourceRuntimeAssociation { source })
     }
@@ -772,6 +781,7 @@ fn bind_source_projection_with(
             let _ = staging.remove_contents_recursive().and_then(|()| {
                 cache_root
                     .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())
                     .map(|_| ())
             });
         }
@@ -913,7 +923,10 @@ fn publish_private_source(
         match existing {
             lillux::PinnedDirectoryEntry::Directory(directory) => {
                 directory.remove_contents_recursive()?;
-                if !parent.remove_empty_child_if_same(name, &directory)? {
+                if !parent
+                    .remove_empty_child_if_same(name, &directory)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("private source shadow remained non-empty");
                 }
             }

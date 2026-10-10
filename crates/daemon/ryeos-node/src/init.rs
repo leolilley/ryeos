@@ -180,7 +180,7 @@ pub struct InitReport {
     pub next_steps: Vec<String>,
 }
 
-const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v3";
+const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v4";
 const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v1";
 const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
 const INIT_SEED_MAX_BYTES: u64 = ryeos_node_runtime::node_document::MAX_ITEM_BYTES;
@@ -195,6 +195,7 @@ struct InitCompletionBody {
     policy_generation_digest: String,
     substrate_identity_digest: String,
     registration_digests: BTreeMap<String, String>,
+    capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
 }
 
 /// Immutable deployment identity used when admitting independently published
@@ -233,7 +234,7 @@ impl SubstrateIdentity {
             bail!("substrate protocol must be nonzero");
         }
         if let Some(profile) = &self.node_profile {
-            ryeos_app::node_policy::generation::validate_init_profile_name(profile)
+            ryeos_node_runtime::node_policy::generation::validate_init_profile_name(profile)
                 .context("validate substrate node-profile binding")?;
         }
         Ok(())
@@ -295,6 +296,7 @@ pub struct ProspectiveInitCompletionInput {
     pub policy_generation_digest: String,
     pub registration_digests: BTreeMap<String, String>,
     pub substrate_identity: Option<SubstrateIdentity>,
+    pub capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
 }
 
 /// Operator authority supplied by the stopped-node caller.  Keeping the key
@@ -332,6 +334,7 @@ pub struct InitCompletionReport {
     pub substrate_identity: SubstrateIdentity,
     pub completion_digest: String,
     pub bundles_verified: usize,
+    pub capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,17 +387,17 @@ pub fn preflight_existing_policy_generation(
     let trust = TrustStore::load(None, &operator_config_root)
         .context("load node trust for policy-generation preflight")?;
     if schema_cut {
-        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
+        ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
             .context("prove complete signed predecessor policy generation")
     } else {
-        let snapshot = ryeos_app::node_policy::load_snapshot(
+        let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
             app_root,
             &trust,
-            &ryeos_app::node_policy::NodePolicyTable::new(),
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
         )
         .context("compile current signed node policy generation")?;
         snapshot
-            .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+            .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
             .require_bundle_sources(active_bundles.iter().map(String::as_str))
             .context("check command authority for selected install bundles")
     }
@@ -467,14 +470,13 @@ fn run_init_internal(
     }
     ryeos_node_runtime::config::retire_pre_node_policy_config(&opts.app_root)
         .context("retire predecessor daemon policy fields")?;
-    let bootstrap_config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: Some(opts.app_root.clone()),
-            bind: opts.bind,
-            uds_path: opts.uds_path.clone(),
-            ..Default::default()
-        })
-        .context("resolve node bootstrap configuration")?;
+    let bootstrap_config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: Some(opts.app_root.clone()),
+        bind: opts.bind,
+        uds_path: opts.uds_path.clone(),
+        ..Default::default()
+    })
+    .context("resolve node bootstrap configuration")?;
     ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
         .context("seed node bootstrap configuration")?;
     // Operator config root (`<app_root>/.ai/config`) — the single trust
@@ -628,16 +630,16 @@ fn run_init_internal(
         discovered = selected;
     }
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
-    let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
+    let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
     let current_node_policy_generation = if opts.replace_node_policy_generation {
-        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(
+        ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(
             &opts.app_root,
             &seed_trust_store,
         )
         .context("prove existing signed policy generation for explicit schema cut")?;
         None
     } else {
-        ryeos_app::node_policy::generation::load_optional_policy_generation(
+        ryeos_node_runtime::node_policy::generation::load_optional_policy_generation(
             &opts.app_root,
             &seed_trust_store,
             &policy_table,
@@ -658,10 +660,10 @@ fn run_init_internal(
             bail!("node initialization requires an explicit publisher-signed --node-profile")
         }
         (None, Some(selected)) if opts.replace_node_policy_generation => {
-            Some(ryeos_app::node_policy::generation::NodePolicyUpdate::schema_cut(selected))
+            Some(ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::schema_cut(selected))
         }
         (None, Some(selected)) => {
-            Some(ryeos_app::node_policy::generation::NodePolicyUpdate::initial(selected))
+            Some(ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::initial(selected))
         }
         (Some(_), None) => None,
         (Some(current), Some(selected)) if current.policies() == selected.policies() => None,
@@ -704,7 +706,7 @@ fn run_init_internal(
         .or(current_node_policy_generation.as_ref())
         .context("init has no complete prospective node policy generation")?;
     let prospective_records = prospective_bundle_records(&plan, None);
-    let prospective_policy = ryeos_app::node_policy::compile_generation(
+    let prospective_policy = ryeos_node_runtime::node_policy::compile_generation(
         &opts.app_root,
         &policy_table,
         prospective_policy_generation,
@@ -712,9 +714,9 @@ fn run_init_internal(
     )
     .context("compile prospective init node policy")?;
     let command_registration = prospective_policy.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
-    let prospective_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let prospective_loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root: &opts.app_root,
         trust_store: &seed_trust_store,
     };
@@ -728,7 +730,7 @@ fn run_init_internal(
         .context("prospective init source set has invalid node configuration")?;
     let isolation_policy =
         prospective_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?;
-    let prospective_isolation = ryeos_app::engine_init::admit_node_bundle_roots(
+    let prospective_isolation = ryeos_node_runtime::engine_init::admit_node_bundle_roots(
         &opts.app_root,
         &prospective_roots,
         &seed_trust_store,
@@ -781,7 +783,7 @@ fn run_init_internal(
     // below is acquired through this guard, preserving global -> per-name lock
     // order while dependency generations are activated in plan order.
     let bundle_registry_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&opts.app_root)?;
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&opts.app_root)?;
     // This file is the whole-node generation commit point. Remove its prior
     // occupant durably before the first bundle tree or registration changes;
     // a crash anywhere below must leave startup refusing the incomplete
@@ -807,7 +809,7 @@ fn run_init_internal(
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
-        let transaction = bundle_registry_lock.acquire_bundle(name)?;
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&bundle_registry_lock, name)?;
         transaction.reconcile(&node_key)?;
         let registration = bundle_registration_value(&target);
         // Source-set preflight above validates the complete graph before init
@@ -924,7 +926,7 @@ fn run_init_internal(
             if desired.contains(&name) {
                 continue;
             }
-            let transaction = bundle_registry_lock.acquire_bundle(&name)?;
+            let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&bundle_registry_lock, &name)?;
             transaction.reconcile(&node_key)?;
             transaction.begin_remove()?;
             transaction.commit_absent()?;
@@ -980,7 +982,7 @@ fn run_init_internal(
     if let Some(update) = selected_node_policy_update.as_ref() {
         let identity = ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
             .context("load node identity for policy-set bootstrap")?;
-        ryeos_app::node_policy::generation::publish_policy_update(
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
             &opts.app_root,
             update,
             &identity,
@@ -1020,6 +1022,14 @@ fn run_init_internal(
     }
 
     let vault_pubkey_fingerprint = vault_sk.public_key().fingerprint();
+    let capacity_issuance = crate::native_capacity::prepare_initial_capacity_binding(
+        &opts.app_root,
+        &state_lock,
+        &user_key,
+        user_key_created,
+        &node_fp,
+        prospective_policy.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
     write_init_completion(
         &opts.app_root,
         &user_key,
@@ -1027,7 +1037,8 @@ fn run_init_internal(
         &node_fp,
         &vault_pubkey_fingerprint,
         prospective_policy.generation_digest(),
-    )?;
+        capacity_issuance.binding(),
+    ).map_err(|error| capacity_issuance.retain_error(error))?;
     let next_steps = Vec::new();
 
     Ok(InitReport {
@@ -1159,8 +1170,27 @@ fn write_init_completion(
     node_fingerprint: &str,
     vault_fingerprint: &str,
     policy_generation_digest: &str,
+    expected_capacity_account: &crate::native_capacity::NativeCapacityAccountBinding,
 ) -> Result<()> {
     let substrate_identity = load_substrate_identity_record(app_root)?;
+    let trust = TrustStore::load(None, &app_root.join(".ai/config"))?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    if snapshot.generation_digest() != policy_generation_digest {
+        bail!("capacity initialization policy changed before completion");
+    }
+    let capacity_account = crate::native_capacity::load_existing_capacity_binding(
+        app_root,
+        operator_fingerprint,
+        node_fingerprint,
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
+    if &capacity_account != expected_capacity_account {
+        bail!("capacity issuance changed after initialization preparation");
+    }
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_string(),
         operator_fingerprint: operator_fingerprint.to_string(),
@@ -1169,6 +1199,7 @@ fn write_init_completion(
         policy_generation_digest: policy_generation_digest.to_string(),
         substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: registration_digests(app_root)?,
+        capacity_account,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
     let signature = signing_key.sign(canonical.as_bytes());
@@ -1214,6 +1245,7 @@ pub fn prepare_prospective_init_completion(
         require_lower_hex_digest(label, digest)?;
     }
     let substrate_identity = load_substrate_identity_record_from_input(&input)?;
+    input.capacity_account.require_node(&input.node_fingerprint)?;
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_owned(),
         operator_fingerprint: signer.fingerprint(),
@@ -1222,6 +1254,7 @@ pub fn prepare_prospective_init_completion(
         policy_generation_digest: input.policy_generation_digest,
         substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: input.registration_digests,
+        capacity_account: input.capacity_account,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
     let signature = signer.signing_key.sign(canonical.as_bytes());
@@ -1295,6 +1328,9 @@ pub fn prepare_bundle_set_init_completion(
             policy_generation_digest,
             registration_digests: future,
             substrate_identity: Some(load_verified_substrate_identity(app_root)?),
+            capacity_account: verify_init_completion(app_root)?
+                .context("prospective bundle completion requires original verified capacity issuance")?
+                .capacity_account,
         },
     )
 }
@@ -1337,15 +1373,26 @@ fn seal_current_init_completion(
         .join("node/vault/public_key.pem");
     let vault_fingerprint = lillux::vault::read_public_key(&vault_path)?.fingerprint();
     let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))?;
-    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &trust_store,
-        &ryeos_app::node_policy::NodePolicyTable::new(),
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
     )?;
     if expected_policy_generation_digest.is_some_and(|expected| generation.digest() != expected) {
         bail!("published node policy generation differs from the prepared replacement");
     }
 
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    let capacity_account = crate::native_capacity::load_existing_capacity_binding(
+        app_root,
+        &operator_fingerprint,
+        &node_fingerprint,
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
     write_init_completion(
         app_root,
         &operator_key,
@@ -1353,6 +1400,7 @@ fn seal_current_init_completion(
         &node_fingerprint,
         &vault_fingerprint,
         generation.digest(),
+        &capacity_account,
     )
 }
 
@@ -1379,9 +1427,54 @@ pub fn seal_init_completion_after_policy_update(
 /// selected. Fixtures build the same keys, policy generation, and bundle
 /// registrations as `run_init`, but must finish planting test-only bundles
 /// before the registration set can be signed as one complete transaction.
+/// The fixture must supply a fresh temporary node for first issuance; resealing
+/// preserves the existing capacity binding and never recreates a lost one.
 #[cfg(feature = "test-support")]
 pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
-    seal_current_init_completion(app_root, None)
+    use std::ffi::OsStr;
+
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
+    )?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    let config = lillux::PinnedDirectory::open(&app_root.join(ryeos_engine::AI_DIR).join("config"))?
+        .context("test fixture operator configuration is absent")?;
+    let onboarding = config.open_or_create_child(OsStr::new("onboarding"), 0o700)?;
+    // An earlier completion is evidence of an existing fixture incarnation.
+    // Absence of its issuance must refuse through the real issuer, not turn a
+    // test reseal into a reset of cumulative consumption.
+    let first_completion = onboarding
+        .open_pinned_regular(OsStr::new("init-completion.json"), false)?
+        .is_none();
+    let operator_key_path = app_root.join(ryeos_engine::AI_DIR)
+        .join("config/keys/signing/private_key.pem");
+    let operator_pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
+    )?);
+    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &app_root.join(ryeos_engine::AI_DIR).join("node/identity/private_key.pem"),
+    )?;
+    let trust = TrustStore::load(None, config.path())?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    // Fixture-only issuance uses the same authenticated policy, actual files,
+    // signed operator binding and retained failure owner as real initialization.
+    // This code is absent without test-support; production still requires the
+    // actual operator-creation result from its stopped-node ceremony.
+    let issuance = crate::native_capacity::prepare_initial_capacity_binding(
+        app_root,
+        &state_lock,
+        &operator_key,
+        first_completion,
+        node.fingerprint(),
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
+    seal_current_init_completion(app_root, Some(snapshot.generation_digest()))
+        .map_err(|error| issuance.retain_error(error))
 }
 
 pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionReport>> {
@@ -1445,10 +1538,10 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if registrations != document.body.registration_digests {
         bail!("bundle registrations differ from the signed init completion record");
     }
-    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &trust_store,
-        &ryeos_app::node_policy::NodePolicyTable::new(),
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
     )?;
     if generation.digest() != document.body.policy_generation_digest {
         bail!("node policy generation differs from the signed init completion record");
@@ -1457,6 +1550,19 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if substrate_identity.digest()? != document.body.substrate_identity_digest {
         bail!("substrate identity differs from the signed init completion record");
     }
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    if snapshot.generation_digest() != document.body.policy_generation_digest {
+        bail!("capacity policy generation changed during completion verification");
+    }
+    document.body.capacity_account.require_installed(
+        app_root,
+        &document.body.node_fingerprint,
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
     Ok(Some(InitCompletionReport {
         operator_fingerprint,
         node_fingerprint: document.body.node_fingerprint,
@@ -1465,6 +1571,7 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         substrate_identity,
         completion_digest: lillux::sha256_hex(&bytes),
         bundles_verified: registrations.len(),
+        capacity_account: document.body.capacity_account,
     }))
 }
 
@@ -1479,10 +1586,10 @@ pub fn load_verified_substrate_identity(app_root: &Path) -> Result<SubstrateIden
 fn prospective_bundle_records(
     plan: &ryeos_bundle::plan::BundlePlan,
     replacement: Option<(&str, &Path)>,
-) -> Vec<ryeos_app::node_config::BundleRecord> {
+) -> Vec<ryeos_node_runtime::node_config_source::BundleRecord> {
     plan.bundles
         .iter()
-        .map(|(name, bundle)| ryeos_app::node_config::BundleRecord {
+        .map(|(name, bundle)| ryeos_node_runtime::node_config_source::BundleRecord {
             name: name.clone(),
             path: replacement
                 .filter(|(replacement_name, _)| *replacement_name == name)
@@ -1500,20 +1607,20 @@ fn validate_prospective_staging(
     plan: &ryeos_bundle::plan::BundlePlan,
     node_trust_store: &TrustStore,
     config_table: &ryeos_app::node_config::NodeConfigTable,
-    policy_table: &ryeos_app::node_policy::NodePolicyTable,
-    policy_snapshot: &ryeos_app::node_policy::NodePolicySnapshot,
+    policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
+    policy_snapshot: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
 ) -> Result<()> {
     let records = prospective_bundle_records(plan, Some((bundle_name, staging)));
     let roots = records
         .iter()
         .map(|record| record.path.clone())
         .collect::<Vec<_>>();
-    let loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root,
         trust_store: node_trust_store,
     };
     let command_registration = policy_snapshot.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
     loader
         .load_full(config_table, &records, command_registration, policy_table)
@@ -1521,7 +1628,7 @@ fn validate_prospective_staging(
             format!("completed `{bundle_name}` staging tree has invalid node config")
         })?;
     let isolation_policy = policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?;
-    ryeos_app::engine_init::admit_node_bundle_roots(
+    ryeos_node_runtime::engine_init::admit_node_bundle_roots(
         app_root,
         &roots,
         node_trust_store,
@@ -1545,18 +1652,18 @@ pub fn load_trusted_init_node_profile(
     source_dir: &Path,
     name: &str,
     trust_store: &TrustStore,
-) -> Result<ryeos_app::node_policy::generation::NodeInitProfile> {
-    ryeos_app::node_policy::generation::validate_init_profile_name(name)?;
+) -> Result<ryeos_node_runtime::node_policy::generation::NodeInitProfile> {
+    ryeos_node_runtime::node_policy::generation::validate_init_profile_name(name)?;
     let path = source_node_init_dir(source_dir)
         .join("profiles")
         .join(format!("{name}.yaml"));
     let raw = read_trusted_seed_yaml(&path, trust_store)
         .with_context(|| format!("verify init node profile {}", path.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let parsed: ryeos_app::node_policy::generation::NodeInitProfile =
+    let parsed: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
         serde_yaml::from_str(&body)
             .with_context(|| format!("parse init node profile {}", path.display()))?;
-    parsed.validate(&ryeos_app::node_policy::NodePolicyTable::new(), &path)?;
+    parsed.validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &path)?;
     Ok(parsed)
 }
 
@@ -2313,12 +2420,11 @@ mod tests {
                 .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
                 .exists()
         );
-        let config =
-            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-                app_root: Some(state.clone()),
-                ..Default::default()
-            })
-            .expect("load init-owned bootstrap config");
+        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(state.clone()),
+            ..Default::default()
+        })
+        .expect("load init-owned bootstrap config");
         assert_eq!(config.app_root, state);
         assert!(state.join(".ai/node/config.yaml").is_file());
     }
@@ -2427,8 +2533,8 @@ mod tests {
         )
         .unwrap();
         let lock =
-            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&state).unwrap();
-        let transaction = lock.acquire_bundle("standard").unwrap();
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state).unwrap();
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&lock, "standard").unwrap();
         transaction.begin_remove().unwrap();
         assert!(verify_init_completion(&state).unwrap().is_some());
         drop(transaction);
@@ -2457,10 +2563,10 @@ mod tests {
             &ryeos_node_runtime::state_lock::default_lock_path(&state),
         )
         .expect("stopped-node authority");
-        let table = ryeos_app::node_policy::NodePolicyTable::new();
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let trust_store =
             TrustStore::load(None, &state.join(".ai/config")).expect("current node trust store");
-        let current = ryeos_app::node_policy::generation::load_policy_generation(
+        let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
             &state,
             &trust_store,
             &table,
@@ -2479,7 +2585,7 @@ mod tests {
             &state.join(".ai/node/identity/private_key.pem"),
         )
         .expect("node identity");
-        ryeos_app::node_policy::generation::publish_policy_update(
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
             &state,
             &update,
             &identity,
@@ -2640,10 +2746,10 @@ mod tests {
         run_init(&replacement).expect("explicit schema cut replaces predecessor generation");
 
         let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
-        let current = ryeos_app::node_policy::generation::load_optional_policy_generation(
+        let current = ryeos_node_runtime::node_policy::generation::load_optional_policy_generation(
             &state,
             &trust,
-            &ryeos_app::node_policy::NodePolicyTable::new(),
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
         )
         .unwrap()
         .expect("current policy generation");

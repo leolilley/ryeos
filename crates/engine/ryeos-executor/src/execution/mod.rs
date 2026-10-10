@@ -4,8 +4,8 @@
 //! 1. Checkout project from CAS to working directory
 //! 2. After execution, diff working dir and fold back changes
 
-pub(crate) mod admitted_trust;
 mod admitted_callback_authority;
+pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
 mod direct_output;
@@ -39,8 +39,8 @@ pub mod runner;
 pub mod runtime_dispatch;
 mod selected_invocation_root;
 pub use selected_invocation_root::{
-    SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier, SelectedDedicatedInvocationLoan,
+    SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
 };
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;
@@ -548,6 +548,7 @@ pub(crate) fn checkout_project_snapshot(
                 let _ = staging_root.remove_contents_recursive().and_then(|()| {
                     cache_root
                         .remove_empty_child_if_same(&staging_name, &staging_root)
+                        .map(|receipt| receipt.is_some())
                         .and_then(|removed| {
                             if removed {
                                 Ok(())

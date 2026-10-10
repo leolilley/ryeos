@@ -26,3 +26,12 @@ pub struct ApiState {
     pub route_table: Arc<ArcSwap<RouteTable>>,
     pub webhook_dedupe: Arc<WebhookDedupeStore>,
 }
+
+#[cfg(feature = "scheduling")]
+pub(crate) fn selected_scheduler(
+    app: &AppState,
+) -> anyhow::Result<Arc<ryeos_scheduler_service::SchedulerService>> {
+    app.extensions
+        .get::<ryeos_scheduler_service::SchedulerService>()
+        .ok_or_else(|| anyhow::anyhow!("selected scheduler service is unavailable"))
+}

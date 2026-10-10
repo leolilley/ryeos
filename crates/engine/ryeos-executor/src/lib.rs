@@ -4,8 +4,8 @@ pub mod dispatch_error;
 pub mod dispatch_role;
 pub mod execution;
 pub use execution::{
-    SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier,
+    SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, SelectedDedicatedInvocationLoan,
 };
 /// Immutable daemon publication. Attachment presence never admits a worker.
 pub struct SelectedApplicationPublication {
@@ -14,20 +14,13 @@ pub struct SelectedApplicationPublication {
 }
 
 impl SelectedApplicationPublication {
-    pub fn app(&self) -> &std::sync::Arc<ryeos_app::state::AppState> {
-        &self.app
-    }
-    pub fn attachment(&self) -> &SelectedInvocationAttachment {
-        &self.attachment
-    }
+    pub fn app(&self) -> &std::sync::Arc<ryeos_app::state::AppState> { &self.app }
+    pub fn attachment(&self) -> &SelectedInvocationAttachment { &self.attachment }
 }
 
 /// Positive closure means no retained selected slot or ambiguous storage lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectedRootClose {
-    Closed,
-    Unresolved,
-}
+pub enum SelectedRootClose { Closed, Unresolved }
 
 pub mod executor;
 pub(crate) mod resolved_config_cache;
@@ -197,9 +190,8 @@ pub mod test_support {
         use ryeos_state::external_content::products::composition::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY;
 
         ryeos_app::external_placement::test_support::install_test_placement_vault(state);
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
-        )?;
+        let operator =
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
         let scopes = vec!["*".to_owned()];
         let site = state.threads.site_id().to_owned();
         let context = crate::executor::ExecutionContext {
@@ -521,9 +513,8 @@ pub mod test_support {
                 &dependency.resolution.restore(),
                 subject,
             )?;
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
-        )?;
+        let operator =
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
         let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,

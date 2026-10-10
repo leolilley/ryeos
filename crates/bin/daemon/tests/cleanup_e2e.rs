@@ -90,12 +90,16 @@ async fn cli_initialized_but_stopped_suggests_start() {
     // fails before lifecycle preflight can report the stopped node.
     let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("populate initialized state");
+    let fixture = common::fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        common::fast_fixture::FastFixtureProfile::Standard,
+    )
+    .expect("populate Standard-profile state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core");
-    common::fast_fixture::register_standard_bundle(&state_path, &fixture)
-        .expect("register standard");
+    common::fast_fixture::register_standard_composition(&state_path, &fixture)
+        .expect("register Standard composition");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
     let ryeos = ryeos_binary();
@@ -442,8 +446,12 @@ async fn uds_namespace_rejects_service_methods() {
 async fn state_lock_prevents_concurrent_daemons() {
     let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("populate initialized state");
+    let fixture = common::fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        common::fast_fixture::FastFixtureProfile::Core,
+    )
+    .expect("populate Core-profile state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core bundle");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");

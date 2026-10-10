@@ -20,22 +20,21 @@ pub fn build_effective_item_engine(
     project_path: Option<&Path>,
     bundle_roots: &[PathBuf],
 ) -> anyhow::Result<Engine> {
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: Some(app_root.to_path_buf()),
-            ..Default::default()
-        })?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        ..Default::default()
+    })?;
     let isolation =
-        ryeos_app::engine_init::load_locked_registered_definition_isolation(&config.app_root)
+        ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&config.app_root)
             .context("load node isolation policy")?;
     let policy = crate::node_descriptors::load_verified_policy_snapshot(app_root)
         .context("load exact node execution policy")?;
     let execution_policy =
         policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
             )?;
 
-    ryeos_app::engine_init::build_registered_engine_for_roots(
+    ryeos_node_runtime::engine_init::build_registered_engine_for_roots(
         &config,
         bundle_roots,
         project_path,

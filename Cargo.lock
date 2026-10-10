@@ -1589,11 +1589,10 @@ dependencies = [
 [[package]]
 name = "libsqlite3-sys"
 version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
 dependencies = [
  "cc",
  "pkg-config",
+ "sha2",
  "vcpkg",
 ]
 
@@ -1621,6 +1620,19 @@ dependencies = [
  "windows-sys 0.59.0",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "lillux-sqlite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "libsqlite3-sys",
+ "lillux",
+ "rusqlite",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -2616,6 +2628,8 @@ dependencies = [
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-contract",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "ryeos-tracing",
  "serde",
@@ -2647,6 +2661,7 @@ dependencies = [
  "hex",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "once_cell",
  "rand 0.8.6",
  "regex",
@@ -2659,7 +2674,7 @@ dependencies = [
  "ryeos-engine",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
- "ryeos-graph-definition",
+ "ryeos-gpu-loader-owner-contract",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-node-runtime",
@@ -2667,6 +2682,7 @@ dependencies = [
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-contract",
  "ryeos-state",
  "ryeos-tracing",
  "ryeos-vault",
@@ -2750,6 +2766,7 @@ dependencies = [
  "ryeos-node",
  "ryeos-node-runtime",
  "ryeos-runtime",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -2887,7 +2904,6 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "rmp-serde",
- "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-handler-protocol",
@@ -3011,6 +3027,7 @@ dependencies = [
  "ryeos-engine",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
+ "ryeos-gpu-loader-owner-contract",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-node-runtime",
@@ -3147,6 +3164,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "ryeos-gpu-loader-owner-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "ryeos-state",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3288,6 +3316,7 @@ dependencies = [
  "hkdf",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "rand 0.8.6",
  "rmp-serde",
  "ryeos-app",
@@ -3295,6 +3324,7 @@ dependencies = [
  "ryeos-bundle-publication-contract",
  "ryeos-engine",
  "ryeos-node-runtime",
+ "ryeos-scheduler",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3315,8 +3345,14 @@ dependencies = [
  "directories",
  "lillux",
  "rand 0.8.6",
+ "ryeos-accounting",
+ "ryeos-bundle",
+ "ryeos-bundle-publication-contract",
  "ryeos-engine",
+ "ryeos-isolation-protocol",
  "ryeos-runtime",
+ "ryeos-scheduler-contract",
+ "ryeos-state",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3333,6 +3369,7 @@ dependencies = [
  "anyhow",
  "lillux",
  "ryeos-app",
+ "ryeos-node-runtime",
  "ryeos-state",
  "serde_json",
  "serde_yaml",
@@ -3408,8 +3445,10 @@ dependencies = [
  "chrono-tz",
  "cron",
  "lillux",
+ "lillux-sqlite",
  "rusqlite",
  "ryeos-engine",
+ "ryeos-scheduler-contract",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3433,6 +3472,27 @@ dependencies = [
  "serde_json",
 ]
 
+[[package]]
+name = "ryeos-scheduler-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "lillux-sqlite",
+ "ryeos-app",
+ "ryeos-engine",
+ "ryeos-executor",
+ "ryeos-node-runtime",
+ "ryeos-scheduler",
+ "ryeos-scheduler-contract",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "ryeos-session-exec"
@@ -3448,6 +3508,7 @@ dependencies = [
  "glob",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "rand 0.8.6",
  "regex",
  "rusqlite",
@@ -3549,6 +3610,7 @@ dependencies = [
  "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3630,6 +3692,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "once_cell",
  "rand 0.8.6",
  "regex",
@@ -3653,6 +3716,8 @@ dependencies = [
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-contract",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "ryeos-tracing",
  "ryeos-ui",

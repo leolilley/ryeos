@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
+use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use serde::Deserialize;

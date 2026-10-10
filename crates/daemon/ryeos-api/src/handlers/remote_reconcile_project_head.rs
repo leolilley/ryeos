@@ -829,7 +829,7 @@ fn validate_project_generation(state: &AppState, snapshot_hash: &str) -> Result<
     ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
     let target_ignore = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
+        .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
     ryeos_state::project_sync::validate_project_tree_against_target_ignore(
         &tree,
         &target_ignore.matcher,

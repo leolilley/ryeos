@@ -22,6 +22,7 @@ use ryeos_scheduler::types::ScheduleSpecRecord;
 use ryeos_scheduler::{
     ScheduledDispatchReceipt, ScheduledProjectBinding, SchedulerContext, ThreadResultOutcome,
 };
+use ryeos_scheduler_service::SchedulerService;
 use ryeos_state::objects::{
     ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
 };
@@ -29,7 +30,7 @@ use ryeos_state::objects::{
 /// Newtype wrapper around `AppState` so daemon-private dispatch can implement
 /// the scheduler-owned context trait without moving either public type.
 #[derive(Clone)]
-pub struct AppSchedulerContext(pub Arc<AppState>);
+pub struct AppSchedulerContext(pub Arc<AppState>, pub Arc<SchedulerService>);
 
 impl AppSchedulerContext {
     fn validate_fire_spec(
@@ -205,19 +206,23 @@ impl AppSchedulerContext {
 
 impl SchedulerContext for AppSchedulerContext {
     fn app_root(&self) -> &Path {
-        &self.0.config.app_root
+        self.1.app_root()
     }
 
     fn scheduler_db(&self) -> Arc<SchedulerDb> {
-        self.0.scheduler_db.clone()
+        self.1.scheduler_db()
     }
 
     fn scheduler_runtime_gate(&self) -> Arc<tokio::sync::RwLock<()>> {
-        self.0.scheduler_runtime_gate.clone()
+        self.1.runtime_gate()
+    }
+
+    fn ensure_dispatch_available(&self) -> Result<()> {
+        self.1.require_dispatch_available()
     }
 
     fn schedule_trust_store(&self) -> &ryeos_engine::trust::TrustStore {
-        &self.0.engine.node_trust_store
+        self.1.trust_store()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {

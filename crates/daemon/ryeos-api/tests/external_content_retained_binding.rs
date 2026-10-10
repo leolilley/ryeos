@@ -6,12 +6,12 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ryeos_api::handlers::external_content_import;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::node_policy::sections::external_content::{
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
 };
 use ryeos_app::operator_external_content::{ImportRequest, RetainedBindingImportRequest};
 use ryeos_app::state::AppState;
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_state::objects::{ExternalContentBinding, ExternalContentConsumerAuthority};
 use serde_json::json;
 
@@ -27,11 +27,11 @@ fn fixture(
     let (tmp, mut state) = test_state::build_test_state();
     let closure = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
@@ -367,11 +367,11 @@ async fn bind_through_managed_activation_owner(
     let (state_dir, mut state) = test_state::build_test_state_with_engine(engine);
     let closure = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,

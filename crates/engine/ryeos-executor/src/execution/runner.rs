@@ -2424,7 +2424,7 @@ fn verify_dispatch_effect_record(
     } = &record.answer
     {
         let verified = (|| -> Result<()> {
-            let limits = state.node_policy.require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?.closure_limits()?;
+            let limits = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?.closure_limits()?;
             let cas = authority.cas_store()?;
             let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
                 &cas,

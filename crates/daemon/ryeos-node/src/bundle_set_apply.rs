@@ -85,7 +85,7 @@ where
     )
     .context("bundle-set apply requires the daemon to be stopped")?;
     let registry_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(app_root)?;
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(app_root)?;
     let authority = StoppedNodeBundleSetAuthority::new(app_root, admit);
     ryeos_app::bundle_set_transaction::apply_stopped_bundle_set(
         app_root,

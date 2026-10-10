@@ -125,9 +125,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     let (key_b64, verifying_key, fingerprint) = parse_public_key(&req.public_key)?;
-    let configured_operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+    let configured_operator = ryeos_node_runtime::identity::NodeIdentity::load(
+        &state.config.operator_signing_key_path,
+    )
+    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
             "configured operator cannot be admitted as remote_node; use the stopped-daemon offline conversion path"
@@ -230,7 +231,7 @@ fn consume_token_file(path: &Path) -> HandlerResult<()> {
 fn hosted_admission_token_ttl_secs(state: &AppState) -> HandlerResult<u64> {
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::hosted::HostedNodePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy>()
         .map_err(|error| HandlerError::Internal(format!("load hosted-node policy: {error:#}")))?;
     match (policy.admission_enabled, policy.admission_token_ttl_secs) {
         (true, Some(ttl_secs)) => Ok(ttl_secs),

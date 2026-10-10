@@ -8,6 +8,8 @@ repository = "https://github.com/leolilley/ryeos"
 
 [features]
 default = []
+scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service"]
+model-provider-setup = ["dep:ryeos-directive-definition"]
 handoff-test-support = ["ryeos-app/test-support"]
 
 [dependencies]
@@ -32,18 +34,19 @@ rmp-serde = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-engine = { workspace = true }
-ryeos-graph-definition = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-node = { workspace = true }
-ryeos-scheduler = { workspace = true }
+ryeos-scheduler-contract = { workspace = true }
+ryeos-scheduler = { workspace = true, optional = true }
+ryeos-scheduler-service = { workspace = true, optional = true }
 ryeos-state = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-bundle-publication-contract = { workspace = true }
 ryeos-core-tools = { workspace = true }
-ryeos-directive-definition = { workspace = true }
+ryeos-directive-definition = { workspace = true, optional = true }
 ryeos-effect-contract = { workspace = true }
 ryeos-provider-contract = { workspace = true }
 ryeos-project-capture = { workspace = true }
@@ -66,6 +69,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 ryeos-node-runtime = { workspace = true, features = ["test-support"] }
+ryeos-graph-definition = { workspace = true }
 rusqlite = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }

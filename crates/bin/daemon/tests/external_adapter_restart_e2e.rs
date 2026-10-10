@@ -474,12 +474,12 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
         // Reuse normal signed node-config admission before the existing
         // test-only vault provisioner; no raw reserved vault key is authored.
         let trust = ryeos_engine::trust::TrustStore::load(None, &state.join(".ai/config"))?;
-        let loader = ryeos_app::node_config::loader::BootstrapLoader { app_root: state, trust_store: &trust };
-        let table = ryeos_app::node_policy::NodePolicyTable::new();
-        let policy = ryeos_app::node_policy::load_snapshot(state, &trust, &table)?;
+        let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader { app_root: state, trust_store: &trust };
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let policy = ryeos_node_runtime::node_policy::load_snapshot(state, &trust, &table)?;
         let config = loader.load_full(&ryeos_app::node_config::NodeConfigTable::new(),
             &loader.load_bundle_section()?,
-            policy.require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?,
+            policy.require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()?,
             &table)?;
         anyhow::ensure!(config.external_execution.len() == 1, "expected one installed fixture binding");
         ryeos_app::node_config::sections::external_execution::provision_installed_test_placement_credential(
@@ -870,7 +870,7 @@ fn admit_independent_verifier_input_root(
     input_root: &Path,
 ) -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
-    use ryeos_app::node_policy::sections::external_content::{
+    use ryeos_node_runtime::node_policy::sections::external_content::{
         ExternalContentImportPolicyRecord, ExternalContentImportRoot,
     };
 

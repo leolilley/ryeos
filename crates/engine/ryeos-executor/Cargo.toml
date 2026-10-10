@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [features]
-test-support = ["ryeos-node-runtime/test-support", ]
+test-support = []
 
 [dependencies]
 ryeos-node-runtime = { workspace = true }

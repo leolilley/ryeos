@@ -8,10 +8,12 @@ pub mod bootstrap;
 pub mod config;
 pub mod engine_init;
 pub mod reconcile;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_impl;
 pub mod uds;
 
 // ── Extracted crates ─────────────────────────────────────────────
+#[cfg(feature = "scheduling")]
 pub use ryeos_scheduler as scheduler;
 
 static SHUTDOWN_TX: OnceCell<tokio::sync::broadcast::Sender<()>> = OnceCell::new();

@@ -67,9 +67,10 @@ pub async fn handle(
 
     // 2. Compute fingerprint from the public key bytes.
     let fingerprint = lillux::sha256_hex(&key_bytes);
-    let configured_operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-            .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+    let configured_operator = ryeos_node_runtime::identity::NodeIdentity::load(
+        &state.config.operator_signing_key_path,
+    )
+    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
             "configured-operator authorization and class changes are offline-only".to_string(),

@@ -9,9 +9,9 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
-use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
-use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
+use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 
 /// Bootstrap options.
 ///
@@ -646,7 +646,7 @@ fn load_node_config_two_phase_with_socket(
     // snapshot. Mutation paths take this same node-wide lock before planning
     // or activation, so one daemon generation cannot mix bundle generations.
     let _bundle_generation_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire_for_startup(app_root)
             .context("acquire bundle-generation lock for node bootstrap")?;
 
     // ── Phase 1: bootstrap trust store + bundle section ──
@@ -655,7 +655,7 @@ fn load_node_config_two_phase_with_socket(
     let bootstrap_trust_store = TrustStore::load(None, &operator_config_root)
         .context("failed to load bootstrap trust store for node-config verification")?;
 
-    let bootstrap_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let bootstrap_loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
     };
@@ -665,7 +665,7 @@ fn load_node_config_two_phase_with_socket(
         .context("Phase 1: failed to load bundle section from node config")?;
 
     let generation = Arc::new(
-        ryeos_app::engine_init::VerifiedBundleGeneration::capture(
+        ryeos_node_runtime::engine_init::VerifiedBundleGeneration::capture(
             bundle_records,
             &bootstrap_trust_store,
         )
@@ -677,7 +677,7 @@ fn load_node_config_two_phase_with_socket(
     // validate before any registry is constructed from these roots.
     generation
         .checked(&bootstrap_trust_store, || {
-            ryeos_app::engine_init::validate_installed_bundle_plan(
+            ryeos_node_runtime::engine_init::validate_installed_bundle_plan(
                 app_root,
                 &generation,
                 &bootstrap_trust_store,
@@ -693,23 +693,23 @@ fn load_node_config_two_phase_with_socket(
     // raw path.
     let config_table = NodeConfigTable::new();
     let policy_table = NodePolicyTable::new();
-    let policy_generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let policy_generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &bootstrap_trust_store,
         &policy_table,
     )
     .context("Phase 1: load exact node policy generation")?;
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
-    let node_policy = Arc::new(ryeos_app::node_policy::compile_generation(
+    let node_policy = Arc::new(ryeos_node_runtime::node_policy::compile_generation(
         app_root,
         &policy_table,
         &policy_generation,
         node_identity.fingerprint(),
     )?);
     let command_registration = node_policy.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
-    let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let full_loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
     };
@@ -727,13 +727,13 @@ fn load_node_config_two_phase_with_socket(
     let (isolation_backend, verified_backend_capture) = generation
         .checked(&bootstrap_trust_store, || {
             if daemon_socket.is_some() {
-                ryeos_app::engine_init::resolve_isolation_backend_with_verified_captures(
+                ryeos_node_runtime::engine_init::resolve_isolation_backend_with_verified_captures(
                     &generation,
                     &bootstrap_trust_store,
                     node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
                 )
             } else {
-                ryeos_app::engine_init::resolve_isolation_backend(
+                ryeos_node_runtime::engine_init::resolve_isolation_backend(
                     &generation,
                     &bootstrap_trust_store,
                     node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
@@ -758,11 +758,9 @@ fn load_node_config_two_phase_with_socket(
                 runtime.verify_loaded_node_identity(&node_identity)?;
                 Some(runtime.open_process_scope_provider()?)
             }
-            // Direct nodes remain valid for non-scope-backed work. The
-            // isolation runtime records no capability, and dedicated workers
-            // fail admission rather than selecting a weaker host process
-            // boundary.
-            None => None,
+            None => anyhow::bail!(
+                "node policy requires enclosing process scopes; direct launch cannot provide them; start through the host service or external controller"
+            ),
         }
     } else {
         None
@@ -779,7 +777,7 @@ fn load_node_config_two_phase_with_socket(
                 node_policy
                     .require::<ryeos_engine::isolation::IsolationPolicy>()?
                     .clone(),
-                ryeos_app::node_policy::generation::policy_directory(app_root)
+                ryeos_node_runtime::node_policy::generation::policy_directory(app_root)
                     .join("isolation.yaml"),
                 format!("sha256:{}", node_policy.generation_digest()),
                 isolation_backend,
@@ -796,7 +794,7 @@ fn load_node_config_two_phase_with_socket(
             node_policy
                 .require::<ryeos_engine::isolation::IsolationPolicy>()?
                 .clone(),
-            ryeos_app::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+            ryeos_node_runtime::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
             format!("sha256:{}", node_policy.generation_digest()),
             isolation_backend,
         ),
@@ -810,7 +808,7 @@ fn load_node_config_two_phase_with_socket(
             .context("Phase 1: retain actual isolation executable captures")?,
         None => isolation,
     };
-    let isolation = Arc::new(ryeos_app::engine_init::retain_daemon_generation(
+    let isolation = Arc::new(ryeos_node_runtime::engine_init::retain_daemon_generation(
         isolation,
         app_root.to_path_buf(),
         Arc::clone(&generation),
@@ -831,7 +829,7 @@ fn load_node_config_two_phase_with_socket(
         isolation,
         &bootstrap_trust_store,
         node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
             )?,
     )?;
     let engine = Arc::new(engine);

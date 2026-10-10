@@ -13,18 +13,22 @@ use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
 use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadLifecycleService;
 use ryeos_app::{command_service, event_store_service, thread_lifecycle};
 use ryeos_app::{kind_profiles, process, state, state_store};
+use ryeos_node_runtime::{state_lock};
 use ryeos_executor::executor as service_executor;
 use ryeos_node::lifecycle_marker;
-use ryeos_node_runtime::identity::NodeIdentity;
-use ryeos_node_runtime::state_lock;
 use ryeosd::config::{self, Cli, Config};
+#[cfg(feature = "scheduling")]
+use ryeosd::scheduler;
+#[cfg(feature = "scheduling")]
 use ryeosd::scheduler::db::SchedulerDb;
-use ryeosd::{bootstrap, reconcile, scheduler, uds};
+use ryeosd::{bootstrap, reconcile, uds};
 
+#[cfg(feature = "scheduling")]
 mod maintenance_schedule;
 mod startup;
 
@@ -32,8 +36,15 @@ const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
 const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
 const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
 
+/// Quote the one-time StateLock owner conversion retained by the consuming
+/// native finalizer. The lock target and registry registration are charged by
+/// their own physical-custody owners.
+fn quote_daemon_operator_lock_handoff() -> lillux_sqlite::original_physical_custody::OutsideWork {
+    lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 2 }
+}
+
 fn configured_bundle_publisher(
-    policy: &ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
 ) -> Result<Option<Arc<dyn ryeos_app::bundle_publication::producer::BundlePublisherAuthority>>> {
     let endpoint = std::env::var_os(BUNDLE_PUBLISHER_URL_ENV);
     let bearer = std::env::var_os(BUNDLE_PUBLISHER_BEARER_ENV);
@@ -75,20 +86,32 @@ fn configured_bundle_publisher(
 struct LifecycleExitGuard {
     state_dir: std::path::PathBuf,
     started_at: String,
+    launch_route: lifecycle_marker::LaunchRoute,
     recorded: bool,
 }
 
 impl LifecycleExitGuard {
-    fn new(state_dir: std::path::PathBuf, started_at: String) -> Self {
+    fn new(
+        state_dir: std::path::PathBuf,
+        started_at: String,
+        launch_route: lifecycle_marker::LaunchRoute,
+    ) -> Self {
         Self {
             state_dir,
             started_at,
+            launch_route,
             recorded: false,
         }
     }
 
     fn record(&mut self, reason: &str, error: Option<&str>) {
-        lifecycle_marker::record_exit(&self.state_dir, reason, &self.started_at, error);
+        lifecycle_marker::record_exit(
+            &self.state_dir,
+            reason,
+            &self.started_at,
+            error,
+            self.launch_route,
+        );
         self.recorded = true;
     }
 }
@@ -101,6 +124,7 @@ impl Drop for LifecycleExitGuard {
                 "startup_failed",
                 &self.started_at,
                 None,
+                self.launch_route,
             );
         }
     }
@@ -108,12 +132,212 @@ impl Drop for LifecycleExitGuard {
 
 /// Main owns the original exclusion/lifecycle guards and Render custody outside
 /// the run future, retaining them until the selected root and Render owners close.
+#[derive(Default)]
+struct NativeFinalizerAttempts(u8);
+
+impl NativeFinalizerAttempts {
+    fn claim(&mut self) -> Result<()> {
+        anyhow::ensure!(self.0 < ryeos_node::native_capacity::MAX_FINALIZATION_ATTEMPTS,
+            "native finalizer attempt allowance exhausted; original custody remains retained");
+        self.0 = self.0.checked_add(1)
+            .context("native finalizer attempt counter overflow")?;
+        Ok(())
+    }
+
+    fn exhausted(&self) -> bool {
+        self.0 >= ryeos_node::native_capacity::MAX_FINALIZATION_ATTEMPTS
+    }
+}
+
+/// Secret-free snapshot of which composition owners remain when bounded
+/// finalization cannot continue. This contains custody-presence facts only;
+/// it deliberately excludes paths, identifiers, errors, credentials and data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnresolvedNativeCustody {
+    attempts_used: u8,
+    services_drained: bool,
+    persistent_pool_retained: bool,
+    app_state_retained: bool,
+    live_store_retained: bool,
+    scheduler_retained: bool,
+    native_failure_retained: bool,
+    inputs_retained: bool,
+    reservation_retained: bool,
+    factory_retained: bool,
+    prepared_registry_retained: bool,
+    store_close_retained: bool,
+    store_outside_retained: bool,
+    settled_account_retained: bool,
+    native_terminal_retained: bool,
+    startup_recovery_retained: bool,
+    selected_root_unresolved: bool,
+    operator_lock_retained: bool,
+}
+
+impl std::fmt::Display for UnresolvedNativeCustody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f,
+            "attempts_used={} services_drained={} persistent_pool_retained={} app_state_retained={} live_store_retained={} scheduler_retained={} native_failure_retained={} inputs_retained={} reservation_retained={} factory_retained={} prepared_registry_retained={} store_close_retained={} store_outside_retained={} settled_account_retained={} native_terminal_retained={} startup_recovery_retained={} selected_root_unresolved={} operator_lock_retained={}",
+            self.attempts_used,
+            self.services_drained,
+            self.persistent_pool_retained,
+            self.app_state_retained,
+            self.live_store_retained,
+            self.scheduler_retained,
+            self.native_failure_retained,
+            self.inputs_retained,
+            self.reservation_retained,
+            self.factory_retained,
+            self.prepared_registry_retained,
+            self.store_close_retained,
+            self.store_outside_retained,
+            self.settled_account_retained,
+            self.native_terminal_retained,
+            self.startup_recovery_retained,
+            self.selected_root_unresolved,
+            self.operator_lock_retained,
+        )
+    }
+}
+
+impl std::error::Error for UnresolvedNativeCustody {}
+
+/// Non-owning native admission fence. The select point can close native
+/// tickets and Scheduler metadata admission while the startup future still
+/// borrows the composition. It holds only `Weak` handles, so it never extends
+/// an owner's lifetime; an install after close is closed immediately.
+#[derive(Default)]
+struct NativeAdmissionFence {
+    closed: std::sync::atomic::AtomicBool,
+    factory: Mutex<Option<std::sync::Weak<ryeos_node::native_capacity::LiveNativeFactory>>>,
+    stores: Mutex<Vec<std::sync::Weak<state_store::StateStore>>>,
+    // Read-only retained shutdown observation, not a native terminal certificate.
+    factory_close: Mutex<Option<std::result::Result<(), anyhow::Error>>>,
+}
+
+impl NativeAdmissionFence {
+    fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn mark_closed(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn close_factory(&self, factory: &ryeos_node::native_capacity::LiveNativeFactory) {
+        // A transient Busy refusal must not be frozen as the final close.
+        // Retain the latest observation; no successful close grants a
+        // native terminal or releases any real owner.
+        if let Ok(mut observation) = self.factory_close.try_lock() {
+            if !matches!(observation.as_ref(), Some(Ok(()))) {
+                *observation = Some(factory.close_admission());
+            }
+        }
+    }
+
+    fn register_factory(&self, factory: &Arc<ryeos_node::native_capacity::LiveNativeFactory>) {
+        if let Ok(mut slot) = self.factory.lock() {
+            *slot = Some(Arc::downgrade(factory));
+        }
+        if self.is_closed() {
+            self.close_factory(factory);
+        }
+    }
+
+    fn register_store(&self, store: &Arc<state_store::StateStore>) {
+        if let Ok(mut stores) = self.stores.lock() {
+            let weak = Arc::downgrade(store);
+            if !stores.iter().any(|known| std::sync::Weak::ptr_eq(known, &weak)) {
+                stores.push(weak);
+            }
+        }
+        if self.is_closed() {
+            store.close_live_scheduler_metadata_admission();
+        }
+    }
+
+    /// Close admission on every registered owner still alive. Each upgrade is
+    /// a transient strong handle dropped at once, before any release path.
+    fn close(&self) {
+        self.mark_closed();
+        if let Ok(stores) = self.stores.lock() {
+            for store in stores.iter().filter_map(std::sync::Weak::upgrade) {
+                store.close_live_scheduler_metadata_admission();
+            }
+        }
+        let factory = self.factory.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade));
+        if let Some(factory) = factory {
+            self.close_factory(&factory);
+        }
+    }
+}
+
 struct DaemonSelectedComposition {
     root: ryeos_executor::SelectedInvocationCompositionBarrier,
+    launch_route: Option<lifecycle_marker::LaunchRoute>,
     process_state_lock: Option<state_lock::StateLock>,
+    #[cfg(target_os = "linux")]
+    native_operator_lock: Option<std::mem::ManuallyDrop<Arc<lillux::ExactExclusiveFileLock>>>,
+    #[cfg(target_os = "linux")]
+    native_operator_lock_registered: bool,
     lifecycle_exit: Option<LifecycleExitGuard>,
     persistent_pool_custody: Option<Arc<ryeos_app::persistent_session::PersistentSessionPool>>,
     app_state_custody: Option<AppState>,
+    live_state_store_custody: Option<Arc<state_store::StateStore>>,
+    native_bootstrap_entered: bool,
+    native_inputs: Option<Arc<ryeos_node::native_capacity::LiveNativeCapacityInputs>>,
+    native_reservation: Option<Arc<ryeos_node::native_capacity::LiveNativeCapacityReservation>>,
+    native_factory: Option<Arc<ryeos_node::native_capacity::LiveNativeFactory>>,
+    native_failure: Option<anyhow::Error>,
+    services_drained: bool,
+    native_closed_store: Option<state_store::ClosedLiveStateStore>,
+    native_outside_store: Option<state_store::LiveStateStoreOutsideCustody>,
+    native_prepared_registry: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
+    native_store_close_failure: Option<state_store::LiveStateStoreCloseFailure>,
+    native_reservation_close_failure: Option<ryeos_node::native_capacity::LiveNativeCapacityReservationFailure>,
+    native_settled_reservation: Option<ryeos_node::native_capacity::SettledLiveNative>,
+    native_terminal: Option<Arc<lillux_sqlite::OriginalNativeTerminal>>,
+    native_startup_recovery_failure: Option<state_store::LiveStateStoreStartupRecoveryFailure>,
+    native_released_startup: Option<state_store::ReleasedLiveStateStoreStartup>,
+    // Shared by the outer composition; once the consuming finalizer is wired,
+    // every shutdown entry path must claim from this same finite allowance.
+    native_finalizer_attempts: NativeFinalizerAttempts,
+    native_admission_fence: Arc<NativeAdmissionFence>,
+    native_control_observation: std::sync::Mutex<Option<
+        std::result::Result<ryeos_node::native_capacity::LiveProducerControlCensus, anyhow::Error>,
+    >>,
+    #[cfg(feature = "scheduling")]
+    scheduler_db_custody: Option<Arc<scheduler::db::SchedulerDb>>,
+    #[cfg(feature = "scheduling")]
+    scheduler_native_finalization_owner: Option<scheduler::db::SchedulerNativeFinalizationOwner>,
+    #[cfg(feature = "scheduling")]
+    scheduler_native_outside_sources: Option<scheduler::db::SchedulerNativeOutsideSources>,
+    #[cfg(feature = "scheduling")]
+    scheduler_admission_failure: Option<state_store::LiveSchedulerNativeAdmissionFailure>,
+    #[cfg(feature = "scheduling")]
+    scheduler_admission_sources: Option<state_store::LiveSchedulerNativeAdmissionOutsideSources>,
+    #[cfg(feature = "scheduling")]
+    scheduler_native_connection_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    #[cfg(feature = "scheduling")]
+    scheduler_native_unopened_inputs: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+    #[cfg(feature = "scheduling")]
+    scheduler_native_schema_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    #[cfg(feature = "scheduling")]
+    scheduler_native_schema_transient: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    #[cfg(feature = "scheduling")]
+    scheduler_participant_custody: Option<Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>>,
+    // Retain actual receipts alongside their database until the full original
+    // factory census settles. Service close alone cannot release this owner.
+    #[cfg(feature = "scheduling")]
+    scheduler_native_terminals: Option<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>>,
+    #[cfg(feature = "scheduling")]
+    scheduler_open_failure: Option<scheduler::db::SchedulerDbOpenFailure>,
+    #[cfg(feature = "scheduling")]
+    scheduler_schema_failure: Option<ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure>,
+    #[cfg(feature = "scheduling")]
+    scheduler_recovered_schema: Option<ryeos_state::sqlite_schema::ReleasedNativeSchemaSqlReference>,
+    #[cfg(feature = "scheduling")]
+    scheduler_admission_custody: Option<state_store::LiveSchedulerNativeAdmission>,
 }
 
 impl DaemonSelectedComposition {
@@ -122,11 +346,293 @@ impl DaemonSelectedComposition {
             ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
         Self {
             root,
+            launch_route: None,
             process_state_lock: None,
+            #[cfg(target_os = "linux")]
+            native_operator_lock: None,
+            #[cfg(target_os = "linux")]
+            native_operator_lock_registered: false,
             lifecycle_exit: None,
             persistent_pool_custody: None,
             app_state_custody: None,
+            live_state_store_custody: None,
+            native_bootstrap_entered: false,
+            native_inputs: None,
+            native_reservation: None,
+            native_factory: None,
+            native_failure: None,
+            services_drained: false,
+            native_closed_store: None,
+            native_outside_store: None,
+            native_prepared_registry: None,
+            native_store_close_failure: None,
+            native_reservation_close_failure: None,
+            native_settled_reservation: None,
+            native_terminal: None,
+                native_startup_recovery_failure: None,
+                native_released_startup: None,
+            native_finalizer_attempts: NativeFinalizerAttempts::default(),
+            native_admission_fence: Arc::default(),
+            native_control_observation: std::sync::Mutex::new(None),
+            #[cfg(feature = "scheduling")]
+            scheduler_db_custody: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_finalization_owner: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_outside_sources: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_admission_failure: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_admission_sources: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_connection_parts: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_unopened_inputs: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_schema_parts: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_schema_transient: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_participant_custody: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_terminals: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_open_failure: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_schema_failure: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_recovered_schema: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_admission_custody: None,
         }
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn retain_scheduler_db(&mut self, db: Arc<scheduler::db::SchedulerDb>) {
+        self.scheduler_db_custody = Some(db);
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn retain_scheduler_open_failure(&mut self, failure: scheduler::db::SchedulerDbOpenFailure) {
+        self.scheduler_open_failure = Some(failure);
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn retain_scheduler_admission_failure(&mut self, error: anyhow::Error) -> anyhow::Error {
+        match error.downcast::<state_store::LiveSchedulerNativeAdmissionFailure>() {
+            Ok(failure) if self.scheduler_admission_failure.is_none() => {
+                self.scheduler_admission_failure = Some(failure);
+                anyhow::anyhow!("original Scheduler admission failure retained")
+            }
+            Ok(failure) => anyhow::Error::new(failure),
+            // Non-owning admission refusal created no scheduler source frame.
+            // Let ordinary startup unwind retain its original diagnostic.
+            Err(error) => error,
+        }
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn retain_scheduler_terminals_after_close(&mut self) -> Result<()> {
+        if self.scheduler_native_terminals.is_some() {
+            return Ok(());
+        }
+        if let Some(owner) = &self.scheduler_native_finalization_owner {
+            let terminals = owner.retained_native_terminals()?;
+            self.scheduler_native_terminals = Some(terminals);
+        } else if let Some(db) = &self.scheduler_db_custody {
+            // This method validates the original factory and actual terminal
+            // state. Any failure leaves the database under composition custody.
+            let terminals = db.retained_native_terminals()?;
+            self.scheduler_native_terminals = Some(terminals);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn transfer_scheduler_native_finalization_owner(&mut self) -> Result<()> {
+        if self.scheduler_native_finalization_owner.is_some() {
+            return Ok(());
+        }
+        let Some(expected_db) = self.scheduler_db_custody.as_ref() else {
+            return Ok(());
+        };
+        let state = self.app_state_custody.as_mut()
+            .context("scheduler finalization transfer has no retained AppState")?;
+        let Some(service) = state.extensions.remove::<ryeos_scheduler_service::SchedulerService>() else {
+            anyhow::bail!("selected scheduler service is absent from the retained extension owner");
+        };
+        let service_db = service.scheduler_db();
+        if !Arc::ptr_eq(expected_db, &service_db) {
+            state.extensions.insert(service);
+            anyhow::bail!("scheduler service selected a different DB than composition custody");
+        }
+        drop(service_db);
+        let Some(participant) = self.scheduler_participant_custody.take()
+            .or_else(|| state.take_scheduler_participant_for_shutdown()) else {
+            state.extensions.insert(service);
+            anyhow::bail!("selected scheduler service has no retained lifecycle participant");
+        };
+        let service_participant: Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant> =
+            service.clone();
+        if !Arc::ptr_eq(&participant, &service_participant) {
+            self.scheduler_participant_custody = Some(participant);
+            state.extensions.insert(service);
+            anyhow::bail!("scheduler lifecycle participant is not the selected service owner");
+        }
+        drop(service_participant);
+        drop(participant);
+        // The service is the canonical DB owner after drain. Retire the
+        // composition's observation alias only after identity is checked; a
+        // refusal below reconstructs it from the returned complete service.
+        self.scheduler_db_custody.take();
+        match service.into_native_finalization_owner() {
+            Ok(owner) => {
+                self.scheduler_native_finalization_owner = Some(owner);
+                Ok(())
+            }
+            Err((service, error)) => {
+                self.scheduler_db_custody = Some(service.scheduler_db());
+                let participant: Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant> =
+                    service.clone();
+                self.scheduler_participant_custody = Some(participant);
+                state.extensions.insert(service);
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn prepare_scheduler_outside_source_fields(&mut self) -> Result<()> {
+        if let Some(sources) = self.scheduler_native_outside_sources.as_ref() {
+            sources.handoff_id()?;
+            anyhow::ensure!(self.scheduler_native_connection_parts.is_none()
+                && self.scheduler_native_unopened_inputs.is_none()
+                && self.scheduler_native_schema_parts.is_none()
+                && self.scheduler_native_schema_transient.is_none(),
+                "Scheduler outside packet competes with an already retained source field");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn advance_scheduler_sources_in_store(
+        &mut self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        producer: &ryeos_node::native_capacity::LiveNativeFactory,
+        terminal: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> Result<()> {
+        self.prepare_scheduler_outside_source_fields()?;
+        if self.scheduler_recovered_schema.is_some() {
+            anyhow::ensure!(self.scheduler_native_schema_parts.is_none()
+                && self.scheduler_native_schema_transient.is_none()
+                && self.scheduler_native_outside_sources.as_ref()
+                    .is_none_or(scheduler::db::SchedulerNativeOutsideSources::is_empty),
+                "failed schema reference competes with a normal Scheduler source packet");
+            let released = self.scheduler_recovered_schema.take()
+                .expect("checked recovered Scheduler schema source");
+            match released.into_outside_parts(factory, terminal) {
+                Ok((parts, transient, _prior_refusal)) => {
+                    if let Some(parts) = parts {
+                        self.scheduler_native_schema_parts =
+                            Some(std::mem::ManuallyDrop::new(parts));
+                    }
+                    self.scheduler_native_schema_transient = transient;
+                    tracing::warn!(
+                        "scheduler schema reference failed; retaining its original failure evidence during shutdown"
+                    );
+                }
+                Err((released, error)) => {
+                    self.scheduler_recovered_schema = Some(released);
+                    return Err(error);
+                }
+            }
+        }
+        let outside = self.native_outside_store.as_mut()
+            .context("selected Scheduler source lacks the retained Store graph")?;
+        outside.advance_scheduler_admission_sources(&mut self.scheduler_admission_sources,
+            factory, terminal, &|bytes, steps|
+                producer.prepay_outside_control(terminal, bytes, steps))?;
+        outside.advance_scheduler_native_handoff(&mut self.scheduler_native_outside_sources,
+            factory, terminal, &|bytes, steps|
+                producer.prepay_outside_control(terminal, bytes, steps))?;
+        if self.scheduler_native_connection_parts.is_some() {
+            outside.advance_scheduler_packet_parts(&mut self.scheduler_native_connection_parts, factory, terminal,
+                &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
+        }
+        if self.scheduler_native_unopened_inputs.is_some() {
+            outside.advance_unopened_scheduler_database(&mut self.scheduler_native_unopened_inputs, factory, terminal,
+                &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
+        }
+        if self.scheduler_native_schema_parts.is_some() {
+            outside.advance_scheduler_packet_parts(&mut self.scheduler_native_schema_parts, factory, terminal,
+                &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
+        }
+        if self.scheduler_native_schema_transient.is_some() {
+            outside.advance_unopened_scheduler_transient(&mut self.scheduler_native_schema_transient,
+                factory, terminal, &|bytes, steps|
+                    producer.prepay_outside_control(terminal, bytes, steps))?;
+        }
+        // Resume any packet or unopened-bound transition already cached in the
+        // Store after a prior callback/prepayment refusal.
+        let mut no_packet_source = None;
+        outside.advance_scheduler_packet_parts(&mut no_packet_source, factory, terminal,
+            &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
+        let mut no_unopened_source = None;
+        outside.advance_unopened_scheduler_database(&mut no_unopened_source, factory, terminal,
+            &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
+        let mut no_transient_source = None;
+        outside.advance_unopened_scheduler_transient(&mut no_transient_source, factory, terminal,
+            &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
+        anyhow::ensure!(self.scheduler_native_connection_parts.is_none()
+            && self.scheduler_native_unopened_inputs.is_none()
+            && self.scheduler_native_schema_parts.is_none()
+            && self.scheduler_native_schema_transient.is_none()
+            && self.scheduler_admission_sources.is_none(),
+            "selected Scheduler sources remain outside the Store inventory");
+        if self.scheduler_native_finalization_owner.is_some() {
+            let sources = self.scheduler_native_outside_sources.as_ref()
+                .context("selected Scheduler source owner absent before completion")?;
+            anyhow::ensure!(sources.is_empty(),
+                "selected Scheduler inputs remain outside Store custody");
+            let handoff_id = sources.handoff_id()?;
+            let receipt = outside.scheduler_native_store_handoff_receipt(handoff_id,
+                factory, terminal)?;
+            let owner = self.scheduler_native_finalization_owner.take()
+                .expect("checked Scheduler finalization owner");
+            if let Err((owner, error)) = owner.finish_outside_handoff(receipt) {
+                self.scheduler_native_finalization_owner = Some(owner);
+                return Err(error);
+            }
+            self.scheduler_native_outside_sources = None;
+        } else {
+            anyhow::ensure!(self.scheduler_native_outside_sources.as_ref()
+                .is_none_or(scheduler::db::SchedulerNativeOutsideSources::is_empty),
+                "Scheduler Store source inputs outlived their finalization owner");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn has_scheduler_custody(&self) -> bool {
+        self.scheduler_db_custody.is_some() || self.scheduler_native_terminals.is_some()
+            || self.scheduler_native_finalization_owner.is_some()
+            || self.scheduler_native_outside_sources.is_some()
+            || self.scheduler_admission_failure.is_some()
+            || self.scheduler_admission_sources.is_some()
+            || self.scheduler_native_connection_parts.is_some()
+            || self.scheduler_native_unopened_inputs.is_some()
+            || self.scheduler_native_schema_parts.is_some()
+            || self.scheduler_native_schema_transient.is_some()
+            || self.scheduler_participant_custody.is_some()
+            || self.scheduler_open_failure.is_some()
+            || self.scheduler_schema_failure.is_some()
+            || self.scheduler_recovered_schema.is_some()
+            || self.scheduler_admission_custody.is_some()
+    }
+
+    #[cfg(not(feature = "scheduling"))]
+    fn has_scheduler_custody(&self) -> bool {
+        false
     }
 
     fn retain_persistent_pool(
@@ -136,13 +642,86 @@ impl DaemonSelectedComposition {
         self.persistent_pool_custody = Some(pool);
     }
 
-    fn adopt_app_state(&mut self, app: AppState) {
+    fn install_live_state_store(&mut self, store: Arc<state_store::StateStore>) {
+        self.native_admission_fence.register_store(&store);
+        self.live_state_store_custody = Some(store);
+    }
+
+    fn adopt_app_state(&mut self, app: AppState) -> Result<()> {
+        // Retain the destination before checking the actual handoff. On any
+        // mismatch both original stores remain under composition custody.
+        self.native_admission_fence.register_store(&app.state_store);
         self.app_state_custody = Some(app);
+        if let Some(original) = &self.live_state_store_custody {
+            anyhow::ensure!(Arc::ptr_eq(original,
+                &self.app_state_custody.as_ref().expect("retained AppState").state_store),
+                "AppState selects a different live StateStore");
+        }
+        self.live_state_store_custody.take();
         self.persistent_pool_custody.take();
+        Ok(())
     }
 
     fn app_state(&self) -> Option<&AppState> {
         self.app_state_custody.as_ref()
+    }
+
+    fn retain_native_failure(&mut self, error: anyhow::Error) -> anyhow::Error {
+        // Retain actual partial owners before allocating a propagation error.
+        // Do not format/copy the original failure before composition custody.
+        self.native_failure = Some(error);
+        anyhow::anyhow!("live native startup refused; original failure custody retained")
+    }
+
+    fn prepare_live_native(
+        &mut self,
+        config: &Config,
+        identity: &NodeIdentity,
+        policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+    ) -> Result<(
+        Arc<lillux_sqlite::OriginalNativeFactory>,
+        lillux::time::MonotonicDeadline,
+        Arc<state_lock::StateLockLease>,
+    )> {
+        anyhow::ensure!(!self.native_bootstrap_entered && self.native_inputs.is_none()
+            && self.native_reservation.is_none() && self.native_factory.is_none()
+            && self.native_failure.is_none() && self.native_outside_store.is_none(),
+            "live native startup already entered; retain original attempt");
+        // Claim before any fallible preparation. Even a pre-owner refusal may
+        // not renew the original interval by entering another capture attempt.
+        self.native_bootstrap_entered = true;
+        let exclusion = Arc::new(self.process_state_lock.as_ref()
+            .context("daemon state lock is absent")?.retain());
+        let inputs = ryeos_node::native_capacity::LiveNativeCapacityInputs::capture(
+            &config.app_root, Arc::clone(&exclusion),
+        )?;
+        inputs.require_loaded_startup(identity, policy)?;
+        self.native_inputs = Some(Arc::clone(&inputs));
+        let reservation = match ryeos_node::native_capacity::LiveNativeCapacityReservation::reserve(inputs) {
+            Ok(reservation) => reservation,
+            Err(error) => match error.downcast::<ryeos_node::native_capacity::LiveNativeCapacityReservationFailure>() {
+                Ok(failure) => {
+                    // Only failures after an actual reservation checkout carry
+                    // this affine owner. Quote/input refusals have no such owner.
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("live native reservation refused; original recovery custody retained");
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        self.native_reservation = Some(Arc::clone(&reservation));
+        let factory = match ryeos_node::native_capacity::LiveNativeFactory::install(reservation) {
+            Ok(factory) => factory,
+            Err(error) => return Err(self.retain_native_failure(error)),
+        };
+        self.native_admission_fence.register_factory(&factory);
+        self.native_factory = Some(Arc::clone(&factory));
+        if let Err(error) = factory.initialize() {
+            return Err(self.retain_native_failure(error));
+        }
+        let ready = factory.ready_factory().map_err(|error| self.retain_native_failure(error))?;
+        let deadline = factory.original_sql_deadline().map_err(|error| self.retain_native_failure(error))?;
+        Ok((ready, deadline, exclusion))
     }
 
     fn app_state_mut(&mut self) -> Option<&mut AppState> {
@@ -150,29 +729,693 @@ impl DaemonSelectedComposition {
     }
 
     fn release_app_state_after_drain(&mut self) {
+        // Called only after the actual supervised thread/service drain and
+        // scheduler close. Native owners remain separately retained; perform
+        // consuming close after run's listener/service locals leave scope.
+        self.services_drained = true;
+        if self.native_reservation.is_some() || self.native_factory.is_some() || self.native_failure.is_some()
+            || self.native_outside_store.is_some() {
+            return;
+        }
         match self.root.close() {
-            ryeos_executor::SelectedRootClose::Closed => {
-                self.app_state_custody.take();
+            ryeos_executor::SelectedRootClose::Closed => { self.app_state_custody.take(); }
+            ryeos_executor::SelectedRootClose::Unresolved => {}
+        }
+    }
+
+    fn retain_settled_reservation(&mut self, settled: ryeos_node::native_capacity::SettledLiveNative) -> Result<()> {
+        self.native_settled_reservation = Some(settled);
+        // Account settlement does not discard the still-owned input,
+        // exclusion, clock or pre-mapping registry. The consuming finalizer
+        // continues from this cached phase within the same attempt; every
+        // refusal leaves the settled owner cached for the next attempt.
+        self.advance_settled_native()
+    }
+
+    fn advance_native_shutdown(&mut self) -> Result<()> {
+        self.native_finalizer_attempts.claim()?;
+        if self.native_settled_reservation.is_some() {
+            return self.advance_settled_native();
+        }
+        self.advance_unsettled_native()
+    }
+
+    fn advance_settled_native(&mut self) -> Result<()> {
+        {
+            let settled = self.native_settled_reservation.as_mut()
+                .context("settled native reservation absent")?;
+            settled.require_original_process()?;
+            if !settled.finalization_registry_retired() {
+                settled.prepare_account_finalization_sources()?;
+                settled.prepare_input_finalization_sources(&mut self.native_inputs)?;
+                if let Some(outside) = &mut self.native_outside_store {
+                    settled.register_finalization_sources_in_store(outside)?;
+                    settled.retire_non_account_finalization_descriptors_in_store(outside)?;
+                } else {
+                    settled.register_finalization_sources_in_reservation()?;
+                    #[cfg(target_os = "linux")]
+                    if !self.native_operator_lock_registered {
+                        if self.native_operator_lock.is_none() {
+                            let primary = self.process_state_lock.take()
+                                .context("actual no-Store daemon operator lock absent")?;
+                            match primary.into_original_owner() {
+                                Ok(owner) => self.native_operator_lock =
+                                    Some(std::mem::ManuallyDrop::new(owner)),
+                                Err((primary, error)) => {
+                                    self.process_state_lock = Some(primary);
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        settled.register_operator_lock_in_reservation(
+                            &mut self.native_operator_lock,
+                        )?;
+                        anyhow::ensure!(self.native_operator_lock.is_none(),
+                            "registered no-Store operator lock still has a caller alias");
+                        self.native_operator_lock_registered = true;
+                    }
+                    settled.retire_non_account_finalization_descriptors_in_reservation()?;
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(outside) = &mut self.native_outside_store {
+                    settled.retire_operator_finalization_descriptors_in_store(outside)?;
+                } else {
+                    settled.retire_operator_finalization_descriptors_in_reservation()?;
+                }
+                if let Some(outside) = &mut self.native_outside_store {
+                    settled.retire_finalization_registry_in_store(outside)?;
+                } else {
+                    settled.retire_finalization_registry_in_reservation()?;
+                }
             }
-            ryeos_executor::SelectedRootClose::Unresolved => {
-                self.hold_unresolved_render_custody_sync();
+            if let Some(outside) = &mut self.native_outside_store {
+                settled.consume_finalization_packet_destinations_in_store(outside)?;
+                settled.consume_finalization_store_packet_bound_roots(outside)?;
+                settled.consume_finalization_store_packet_metadata_pins(outside)?;
+                // Packet source frames must be exhausted before State and
+                // Operational root retirement validates their receipts.
+                settled.consume_finalization_store_packet_source_parts(outside)?;
+                settled.consume_finalization_store_metadata_sources(outside)?;
+                settled.consume_finalization_store_parent_sources(outside)?;
+                settled.consume_finalization_store_state_projection_sources(outside)?;
+                settled.consume_finalization_store_state_root_sources(outside)?;
+                settled.consume_finalization_store_runtime_shared_roots(outside)?;
+                settled.consume_finalization_store_scheduler_sources(outside)?;
+                settled.consume_finalization_store_owner_frames(outside)?;
+            }
+            if self.native_outside_store.is_some() {
+                // Cleared only on success; a refusal restores the graph.
+                settled.exhaust_finalization_store(&mut self.native_outside_store)?;
+            } else {
+                anyhow::ensure!(settled.finalization_registry_retired(),
+                    "no-Store finalization destination phase precedes the original registry retirement");
+            }
+            settled.consume_finalization_control_sources()?;
+            // The clock outlives every outside-graph consumer that prepays
+            // from it; the Store graph was exhausted above.
+            anyhow::ensure!(self.native_outside_store.is_none(),
+                "settled Store outside graph remains before the late clock retires");
+            settled.retire_finalization_clock()?;
+        }
+        anyhow::ensure!(self.native_outside_store.is_none() && self.native_inputs.is_none()
+            && self.native_reservation.is_none() && self.native_reservation_close_failure.is_none()
+            && self.native_factory.is_none() && self.native_terminal.is_none()
+            && self.native_prepared_registry.is_none(),
+            "settled native finalization still has a competing composition owner");
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(self.native_operator_lock.is_none(),
+            "settled native finalization retains an unregistered operator lock alias");
+        let settled = self.native_settled_reservation.take()
+            .context("settled native reservation absent before final consumption")?;
+        let finalized = match settled.into_finalized() {
+            Ok(finalized) => finalized,
+            Err((settled, error)) => {
+                self.native_settled_reservation = Some(settled);
+                return Err(error);
+            }
+        };
+        // Only a non-owning release record remains; no account, clock,
+        // registry or descriptor survives the final consumption above.
+        drop(finalized);
+        #[cfg(target_os = "linux")]
+        {
+            self.native_operator_lock_registered = false;
+        }
+        Ok(())
+    }
+
+    /// Pre-seal stages of the retained Store graph, run while the producer,
+    /// factory and aggregate terminal remain valid. Scope-bound aliases of the
+    /// supervisor's own owners end when this returns, before any release.
+    fn advance_store_pre_seal(&mut self) -> Result<()> {
+        let producer = Arc::clone(self.native_factory.as_ref().context("original live cleanup producer absent")?);
+        let producer = producer.as_ref();
+        let factory = producer.retained_factory_for_cleanup()?;
+        let terminal = Arc::clone(self.native_terminal.as_ref().context("original live aggregate terminal absent")?);
+        let terminal = &terminal;
+        let outside = self.native_outside_store.as_mut()
+            .context("actual Store outside graph disappeared during Scheduler handoff")?;
+        outside.require_original_process()?;
+        if self.native_prepared_registry.is_none() && !outside.has_prepared_physical_registry() {
+            self.native_prepared_registry = Some(producer.take_prepared_physical_registry(terminal)?);
+        }
+        // SAFETY: the actual same-factory reservation supplied this cached
+        // pre-mapping registry. Every refusal keeps it in one of these two
+        // concrete supervisor/source slots; no late replacement is issued.
+        unsafe { outside.accept_prepared_physical_registry(
+            &mut self.native_prepared_registry, &factory, terminal) }?;
+        #[cfg(feature = "scheduling")]
+        self.advance_scheduler_sources_in_store(&factory, producer, terminal)?;
+        let outside = self.native_outside_store.as_mut()
+            .context("actual Store outside graph disappeared during Scheduler handoff")?;
+        outside.prepare_destination_join(&factory, terminal, &|bytes, steps|
+            producer.prepay_outside_control(terminal, bytes, steps))?;
+        outside.advance_state_projection_sources(&factory, terminal, &|bytes, steps|
+            producer.prepay_outside_control(terminal, bytes, steps))?;
+        outside.advance_runtime_physical_sources(&factory, terminal, &|bytes, steps|
+            producer.prepay_outside_control(terminal, bytes, steps))?;
+        #[cfg(target_os = "linux")]
+        if !self.native_operator_lock_registered {
+            if self.native_operator_lock.is_none() {
+                let quote = quote_daemon_operator_lock_handoff();
+                producer.prepay_outside_control(terminal, quote.bytes, quote.steps)?;
+                // Startup/use has ended and the real Store is already in
+                // outside custody. Consume the primary wrapper exactly once;
+                // the SAME lock allocation retains target/parent/registration.
+                let primary = self.process_state_lock.take()
+                    .context("actual daemon operator lock absent")?;
+                match primary.into_original_owner() {
+                    Ok(owner) => self.native_operator_lock = Some(std::mem::ManuallyDrop::new(owner)),
+                    Err((primary, error)) => {
+                        self.process_state_lock = Some(primary);
+                        return Err(error);
+                    }
+                }
+            }
+            let owner = self.native_operator_lock.as_ref()
+                .context("actual daemon operator outside owner absent")?;
+            // Any refusal leaves the whole primary cached here and the
+            // same Store/registry in outside custody. No replacement grant.
+            outside.register_operator_lock_alias(owner, &factory, terminal, &|bytes, steps|
+                producer.prepay_outside_control(terminal, bytes, steps))?;
+            self.native_operator_lock_registered = true;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // The Store's original parent, including its StateLockLease
+            // and factory/lease aliases, is consumed only after roots and
+            // the canonical operator membership agree in this registry.
+            // Nested packet continuations remain behind that barrier.
+            outside.complete_store_parent_join(&factory, terminal, &|bytes, steps|
+                producer.prepay_outside_control(terminal, bytes, steps),
+                &|leaf, pins| producer.packet_metadata_pin_retirement_inputs(terminal, leaf, pins))?;
+            // State-generated Bound pins live on State's closed connections,
+            // not in packets. Retire them with the same issuer while the
+            // factory and terminal remain valid, then end State's strong
+            // native owners; only non-owning receipts stay in State.
+            outside.retire_state_native_sources(&factory, terminal, &|bytes, steps|
+                producer.prepay_outside_control(terminal, bytes, steps),
+                &|leaf, pins| producer.packet_metadata_pin_retirement_inputs(terminal, leaf, pins))?;
+            // The registry now retains the canonical lock owner and the
+            // Store frame retains its original lease through settlement.
+            if let Some(owner) = self.native_operator_lock.take() {
+                drop(std::mem::ManuallyDrop::into_inner(owner));
+            }
+            // Retire the actual budget facade only after the complete
+            // native ACK and this Store graph's source/alias join. This is
+            // repeatable on the same terminal; region release, account
+            // settlement and descriptor retirement remain separate later
+            // stages owned by the consuming finalizer.
+            producer.retire_native_budget_handle(terminal)?;
+        }
+        // Every pre-seal stage must be complete before the producer and
+        // reservation may be released; the seal is the zero-handle census.
+        self.native_outside_store.as_ref()
+            .context("actual Store outside graph disappeared before its pre-seal census")?
+            .require_pre_seal_complete()?;
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("Store pre-seal operator and parent joins require Linux");
+        Ok(())
+    }
+
+    /// Release the producer, factory and original reservation of a retained
+    /// Store graph whose pre-seal stages completed. `release_and_settle` owns
+    /// the authoritative sole-owner and zero-handle seal checks; a refusal
+    /// keeps the same reservation in its typed failure slot for a retry.
+    fn release_store_reservation(&mut self) -> Result<()> {
+        if self.native_factory.is_some() || self.native_terminal.is_some() {
+            anyhow::ensure!(self.app_state_custody.is_none() && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners() && self.native_failure.is_none()
+                && self.native_closed_store.is_none() && self.native_store_close_failure.is_none()
+                && self.native_startup_recovery_failure.is_none()
+                && self.native_released_startup.is_none() && self.native_prepared_registry.is_none(),
+                "Store reservation release still has a published or untransferred native owner");
+            #[cfg(target_os = "linux")]
+            anyhow::ensure!(self.native_operator_lock.is_none(),
+                "Store reservation release retains an unregistered operator lock alias");
+            self.native_outside_store.as_ref()
+                .context("actual Store outside graph absent before reservation release")?
+                .require_pre_seal_complete()?;
+            // The aggregate terminal and then the producer hold the last
+            // supervisor edges to the original factory and its reservation.
+            drop(self.native_terminal.take());
+            drop(self.native_factory.take());
+        }
+        anyhow::ensure!(self.native_reservation.is_none() || self.native_reservation_close_failure.is_none(),
+            "Store reservation release has competing reservation owners");
+        let reservation = if let Some(failure) = self.native_reservation_close_failure.take() {
+            match failure.into_original() {
+                Ok(reservation) => reservation,
+                Err(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("original Store reservation recovery transfer refused");
+                }
+            }
+        } else {
+            self.native_reservation.take()
+                .context("actual original Store reservation release owner absent")?
+        };
+        match reservation.release_and_settle() {
+            Ok(settled) => self.retain_settled_reservation(settled),
+            Err(failure) => {
+                self.native_reservation_close_failure = Some(failure);
+                anyhow::bail!("original Store reservation release refused: an outside owner or native \
+                    handle remains, or the region seal/settlement is pending; custody retained")
             }
         }
     }
 
-    fn has_unresolved_render_custody(&self) -> bool {
+    fn advance_unsettled_native(&mut self) -> Result<()> {
+        if self.native_outside_store.is_some() {
+            if self.native_factory.is_some() {
+                self.advance_store_pre_seal()?;
+            }
+            return self.release_store_reservation();
+        }
+        if self.native_failure.as_ref().is_some_and(|error| error.is::<state_store::LiveStateStoreOpenFailure>())
+            || self.native_startup_recovery_failure.is_some() || self.native_released_startup.is_some() {
+            anyhow::ensure!(self.app_state_custody.is_none() && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners(),
+                "partial Store startup still has published service consumers");
+            let factory = Arc::clone(self.native_factory.as_ref().context("actual startup factory absent")?);
+            factory.close_admission()?;
+            if self.native_released_startup.is_none() {
+                let recovered = if let Some(failure) = self.native_startup_recovery_failure.take() {
+                    failure.retry()
+                } else {
+                    let error = self.native_failure.take().context("actual Store startup failure absent")?;
+                    let failure = match error.downcast::<state_store::LiveStateStoreOpenFailure>() {
+                        Ok(failure) => failure,
+                        Err(error) => { self.native_failure = Some(error); anyhow::bail!("Store failure transfer refused"); }
+                    };
+                    failure.close_retained()
+                };
+                match recovered {
+                    Ok(released) => self.native_released_startup = Some(released),
+                    Err(failure) => {
+                        self.native_startup_recovery_failure = Some(failure);
+                        anyhow::bail!("actual partial Store startup cleanup pending");
+                    }
+                }
+            }
+            let native = factory.retained_factory_for_cleanup()?;
+            let terminals = self.native_released_startup.as_ref().expect("retained startup release")
+                .native_terminals(&native)?;
+            // SAFETY: the actual supervisor above excludes published App,
+            // Store, pool, scheduler and unresolved execution owners. Failed
+            // startup cleanup retained every SQL owner and its true terminals.
+            let leases = unsafe { self.native_released_startup.as_ref().expect("retained startup release")
+                .generation_lease_terminals(&native) }?;
+            self.native_terminal = Some(factory.finish_live_native(&terminals, &leases)?);
+            // Retire actual terminal and namespace holders before resident seal.
+            drop(leases);
+            drop(terminals);
+            drop(native);
+            let released = self.native_released_startup.take().expect("actual startup cleanup holder");
+            match released.into_outside_custody(
+                self.native_terminal.as_ref().expect("actual original backend terminal")) {
+                Ok(outside) => self.native_outside_store = Some(outside),
+                Err(released) => {
+                    self.native_released_startup = Some(released);
+                    anyhow::bail!("startup cleanup graph transfer refused; original custody retained");
+                }
+            }
+            // Cache the actual whole graph before reporting the remaining
+            // disposal join. Native acknowledgement cannot bypass that join.
+            anyhow::bail!("failed-start Store graph transferred; explicit physical disposal and original settlement remain incomplete");
+        }
+        // A factory-install preparation failure can retain a second reference
+        // to this same reservation before any lower factory exists. Transfer
+        // that typed custody, retiring only the duplicate outside reference.
+        if self.native_factory.is_none() && self.native_failure.as_ref()
+            .is_some_and(|error| error.is::<ryeos_node::native_capacity::LiveNativeCapacityReservationFailure>()) {
+            anyhow::ensure!(self.app_state_custody.is_none()
+                && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners()
+                && self.native_reservation_close_failure.is_none(),
+                "reservation preparation recovery has published owners");
+            let failure = self.native_failure.as_ref().expect("typed reservation error")
+                .downcast_ref::<ryeos_node::native_capacity::LiveNativeCapacityReservationFailure>()
+                .expect("checked reservation failure type");
+            if let Some(reservation) = &self.native_reservation {
+                anyhow::ensure!(std::ptr::eq(reservation.as_ref(), failure.original()),
+                    "factory preparation retained a different reservation");
+            }
+            let error = self.native_failure.take().expect("retained reservation failure");
+            match error.downcast::<ryeos_node::native_capacity::LiveNativeCapacityReservationFailure>() {
+                Ok(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    self.native_reservation.take();
+                }
+                Err(error) => {
+                    self.native_failure = Some(error);
+                    anyhow::bail!("original reservation preparation transfer refused");
+                }
+            }
+        }
+        // Reservation refusal precedes factory publication and every service
+        // construction. Recover that exact attempt without inventing a service
+        // drain receipt or retrying bootstrap capture/debit.
+        if self.native_reservation_close_failure.is_some()
+            && self.native_factory.is_none() && self.native_reservation.is_none()
+            && self.native_failure.is_none() && self.native_terminal.is_none()
+            && self.native_closed_store.is_none() && self.native_store_close_failure.is_none()
+            && self.native_outside_store.is_none() {
+            anyhow::ensure!(self.app_state_custody.is_none()
+                && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners(),
+                "reservation recovery still has published composition owners");
+            let failure = self.native_reservation_close_failure.take()
+                .expect("retained original reservation failure");
+            let reservation = match failure.into_original() {
+                Ok(reservation) => reservation,
+                Err(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("original bootstrap reservation transfer refused");
+                }
+            };
+            return match reservation.release_and_settle() {
+                Ok(settled) => self.retain_settled_reservation(settled),
+                Err(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("original bootstrap reservation settlement pending");
+                }
+            };
+        }
+        if self.native_factory.is_none() && self.native_failure.as_ref()
+            .is_some_and(|error| error.is::<ryeos_node::native_capacity::LiveNativeFactoryFailure>()) {
+            anyhow::ensure!(self.app_state_custody.is_none()
+                && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners(),
+                "uninstalled issuer still has published composition owners");
+            let error = self.native_failure.take().expect("actual failed install");
+            let failure = match error.downcast::<ryeos_node::native_capacity::LiveNativeFactoryFailure>() {
+                Ok(failure) => failure,
+                Err(error) => { self.native_failure = Some(error); anyhow::bail!("original failed install transfer refused"); }
+            };
+            match failure.retire_uninstalled() {
+                Ok(()) => {
+                    let reservation = self.native_reservation.take().context("uninstalled issuer reservation absent")?;
+                    return match reservation.release_and_settle() {
+                        Ok(settled) => self.retain_settled_reservation(settled),
+                        Err(failure) => {
+                            self.native_reservation_close_failure = Some(failure);
+                            anyhow::bail!("uninstalled issuer resident settlement pending");
+                        }
+                    };
+                }
+                Err(failure) => self.native_failure = Some(anyhow::Error::new(failure)),
+            }
+        }
+        if let Some(failure) = self.native_failure.as_ref()
+            .and_then(|error| error.downcast_ref::<ryeos_node::native_capacity::LiveNativeFactoryFailure>()) {
+            // No service/database consumer can exist on this pre-Ready route.
+            // The lower factory additionally refuses Ready or issued tickets.
+            anyhow::ensure!(self.app_state_custody.is_none()
+                && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners(),
+                "failed initialization still has published composition owners");
+            let factory = Arc::clone(failure.original());
+            if let Some(retained) = &self.native_factory {
+                anyhow::ensure!(Arc::ptr_eq(retained, &factory), "foreign failed native factory");
+            }
+            self.native_terminal = Some(factory.finish_initialization_refusal()?);
+            // Only the actual terminal allows retirement of the error's native
+            // owner references. The original startup error remains the run result.
+            self.native_failure.take();
+            self.native_factory.take();
+            self.native_terminal.take();
+            drop(factory);
+            let reservation = self.native_reservation.take()
+                .context("failed initialization reservation absent")?;
+            return match reservation.release_and_settle() {
+                Ok(settled) => self.retain_settled_reservation(settled),
+                Err(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("failed initialization resident settlement pending");
+                }
+            };
+        }
+        if !self.services_drained { return Ok(()); }
+        #[cfg(feature = "scheduling")]
+        if let Some(failure) = self.scheduler_schema_failure.take() {
+            match failure.close_retained() {
+                Ok(released) => self.scheduler_recovered_schema = Some(released),
+                Err(failure) => {
+                    self.scheduler_schema_failure = Some(failure);
+                    anyhow::bail!("original scheduler schema recovery remains pending");
+                }
+            }
+        }
+        #[cfg(feature = "scheduling")]
+        if let Some(failure) = self.scheduler_admission_failure.take() {
+            match failure.into_outside_sources() {
+                Ok((sources, _error)) => {
+                    self.scheduler_admission_sources = Some(sources);
+                    tracing::warn!(
+                        "Scheduler admission failed before native open; preserving its unused sources for Store retirement");
+                }
+                Err((failure, error)) => {
+                    self.scheduler_admission_failure = Some(failure);
+                    return Err(error);
+                }
+            }
+        }
+        #[cfg(feature = "scheduling")]
+        if let Some(failure) = self.scheduler_open_failure.take() {
+            anyhow::ensure!(self.scheduler_native_finalization_owner.is_none(),
+                "failed Scheduler open competes with a finalization owner");
+            match failure.retry_close() {
+                Ok(failure) => match failure.into_native_finalization_owner() {
+                    Ok(owner) => self.scheduler_native_finalization_owner = Some(owner),
+                    Err((failure, error)) => {
+                        self.scheduler_open_failure = Some(failure);
+                        return Err(error);
+                    }
+                },
+                Err(failure) => {
+                    self.scheduler_open_failure = Some(failure);
+                    anyhow::bail!("failed Scheduler open has not reached a consuming close phase");
+                }
+            }
+        }
+        anyhow::ensure!(self.native_failure.is_none(), "native partial startup requires its retained recovery path");
+        if self.native_factory.is_none() && self.native_reservation.is_none()
+            && self.native_reservation_close_failure.is_none() { return Ok(()); }
+        self.close_native_admission();
+        if self.native_terminal.is_none() && self.native_reservation_close_failure.is_none() {
+            let factory = self.native_factory.as_ref().context("actual live native factory absent")?;
+            // Close selected invocation ownership independently; native custody
+            // stays here until its own physical/account terminals complete.
+            anyhow::ensure!(matches!(self.root.close(), ryeos_executor::SelectedRootClose::Closed),
+                "selected invocation owners remain unresolved");
+            if let Some(app) = self.app_state_custody.take() {
+                self.native_admission_fence.register_store(&app.state_store);
+                self.live_state_store_custody = Some(Arc::clone(&app.state_store));
+                drop(app);
+            }
+            let native = factory.retained_factory_for_cleanup()?;
+            if self.native_closed_store.is_none() {
+                let result = if let Some(failure) = self.native_store_close_failure.take() {
+                    failure.retry()
+                } else {
+                    let store = self.live_state_store_custody.take().context("actual live Store close owner absent")?;
+                    store.close_live(Arc::clone(&native))
+                };
+                match result {
+                    Ok(closed) => self.native_closed_store = Some(closed),
+                    Err(failure) => {
+                        self.native_store_close_failure = Some(failure);
+                        anyhow::bail!("actual live Store close pending; original custody retained");
+                    }
+                }
+            }
+            let mut terminals = self.native_closed_store.as_ref().context("actual live Store terminal owner absent")?
+                .native_terminals(&native)?;
+            #[cfg(feature = "scheduling")]
+            if let Some(scheduler) = &self.scheduler_native_terminals { terminals.extend(scheduler.iter().cloned()); }
+            #[cfg(feature = "scheduling")]
+            if let Some(released) = &self.scheduler_recovered_schema {
+                if let Some(terminal) = released.terminal(&native)? { terminals.push(terminal.clone()); }
+            }
+            let leases = self.native_closed_store.as_ref().context("actual live Store terminal owner absent")?
+                .generation_lease_terminals(&native)?;
+            self.native_terminal = Some(factory.finish_live_native(&terminals, &leases)?);
+            // These borrowed census packets have served the genuine aggregate
+            // ACK. Release their aliases before consuming Scheduler terminals
+            // into the retained outside source graph.
+            drop(leases);
+            drop(terminals);
+            #[cfg(feature = "scheduling")]
+            self.scheduler_native_terminals.take();
+        }
+        // Every native terminal is already acknowledged by the real backend.
+        // Retire their Rust handles before the zero-loan resident seal.
+        let terminal = self.native_terminal.as_ref().context("actual native terminal absent for Store retirement")?;
+        #[cfg(feature = "scheduling")]
+        if self.scheduler_native_outside_sources.is_none()
+            && let Some(owner) = &mut self.scheduler_native_finalization_owner
+        {
+            owner.prepare_outside_sources(terminal)?;
+            // SAFETY: the exact wrapper is retained in this composition and
+            // passed to the Store's typed handoff path before owner completion.
+            self.scheduler_native_outside_sources = Some(unsafe { owner.take_outside_sources()? });
+        }
+        if let Some(closed) = self.native_closed_store.take() {
+            match closed.into_outside_custody(terminal) {
+                Ok(outside) => self.native_outside_store = Some(outside),
+                Err(closed) => {
+                    self.native_closed_store = Some(closed);
+                    anyhow::bail!("actual closed Store graph transfer refused; original custody retained");
+                }
+            }
+            anyhow::bail!("live Store graph transferred; explicit physical disposal and original settlement remain incomplete");
+        }
+        #[cfg(feature = "scheduling")]
+        {
+            self.scheduler_native_terminals.take();
+            self.scheduler_recovered_schema.take();
+            self.scheduler_db_custody.take();
+        }
+        self.native_terminal.take();
+        self.native_factory.take();
+        if let Some(failure) = self.native_reservation_close_failure.take() {
+            match failure.into_original() {
+                Ok(reservation) => self.native_reservation = Some(reservation),
+                Err(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("original reservation recovery transfer refused");
+                }
+            }
+        }
+        let reservation = self.native_reservation.take().context("actual original reservation release owner absent")?;
+        match reservation.release_and_settle() {
+            Ok(settled) => self.retain_settled_reservation(settled),
+            Err(failure) => {
+                self.native_reservation_close_failure = Some(failure);
+                anyhow::bail!("original resident/account settlement pending; custody retained");
+            }
+        }
+    }
+
+    fn has_unresolved_custody(&self) -> bool {
         self.persistent_pool_custody.is_some()
             || self.app_state_custody.is_some()
+            || self.live_state_store_custody.is_some()
             || self.root.has_unresolved_owners()
+            || self.has_scheduler_custody()
+            || self.native_reservation.is_some()
+            || self.native_factory.is_some()
+            || self.native_failure.is_some()
+            || self.native_outside_store.is_some()
+            || self.native_prepared_registry.is_some()
+            || self.native_closed_store.is_some()
+            || self.native_store_close_failure.is_some()
+            || self.native_reservation_close_failure.is_some()
+            || self.native_settled_reservation.is_some()
+            || self.native_terminal.is_some()
+            || self.native_startup_recovery_failure.is_some()
+            || self.native_released_startup.is_some()
     }
 
-    async fn hold_unresolved_render_custody(&self) -> ! {
-        let _retained_composition = self;
-        std::future::pending::<()>().await;
-        unreachable!("unresolved Render custody hold cannot complete")
+    fn unresolved_native_custody(&self) -> UnresolvedNativeCustody {
+        UnresolvedNativeCustody {
+            attempts_used: self.native_finalizer_attempts.0,
+            services_drained: self.services_drained,
+            persistent_pool_retained: self.persistent_pool_custody.is_some(),
+            app_state_retained: self.app_state_custody.is_some(),
+            live_store_retained: self.live_state_store_custody.is_some(),
+            scheduler_retained: self.has_scheduler_custody(),
+            native_failure_retained: self.native_failure.is_some(),
+            inputs_retained: self.native_inputs.is_some(),
+            reservation_retained: self.native_reservation.is_some()
+                || self.native_reservation_close_failure.is_some(),
+            factory_retained: self.native_factory.is_some(),
+            prepared_registry_retained: self.native_prepared_registry.is_some(),
+            store_close_retained: self.native_closed_store.is_some()
+                || self.native_store_close_failure.is_some(),
+            store_outside_retained: self.native_outside_store.is_some(),
+            settled_account_retained: self.native_settled_reservation.is_some(),
+            native_terminal_retained: self.native_terminal.is_some(),
+            startup_recovery_retained: self.native_startup_recovery_failure.is_some()
+                || self.native_released_startup.is_some(),
+            selected_root_unresolved: self.root.has_unresolved_owners(),
+            operator_lock_retained: {
+                #[cfg(target_os = "linux")]
+                {
+                    self.native_operator_lock.is_some() || self.native_operator_lock_registered
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    false
+                }
+            },
+        }
     }
 
-    fn hold_unresolved_render_custody_sync(&self) -> ! {
+    async fn hold_unresolved_custody(
+        &mut self,
+    ) -> std::result::Result<(), UnresolvedNativeCustody> {
+        self.close_native_admission();
+        // Retry the actual retained transition, not bootstrap or a replacement
+        // service. Every effect still checks its original clock/account. An
+        // expired/refused cleanup grant cannot be refreshed by this supervisor.
+        while self.has_unresolved_custody() {
+            if self.native_finalizer_attempts.exhausted() {
+                return Err(self.unresolved_native_custody());
+            }
+            let retry_authorized = self.native_settled_reservation.as_ref()
+                .map(|settled| settled.require_original_cleanup().is_ok())
+                .or_else(|| self.native_inputs.as_ref()
+                    .map(|inputs| inputs.require_original_cleanup().is_ok()))
+                .unwrap_or(false);
+            if !retry_authorized {
+                return Err(self.unresolved_native_custody());
+            }
+            if self.advance_native_shutdown().is_err() {
+                tracing::debug!("original native recovery transition remains pending");
+            }
+            if self.has_unresolved_custody() {
+                if self.native_finalizer_attempts.exhausted() {
+                    return Err(self.unresolved_native_custody());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        Ok(())
+    }
+
+    fn hold_unresolved_custody_sync(&mut self) -> ! {
+        self.close_native_admission();
+        let custody = self.unresolved_native_custody();
+        tracing::error!(%custody,
+            "unresolved native custody; retaining the original process until cold recovery is supported");
         loop {
             std::thread::park();
         }
@@ -199,12 +1442,40 @@ impl DaemonSelectedComposition {
         self.root.arm_from_app_generation(app)
     }
 
-    fn close_after_run(&self) {
+    fn close_native_admission(&self) {
+        // Fence metadata even during partial startup, before the StateStore
+        // has transferred into AppState. This grants no native terminal.
+        self.native_admission_fence.mark_closed();
+        if let Some(store) = &self.live_state_store_custody {
+            store.close_live_scheduler_metadata_admission();
+        }
+        if let Some(app) = &self.app_state_custody {
+            app.state_store.close_live_scheduler_metadata_admission();
+        }
+        if let Some(factory) = &self.native_factory {
+            self.native_admission_fence.close_factory(factory);
+        }
+    }
+
+    fn observe_native_controls(&self) {
+        if let Some(factory) = &self.native_factory {
+            if let Ok(mut observation) = self.native_control_observation.try_lock() {
+                *observation = Some(factory.producer_control_census());
+            }
+        }
+    }
+
+    fn close_after_run(&mut self) {
+        if self.has_unresolved_custody() {
+            self.hold_unresolved_custody_sync();
+        }
+        self.close_native_admission();
+        self.observe_native_controls();
         if matches!(
             self.root.close(),
             ryeos_executor::SelectedRootClose::Unresolved
         ) {
-            self.hold_unresolved_render_custody_sync();
+            self.hold_unresolved_custody_sync();
         }
     }
 
@@ -212,6 +1483,7 @@ impl DaemonSelectedComposition {
     /// publications remain readable, but their attachment can no longer admit
     /// another selected owner. Existing owners still get the normal drain.
     fn close_root_admission(&self) {
+        self.close_native_admission();
         let _ = self.root.close();
     }
 
@@ -227,11 +1499,10 @@ impl DaemonSelectedComposition {
 
 impl Drop for DaemonSelectedComposition {
     fn drop(&mut self) {
-        if self.has_unresolved_render_custody() {
-            // Drop cannot await. Parking in place keeps every field, including
-            // the exact pool/AppState and original exclusion/lifecycle guards,
-            // alive without making a cleanup or lifecycle claim.
-            self.hold_unresolved_render_custody_sync();
+        if self.has_unresolved_custody() {
+            // Drop cannot await or claim another attempt. Preserve every field
+            // until process exit and record the unresolved phase for cold recovery.
+            self.hold_unresolved_custody_sync();
         }
         self.close_after_run();
         // Record the fallback while the exact exclusion owner is still held.
@@ -525,12 +1796,16 @@ fn main() -> Result<()> {
     if let Some(config::DaemonCommand::HostProvision {
         app_root,
         controller_account_json,
+        node_resources_json,
     }) = &cli.command
     {
         lillux::require_administrator()?;
         let account: lillux::ControllerAccount = serde_json::from_str(controller_account_json)
             .context("parse explicit host controller account")?;
-        let desired = ryeos_node::supervision::provision_host_service(app_root, account)?;
+        let node_resources: lillux::ProcessScopeResourceLimits =
+            serde_json::from_str(node_resources_json)
+                .context("parse explicit host node resource envelope")?;
+        let desired = ryeos_node::supervision::provision_host_service(app_root, account, node_resources)?;
         println!(
             "host service provisioned {}; use ryeos start/stop for ordinary lifecycle",
             match desired {
@@ -677,10 +1952,17 @@ fn main() -> Result<()> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(run(cli, &mut composition, external_host_runtime))
     }));
-    if composition.has_unresolved_render_custody() {
-        // Do not close the composition, stop the runtime, or resume an unwind
-        // while the exact Render pool/AppState owner remains unproved.
-        runtime.block_on(composition.hold_unresolved_render_custody());
+    if composition.has_unresolved_custody() {
+        // The selected cold-recovery caller is not implemented yet. Keep the
+        // exact composition, runtime and exclusion alive rather than recording
+        // an exited lifecycle or letting Drop release unresolved owners.
+        if let Err(custody) = runtime.block_on(composition.hold_unresolved_custody()) {
+            tracing::error!(%custody,
+                "native custody remains unresolved; retaining the original process until cold recovery is supported");
+            loop {
+                std::thread::park();
+            }
+        }
     }
     composition.close_after_run();
 
@@ -808,6 +2090,12 @@ async fn run(
         runtime.binding().account.require_current_process()?;
         runtime.binding().validate(&selected_app_root)?;
     }
+    let launch_route = if host_service.is_some() || external_host_runtime.is_some() {
+        lifecycle_marker::LaunchRoute::Supervised
+    } else {
+        lifecycle_marker::LaunchRoute::Direct
+    };
+    composition.launch_route = Some(launch_route);
     ryeosd::init_shutdown_channel();
 
     // Verify operator-owned node initialization before any local repairs
@@ -874,8 +2162,12 @@ async fn run(
     let state_dir = ryeos_engine::roots::RuntimeRoot::new(selected_app_root.clone()).state();
     lifecycle_marker::report_previous_exit(&state_dir);
     lifecycle_marker::check_disk_space(&state_dir);
-    let lifecycle_started_at = lifecycle_marker::record_running(&state_dir);
-    composition.lifecycle_exit = Some(LifecycleExitGuard::new(state_dir, lifecycle_started_at));
+    let lifecycle_started_at = lifecycle_marker::record_running(&state_dir, launch_route);
+    composition.lifecycle_exit = Some(LifecycleExitGuard::new(
+        state_dir,
+        lifecycle_started_at,
+        launch_route,
+    ));
 
     let mut config = match Config::load(&config_sources) {
         Ok(config) => config,
@@ -907,7 +2199,7 @@ async fn run(
     // the journal owns exact backup coordinates.
     let bundle_set_recovery = {
         let registry_lock =
-            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&config.app_root)?;
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&config.app_root)?;
         ryeos_app::bundle_set_transaction::recover_for_bootstrap(
             &config.app_root,
             &registry_lock,
@@ -1038,6 +2330,10 @@ async fn run(
     // publication boundary.
     tokio::task::yield_now().await;
 
+    // Taken before the startup future borrows the composition so listener
+    // loss can close new selected attachments before awaiting that future.
+    let root_admission_fence = composition.root.admission_fence();
+    let native_admission_fence = Arc::clone(&composition.native_admission_fence);
     let daemon_result: (Result<()>, bool, bool) = {
         #[allow(clippy::let_and_return)]
         let daemon_work = async {
@@ -1278,7 +2574,7 @@ async fn run(
             // Execution admission limits must be armed before projection recovery
             // or any later runtime recovery action is classified or enqueued.
             let execution_limits = node_policy_snapshot.require::<
-                ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+                ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
             >()?;
             ryeos_executor::execution::launch::arm_global_live_fanout_limit(Some(
                 execution_limits.max_live_fanout,
@@ -1300,8 +2596,16 @@ async fn run(
             )?;
             let state_open_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver> =
                 Arc::new(startup.clone());
+            let (native_factory, native_deadline, native_exclusion) =
+                composition.prepare_live_native(&config, &identity, &node_policy_snapshot)?;
+            let native_lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
+                composition.native_factory.as_ref().context("actual native issuer absent before State startup")?.clone();
             let state_store = tokio::task::spawn_blocking(move || {
-                state_store::StateStore::new_with_head_trust_and_recovery_observer(
+                // SAFETY: prepare_live_native authenticated/reserved this
+                // incarnation; the selected composition retains its original
+                // issuer and account/namespace outside the native graph. This
+                // authority is a clone of that same issuer, not a new grant.
+                unsafe { state_store::StateStore::new_live_with_head_trust_and_recovery_observer(
                     state_app_root,
                     runtime_state_dir,
                     runtime_db_path,
@@ -1309,14 +2613,19 @@ async fn run(
                     write_barrier.clone(),
                     head_trust,
                     state_open_observer,
-                )
+                    native_exclusion,
+                    native_factory,
+                    native_lease_authority,
+                    native_deadline,
+                ) }
                 .map(|store| (store, write_barrier))
             })
             .await
             .context("StateStore initialization task failed")?
-            .context("StateStore initialization failed")?;
+            .map_err(|error| composition.retain_native_failure(error.context("StateStore initialization failed")))?;
             let (state_store, write_barrier) = state_store;
             let state_store = Arc::new(state_store);
+            composition.install_live_state_store(Arc::clone(&state_store));
             tracing::info!("StateStore initialized successfully");
 
             // StateDb::open owns the one deterministic pending-transition replay
@@ -1333,40 +2642,96 @@ async fn run(
             // long startup domain. It must complete before terminal-history
             // removal consults scheduler pins and before active-thread recovery
             // can observe scheduler rows.
-            startup.phase(
-                ryeos_node::StartupPhase::RecoveringSchedulerProjection,
-                "recovering scheduler fire projection",
-            )?;
-            let scheduler_db_path = config
-                .app_root
-                .join(ryeos_engine::AI_DIR)
-                .join("state")
-                .join("scheduler.sqlite3");
-            let scheduler_db = Arc::new(
-                scheduler::db::SchedulerDb::open(&scheduler_db_path)
-                    .context("SchedulerDb initialization failed")?,
-            );
-            let scheduler_runtime_gate = Arc::new(tokio::sync::RwLock::new(()));
-            {
-                // Scheduler fire rows are consulted by terminal-chain recovery
-                // before the timer's later reconciliation phase. Recover the
-                // durable outbox and any invalid fire projection now, under the
-                // same exclusive gate used by every later journal mutation, so
-                // pin inspection can never observe a partial full replay.
-                let _scheduler_startup_guard = scheduler_runtime_gate.clone().write_owned().await;
-                let runtime_state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
-                scheduler_db
-                    .drain_fire_outbox(&runtime_state_dir)
-                    .context("recover scheduler fire outbox before runtime cleanup")?;
-                if !scheduler_db.fire_projection_is_current()? {
-                    scheduler::projection::rebuild_fires_from_dir(
-                        &runtime_state_dir.join("schedules"),
-                        &scheduler_db,
-                    )
-                    .context("rebuild scheduler fire projection before runtime cleanup")?;
+            #[cfg(feature = "scheduling")]
+            let (scheduler_db, scheduler_runtime_gate, scheduler_service) = {
+                startup.phase(
+                    ryeos_node::StartupPhase::RecoveringSchedulerProjection,
+                    "recovering scheduler fire projection",
+                )?;
+                let scheduler_db_path = config
+                    .app_root
+                    .join(ryeos_engine::AI_DIR)
+                    .join("state")
+                    .join("scheduler.sqlite3");
+                let scheduler_runtime_path =
+                    config.app_root.join(ryeos_engine::AI_DIR).join("state");
+                let scheduler_runtime_directory = Arc::new(
+                    lillux::PinnedDirectory::open(&scheduler_runtime_path)?
+                        .context("scheduler runtime directory is absent before DB open")?,
+                );
+                ryeos_scheduler_service::validate_retirement_startup(
+                    &scheduler_runtime_directory,
+                    &identity,
+                )
+                .context("validate scheduler retirement journal before DB open")?;
+                let scheduler_runtime_gate = Arc::new(tokio::sync::RwLock::new(()));
+                let scheduler_startup_guard = scheduler_runtime_gate.clone().write_owned().await;
+                let original_factory = composition.native_factory.as_ref()
+                    .context("scheduler requires retained live native factory")?.ready_factory()?;
+                let admission = state_store.live_scheduler_native_admission()
+                    .map_err(|error| composition.retain_scheduler_admission_failure(error))?;
+                composition.scheduler_admission_custody = Some(admission);
+                composition.scheduler_admission_custody.as_ref().expect("retained scheduler admission")
+                    .require_factory(&original_factory)?;
+                anyhow::ensure!(composition.scheduler_native_unopened_inputs.is_none()
+                    && composition.scheduler_schema_failure.is_none(),
+                    "scheduler admission competes with retained unopened/schema-failure custody");
+                // Consume only after every fallible handoff check; mismatch
+                // keeps the complete affine metadata under composition custody.
+                let (scheduler_factory, scheduler_inputs, reference_inputs) = composition
+                    .scheduler_admission_custody.take().expect("validated scheduler admission").into_parts();
+                let reference = match scheduler::db::SchedulerDb::prepare_scheduler_schema_reference(
+                    Arc::clone(&scheduler_factory), reference_inputs,
+                ) {
+                    Ok(reference) => reference,
+                    Err(failure) => {
+                        composition.scheduler_schema_failure = Some(failure);
+                        composition.scheduler_native_unopened_inputs =
+                            Some(std::mem::ManuallyDrop::new(scheduler_inputs));
+                        anyhow::bail!("scheduler schema reference refused; original custody retained");
+                    }
+                };
+                let scheduler_db = match scheduler::db::SchedulerDb::open_original_scheduler(
+                    scheduler_factory, scheduler_inputs, reference,
+                ) {
+                    Ok(db) => Arc::new(db),
+                    Err(failure) => {
+                        composition.retain_scheduler_open_failure(failure);
+                        anyhow::bail!("SchedulerDb initialization failed; original failure custody retained");
+                    }
+                };
+                composition.retain_scheduler_db(Arc::clone(&scheduler_db));
+                let scheduler_service = Arc::new(ryeos_scheduler_service::SchedulerService::new(
+                    config.app_root.clone(),
+                    scheduler_runtime_directory,
+                    scheduler_db.clone(),
+                    scheduler_runtime_gate.clone(),
+                    Arc::new(identity.clone()),
+                    Arc::new(engine.node_trust_store.clone()),
+                )?);
+                {
+                    // Scheduler fire rows are consulted by terminal-chain recovery
+                    // before the timer's later reconciliation phase. Recover the
+                    // durable outbox and any invalid fire projection now, under the
+                    // same exclusive gate used by every later journal mutation, so
+                    // pin inspection can never observe a partial full replay.
+                    let runtime_state_dir =
+                        config.app_root.join(ryeos_engine::AI_DIR).join("state");
+                    scheduler_db
+                        .drain_fire_outbox(&runtime_state_dir)
+                        .context("recover scheduler fire outbox before runtime cleanup")?;
+                    if !scheduler_db.fire_projection_is_current()? {
+                        scheduler::projection::rebuild_fires_from_dir(
+                            &runtime_state_dir.join("schedules"),
+                            &scheduler_db,
+                        )
+                        .context("rebuild scheduler fire projection before runtime cleanup")?;
+                    }
                 }
-            }
-            tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
+                drop(scheduler_startup_guard);
+                tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
+                (scheduler_db, scheduler_runtime_gate, scheduler_service)
+            };
 
             let events = Arc::new(EventStoreService::new(state_store.clone()));
             // The hub is shared with the lifecycle service so its create/start/
@@ -1381,11 +2746,6 @@ async fn run(
                 event_streams.clone(),
                 &identity.site_id(),
             )?);
-            threads.set_scheduler_db(
-                scheduler_db.clone(),
-                scheduler_runtime_gate.clone(),
-                config.app_root.clone(),
-            );
             // Operator live-input queue, shared between the `threads.input` enqueue
             // path (via AppState) and lifecycle finalization (closes a thread's entry).
             let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
@@ -1416,7 +2776,7 @@ async fn run(
                 ryeos_runtime::CommandRegistry::from_records(
                     &node_config_snapshot.commands,
                     &node_policy_snapshot
-                        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+                        .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
                         .runtime_policy(),
                 )
                 .context("failed to build command registry from node-config records")?,
@@ -1466,7 +2826,7 @@ async fn run(
                     &build,
                 )?;
             let persistent_session_policy = node_policy_snapshot.require::<
-                ryeos_app::node_policy::sections::persistent_sessions::PersistentSessionPolicy,
+                ryeos_node_runtime::node_policy::sections::persistent_sessions::PersistentSessionPolicy,
             >()?;
             let persistent_sessions = Arc::new(if persistent_session_policy.enabled {
                 ryeos_app::persistent_session::PersistentSessionPool::with_limits(
@@ -1482,7 +2842,7 @@ async fn run(
             // or AppState field construction can return or unwind.
             composition.retain_persistent_pool(Arc::clone(&persistent_sessions));
             let execution_policy = node_policy_snapshot.require::<
-                ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+                ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
             >()?;
             let execution_resources =
                 ryeos_app::execution_resources::ExecutionResourcePool::observe(
@@ -1491,7 +2851,7 @@ async fn run(
                 .context("observe node execution resources")?;
             let ignore_matcher = Arc::new(
                 node_policy_snapshot
-                    .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+                    .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
                     .matcher
                     .clone(),
             );
@@ -1526,12 +2886,17 @@ async fn run(
                 controller_lifetime: Arc::clone(&operator_state_lease),
                 extensions: {
                     let mut ext = ryeos_app::extension_state::ExtensionState::new();
+                    #[cfg(feature = "scheduling")]
+                    ext.insert(scheduler_service.clone());
+                    ext.insert(Arc::new(
+                        ryeos_api::project_deploy::ProjectScheduleRecoveryOwners::default(),
+                    ));
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
                     let publication_policy = node_policy_snapshot
-                        .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+                        .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
                         .clone();
                     let publisher = configured_bundle_publisher(&publication_policy)?;
                     let publication_authorities =
@@ -1586,9 +2951,6 @@ async fn run(
                 vault,
                 command_registry,
                 authorizer,
-                scheduler_db,
-                scheduler_runtime_gate,
-                scheduler_reload_tx: None,
                 ignore_matcher,
                 vault_fingerprint: {
                     let vault_pk_path = config
@@ -1610,10 +2972,13 @@ async fn run(
                 scoped_producer_processes: Arc::new(Default::default()),
                 qualification_workspace_custody: Arc::new(Default::default()),
             };
+            #[cfg(feature = "scheduling")]
+            app_state.install_scheduler_participant(scheduler_service.clone()
+                as Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>)?;
             // Move the completed AppState under outer custody before the
             // fallible generation arm and recovery sequence. This preserves
             // the exact pool allocation installed above.
-            composition.adopt_app_state(app_state);
+            composition.adopt_app_state(app_state)?;
             composition
                 .arm_retained_app_generation()
                 .context("register actual App generation in empty selected composition")?;
@@ -1678,26 +3043,41 @@ async fn run(
                 ryeos_node::StartupPhase::ReplayingHeadChanges,
                 "finishing interrupted terminal-history removals",
             )?;
-            let _startup_retention_guard =
-                app_state.scheduler_runtime_gate.clone().write_owned().await;
+            #[cfg(not(feature = "scheduling"))]
+            let scheduler_absence = require_absent_scheduler_history(&config.app_root)?;
+            #[cfg(feature = "scheduling")]
+            let _startup_retention_guard = scheduler_runtime_gate.clone().write_owned().await;
             let cleanup_store = app_state.state_store.clone();
-            let cleanup_scheduler = app_state.scheduler_db.clone();
+            #[cfg(feature = "scheduling")]
+            let cleanup_scheduler = scheduler_db.clone();
             let recovered_removals = tokio::task::spawn_blocking(move || {
-                cleanup_store.recover_pending_terminal_chain_removals(
+                let recovered = cleanup_store.recover_pending_terminal_chain_removals(
                     &lillux::time::iso8601_now(),
                     false,
                     |thread_ids| {
-                        let mut pins = 0_u64;
-                        for thread_id in thread_ids {
-                            if cleanup_scheduler.find_fire_by_thread(thread_id)?.is_some() {
-                                pins = pins.checked_add(1).ok_or_else(|| {
-                                    anyhow::anyhow!("scheduler recovery pin count overflow")
-                                })?;
+                        #[cfg(feature = "scheduling")]
+                        {
+                            let mut pins = 0_u64;
+                            for thread_id in thread_ids {
+                                if cleanup_scheduler.find_fire_by_thread(thread_id)?.is_some() {
+                                    pins = pins.checked_add(1).ok_or_else(|| {
+                                        anyhow::anyhow!("scheduler recovery pin count overflow")
+                                    })?;
+                                }
                             }
+                            Ok(pins)
                         }
-                        Ok(pins)
+                        #[cfg(not(feature = "scheduling"))]
+                        {
+                            let _ = thread_ids;
+                            scheduler_absence.verify_absent()?;
+                            Ok(0)
+                        }
                     },
-                )
+                )?;
+                #[cfg(not(feature = "scheduling"))]
+                scheduler_absence.verify_absent()?;
+                Ok::<_, anyhow::Error>(recovered)
             })
             .await
             .context("interrupted terminal-history cleanup task failed")??;
@@ -1712,6 +3092,7 @@ async fn run(
                     pending_heads.pending
                 );
             }
+            #[cfg(feature = "scheduling")]
             drop(_startup_retention_guard);
             let webhook_dedupe =
                 Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
@@ -1805,17 +3186,26 @@ async fn run(
 
             // Scheduler reload channel — must be created BEFORE the router is built
             // so that HTTP handler clones of AppState carry the sender.
-            let (scheduler_reload_tx, scheduler_reload_rx) =
-                tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
-            app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
+            #[cfg(feature = "scheduling")]
+            let scheduler_reload_rx = {
+                let (scheduler_reload_tx, scheduler_reload_rx) =
+                    tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
+                scheduler_service.install_reload_sender(scheduler_reload_tx)?;
+                scheduler_reload_rx
+            };
 
             // Auth is per-route via the dispatcher's auth_invoker chain.
             // No global middleware layer — each route declares its own auth
             // policy (auth: "none" for public, auth: "ryeos_signed" for
             // authenticated). The fallback dispatcher handles everything.
+            // Shared handle clone for the remaining startup body; ends the
+            // custody slot's mutable borrow before the root is borrowed. It
+            // lives no longer than this startup scope, like the published copy.
+            let app_state = app_state.clone();
+            let published_state = Arc::new(app_state.clone());
             let publication = composition
                 .root
-                .publication(Arc::new(app_state.clone()))
+                .publication(published_state)
                 .context("pair HTTP/UDS AppState with selected Executor generation")?;
             let api_state = ryeos_api::ApiState {
                 app: publication.app().clone(),
@@ -1827,21 +3217,37 @@ async fn run(
             // Reconcile scheduler truth while holding the runtime gate through
             // application publication and recovery enqueue. Timer/recovery tasks may be
             // spawned below, but cannot claim a fire until Ready releases this guard.
-            startup.phase(
-                ryeos_node::StartupPhase::ReconcilingScheduler,
-                "reconciling scheduler state",
-            )?;
-            maintenance_schedule::ensure_maintenance_schedule(&app_state)
-                .context("materialize node-policy maintenance schedules")?;
-            let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
-                app_state.clone(),
-            )));
-            let scheduler_reconcile_guard =
-                app_state.scheduler_runtime_gate.clone().write_owned().await;
-            let scheduler_intents = scheduler::reconcile::reconcile(&scheduler_ctx).await?;
-            if ryeosd::shutdown_requested() {
-                tracing::info!("startup shutdown requested after scheduler reconciliation");
-                return Ok(());
+            #[cfg(feature = "scheduling")]
+            let (scheduler_ctx, scheduler_reconcile_guard, scheduler_intents) = {
+                startup.phase(
+                    ryeos_node::StartupPhase::ReconcilingScheduler,
+                    "reconciling scheduler state",
+                )?;
+                maintenance_schedule::ensure_maintenance_schedule(&app_state)
+                    .context("materialize node-policy maintenance schedules")?;
+                let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(
+                    Arc::new(app_state.clone()),
+                    scheduler_service.clone(),
+                ));
+                let scheduler_reconcile_guard = scheduler_runtime_gate.clone().write_owned().await;
+                let scheduler_intents = scheduler::reconcile::reconcile(&scheduler_ctx).await?;
+                if ryeosd::shutdown_requested() {
+                    tracing::info!("startup shutdown requested after scheduler reconciliation");
+                    return Ok(());
+                }
+                (scheduler_ctx, scheduler_reconcile_guard, scheduler_intents)
+            };
+            #[cfg(not(feature = "scheduling"))]
+            if app_state
+                .node_policy
+                .require::<ryeos_scheduler_contract::NodeMaintenancePolicy>()?
+                .schedules
+                .iter()
+                .any(|schedule| schedule.initial_enabled)
+            {
+                anyhow::bail!(
+                    "this node policy requires scheduled maintenance, but the selected daemon composition has no scheduler service"
+                );
             }
 
             // Publish callback-capable application state while external admission is
@@ -1923,6 +3329,7 @@ async fn run(
             // Persist/claim every recovered fire while the startup gate is still held.
             // `dispatch_fire` detaches execution after its durable scheduler record, so
             // this waits for enqueue—not for the scheduled work to finish.
+            #[cfg(feature = "scheduling")]
             for intent in scheduler_intents {
                 let fire_id = intent.fire_id.clone();
                 let outcome = scheduler::timer::dispatch_recovery_fire_under_startup_guard(
@@ -1970,20 +3377,25 @@ async fn run(
             let recovery_release_for_ready = recovery_execution_release.clone();
             startup.ready(projection, move || {
                 recovery_release_for_ready.open();
+                #[cfg(feature = "scheduling")]
                 drop(scheduler_reconcile_guard);
             })?;
 
             // The ordinary timer does not exist until Ready is published, so
             // no timer fire can race the final internal-gate release boundary.
-            let scheduler_task = tokio::spawn(scheduler::timer::run(
+            #[cfg(feature = "scheduling")]
+            let scheduler_task = Some(tokio::spawn(scheduler::timer::run(
                 scheduler_ctx,
                 scheduler_reload_rx,
                 shutdown_signal(),
-            ));
+            )));
+            #[cfg(not(feature = "scheduling"))]
+            let scheduler_task = None;
+            #[cfg(feature = "scheduling")]
             tracing::info!("scheduler: timer loop started after readiness publication");
 
             let result = supervise_background_tasks(
-                (*app_state).clone(),
+                app_state.clone(),
                 ui_state_for_hints,
                 scheduler_task,
             )
@@ -2006,7 +3418,11 @@ async fn run(
         // A request may already hold the immutable application publication.
         // Close its selected attachment before awaiting daemon work, listeners,
         // or cleanup; the returned Unresolved state is held only after drain.
-        composition.close_root_admission();
+        // Native tickets and Scheduler metadata close through the non-owning
+        // fence; the full composition close below follows once the startup
+        // future has released its borrow.
+        root_admission_fence.close();
+        native_admission_fence.close();
         let shutdown_was_requested = ryeosd::shutdown_requested();
         let first_exit_was_clean = result.is_ok();
 
@@ -2028,6 +3444,7 @@ async fn run(
         // the owning future now, ending its mutable envelope borrow before
         // shutdown custody borrows the same original composition owners.
         drop(daemon_work);
+        composition.close_root_admission();
 
         // No startup-owned task may remain parked behind a gate that can no
         // longer reach Ready. Waking it with cancellation drops transient
@@ -2085,7 +3502,7 @@ async fn run(
             }
         }
 
-        if let Some(state) = composition.app_state() {
+        if let Some(state) = composition.app_state().cloned() {
             // The outer composition retains the original AppState across this
             // awaited task. A panic/cancellation drops only task clones.
             let drain_state = state.clone();
@@ -2095,15 +3512,69 @@ async fn run(
             let mut custody = Some((held_state, &*composition));
             complete_shutdown_drain(drain_result, &result, &mut custody).await;
             drop(custody);
+            #[cfg(feature = "scheduling")]
+            {
+                let scheduler_service = state
+                    .extensions
+                    .get::<ryeos_scheduler_service::SchedulerService>();
+                let close_result = match &scheduler_service {
+                    Some(service) => service.close_after_shutdown_drain(),
+                    None if composition.has_scheduler_custody() => Err(anyhow::anyhow!(
+                        "selected scheduler database has no retained service close owner"
+                    )),
+                    None => Ok(()),
+                };
+                let close_result = close_result
+                    .and_then(|()| composition.retain_scheduler_terminals_after_close());
+                match close_result {
+                    Ok(()) => {
+                        drop(scheduler_service);
+                        drop(state);
+                        if composition.transfer_scheduler_native_finalization_owner().is_err() {
+                            if result.is_ok() {
+                                result = Err(anyhow::anyhow!(
+                                    "scheduler finalization custody transfer did not complete"
+                                ));
+                            } else {
+                                tracing::error!(
+                                    "closed scheduler owner could not transfer into native finalization custody"
+                                );
+                            }
+                        }
+                        composition.release_app_state_after_drain();
+                    }
+                    Err(_error) => {
+                        if result.is_ok() {
+                            result = Err(anyhow::anyhow!(
+                                "scheduler database close did not complete"
+                            ));
+                        } else {
+                            tracing::error!(
+                                "scheduler database close failed while preserving its owner"
+                            );
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "scheduling"))]
             composition.release_app_state_after_drain();
         }
 
         (result, startup_cancelled, startup_failed)
     };
-    let (daemon_result, startup_cancelled, startup_failed) = daemon_result;
+    let (mut daemon_result, startup_cancelled, startup_failed) = daemon_result;
+    if composition.advance_native_shutdown().is_err() {
+        if daemon_result.is_ok() {
+            daemon_result = Err(anyhow::anyhow!("native shutdown did not complete"));
+        } else {
+            tracing::error!("native shutdown retains original unresolved custody");
+        }
+    }
 
-    if composition.has_unresolved_render_custody() {
-        composition.hold_unresolved_render_custody().await;
+    if composition.has_unresolved_custody() {
+        if let Err(custody) = composition.hold_unresolved_custody().await {
+            return Err(anyhow::Error::new(custody));
+        }
     }
 
     let exit_reason = if daemon_result.is_ok() || startup_cancelled {
@@ -2836,6 +4307,16 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
 }
 
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    let recovered_project_applies =
+        ryeos_api::handlers::project_apply_snapshot::retry_retained_project_snapshot_applies(state)
+            .await
+            .context("periodic retained project snapshot recovery")?;
+    if recovered_project_applies != 0 {
+        tracing::info!(
+            recovered_project_applies,
+            "periodic recovery resolved retained project schedule owners"
+        );
+    }
     let recovered_external_imports = state
         .external_candidate_imports
         .wake_recoverable(Arc::clone(&state.state_store), None)
@@ -3113,20 +4594,122 @@ async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) 
     }
 }
 
+/// A scheduler-free daemon may perform terminal-history cleanup only while the
+/// pinned runtime and node namespaces continue to prove no scheduler DB, fire
+/// history, or signed schedule source exists. The process StateLock is also
+/// retained across startup recovery.
+#[cfg(not(feature = "scheduling"))]
+struct SchedulerFreeStartupAbsence {
+    runtime: lillux::PinnedDirectory,
+    node: Option<lillux::PinnedDirectory>,
+    node_path: std::path::PathBuf,
+}
+
+#[cfg(not(feature = "scheduling"))]
+fn require_absent_scheduler_history(
+    app_root: &std::path::Path,
+) -> Result<SchedulerFreeStartupAbsence> {
+    let runtime_path = app_root.join(ryeos_engine::AI_DIR).join("state");
+    let runtime = lillux::PinnedDirectory::open(&runtime_path)?
+        .context("scheduler-free startup requires a pinned runtime directory")?;
+    let node_path = app_root.join(ryeos_engine::AI_DIR).join("node");
+    let node = lillux::PinnedDirectory::open(&node_path)?;
+    let guard = SchedulerFreeStartupAbsence {
+        runtime,
+        node,
+        node_path,
+    };
+    guard.verify_absent()?;
+    Ok(guard)
+}
+
+#[cfg(not(feature = "scheduling"))]
+impl SchedulerFreeStartupAbsence {
+    fn verify_absent(&self) -> Result<()> {
+        self.runtime.ensure_path_binding()?;
+        for name in self.runtime.entry_names()? {
+            let Some(name) = name.to_str() else {
+                anyhow::bail!(
+                    "cannot prove scheduler-history absence from a non-UTF-8 runtime entry"
+                );
+            };
+            if name.starts_with("scheduler") || name == "schedules" {
+                anyhow::bail!("scheduler history requires the selected scheduler composition");
+            }
+        }
+        if let Some(node) = self.node.as_ref() {
+            node.ensure_path_binding()?;
+            if node
+                .entry_names()?
+                .iter()
+                .any(|name| name == std::ffi::OsStr::new("schedules"))
+            {
+                anyhow::bail!(
+                    "signed scheduler sources require the selected scheduler composition"
+                );
+            }
+        } else if lillux::PinnedDirectory::open(&self.node_path)?.is_some() {
+            anyhow::bail!("node configuration appeared during scheduler-free startup");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(feature = "scheduling")))]
+mod scheduler_free_startup_tests {
+    use super::*;
+
+    fn make_state_dirs(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let runtime = root.join(ryeos_engine::AI_DIR).join("state");
+        let node = root.join(ryeos_engine::AI_DIR).join("node");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&node).unwrap();
+        (runtime, node)
+    }
+
+    #[test]
+    fn scheduler_free_startup_accepts_only_empty_scheduler_namespaces() {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, node) = make_state_dirs(root.path());
+        let guard = require_absent_scheduler_history(root.path()).unwrap();
+        guard.verify_absent().unwrap();
+
+        std::fs::write(runtime.join("scheduler.sqlite3"), b"untrusted").unwrap();
+        assert!(guard.verify_absent().is_err());
+        std::fs::remove_file(runtime.join("scheduler.sqlite3")).unwrap();
+
+        std::fs::create_dir(node.join("schedules")).unwrap();
+        assert!(guard.verify_absent().is_err());
+    }
+
+    #[test]
+    fn scheduler_free_startup_refuses_replaced_held_node_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let (_runtime, node) = make_state_dirs(root.path());
+        let guard = require_absent_scheduler_history(root.path()).unwrap();
+        let retired = node.with_extension("retired");
+        std::fs::rename(&node, &retired).unwrap();
+        std::fs::create_dir(&node).unwrap();
+        assert!(guard.verify_absent().is_err());
+    }
+}
+
 async fn supervise_background_tasks(
     state: AppState,
     ui: Arc<ryeos_ui::UiState>,
-    scheduler_task: tokio::task::JoinHandle<Result<()>>,
+    scheduler_task: Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::<(&'static str, Result<()>)>::new();
 
-    tasks.spawn(async move {
-        let result = scheduler_task
-            .await
-            .context("scheduler timer task join failed")
-            .and_then(|result| result);
-        ("scheduler timer", result)
-    });
+    if let Some(scheduler_task) = scheduler_task {
+        tasks.spawn(async move {
+            let result = scheduler_task
+                .await
+                .context("scheduler timer task join failed")
+                .and_then(|result| result);
+            ("scheduler timer", result)
+        });
+    }
 
     let repair_store = state.state_store.clone();
     tasks.spawn(async move {
@@ -4098,7 +5681,7 @@ async fn run_service_standalone(
         ryeos_runtime::CommandRegistry::from_records(
             &node_config_snapshot.commands,
             &node_policy_snapshot
-                .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+                .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
                 .runtime_policy(),
         )
         .context("failed to build command registry from node-config records")?,
@@ -4108,28 +5691,6 @@ async fn run_service_standalone(
     let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
     let standalone_node_config_validator =
         prospective_node_config_validator(standalone_ui_state.clone(), engine.clone());
-    let standalone_scheduler_db = match standalone_state_access {
-        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
-            let scheduler_path = config
-                .app_root
-                .join(ryeos_engine::AI_DIR)
-                .join("state")
-                .join("scheduler.sqlite3");
-            Arc::new(
-                SchedulerDb::open_existing_current(&scheduler_path).with_context(|| {
-                    format!(
-                        "projection rebuild requires current persisted scheduler state at {}",
-                        scheduler_path.display()
-                    )
-                })?,
-            )
-        }
-        ryeos_app::service_registry::StandaloneStateAccess::ReadWrite
-        | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
-            Arc::new(SchedulerDb::new_in_memory().context("scheduler in-memory db")?)
-        }
-    };
-
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
         daemon_build: ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION")),
@@ -4153,6 +5714,9 @@ async fn run_service_standalone(
         controller_lifetime: Arc::new(standalone_state_lock.retain()),
         extensions: {
             let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+            extensions.insert(Arc::new(
+                ryeos_api::project_deploy::ProjectScheduleRecoveryOwners::default(),
+            ));
             // This is the stopped-node invocation's actual exclusion guard,
             // retained through service completion. Never install the running
             // daemon's lifecycle lock as standalone authority in extensions.
@@ -4160,7 +5724,7 @@ async fn run_service_standalone(
             extensions.insert(standalone_ui_state);
             extensions.insert(standalone_node_config_validator);
             let publication_policy = node_policy_snapshot
-                .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+                .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
                 .clone();
             let publisher = configured_bundle_publisher(&publication_policy)?;
             let publication_authorities =
@@ -4207,12 +5771,9 @@ async fn run_service_standalone(
         ),
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
-        scheduler_db: standalone_scheduler_db,
-        scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-        scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
             node_policy_snapshot
-                .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+                .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
                 .matcher
                 .clone(),
         ),
@@ -4281,6 +5842,40 @@ mod selected_composition_tests {
     use super::*;
     use ryeos_executor::{SelectedInstallationRefusal, SelectedInvocationAttachment};
 
+    #[test]
+    fn native_finalizer_attempt_allowance_is_four_total_and_cannot_renew() {
+        let mut attempts = NativeFinalizerAttempts::default();
+        for _ in 0..ryeos_node::native_capacity::MAX_FINALIZATION_ATTEMPTS {
+            attempts.claim().unwrap();
+        }
+
+        assert!(attempts.exhausted());
+        assert!(attempts.claim().is_err());
+        assert_eq!(attempts.0, ryeos_node::native_capacity::MAX_FINALIZATION_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn exhausted_finalizer_returns_secret_free_custody_without_claiming_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut composition, _attachment) = fixture(root.path());
+        composition.native_failure = Some(anyhow::anyhow!("sensitive source detail"));
+        composition.native_finalizer_attempts.0 = ryeos_node::native_capacity::MAX_FINALIZATION_ATTEMPTS;
+
+        let custody = composition.hold_unresolved_custody().await.unwrap_err();
+        assert_eq!(custody.attempts_used, ryeos_node::native_capacity::MAX_FINALIZATION_ATTEMPTS);
+        assert!(custody.native_failure_retained);
+        assert!(!custody.to_string().contains("sensitive source detail"));
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        assert!(matches!(
+            lifecycle_marker::read(&state_dir),
+            Some(lifecycle_marker::LifecycleMarker::Running { .. })
+        ));
+
+        // Keep Drop on the ordinary resolved path for this in-process control.
+        composition.native_failure = None;
+        composition.close_after_run();
+    }
+
     fn fixture(
         root: &std::path::Path,
     ) -> (DaemonSelectedComposition, SelectedInvocationAttachment) {
@@ -4290,14 +5885,75 @@ mod selected_composition_tests {
         let lock = state_lock::StateLock::acquire(&lock_path).unwrap();
         let state_dir = ryeos_engine::roots::RuntimeRoot::new(root.to_owned()).state();
         std::fs::create_dir_all(&state_dir).unwrap();
-        let started = lifecycle_marker::record_running(&state_dir);
+        let started = lifecycle_marker::record_running(
+            &state_dir,
+            lifecycle_marker::LaunchRoute::Direct,
+        );
         (
             DaemonSelectedComposition {
                 root: barrier,
+                launch_route: Some(lifecycle_marker::LaunchRoute::Direct),
                 process_state_lock: Some(lock),
-                lifecycle_exit: Some(LifecycleExitGuard::new(state_dir, started)),
+                #[cfg(target_os = "linux")]
+                native_operator_lock: None,
+                #[cfg(target_os = "linux")]
+                native_operator_lock_registered: false,
+                lifecycle_exit: Some(LifecycleExitGuard::new(
+                    state_dir,
+                    started,
+                    lifecycle_marker::LaunchRoute::Direct,
+                )),
                 persistent_pool_custody: None,
                 app_state_custody: None,
+                live_state_store_custody: None,
+                native_bootstrap_entered: false,
+            native_inputs: None,
+                native_reservation: None,
+                native_factory: None,
+                native_failure: None,
+            services_drained: false,
+            native_closed_store: None,
+            native_outside_store: None,
+            native_prepared_registry: None,
+            native_store_close_failure: None,
+            native_reservation_close_failure: None,
+            native_settled_reservation: None,
+            native_terminal: None,
+                native_startup_recovery_failure: None,
+                native_released_startup: None,
+                native_finalizer_attempts: NativeFinalizerAttempts::default(),
+                native_admission_fence: Arc::default(),
+                native_control_observation: std::sync::Mutex::new(None),
+                #[cfg(feature = "scheduling")]
+                scheduler_db_custody: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_native_finalization_owner: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_native_outside_sources: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_admission_failure: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_admission_sources: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_native_connection_parts: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_native_unopened_inputs: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_native_schema_parts: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_native_schema_transient: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_participant_custody: None,
+            #[cfg(feature = "scheduling")]
+            scheduler_native_terminals: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_open_failure: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_schema_failure: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_recovered_schema: None,
+                #[cfg(feature = "scheduling")]
+                scheduler_admission_custody: None,
             },
             attachment,
         )
@@ -4422,8 +6078,7 @@ mod shutdown_mapping_tests {
     fn standalone_ingress_carries_only_the_loaded_local_operator_authority() {
         let root = tempfile::tempdir().unwrap();
         let operator =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("operator.pem"))
-                .unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("operator.pem")).unwrap();
         let context = super::standalone_operator_handler_context(&operator);
         assert!(context.verified);
         assert_eq!(context.fingerprint, operator.principal_id());
@@ -4554,7 +6209,7 @@ mod render_composition_custody_tests {
         let pool = Arc::new(ryeos_app::persistent_session::PersistentSessionPool::disabled());
         composition.retain_persistent_pool(Arc::clone(&pool));
 
-        assert!(composition.has_unresolved_render_custody());
+        assert!(composition.has_unresolved_custody());
         assert!(Arc::ptr_eq(
             composition.persistent_pool_custody.as_ref().unwrap(),
             &pool,
@@ -4563,6 +6218,6 @@ mod render_composition_custody_tests {
         // Clear fixture custody so this test can return without entering the
         // production Drop hold. AppState adoption is not exercised here.
         composition.persistent_pool_custody.take();
-        assert!(!composition.has_unresolved_render_custody());
+        assert!(!composition.has_unresolved_custody());
     }
 }

@@ -8,7 +8,7 @@ use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 
 // ── Generic static asset provider trait ────────────────────────────────────
 

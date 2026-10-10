@@ -71,6 +71,7 @@ fn failed_marker_status(
         started_at,
         exited_at,
         error,
+        launch_route: _,
     } = marker
     else {
         return None;
@@ -249,7 +250,7 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
     if unusable_control_paths.is_empty() {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         let marker = crate::lifecycle_marker::read(&state_dir);
-        if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at }) =
+        if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at, .. }) =
             marker.clone()
             && crate::lifecycle_marker::process_alive_as_ryeosd(pid)
         {
@@ -411,12 +412,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = ryeos_engine::roots::RuntimeRoot::new(tmp.path().to_path_buf()).state();
         std::fs::create_dir_all(&state).unwrap();
-        let started_at = crate::lifecycle_marker::record_running(&state);
+        let started_at = crate::lifecycle_marker::record_running(
+            &state,
+            crate::lifecycle_marker::LaunchRoute::Direct,
+        );
         crate::lifecycle_marker::record_exit(
             &state,
             "startup_failed",
             &started_at,
             Some("load node bootstrap configuration: invalid field"),
+            crate::lifecycle_marker::LaunchRoute::Direct,
         );
 
         let status = retained_startup_failure(tmp.path()).expect("retained failure");

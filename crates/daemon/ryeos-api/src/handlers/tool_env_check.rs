@@ -204,7 +204,7 @@ pub async fn handle(
         let isolation_item_ref = req.item_ref.clone();
         let probe_names = names.clone();
         tokio::task::spawn_blocking(move || {
-            ryeos_app::env_probe::import_dry_run(
+            ryeos_engine::env_probe::import_dry_run(
                 &engine,
                 &plan_ctx,
                 &verified,

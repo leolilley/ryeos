@@ -202,6 +202,7 @@ impl Drop for PinnedStagingDirectory {
         if let Err(error) = directory.remove_contents_recursive().and_then(|()| {
             self.parent
                 .remove_empty_child_if_same(&self.name, directory)
+                .map(|receipt| receipt.is_some())
                 .and_then(|removed| {
                     if removed {
                         Ok(())

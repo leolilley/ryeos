@@ -11,7 +11,7 @@
 use std::io::{Read as _, Seek as _};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use serde_json::Value;
 

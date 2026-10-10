@@ -2403,8 +2403,8 @@ pub(crate) mod tests {
             operator_signing_key_path: temp.path().join("user-key.pem"),
             authorized_keys_dir: temp.path().join("auth"),
         };
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&key_path).expect("test node identity");
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -2502,7 +2502,7 @@ pub(crate) mod tests {
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
-                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 )]),
             ),

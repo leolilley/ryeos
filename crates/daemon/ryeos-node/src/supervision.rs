@@ -229,15 +229,14 @@ pub(crate) fn configure_host_endpoints_while_locked(
         lillux::time::Duration::from_secs(30),
     )
     .context("endpoint configuration requires a stopped node")?;
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: Some(app_root.to_path_buf()),
-            bind,
-            uds_path,
-            force: true,
-            ..Default::default()
-        })
-        .context("resolve replacement node endpoints")?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        bind,
+        uds_path,
+        force: true,
+        ..Default::default()
+    })
+    .context("resolve replacement node endpoints")?;
     ryeos_node_runtime::config::replace_bootstrap_config(&config, &state_lock)?;
     Ok(NodeConfig::from_app_config(&config))
 }
@@ -249,8 +248,10 @@ pub(crate) fn configure_host_endpoints_while_locked(
 pub fn provision_host_service(
     app_root: &Path,
     account: lillux::ControllerAccount,
+    node_resources: lillux::ProcessScopeResourceLimits,
 ) -> Result<DesiredState> {
     lillux::require_administrator()?;
+    node_resources.validate().map_err(anyhow::Error::msg)?;
     // The administrator boundary receives only the explicit app root. Retain
     // the same two locks as ordinary lifecycle/config mutation so a concurrent
     // start cannot select direct mode immediately before this association is
@@ -312,6 +313,7 @@ pub fn provision_host_service(
             &app_root,
             node_fingerprint,
             account,
+            node_resources,
             process_scopes,
         )?,
         daemon_executable: daemon.path().to_path_buf(),
@@ -498,6 +500,7 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
             .process_scopes
             .exec_controller(
                 &service.binding.runtime.account,
+                service.binding.runtime.node_resources,
                 &executable,
                 &["--app-root".to_owned(), root.to_owned()],
                 &service.app_root,
@@ -1141,13 +1144,12 @@ mod tests {
             &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
         )
         .unwrap();
-        let initial =
-            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-                app_root: Some(app_root.clone()),
-                uds_path: Some(tmp.path().join("first.sock")),
-                ..Default::default()
-            })
-            .unwrap();
+        let initial = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.clone()),
+            uds_path: Some(tmp.path().join("first.sock")),
+            ..Default::default()
+        })
+        .unwrap();
         ryeos_node_runtime::config::seed_bootstrap_config(&initial, &lock).unwrap();
         drop(lock);
 
@@ -1269,6 +1271,7 @@ mod tests {
                 "app_root_identity": {"containing_device": 1, "inode": 2},
                 "node_fingerprint": "a".repeat(64),
                 "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+                "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},
                 "process_scopes": {
                     "version": 3,
                     "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}

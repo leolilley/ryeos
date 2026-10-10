@@ -5,6 +5,10 @@ edition = "2024"
 license.workspace = true
 description = "RyeOS UI/browser session handlers and session event substrate"
 
+[features]
+default = []
+scheduling = ["dep:ryeos-scheduler-service", "ryeos-api/scheduling"]
+
 [dependencies]
 ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
@@ -19,6 +23,7 @@ ryeos-client-base = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-runtime = { workspace = true }
+ryeos-scheduler-service = { workspace = true, optional = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

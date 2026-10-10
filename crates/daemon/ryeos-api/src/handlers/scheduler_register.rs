@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
+use ryeos_node_runtime::node_document;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_document;
-use ryeos_scheduler::crontab;
 use ryeos_scheduler::projection;
-use ryeos_scheduler::types::{
-    ScheduleExecution, ScheduleExecutionAuthority, ScheduleManagedBy, ScheduleSourceRecord,
+use ryeos_scheduler::types::{ScheduleManagedBy, ScheduleSourceRecord};
+use ryeos_scheduler_contract::{
+    ScheduleExecution, ScheduleExecutionAuthority, parse_misfire_policy, parse_overlap_policy,
+    validate_expression, validate_schedule_id, validate_timezone,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,21 +47,23 @@ pub async fn handle(
 ) -> Result<Value> {
     // Caller identity is used for execution authority — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
-    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())?;
+    let _mutation_guard = scheduler.acquire_mutation().await?;
+    let scheduler_db = scheduler.scheduler_db();
 
     // Validate
-    crontab::validate_schedule_id(&req.schedule_id)?;
+    validate_schedule_id(&req.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
         .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
     ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)?;
-    crontab::validate_expression(&req.schedule_type, &req.expression)?;
+    validate_expression(&req.schedule_type, &req.expression)?;
 
-    crontab::validate_timezone(&req.timezone)?;
+    validate_timezone(&req.timezone)?;
 
     // All overlap policies ship day 1: allow, skip, cancel_previous.
-    ryeos_scheduler::overlap::parse_overlap_policy(&req.overlap_policy)?;
+    parse_overlap_policy(&req.overlap_policy)?;
     // All misfire policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S.
-    ryeos_scheduler::misfire::parse_misfire_policy(&req.misfire_policy)?;
+    parse_misfire_policy(&req.misfire_policy)?;
     if req.lateness_grace_secs <= 0 {
         bail!(
             "lateness_grace_secs must be positive, got: {}",
@@ -79,13 +82,13 @@ pub async fn handle(
     }
 
     if req.schedule_type == "at"
-        && crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
+        && ryeos_scheduler::crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
     {
         bail!("at schedule timestamp is in the past");
     }
 
     // Check if schedule already exists (for preserving registered_at on update)
-    let existing_spec = state.scheduler_db.get_spec(&req.schedule_id)?;
+    let existing_spec = scheduler_db.get_spec(&req.schedule_id)?;
 
     // Ownership check on update: the caller must be the existing
     // requester. On create, no ownership check needed —
@@ -126,7 +129,7 @@ pub async fn handle(
     }
 
     let source_mutation = ScheduleSourceMutation::acquire(
-        state.as_ref(),
+        scheduler.as_ref(),
         &req.schedule_id,
         existing_spec.as_ref().map(|spec| spec.spec_hash.as_str()),
     )?;
@@ -220,19 +223,13 @@ pub async fn handle(
 
     // Write signed YAML through the same pinned source transaction used for
     // the verified existing-source read.
-    let (spec_path, verified) = source_mutation.publish(&body, &state.identity)?;
+    let (spec_path, verified) = source_mutation.publish(&body, scheduler.identity())?;
     let rec = verified.to_spec_record()?;
     let was_existing = existing_spec.is_some();
-    state.scheduler_db.upsert_spec(&rec)?;
+    scheduler_db.upsert_spec(&rec)?;
 
     // Ping timer loop
-    if let Some(ref tx) = state.scheduler_reload_tx
-        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
-            schedule_id: Some(req.schedule_id.clone()),
-        })
-    {
-        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
-    }
+    scheduler.notify_reload(Some(req.schedule_id.clone()));
 
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,
@@ -255,29 +252,18 @@ pub(crate) fn authenticated_schedule_authority(
     state: &AppState,
     registration_request_hash: String,
 ) -> Result<ScheduleExecutionAuthority> {
-    ctx.require_verified()
-        .map_err(|error| anyhow::anyhow!(error))?;
-    let principal_class = ctx
-        .authorized_key_class
-        .context("schedule registration requires a RyeOS authorized-key principal class")?;
-    let grant_authority = ctx.authenticated_grant_authority.clone().context(
-        "schedule registration requires stable authorized-key grant-generation evidence",
-    )?;
-    let origin_site_id = ctx.execution_origin(state.threads.site_id());
-    Ok(ScheduleExecutionAuthority::Authenticated {
-        principal_id: ctx.fingerprint.clone(),
-        principal_class,
-        effective_origin_site_id: origin_site_id,
-        grant_authority,
+    crate::project_deploy::authenticated_schedule_authority_for_site(
+        ctx,
+        state.threads.site_id(),
         registration_request_hash,
-    })
+    )
 }
 
 pub(super) fn canonical_schedule_source_path(
     app_root: &Path,
     schedule_id: &str,
 ) -> Result<PathBuf> {
-    crontab::validate_schedule_id(schedule_id)?;
+    validate_schedule_id(schedule_id)?;
     let schedules_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
@@ -287,11 +273,11 @@ pub(super) fn canonical_schedule_source_path(
 }
 
 pub(super) fn load_existing_schedule_source(
-    state: &AppState,
+    scheduler: &ryeos_scheduler_service::SchedulerService,
     schedule_id: &str,
     expected_spec_hash: Option<&str>,
 ) -> Result<Option<projection::VerifiedScheduleSource>> {
-    let source = canonical_schedule_source_path(&state.config.app_root, schedule_id)?;
+    let source = canonical_schedule_source_path(scheduler.app_root(), schedule_id)?;
     match std::fs::symlink_metadata(&source) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -300,7 +286,7 @@ pub(super) fn load_existing_schedule_source(
                 .with_context(|| format!("inspect schedule source {}", source.display()));
         }
     }
-    let verified = projection::load_verified_schedule_source(&source, &state.engine.trust_store)?;
+    let verified = projection::load_verified_schedule_source(&source, scheduler.trust_store())?;
     if let Some(expected) = expected_spec_hash
         && verified.spec_hash != expected
     {
@@ -329,16 +315,12 @@ struct ScheduleSourceMutation<'a> {
 
 impl<'a> ScheduleSourceMutation<'a> {
     fn acquire(
-        state: &'a AppState,
+        scheduler: &'a ryeos_scheduler_service::SchedulerService,
         schedule_id: &str,
         expected_spec_hash: Option<&str>,
     ) -> Result<Self> {
-        crontab::validate_schedule_id(schedule_id)?;
-        let node_path = state
-            .config
-            .app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node");
+        validate_schedule_id(schedule_id)?;
+        let node_path = scheduler.app_root().join(ryeos_engine::AI_DIR).join("node");
         let node_directory = lillux::PinnedDirectory::open_or_create(&node_path)?;
         let directory =
             node_directory.open_or_create_child(std::ffi::OsStr::new("schedules"), 0o777)?;
@@ -352,7 +334,7 @@ impl<'a> ScheduleSourceMutation<'a> {
             Some(projection::verify_schedule_source_content(
                 &path,
                 &content,
-                &state.engine.trust_store,
+                scheduler.trust_store(),
             )?)
         } else {
             None
@@ -376,7 +358,7 @@ impl<'a> ScheduleSourceMutation<'a> {
             name,
             current_file,
             verified,
-            trust_store: &state.engine.trust_store,
+            trust_store: scheduler.trust_store(),
         })
     }
 
@@ -412,18 +394,18 @@ fn is_project_managed_schedule(record: &ScheduleSourceRecord) -> bool {
 }
 
 pub(super) fn verify_schedule_enabled(
-    state: &AppState,
+    scheduler: &ryeos_scheduler_service::SchedulerService,
     current: &ryeos_scheduler::types::ScheduleSpecRecord,
     enabled: bool,
 ) -> Result<()> {
     let source =
-        load_existing_schedule_source(state, &current.schedule_id, Some(&current.spec_hash))?
+        load_existing_schedule_source(scheduler, &current.schedule_id, Some(&current.spec_hash))?
             .with_context(|| {
-                format!(
-                    "schedule projection {} has no trusted source",
-                    current.schedule_id
-                )
-            })?;
+            format!(
+                "schedule projection {} has no trusted source",
+                current.schedule_id
+            )
+        })?;
     if source.record.enabled != enabled {
         bail!(
             "schedule {} source enabled state diverges from its projection",
@@ -434,12 +416,12 @@ pub(super) fn verify_schedule_enabled(
 }
 
 pub(super) fn rewrite_schedule_enabled(
-    state: &AppState,
+    scheduler: &ryeos_scheduler_service::SchedulerService,
     current: &ryeos_scheduler::types::ScheduleSpecRecord,
     enabled: bool,
 ) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
     let mutation =
-        ScheduleSourceMutation::acquire(state, &current.schedule_id, Some(&current.spec_hash))?;
+        ScheduleSourceMutation::acquire(scheduler, &current.schedule_id, Some(&current.spec_hash))?;
     let source = mutation.verified.as_ref().with_context(|| {
         format!(
             "schedule projection {} has no trusted source",
@@ -451,7 +433,7 @@ pub(super) fn rewrite_schedule_enabled(
     record.validate(Some(&current.schedule_id))?;
 
     let body = serde_json::to_value(&record)?;
-    let (_path, verified) = mutation.publish(&body, &state.identity)?;
+    let (_path, verified) = mutation.publish(&body, scheduler.identity())?;
     if verified.record.enabled != enabled {
         bail!(
             "rewritten schedule {} did not retain requested enabled state",

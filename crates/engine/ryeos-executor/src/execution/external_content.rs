@@ -440,6 +440,7 @@ impl ExternalGenerationRetirement<'_> {
         self.directory.remove_contents_recursive()?;
         self.root
             .remove_empty_child_if_same(OsStr::new(self.generation), self.directory)
+            .map(|receipt| receipt.is_some())
     }
 }
 
@@ -908,7 +909,9 @@ impl ExternalMaterializationCache {
         })();
         if result.is_err() {
             let _ = staging.remove_contents_recursive();
-            let _ = root.remove_empty_child_if_same(&staging_name, &staging);
+            let _ = root
+                .remove_empty_child_if_same(&staging_name, &staging)
+                .map(|receipt| receipt.is_some());
         }
         result
     }
@@ -964,7 +967,9 @@ impl ExternalMaterializationCache {
         })();
         if result.is_err() {
             let _ = staging.remove_contents_recursive();
-            let _ = root.remove_empty_child_if_same(&staging_name, &staging);
+            let _ = root
+                .remove_empty_child_if_same(&staging_name, &staging)
+                .map(|receipt| receipt.is_some());
         }
         result
     }
@@ -1088,7 +1093,9 @@ impl ExternalMaterializationCache {
                     .is_some_and(|age| age > STALE_STAGING_MAX_AGE);
                 if abandoned {
                     directory.remove_contents_recursive()?;
-                    let _ = root.remove_empty_child_if_same(OsStr::new(&name), &directory);
+                    let _ = root
+                        .remove_empty_child_if_same(OsStr::new(&name), &directory)
+                        .map(|receipt| receipt.is_some());
                 }
                 continue;
             }
@@ -1354,7 +1361,10 @@ where
             // without being replaced.
             if verify_existing(existing).is_ok() {
                 staging.remove_contents_recursive()?;
-                if !parent.remove_empty_child_if_same(&staging_name, &staging)? {
+                if !parent
+                    .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!(
                         "unused external realization staging directory remained non-empty"
                     );
@@ -1364,7 +1374,10 @@ where
             match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
                     directory.remove_contents_recursive()?;
-                    if !parent.remove_empty_child_if_same(&mount_name, directory)? {
+                    if !parent
+                        .remove_empty_child_if_same(&mount_name, directory)
+                        .map(|receipt| receipt.is_some())?
+                    {
                         anyhow::bail!(
                             "private external realization destination remained non-empty: {}",
                             parent.path().join(&mount_name).display()
@@ -1399,7 +1412,10 @@ where
                     );
                 }
                 published = true;
-                if !parent.remove_empty_child_if_same(&staging_name, &staging)? {
+                if !parent
+                    .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("file realization staging directory remained non-empty");
                 }
             }
@@ -1408,7 +1424,9 @@ where
     })();
     if result.is_err() && !published {
         let _ = staging.remove_contents_recursive();
-        let _ = parent.remove_empty_child_if_same(&staging_name, &staging);
+        let _ = parent
+            .remove_empty_child_if_same(&staging_name, &staging)
+            .map(|receipt| receipt.is_some());
     }
     result
 }

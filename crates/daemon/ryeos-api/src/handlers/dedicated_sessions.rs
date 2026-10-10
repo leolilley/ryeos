@@ -9118,14 +9118,14 @@ fn validate_candidate_evaluation_payload(
             definition_ref,
             effective_definition_digest,
         } => {
-            let graph: ryeos_graph_definition::GraphResult = serde_json::from_value(value)
+            let graph: ryeos_runtime::graph_result::GraphResult = serde_json::from_value(value)
                 .map_err(|error| {
                     HandlerError::BadRequest(format!("invalid Graph evaluator result: {error}"))
                 })?;
             if graph.definition_ref != definition_ref
                 || graph.effective_definition_digest != effective_definition_digest
                 || !graph.success
-                || graph.status != ryeos_graph_definition::GraphRunStatus::Completed
+                || graph.status != ryeos_runtime::graph_result::GraphRunStatus::Completed
                 || graph.errors_suppressed.unwrap_or(0) != 0
                 || graph
                     .errors

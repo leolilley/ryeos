@@ -59,6 +59,7 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         summary: "Initialize RyeOS with an interactive first-contact ceremony",
         category: "lifecycle",
     },
+    #[cfg(feature = "model-provider-setup")]
     LocalCommandDescriptor {
         tokens: &["setup"],
         summary: "Configure a verified model provider and default model",
@@ -172,6 +173,7 @@ pub async fn try_dispatch(
                 .map_err(map_local_err)?;
             Ok(true)
         }
+        #[cfg(feature = "model-provider-setup")]
         ("setup", _) => {
             run_setup_command(&argv[1..], console)
                 .await
@@ -273,6 +275,14 @@ struct NodeHostSetupArgs {
     /// association for the current account and node.
     #[arg(long)]
     confirm: bool,
+    /// Finite enclosing memory ceiling for the node and its worker scopes.
+    #[arg(long)]
+    node_memory_bytes: u64,
+
+    /// Finite enclosing task ceiling for the node and its worker scopes.
+    #[arg(long)]
+    node_processes: u32,
+
 }
 
 fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) -> Result<()> {
@@ -282,6 +292,11 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
     if !args.confirm {
         anyhow::bail!("host setup requires --confirm");
     }
+    let node_resources = lillux::ProcessScopeResourceLimits {
+        maximum_memory_bytes: args.node_memory_bytes,
+        maximum_processes: args.node_processes,
+    };
+    node_resources.validate().map_err(anyhow::Error::msg)?;
     let existing = ryeos_node::NodeConfig::load_local(args.app_root)?;
     ryeos_node::require_initialized(&existing.app_root)?;
     let config = ryeos_node::supervision::configure_host_endpoints(
@@ -301,6 +316,8 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
         config.app_root.into_os_string(),
         "--controller-account-json".into(),
         serde_json::to_string(&account)?.into(),
+        "--node-resources-json".into(),
+        serde_json::to_string(&node_resources)?.into(),
     ];
     lillux::run_as_administrator(&daemon, &arguments)
         .with_context(|| format!("run administrator host setup through {}", daemon.display()))?;
@@ -346,7 +363,7 @@ impl NodePolicyGenerationResetArgs {
         if !self.confirm {
             anyhow::bail!("replacing the complete node-policy generation requires --confirm");
         }
-        ryeos_app::node_policy::generation::validate_init_profile_name(&self.node_profile)
+        ryeos_node_runtime::node_policy::generation::validate_init_profile_name(&self.node_profile)
             .context("validate node init profile name")
     }
 }
@@ -359,12 +376,11 @@ fn run_node_policy_generation_reset_command(
         return Ok(());
     };
     args.validate()?;
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node location for policy-generation reset")?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node location for policy-generation reset")?;
     let report = ryeos_node::run_init(&ryeos_node::InitOptions {
         app_root: config.app_root,
         bind: None,
@@ -423,18 +439,17 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let Some(args) = parse_or_render_help::<NodePolicyApplyArgs>(argv, console)? else {
         return Ok(());
     };
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node location for policy apply")?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node location for policy apply")?;
     let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("node policy apply requires the daemon to be stopped")?;
 
-    let table = ryeos_app::node_policy::NodePolicyTable::new();
+    let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
     table
         .get(&args.section)
         .with_context(|| format!("unknown node-policy section `{}`", args.section))?;
@@ -456,7 +471,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         .context("load node identity for policy apply")?;
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
         .context("load trust store for current node policies")?;
-    let update = ryeos_app::node_policy::generation::prepare_policy_member_replacement(
+    let update = ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
         &config.app_root,
         &trust_store,
         &table,
@@ -464,7 +479,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         body,
         &args.source,
     )?;
-    let policy_dir = ryeos_app::node_policy::generation::publish_policy_update(
+    let policy_dir = ryeos_node_runtime::node_policy::generation::publish_policy_update(
         &config.app_root,
         &update,
         &identity,
@@ -524,12 +539,11 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     if !args.confirm {
         anyhow::bail!("resetting predecessor replay indexes requires --confirm");
     }
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node configuration for replay-index reset")?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for replay-index reset")?;
     let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
@@ -537,8 +551,20 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     let path = config
         .runtime_state_dir()
         .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
-    let (db, report) = ryeos_state::OperationalDb::open_for_explicit_replay_reset(&path)
-        .with_context(|| format!("activate replay indexes in {}", path.display()))?;
+    let mut prepared = ryeos_state::OperationalDb::prepare_explicit_replay_reset(&path)
+        .with_context(|| format!("prepare replay indexes in {}", path.display()))?;
+    let (db, report) = loop {
+        _state_lock.ensure_protects_app_root(&config.app_root)?;
+        match prepared.activate().and_then(|_| prepared.take_activated()) {
+            Ok(activated) => break activated,
+            Err(error) => {
+                eprintln!(
+                    "replay-index reset retains its original database and stopped-node lock while retrying activation: {error:#}"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    };
     drop(db);
     if args.json {
         crate::tty::write_json(&serde_json::json!({
@@ -614,12 +640,11 @@ fn run_node_external_content_reset_command(
     if !args.dry_run && !args.confirm {
         anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
     }
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node configuration for external-content binding reset")?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for external-content binding reset")?;
     let bindings =
         ryeos_app::operator_external_content::discard_binding_heads_offline(&config, args.dry_run)?;
     if args.json {
@@ -668,12 +693,11 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     if !args.confirm {
         anyhow::bail!("resetting every authorized key requires --confirm");
     }
-    let config =
-        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: args.app_root,
-            ..Default::default()
-        })
-        .context("load local node configuration for authorization reset")?;
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for authorization reset")?;
     let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
@@ -681,9 +705,8 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
 
     let node = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for authorization reset")?;
-    let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
-            .context("load operator identity for authorization reset")?;
+    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
+        .context("load operator identity for authorization reset")?;
     let parent = config
         .authorized_keys_dir
         .parent()
@@ -908,6 +931,19 @@ fn run_execution_history_reset_command(
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
+    #[cfg(feature = "scheduling")]
+    let scheduler_reset = ryeos_scheduler_service::SchedulerHistoryReset::new();
+    #[cfg(feature = "scheduling")]
+    let scheduler_participant: Option<
+        &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
+    > = Some(
+        &scheduler_reset
+            as &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
+    );
+    #[cfg(not(feature = "scheduling"))]
+    let scheduler_participant: Option<
+        &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
+    > = None;
     let report = match progress.as_mut() {
         Some(progress) => {
             let mut observer =
@@ -916,10 +952,14 @@ fn run_execution_history_reset_command(
                 };
             ryeos_app::execution_history_reset::run_execution_history_reset_with_progress(
                 &options,
+                scheduler_participant,
                 &mut observer,
             )
         }
-        None => ryeos_app::execution_history_reset::run_execution_history_reset(&options),
+        None => ryeos_app::execution_history_reset::run_execution_history_reset(
+            &options,
+            scheduler_participant,
+        ),
     }
     .context("offline execution-history reset failed")?;
     if args.json {
@@ -1230,6 +1270,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
 
 // ── ryeos setup ────────────────────────────────────────────────────
 
+#[cfg(feature = "model-provider-setup")]
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos setup",
@@ -1242,6 +1283,7 @@ struct SetupArgs {
     app_root: Option<PathBuf>,
 }
 
+#[cfg(feature = "model-provider-setup")]
 async fn run_setup_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_or_render_help::<SetupArgs>(argv, console)? else {
         return Ok(());
@@ -1686,7 +1728,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // 5. Verified node config + per-bundle doctor. Requires init; degrades to
     //    n/a rather than piling failures onto an uninitialized node.
     if initialized {
-        let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&config.app_root)
+        let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&config.app_root)
             .map_err(|error| error.to_string());
         let snapshot = match &isolation {
             Ok(runtime) => crate::node_descriptors::load_verified_snapshot_with_trust(
@@ -1837,7 +1879,7 @@ fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolic
     use ryeos_core_tools::actions::doctor::{NA, OK};
     use ryeos_engine::isolation::IsolationMode;
 
-    let runtime = ryeos_app::engine_init::load_locked_registered_isolation(app_root)?;
+    let runtime = ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)?;
     let inspection = runtime.inspection();
     let enforced = runtime.mode() == IsolationMode::Enforce;
     let open_files_status = match (enforced, inspection.limits.open_files) {

@@ -93,6 +93,8 @@ pub enum DaemonCommand {
         app_root: PathBuf,
         #[arg(long)]
         controller_account_json: String,
+        #[arg(long)]
+        node_resources_json: String,
     },
     /// Root-only installer transaction bridge. It owns the shared package
     /// namespace lock; it is neither node configuration nor worker authority.

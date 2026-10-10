@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use lillux::{InheritedReadonlyDocument, PinnedDirectory, PinnedDirectoryIdentity};
 use serde::{Deserialize, Serialize};
 
-pub const HOST_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 1;
+pub const HOST_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 2;
 pub const HOST_RUNTIME_AUTHORITY_FD_ENV: &str = "RYEOS_HOST_RUNTIME_AUTHORITY_FD";
 const MAX_HOST_RUNTIME_DOCUMENT_BYTES: u64 = 64 * 1024;
 
@@ -24,6 +24,7 @@ pub struct HostRuntimeBinding {
     pub app_root_identity: PinnedDirectoryIdentity,
     pub node_fingerprint: String,
     pub account: lillux::ControllerAccount,
+    pub node_resources: lillux::ProcessScopeResourceLimits,
     pub process_scopes: lillux::ProcessScopeConfiguration,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_lifecycle: Option<lillux::OciLifecycleGeneration>,
@@ -37,13 +38,17 @@ impl HostRuntimeBinding {
         observed_app_root: &PinnedDirectory,
         runtime_app_root: PathBuf,
         account: lillux::ControllerAccount,
+        node_resources: lillux::ProcessScopeResourceLimits,
         process_scopes: lillux::ProcessScopeConfiguration,
         oci_lifecycle: lillux::OciLifecycleGeneration,
     ) -> Result<Self> {
         account.validate().map_err(anyhow::Error::msg)?;
+        node_resources.validate().map_err(anyhow::Error::msg)?;
         account.require_directory_owner(observed_app_root)?;
         process_scopes.validate().map_err(anyhow::Error::msg)?;
         oci_lifecycle.validate().map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(node_resources == oci_lifecycle.node_resources(),
+            "host runtime node envelope differs from OCI generation");
         process_scopes
             .require_oci_generation_as_administrator(&account, &oci_lifecycle)
             .map_err(anyhow::Error::msg)?;
@@ -65,6 +70,7 @@ impl HostRuntimeBinding {
             app_root_identity: observed_app_root.identity()?,
             node_fingerprint: identity.verified_fingerprint()?,
             account,
+            node_resources,
             process_scopes,
             oci_lifecycle: Some(oci_lifecycle),
         })
@@ -74,6 +80,7 @@ impl HostRuntimeBinding {
         app_root: &PinnedDirectory,
         node_fingerprint: String,
         account: lillux::ControllerAccount,
+        node_resources: lillux::ProcessScopeResourceLimits,
         process_scopes: lillux::ProcessScopeConfiguration,
     ) -> Result<Self> {
         let binding = Self {
@@ -82,6 +89,7 @@ impl HostRuntimeBinding {
             app_root_identity: app_root.identity()?,
             node_fingerprint,
             account,
+            node_resources,
             process_scopes,
             oci_lifecycle: None,
         };
@@ -124,6 +132,12 @@ impl HostRuntimeBinding {
             bail!("host runtime has a wrong epoch or app root");
         }
         self.account.validate().map_err(anyhow::Error::msg)?;
+        self.node_resources.validate().map_err(anyhow::Error::msg)?;
+        if let Some(lifecycle) = &self.oci_lifecycle {
+            lifecycle.validate().map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(self.node_resources == lifecycle.node_resources(),
+                "host runtime node envelope differs from OCI generation");
+        }
         self.process_scopes.validate().map_err(anyhow::Error::msg)?;
         if !lillux::valid_hash(&self.node_fingerprint) {
             bail!("host runtime has an invalid node public identity");
@@ -153,10 +167,11 @@ impl HostRuntimeBinding {
         app_root: &PinnedDirectory,
         node_fingerprint: String,
         account: lillux::ControllerAccount,
+        node_resources: lillux::ProcessScopeResourceLimits,
         process_scopes: lillux::ProcessScopeConfiguration,
         oci_lifecycle: lillux::OciLifecycleGeneration,
     ) -> Result<Self> {
-        let mut binding = Self::capture(app_root, node_fingerprint, account, process_scopes)?;
+        let mut binding = Self::capture(app_root, node_fingerprint, account, node_resources, process_scopes)?;
         binding.oci_lifecycle = Some(oci_lifecycle);
         binding.validate_as_administrator(app_root.path())?;
         Ok(binding)
@@ -289,6 +304,7 @@ pub fn exec_external_controller(
             .process_scopes
             .exec_prepared_oci_controller_with_inherited_document(
                 &binding.account,
+                binding.node_resources,
                 lifecycle,
                 &executable,
                 &arguments,
@@ -302,6 +318,7 @@ pub fn exec_external_controller(
             .process_scopes
             .exec_controller_with_inherited_document(
                 &binding.account,
+                binding.node_resources,
                 &executable,
                 &arguments,
                 &app_root,
@@ -326,6 +343,7 @@ mod tests {
             "app_root_identity": {"containing_device": 1, "inode": 2},
             "node_fingerprint": "a".repeat(64),
             "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+            "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},
             "process_scopes": {
                 "version": 3,
                 "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
@@ -367,6 +385,28 @@ mod tests {
         assert_eq!(first.identity_digest().unwrap().len(), "sha256:".len() + 64);
     }
 
+    #[test]
+    fn node_envelope_is_required_closed_and_part_of_authority_identity() {
+        let original = binding_value();
+        let first: HostRuntimeBinding = serde_json::from_value(original.clone()).unwrap();
+        let mut absent = original.clone();
+        absent.as_object_mut().unwrap().remove("node_resources");
+        assert!(serde_json::from_value::<HostRuntimeBinding>(absent).is_err());
+        let mut unknown = original.clone();
+        unknown["node_resources"]["ambient_allowance"] = true.into();
+        assert!(serde_json::from_value::<HostRuntimeBinding>(unknown).is_err());
+        let mut changed = original;
+        changed["node_resources"]["maximum_memory_bytes"] = 536870912_u64.into();
+        let changed: HostRuntimeBinding = serde_json::from_value(changed).unwrap();
+        assert_ne!(first.identity_digest().unwrap(), changed.identity_digest().unwrap());
+        let mut no_capacity = first.node_resources;
+        no_capacity.maximum_memory_bytes = 0;
+        assert!(no_capacity.validate().is_err());
+        no_capacity = first.node_resources;
+        no_capacity.maximum_processes = 0;
+        assert!(no_capacity.validate().is_err());
+    }
+
     #[cfg(unix)]
     fn binding_for_directory(path: &Path, uid: u32, gid: u32) -> HostRuntimeBinding {
         let directory = PinnedDirectory::open(path).unwrap().unwrap();
@@ -376,6 +416,7 @@ mod tests {
             "app_root_identity": directory.identity().unwrap(),
             "node_fingerprint": "a".repeat(64),
             "account": {"implementation": "unix", "uid": uid, "gid": gid},
+            "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},
             "process_scopes": {
                 "version": 3,
                 "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}

@@ -539,7 +539,7 @@ fn attestation_sync_entry(attestation: &AdmissionAttestationRemoteRecord) -> Res
 pub(crate) fn append_admitted_supplemental_entry(
     payload: &mut ExportPayload,
     entry: SyncEntry,
-    limits: &ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
 ) -> Result<()> {
     if let Some(existing) = payload
         .entries
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn supplemental_object_size_limit_precedes_json_materialization() {
-        let limits = ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits {
+        let limits = ryeos_node_runtime::node_policy::sections::object_closure::AdmittedObjectTransferLimits {
             max_roots: 1,
             max_objects: 2,
             max_blobs: 2,

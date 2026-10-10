@@ -173,6 +173,38 @@ pub(crate) struct AttachedProcessGuard {
     settled: bool,
 }
 
+/// Keep the actual caller's durable attachment untouched unless Lillux's
+/// consuming release owner proves both the child/wrapper and selected scope
+/// cleanup. PID/group absence and diagnostic text do not establish that proof.
+trait CallbackReleaseTestimony {
+    fn cleanup_is_settled(&self) -> bool;
+}
+impl CallbackReleaseTestimony for lillux::exec::AttachmentReleaseError {
+    fn cleanup_is_settled(&self) -> bool {
+        lillux::exec::AttachmentReleaseError::cleanup_is_settled(self)
+    }
+}
+
+fn callback_release_failure<E>(
+    error: E,
+    settle: impl FnOnce() -> Result<()>,
+) -> anyhow::Error
+where
+    E: CallbackReleaseTestimony + std::error::Error + Send + Sync + 'static,
+{
+    if !error.cleanup_is_settled() {
+        return anyhow::Error::new(error)
+            .context("callback subprocess release cleanup is unproved; retaining authority");
+    }
+    match settle() {
+        Ok(()) => anyhow::Error::new(error)
+            .context("release callback subprocess after durable attachment"),
+        Err(settlement) => anyhow::Error::new(error).context(format!(
+            "release failed; exact attachment retained: {settlement:#}"
+        )),
+    }
+}
+
 impl AttachedProcessGuard {
     pub(crate) fn new(
         state: &AppState,
@@ -424,20 +456,59 @@ pub(crate) fn run_spawned_lillux_attached(
     }
     let spawned = match spawned.release_after_attachment() {
         Ok(spawned) => spawned,
-        Err(error) => {
-            // Lillux's release error retains a completed cleanup contract; we
-            // additionally verify group absence before clearing durable state.
-            let settlement = attachment.settle_after_reap();
-            return Err(match settlement {
-                Ok(()) => anyhow::Error::new(error)
-                    .context("release callback subprocess after durable attachment"),
-                Err(settlement) => anyhow::Error::new(error).context(format!(
-                    "release failed; exact attachment retained: {settlement:#}"
-                )),
-            });
-        }
+        Err(error) => return Err(callback_release_failure(error, || attachment.settle_after_reap())),
     };
     let result = spawned.wait();
     attachment.settle_after_reap()?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod release_failure_controls {
+    use super::callback_release_failure;
+    use lillux::exec::SubprocessResult;
+
+    #[derive(Debug)]
+    struct UnprovedRelease {
+        result: SubprocessResult,
+    }
+    impl std::fmt::Display for UnprovedRelease {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.result.stderr)
+        }
+    }
+    impl std::error::Error for UnprovedRelease {}
+    impl super::CallbackReleaseTestimony for UnprovedRelease {
+        fn cleanup_is_settled(&self) -> bool { false }
+    }
+
+    #[test]
+    fn absent_target_without_wrapper_and_scope_cleanup_proof_keeps_attachment() {
+        let error = UnprovedRelease {
+            result: SubprocessResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "target absent; wrapper/scope disposition unresolved".into(),
+                exit_code: -1,
+                duration_ms: 0.0,
+                pid: 0,
+                timed_out: false,
+                launcher_refusal: None,
+                aborted_before_attachment: None,
+                output_limit_exceeded: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+        };
+        assert_eq!(error.result.pid, 0);
+        assert!(error.result.aborted_before_attachment.is_none());
+        let mut settlement_called = false;
+        let reported = callback_release_failure(error, || {
+            settlement_called = true;
+            Ok(())
+        });
+        assert!(!settlement_called, "unproved physical cleanup must not clear durable attachment");
+        assert!(reported.downcast_ref::<UnprovedRelease>().is_some());
+        assert!(reported.to_string().contains("cleanup is unproved"));
+    }
 }

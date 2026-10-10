@@ -28,12 +28,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use ryeos_app::node_policy::sections::maintenance::{
-    NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy,
-};
-use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::node_document;
+use ryeos_app::state::AppState;
+use ryeos_scheduler_contract::{NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy};
 
 /// Exact ownership discriminator written into generated schedule specs.
 /// Both fields must match before reconciliation may mutate or remove a spec.
@@ -247,7 +245,7 @@ fn scan_schedule_files(
             .file_stem()
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| anyhow::anyhow!("schedule filename must be UTF-8"))?;
-        ryeos_scheduler::crontab::validate_schedule_id(schedule_id)?;
+        ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
         by_id.entry(schedule_id.to_string()).or_default().push(path);
     }
     Ok(by_id)
@@ -498,7 +496,8 @@ mod tests {
         .unwrap();
     }
 
-    const POLICY: &str = r#"schema: 1
+    const POLICY: &str = r#"schema: 4
+offline_reset: null
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
@@ -751,7 +750,8 @@ schedules:
         write_operator_schedule(&node_dir, &id, "operator-job");
 
         let empty = NodeMaintenancePolicy {
-            schema: 1,
+            schema: 4,
+            offline_reset: None,
             schedules: Vec::new(),
         };
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();

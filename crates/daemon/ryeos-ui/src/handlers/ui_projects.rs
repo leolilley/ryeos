@@ -395,7 +395,7 @@ pub async fn handle_projects_open(
     }
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
     )?;
     let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let attachment = ui.browser_sessions.publish_attachment(
@@ -564,7 +564,7 @@ pub async fn handle_particular_view_set_resume(
         }
         let policy = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
             )?;
         let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
         let retained = ui.browser_sessions.publish_attachment(
@@ -899,9 +899,8 @@ fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
     if let Some(attachment) = crate::seat_auth::compiled_ui_attachment() {
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
-        )?;
+        let operator =
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
         if attachment.compiled_binding.binding.principal_id != operator.principal_id() {
             return Err(HandlerError::Forbidden(
                 "UI session has no retained local-operator store authority".into(),

@@ -1933,6 +1933,7 @@ mod tests {
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
     use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
+    use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::{NewThreadRecord, StateStore};
@@ -1940,7 +1941,6 @@ mod tests {
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
     use ryeos_app::write_barrier::WriteBarrier;
-    use ryeos_node_runtime::identity::NodeIdentity;
     use std::sync::Arc;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -2326,7 +2326,7 @@ mod tests {
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
-                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 )]),
             ),
@@ -2336,9 +2336,6 @@ mod tests {
             )),
             command_registry: test_command_registry,
             authorizer: test_auth,
-            scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(
                 ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                     patterns: Vec::new(),

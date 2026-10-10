@@ -50,10 +50,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
     )?;
     let limits = policy.admit(
-        ryeos_app::node_policy::sections::object_closure::RequestedObjectTransferLimits {
+        ryeos_node_runtime::node_policy::sections::object_closure::RequestedObjectTransferLimits {
             max_objects: req.max_objects,
             max_blobs: req.max_blobs,
             max_object_bytes: req.max_object_bytes,

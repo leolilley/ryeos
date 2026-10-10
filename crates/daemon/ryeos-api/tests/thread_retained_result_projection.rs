@@ -151,10 +151,10 @@ async fn projected_result_hash_drift_does_not_override_the_exact_thread_snapshot
     state
         .state_store
         .with_state_db(|db| {
-            db.projection().connection().execute(
+            db.projection().with_sql(|connection| Ok(connection.execute(
                 "UPDATE threads SET result_project_snapshot_hash = ?1 WHERE thread_id = ?2",
                 ["f".repeat(64), "T-retained-result".to_owned()],
-            )?;
+            )?))?;
             Ok(())
         })
         .unwrap();

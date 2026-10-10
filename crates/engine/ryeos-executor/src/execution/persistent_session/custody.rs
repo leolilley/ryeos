@@ -54,7 +54,7 @@ impl PreparedTrustedSessionCustody {
         let session = retained_session_protocol(&state.engine, &capsule)?;
         let node = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
         )?;
         let cleanup_agreement =
             admit_session_resource_cleanup_contract(node.resource_authority.as_ref(), &session)?
@@ -206,9 +206,11 @@ impl PreparedTrustedSessionCustody {
         if let Some(source) = &self.source {
             owners.push(Box::new(Arc::clone(source)));
         }
+        // Retention-only lifelines must be Sync; the Mutex wrapper owns `self`
+        // unchanged until the retained set is dropped.
         if let Err(error) = original_start.retain_before_contact(owners) {
             let retention = original_start
-                .retain_before_contact(vec![Box::new(self)])
+                .retain_before_contact(vec![Box::new(std::sync::Mutex::new(self))])
                 .err();
             return Err(error.context(format!(
                 "same original custody retained on refusal: {retention:?}"
@@ -255,7 +257,7 @@ impl PreparedTrustedSessionCustody {
             Ok(original) => original,
             Err(error) => {
                 let retention = original_start
-                    .retain_before_contact(vec![Box::new(self)])
+                    .retain_before_contact(vec![Box::new(std::sync::Mutex::new(self))])
                     .err();
                 return Err(error.context(format!(
                     "same original custody retained on validation refusal: {retention:?}"
@@ -286,7 +288,7 @@ impl PreparedTrustedSessionCustody {
             Ok(roots) => roots,
             Err(error) => {
                 let retention = original_start
-                    .retain_before_contact(vec![Box::new(self)])
+                    .retain_before_contact(vec![Box::new(std::sync::Mutex::new(self))])
                     .err();
                 return Err(error.context(format!(
                     "same original custody retained on GPU root projection refusal: {retention:?}"

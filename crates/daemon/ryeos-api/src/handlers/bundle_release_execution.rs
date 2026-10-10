@@ -529,7 +529,7 @@ pub(crate) async fn execute_pinned_graph(
         let maximum_bytes = state
             .node_policy
             .require::<
-                ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+                ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
             >()?
             .limits
             .max_total_bytes;
@@ -756,7 +756,7 @@ pub(crate) async fn execute_protected_qualification(
 
     let maximum_bytes = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
         .limits
         .max_total_bytes;
     compose_pinned_release_consumer(
@@ -1111,9 +1111,7 @@ mod tests {
     async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
         use base64::Engine as _;
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_node_runtime::identity::{
-            AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy,
-        };
+        use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 

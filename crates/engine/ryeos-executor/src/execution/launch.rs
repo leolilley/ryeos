@@ -2128,6 +2128,7 @@ impl QuarantinedExecutorEntry {
                 })?;
                 if !executors
                     .remove_empty_child_if_same(OsStr::new(&name), &directory)
+                    .map(|receipt| receipt.is_some())
                     .map_err(|error| MaterializationError::MaterializationFailed {
                         executor_ref: executor_ref.to_string(),
                         detail: format!("failed to remove executor quarantine {name}: {error}"),
@@ -2228,7 +2229,10 @@ fn remove_staging_directory(
     staging: &lillux::secure_fs::PinnedDirectory,
 ) -> anyhow::Result<()> {
     staging.remove_contents_recursive()?;
-    if !executors.remove_empty_child_if_same(OsStr::new(staging_name), staging)? {
+    if !executors
+        .remove_empty_child_if_same(OsStr::new(staging_name), staging)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!("executor staging directory remained non-empty");
     }
     Ok(())

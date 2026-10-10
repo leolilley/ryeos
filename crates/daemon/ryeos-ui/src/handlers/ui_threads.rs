@@ -585,12 +585,10 @@ mod tests {
     fn thread_meta_requires_the_current_node_signature() {
         let directory = tempfile::tempdir().unwrap();
         let current =
-            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem"))
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node.pem")).unwrap();
+        let predecessor =
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("old-node.pem"))
                 .unwrap();
-        let predecessor = ryeos_node_runtime::identity::NodeIdentity::create(
-            &directory.path().join("old-node.pem"),
-        )
-        .unwrap();
         let body = serde_json::json!({"thread_id":"T-signed"}).to_string();
         let signed = lillux::signature::sign_content(&body, predecessor.signing_key(), "#", None);
         assert_eq!(

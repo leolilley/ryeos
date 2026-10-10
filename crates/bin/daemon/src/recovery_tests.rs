@@ -791,7 +791,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         external_provider_configurations: Arc::new(Default::default()),
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: Arc::new(
-            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+            ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                 ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
             )]),
         ),
@@ -800,9 +800,6 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         ),
         authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-        scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
-        scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-        scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
             ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                 patterns: Vec::new(),

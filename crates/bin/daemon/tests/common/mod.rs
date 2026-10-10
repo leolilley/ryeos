@@ -393,32 +393,20 @@ pub fn selected_projection_path(app_root: &Path) -> anyhow::Result<PathBuf> {
     Ok(runtime_state_dir.join(generation.projection_file))
 }
 
-/// Path to the built `ryeos` CLI binary, which lives in the same `target/<profile>/`
-/// directory as `ryeosd`. We build it on demand if it's not present, since
-/// Cargo only auto-builds bins from the same package as the integration test.
+/// Path to the explicitly prepared `ryeos` CLI binary beside `ryeosd`.
+///
+/// The validation queue builds this artifact with its declared source, lock,
+/// target and feature selection before allocating the integration test. A test
+/// must not start another Cargo process or infer freshness from file presence.
 pub fn ryeos_binary() -> PathBuf {
     let candidate = ryeosd_binary()
         .parent()
         .expect("ryeosd binary has parent dir")
         .join("ryeos");
 
-    // Always ask Cargo to build once per test process. Cargo no-ops
-    // when fresh; this guarantees the subprocess CLI matches the
-    // current source rather than a stale pre-v0.4.0 artifact left
-    // over from an earlier build. (See PLAN-V0.4.0-CLI-INTEGRATION-401-FIX.md.)
-    static BUILD_RYEOS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    BUILD_RYEOS.get_or_init(|| {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let status = std::process::Command::new(&cargo)
-            .args(["build", "-p", "ryeos-cli", "--bin", "ryeos"])
-            .status()
-            .expect("failed to invoke `cargo build -p ryeos-cli`");
-        assert!(status.success(), "cargo build -p ryeos-cli failed");
-    });
-
     assert!(
-        candidate.exists(),
-        "ryeos binary not found at {} after cargo build",
+        candidate.is_file(),
+        "prepared ryeos CLI is unavailable at {}; explicitly build the selected CLI artifact in the validation queue before running this integration test",
         candidate.display()
     );
     candidate
@@ -448,7 +436,17 @@ pub fn workspace_core_dir() -> PathBuf {
 /// state below the registered bundle and make that state appear to be
 /// publisher-authored bundle content.
 pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
-    ensure_bundles_fresh();
+    require_bundles_prepared(&["core"])
+        .expect("Core test bundle must be explicitly prepared before daemon tests");
+    copy_core_to_temp_from_prepared()
+}
+
+fn copy_core_to_temp_prepared(bundle_names: &[&str]) -> anyhow::Result<(TempDir, PathBuf)> {
+    require_bundles_prepared(bundle_names)?;
+    Ok(copy_core_to_temp_from_prepared())
+}
+
+fn copy_core_to_temp_from_prepared() -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir for isolated app root");
     let app_root = tmp.path().join("app-root");
     let src = workspace_core_dir();
@@ -457,83 +455,100 @@ pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
     (tmp, app_root)
 }
 
-/// Ensure published bundle artifacts under `bundles/{core,standard}/`
-/// reflect the current source tree. If any tracked source file is newer
-/// than the standard bundle's published manifest ref, re-run
-/// `scripts/populate-bundles.sh` to rebuild release binaries, restage
-/// them, and re-sign + republish both bundles.
-///
-/// This guards against the silent stale-artifact failure mode that
-/// otherwise bites every E2E that resolves runtimes through bundle CAS:
-/// touch a runtime crate, forget to republish, watch tests fail with
-/// confusing config / verification errors. Runs at most once per test
-/// process via [`std::sync::OnceLock`].
-///
-/// Set `RYEOS_TEST_SKIP_BUNDLE_REFRESH=1` to opt out (e.g. in CI where
-/// the bundles were already published in an earlier step).
-pub fn ensure_bundles_fresh() {
-    use std::sync::OnceLock;
-    static GUARD: OnceLock<()> = OnceLock::new();
-    GUARD.get_or_init(|| {
-        if std::env::var("RYEOS_TEST_SKIP_BUNDLE_REFRESH").as_deref() == Ok("1") {
-            return;
-        }
-        let root = workspace_root();
-
-        // Cross-process lock: under `cargo test --workspace`, multiple
-        // test binaries race to check/refresh bundles. Use an flock-style
-        // lock file under a repo-stable temp directory so only one process
-        // refreshes at a time without requiring target/ to exist.
-        let lock_dir = root.join(".tmp").join("locks");
-        std::fs::create_dir_all(&lock_dir).expect("create bundle refresh lock dir");
-        let lock_path = lock_dir.join("bundle-refresh.lock");
-        let _lock = std::fs::File::create(&lock_path)
-            .expect("create bundle refresh lock file");
-        // Block until we have exclusive access.
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = _lock.as_raw_fd();
-            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-            assert!(ret == 0, "flock on bundle refresh lock failed");
-        }
-
-        // Re-check staleness inside the lock — another process may have
-        // already refreshed while we waited.
-        // Publication rewrites this ref only after the standard bundle's
-        // manifest closure has been committed. Do not use a source item's
-        // embedded signature timestamp here: unchanged signed YAML remains
-        // byte-for-byte stable across publication, which made every later test
-        // incorrectly treat a freshly published bundle as stale.
-        let representative = root.join("bundles/standard/.ai/refs/bundles/manifest");
-        let publish_time = representative
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        let needs_refresh = match publish_time {
-            None => true,
-            Some(m) => bundle_inputs_newer_than(&root, m),
-        };
-        if !needs_refresh {
-            return;
-        }
-        eprintln!("[ryeosd-tests] bundle artifacts stale — running populate-bundles.sh");
-        let key = root.join(".dev-keys/PUBLISHER_DEV.pem");
-        let status = std::process::Command::new("bash")
-            .arg(root.join("scripts/populate-bundles.sh"))
-            .arg("--key").arg(&key)
-            .arg("--owner").arg("RyeOS Development")
-            .arg("--all")
-            .current_dir(&root)
-            .status()
-            .expect("failed to invoke scripts/populate-bundles.sh");
-        assert!(
-            status.success(),
-            "populate-bundles.sh failed (exit {status}); fix the build or set RYEOS_TEST_SKIP_BUNDLE_REFRESH=1",
+/// Require prebuilt, published bundle inputs without rebuilding or signing.
+/// Selected E2E controls use this gate so tests never invoke the development
+/// publisher key implicitly.
+pub fn require_bundles_prepared(bundle_names: &[&str]) -> anyhow::Result<()> {
+    let root = workspace_root();
+    for name in bundle_names {
+        let manifest_ref = root
+            .join("bundles")
+            .join(name)
+            .join(".ai/refs/bundles/manifest");
+        let ref_metadata = std::fs::symlink_metadata(&manifest_ref)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "prepared {name} bundle manifest ref is unavailable at {}; prepare the selected bundle set before running this E2E: {error}",
+                    manifest_ref.display()
+                )
+            })?;
+        anyhow::ensure!(
+            ref_metadata.file_type().is_file(),
+            "prepared {name} bundle manifest ref must be a regular non-symlink file at {}",
+            manifest_ref.display()
         );
-        // Lock released when _lock is dropped at end of scope.
-    });
+        let published = ref_metadata.modified()?;
+        let bundle_root = root.join("bundles").join(name);
+        for relative in [".ai/manifest.source.yaml", ".ai/manifest.yaml"] {
+            let path = bundle_root.join(relative);
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                anyhow::anyhow!(
+                    "prepared {name} bundle is missing required file {}; prepare the selected bundle set: {error}",
+                    path.display()
+                )
+            })?;
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "prepared {name} bundle file must be a regular non-symlink file at {}",
+                path.display()
+            );
+        }
+        if *name == "core" {
+            let bin_root = bundle_root.join(".ai/bin");
+            let has_core_tools = std::fs::read_dir(&bin_root)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "prepared Core tools are missing at {}; prepare the selected bundle set: {error}",
+                        bin_root.display()
+                    )
+                })?
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().join("ryeos-core-tools").is_file());
+            anyhow::ensure!(
+                has_core_tools,
+                "prepared Core bundle has no ryeos-core-tools binary under {}; prepare the selected bundle set",
+                bin_root.display()
+            );
+        }
+        anyhow::ensure!(
+            !bundle_inputs_newer_than(&root, published)
+                && !bundle_tree_has_newer(&bundle_root, published)?,
+            "prepared {name} bundle artifacts are stale; prepare the selected bundle set before running this E2E"
+        );
+    }
+    Ok(())
 }
+
+fn bundle_tree_has_newer(path: &Path, published: std::time::SystemTime) -> anyhow::Result<bool> {
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| anyhow::anyhow!("inspect prepared bundle {}: {error}", path.display()))?
+    {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "prepared bundle contains a symlink at {}; refusing stale-artifact check",
+                entry_path.display()
+            );
+        }
+        if file_type.is_dir() {
+            if bundle_tree_has_newer(&entry_path, published)? {
+                return Ok(true);
+            }
+        } else if entry
+            .metadata()?
+            .modified()
+            .is_ok_and(|modified| modified > published)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Bundle validation is read-only: test harnesses require prepared artifacts and never
+/// rebuild, sign, or publish workspace bundles implicitly.
 
 /// Walk the source roots that affect bundle binary contents and return
 /// `true` if a workspace manifest or production crate source has an mtime
@@ -650,6 +665,14 @@ pub struct DaemonHarness {
     pub node_key: Option<SigningKey>,
 }
 
+#[derive(Clone, Copy)]
+enum FastBundleSelection {
+    PreparedCoreOnly,
+    PreparedCoreScheduling,
+    PreparedStandard,
+    PreparedFull,
+}
+
 impl DaemonHarness {
     /// Retain the disposable node and its exact bundle/user inputs for diagnosis
     /// if an accepted operation fails or observation times out. The daemon is
@@ -703,7 +726,11 @@ impl DaemonHarness {
         // `repair_daemon_local` invariants pass. The fixture is
         // intentionally pre-applied rather than relying on (now-gone)
         // daemon auto-init for operator artifacts.
-        let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
+        let fixture = fast_fixture::populate_initialized_state_with_profile(
+            &app_root,
+            user_space.path(),
+            fast_fixture::FastFixtureProfile::Core,
+        )?;
         fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
 
         pre_init(&app_root, user_space.path())?;
@@ -786,10 +813,42 @@ impl DaemonHarness {
     /// items (directives, routes, providers, …) with
     /// `fixture.publisher`.
     pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
-        Self::start_fast_with(
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedStandard,
             |state_path, _user_space, fixture| {
-                fast_fixture::register_standard_bundle(state_path, fixture)
+                fast_fixture::register_standard_composition(state_path, fixture)
             },
+            |_| {},
+        )
+        .await
+    }
+
+    /// Start an authenticated Core+Scheduling daemon from already prepared
+    /// bundle artifacts. This path never rebuilds or signs workspace bundles.
+    pub async fn start_fast_core_scheduling() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedCoreScheduling,
+            |state_path, _user_space, fixture| {
+                fast_fixture::register_scheduling_bundle(state_path, fixture)
+            },
+            |_| {},
+        )
+        .await
+    }
+
+    /// Start an authenticated Core-only daemon from already prepared bundle
+    /// artifacts. This path never rebuilds or signs workspace bundles.
+    pub async fn start_fast_core_only_prepared() -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedCoreOnly,
+            |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
         .await
@@ -813,7 +872,14 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_identities(None, None, plant, tweak).await
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedFull,
+            plant,
+            tweak,
+        )
+        .await
     }
 
     /// Like [`start_fast_with`], but initializes the daemon with an explicit
@@ -828,7 +894,14 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_identities(Some(node_key), None, plant, tweak).await
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            None,
+            FastBundleSelection::PreparedFull,
+            plant,
+            tweak,
+        )
+        .await
     }
 
     /// Cross-site fixture with distinct node and operator identities. This is
@@ -844,13 +917,20 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_identities(Some(node_key), Some(user_key), plant, tweak)
-            .await
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            Some(user_key),
+            FastBundleSelection::PreparedFull,
+            plant,
+            tweak,
+        )
+        .await
     }
 
     async fn start_fast_with_optional_identities<S, F>(
         node_key: Option<SigningKey>,
         user_key: Option<SigningKey>,
+        bundle_selection: FastBundleSelection,
         plant: S,
         tweak: F,
     ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
@@ -862,33 +942,69 @@ impl DaemonHarness {
         let user_space = tempfile::tempdir()?;
 
         // Copy core bundle to temp so fast fixture writes don't pollute workspace.
-        let (core_bundle_tmp, state_path) = copy_core_to_temp();
+        let (core_bundle_tmp, state_path) = match bundle_selection {
+            FastBundleSelection::PreparedCoreOnly => copy_core_to_temp_prepared(&["core"])?,
+            FastBundleSelection::PreparedCoreScheduling => {
+                copy_core_to_temp_prepared(&["core", "scheduling"])?
+            }
+            FastBundleSelection::PreparedStandard => {
+                copy_core_to_temp_prepared(&["core", "scheduling", "standard"])?
+            }
+            FastBundleSelection::PreparedFull => copy_core_to_temp_prepared(
+                fast_fixture::FastFixtureProfile::Full
+                    .exact_bundles()
+                    .expect("Full profile has an exact bundle inventory"),
+            )?,
+        };
 
+        let selected_profile = match bundle_selection {
+            FastBundleSelection::PreparedCoreOnly => fast_fixture::FastFixtureProfile::Core,
+            FastBundleSelection::PreparedCoreScheduling => {
+                fast_fixture::FastFixtureProfile::CoreScheduling
+            }
+            FastBundleSelection::PreparedStandard => fast_fixture::FastFixtureProfile::Standard,
+            FastBundleSelection::PreparedFull => fast_fixture::FastFixtureProfile::Full,
+        };
         let fixture = match (node_key, user_key) {
             (Some(node_key), Some(user_key)) => {
-                fast_fixture::populate_initialized_state_with_identities(
+                fast_fixture::populate_initialized_state_with_profile_and_identities(
                     &state_path,
                     user_space.path(),
                     node_key,
                     user_key,
+                    selected_profile,
                 )?
             }
-            (Some(node_key), None) => fast_fixture::populate_initialized_state_with_node_key(
+            (Some(node_key), None) => {
+                fast_fixture::populate_initialized_state_with_profile_and_identities(
+                    &state_path,
+                    user_space.path(),
+                    node_key,
+                    fast_fixture::user_signing_key(),
+                    selected_profile,
+                )?
+            }
+            (None, None) => fast_fixture::populate_initialized_state_with_profile_and_identities(
                 &state_path,
                 user_space.path(),
-                node_key,
+                fast_fixture::node_signing_key(),
+                fast_fixture::user_signing_key(),
+                selected_profile,
             )?,
-            (None, None) => {
-                fast_fixture::populate_initialized_state(&state_path, user_space.path())?
-            }
             (None, Some(_)) => unreachable!("explicit operator identity requires a node identity"),
         };
         // The harness copies `bundles/core` to `state_path`. Register it
-        // so `bootstrap::verify_initialized` sees at least one bundle. Tests
-        // that need additional bundles call `register_standard_bundle` from
-        // their `plant` hook.
+        // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
+        if matches!(bundle_selection, FastBundleSelection::PreparedFull) {
+            fast_fixture::register_full_composition(&state_path, &fixture)?;
+        }
         plant(&state_path, user_space.path(), &fixture)?;
+        fast_fixture::validate_profile_bundle_records(
+            &state_path,
+            &fixture,
+            selected_profile,
+        )?;
         fast_fixture::seal_initialized_state(&state_path)?;
 
         // Authorize the user key (wildcard scope) so `post_execute` can sign
@@ -1494,9 +1610,13 @@ impl StandaloneHarness {
     pub fn new_initialized() -> anyhow::Result<Self> {
         let user_space = tempfile::tempdir()?;
         let (core_tmp, app_root) = copy_core_to_temp();
-        let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
+        let fixture = fast_fixture::populate_initialized_state_with_profile(
+            &app_root,
+            user_space.path(),
+            fast_fixture::FastFixtureProfile::Standard,
+        )?;
         fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
-        fast_fixture::register_standard_bundle(&app_root, &fixture)?;
+        fast_fixture::register_standard_composition(&app_root, &fixture)?;
         fast_fixture::seal_initialized_state(&app_root)?;
 
         let uds_path = app_root.join("ryeosd.sock");
@@ -1563,21 +1683,31 @@ pub async fn run_service_standalone(
 ) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
     // Use the fast fixture to set up a fully initialized state with bundles.
     let (core_tmp, state_path) = copy_core_to_temp();
-    let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
+    let fixture = fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        fast_fixture::FastFixtureProfile::Standard,
+    )?;
     fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-    fast_fixture::register_standard_bundle(&state_path, &fixture)?;
+    fast_fixture::register_standard_composition(&state_path, &fixture)?;
     fast_fixture::seal_initialized_state(&state_path)?;
     drop(ryeos_app::runtime_db::RuntimeDb::open(
         &state_path.join(".ai/state/runtime.sqlite3"),
     )?);
     let runtime_state_dir = state_path.join(".ai/state");
+    let scheduler_runtime = std::sync::Arc::new(
+        lillux::PinnedDirectory::open(&runtime_state_dir)?
+            .context("scheduler fixture runtime directory is absent")?,
+    );
     let scheduler_db =
-        ryeos_scheduler::db::SchedulerDb::open(&runtime_state_dir.join("scheduler.sqlite3"))?;
+        ryeos_scheduler::db::SchedulerDb::open_bound(std::sync::Arc::clone(&scheduler_runtime))
+            .map_err(anyhow::Error::new)?;
+    scheduler_db.require_runtime(&scheduler_runtime)?;
     ryeos_scheduler::projection::rebuild_fires_from_dir(
         &runtime_state_dir.join("schedules"),
         &scheduler_db,
     )?;
-    drop(scheduler_db);
+    scheduler_db.close().map_err(anyhow::Error::new)?;
 
     let mut cmd = ryeosd_command();
     cmd.arg("--app-root")

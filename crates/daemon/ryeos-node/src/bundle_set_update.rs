@@ -132,14 +132,14 @@ pub fn load_current_consumer_publication_policy(
     let config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config_root)
         .context("load pinned consumer trust store")?;
-    let table = ryeos_app::node_policy::NodePolicyTable::new();
+    let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
     let generation =
-        ryeos_app::node_policy::generation::load_policy_generation(app_root, &trust_store, &table)
+        ryeos_node_runtime::node_policy::generation::load_policy_generation(app_root, &trust_store, &table)
             .context("load current signed node-policy generation")?;
     if generation.digest() != completion.policy_generation_digest {
         bail!("consumer policy generation differs from verified init completion");
     }
-    let snapshot = ryeos_app::node_policy::compile_generation(
+    let snapshot = ryeos_node_runtime::node_policy::compile_generation(
         app_root,
         &table,
         &generation,

@@ -3650,7 +3650,10 @@ fn remove_exact_workspace_root_if_present(root_path: &std::path::Path) -> Result
         return Ok(());
     };
     root.remove_contents_recursive()?;
-    if !parent.remove_empty_child_if_same(name, &root)? {
+    if !parent
+        .remove_empty_child_if_same(name, &root)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!("workspace root remained non-empty");
     }
     Ok(())

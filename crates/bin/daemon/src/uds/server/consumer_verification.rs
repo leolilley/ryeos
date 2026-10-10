@@ -43,7 +43,7 @@ pub(super) async fn inputs(
     // occurrence or executable permission can escape this blocking owner.
     tokio::task::spawn_blocking(move || {
         let limits = state.node_policy.require::<
-            ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy
         >()?.closure_limits()?;
         serde_json::to_value(
             ryeos_app::operator_external_content::product_qualification::consumer_verification_inputs_for_callback(
@@ -111,7 +111,7 @@ pub(super) async fn start(
     // even if the RPC waiter disappears; ambiguous attempts are not relaunched.
     tokio::task::spawn_blocking(move || {
         let limits = state.node_policy.require::<
-            ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy
         >()?.closure_limits()?;
         let prepared = ryeos_app::operator_external_content::product_qualification::prepare_retained_consumer_verifier_for_callback(
             &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
@@ -175,7 +175,7 @@ pub(super) async fn settle(
     // operation even if the RPC waiter disappears. A retry reconciles it.
     tokio::task::spawn_blocking(move || {
         let limits = state.node_policy.require::<
-            ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy
         >()?.closure_limits()?;
         serde_json::to_value(ryeos_app::operator_runtime_snapshot::terminate_consumer_qualification_occurrence_for_callback(
             &state, &token, &request.coordinate, &request.qualification_operation_id, limits,
@@ -215,7 +215,7 @@ pub(super) async fn observe(
     tokio::task::spawn_blocking(move || {
         let limits = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         if let Some(selection) = &request.transcript_chunk {
             return serde_json::to_value(

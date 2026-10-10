@@ -1728,7 +1728,7 @@ async fn adopt_authorized(
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         let transfer_policy = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
             .map_err(internal)?;
         if u64::try_from(payload.total_bytes).map_err(internal)?
             > transfer_policy
@@ -3293,9 +3293,7 @@ fn returning_local_operator_anchor(
     chain_root_id: &str,
     source_chain_head_hash: &str,
 ) -> Result<Option<String>> {
-    if admitted.principal_class
-        != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
-    {
+    if admitted.principal_class != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient {
         return Ok(None);
     }
     state
@@ -4166,7 +4164,7 @@ async fn prepare_after_staging(
     drop(guard);
     let transfer_policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
     let admission_limits = ryeos_state::object_closure::ObjectClosureLimits {
         max_objects: transfer_policy.max_objects,
         max_blobs: transfer_policy.max_blobs,
@@ -4699,13 +4697,7 @@ fn source_project_path_from_payload(
         bail!("transfer launch capsule content address changed");
     }
     let value: Value = serde_json::from_slice(&entry.data)?;
-    if lillux::canonical_json_bounded(
-        &value,
-        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
-    )?
-    .as_slice()
-        != entry.data
-    {
+    if lillux::canonical_json_bounded(&value, ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)?.as_slice() != entry.data {
         bail!("transfer launch capsule content identity changed");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
