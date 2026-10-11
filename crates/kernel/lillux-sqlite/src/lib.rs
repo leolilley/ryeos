@@ -923,8 +923,12 @@ impl RetainedOriginalWitnessFile {
         );
         #[cfg(target_os = "linux")]
         {
-            self.original
-                .with_file(|file| binding::read_unbound_regular(file, maximum))
+            // The publisher retains a writable descriptor; the guarded read
+            // takes a path-only pin of the same inode and reopens it itself.
+            self.original.with_file(|file| {
+                let pin = lillux::path_pin_open_regular_file(file)?;
+                binding::read_unbound_regular(&pin, maximum)
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {

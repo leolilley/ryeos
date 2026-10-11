@@ -31,32 +31,79 @@ pub fn prepare_operational_schema_reference(
 pub type RetainTerminal<'a> = &'a dyn Fn(OriginalNativeConnectionTerminal)
     -> std::result::Result<(), (OriginalNativeConnectionTerminal, anyhow::Error)>;
 
+/// One owner kept alive by a refusal, with the name of its type.
+pub type CarriedOwner = Box<dyn std::any::Any + Send + Sync>;
+
 /// An error that keeps every refused owner alive until the error itself ends,
-/// so no native owner is dropped on a refusal path.
+/// so no native owner is dropped on a refusal path. Carriers never nest:
+/// every helper in this module flattens a carried error into one carrier, so
+/// the owners listed here are all the owners the refusal holds.
 pub struct CarriedOwners {
     error: anyhow::Error,
-    owners: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    owners: Vec<(&'static str, CarriedOwner)>,
 }
 impl CarriedOwners {
-    /// The carried owners, in the order they were refused.
-    pub fn into_owners(self) -> Vec<Box<dyn std::any::Any + Send + Sync>> {
-        self.owners
+    /// The refusal and every carried owner, in the order they were refused.
+    /// The error is returned too: dropping it is the caller's decision.
+    pub fn into_parts(self) -> (anyhow::Error, Vec<CarriedOwner>) {
+        (self.error, self.owners.into_iter().map(|(_, owner)| owner).collect())
+    }
+    /// Type names of the carried owners, in the order they were refused.
+    pub fn owner_names(&self) -> Vec<&'static str> {
+        self.owners.iter().map(|(name, _)| *name).collect()
+    }
+    /// Split `error` into its refusal and the owners it carries, if any.
+    fn split(error: anyhow::Error) -> (anyhow::Error, Vec<(&'static str, CarriedOwner)>) {
+        match error.downcast::<CarriedOwners>() {
+            Ok(carried) => (carried.error, carried.owners),
+            Err(error) => (error, Vec::new()),
+        }
+    }
+    fn join(error: anyhow::Error, owners: Vec<(&'static str, CarriedOwner)>) -> anyhow::Error {
+        if owners.is_empty() {
+            return error;
+        }
+        anyhow::Error::new(CarriedOwners { error, owners })
     }
 }
 impl std::fmt::Debug for CarriedOwners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CarriedOwners").field("error", &self.error).field("owners", &self.owners.len()).finish()
+        f.debug_struct("CarriedOwners").field("error", &self.error).field("owners", &self.owner_names()).finish()
     }
 }
 impl std::fmt::Display for CarriedOwners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#} ({} refused owner(s) retained)", self.error, self.owners.len())
+        write!(f, "{:#} ({} refused owner(s) retained: {})", self.error, self.owners.len(), self.owner_names().join(", "))
     }
 }
 impl std::error::Error for CarriedOwners {}
 
-fn carry(error: anyhow::Error, owner: impl std::any::Any + Send + Sync) -> anyhow::Error {
-    anyhow::Error::new(CarriedOwners { error, owners: vec![Box::new(owner)] })
+/// Carry `owner` with `error`, merging any owners `error` already carries.
+fn carry<T: std::any::Any + Send + Sync>(error: anyhow::Error, owner: T) -> anyhow::Error {
+    let (error, mut owners) = CarriedOwners::split(error);
+    owners.push((std::any::type_name::<T>(), Box::new(owner)));
+    CarriedOwners::join(error, owners)
+}
+
+/// Merge the owners carried by `carried` into `error`. What remains of
+/// `carried` after its owners are taken may still hold typed owners, so it is
+/// carried too rather than dropped.
+fn carry_error(error: anyhow::Error, carried: anyhow::Error) -> anyhow::Error {
+    let (error, mut owners) = CarriedOwners::split(error);
+    let (residual, carried) = CarriedOwners::split(carried);
+    owners.extend(carried);
+    owners.push((std::any::type_name::<anyhow::Error>(), Box::new(residual)));
+    CarriedOwners::join(error, owners)
+}
+
+/// Add context to `error` while keeping any carrier at the top, so a later
+/// helper can still find and merge its owners.
+fn contextualize<C>(error: anyhow::Error, context: C) -> anyhow::Error
+where
+    C: std::fmt::Display + Send + Sync + 'static,
+{
+    let (error, owners) = CarriedOwners::split(error);
+    CarriedOwners::join(error.context(context), owners)
 }
 
 fn committed(report: &ReplayIndexResetReport) -> String {
@@ -112,7 +159,7 @@ pub unsafe fn activate_replay_indexes_offline(
         )),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err((terminal, refusal))) => Err(carry(
-            error.context(format!("schema reference terminal not retained: {refusal:#}")),
+            contextualize(error, format!("schema reference terminal not retained: {refusal:#}")),
             terminal,
         )),
     }
@@ -168,18 +215,21 @@ fn activate_with_reference(
                                 committed(&report)
                             )),
                         },
-                        Err(carried) => Err(carried.context(committed(&report))),
+                        Err(carried) => Err(contextualize(carried, committed(&report))),
                     },
-                    Err(failure) => Err(release_operational_failure(failure, retain)
-                        .context(format!("{}; Operational close refused", committed(&report)))),
+                    Err(failure) => Err(contextualize(
+                        release_operational_failure(failure, retain),
+                        format!("{}; Operational close refused", committed(&report)),
+                    )),
                 };
             }
             Err(error) => last = Some(error),
         }
     }
-    let error = last
-        .unwrap_or_else(|| anyhow::anyhow!("replay-index activation made no attempt"))
-        .context("replay-index activation refused; the epoch commit may have landed, and rerunning the reset reports Unchanged if it did");
+    let error = contextualize(
+        last.unwrap_or_else(|| anyhow::anyhow!("replay-index activation made no attempt")),
+        "replay-index activation refused; the epoch commit may have landed, and rerunning the reset reports Unchanged if it did",
+    );
     Err(close_prepared(prepared, factory, error, retain))
 }
 
@@ -198,15 +248,18 @@ fn close_prepared(
                 drop(closed);
                 error
             }
-            Err(carried) => carry(error.context(format!("closed Operational census refused: {carried:#}")), carried),
+            Err(carried) => carry_error(
+                contextualize(error, format!("closed Operational census refused: {carried:#}")),
+                carried,
+            ),
         },
         Err(close) => match close.downcast::<OriginalOperationalFailure>() {
             Ok(failure) => {
                 let released = release_operational_failure(failure, retain);
-                carry(error.context(format!("prepared Operational close refused: {released:#}")), released)
+                carry_error(contextualize(error, format!("prepared Operational close refused: {released:#}")), released)
             }
             // No owner: the preparation was already transferred.
-            Err(close) => error.context(format!("prepared Operational close refused: {close:#}")),
+            Err(close) => contextualize(error, format!("prepared Operational close refused: {close:#}")),
         },
     }
 }
@@ -246,7 +299,7 @@ fn release_operational_failure(failure: OriginalOperationalFailure, retain: Reta
                 drop(closed);
                 original
             }
-            Err(carried) => carried.context(original),
+            Err(carried) => contextualize(carried, original),
         },
         Err(failure) => anyhow::Error::new(failure).context(original),
     }
@@ -273,7 +326,18 @@ fn release_reference_failure(
                         (released, terminal),
                     ),
                 },
-                Ok(None) => original,
+                Ok(None) => {
+                    // Refused before any ticket: nothing joins the census.
+                    // Dropping `released` deliberately leaks its unused
+                    // transient inputs, and with them one Arc of the
+                    // destination authority. The offline host's destination
+                    // holds only a Weak to the factory, so the leak keeps
+                    // neither the factory nor its region alive and the
+                    // host's region seal is unaffected; it also carries no
+                    // descriptor, ticket or budget.
+                    drop(released);
+                    original
+                }
                 Err(refusal) => carry(
                     original.context(format!("released schema reference refused: {refusal:#}")),
                     released,
@@ -281,6 +345,31 @@ fn release_reference_failure(
             }
         }
         Err(failure) => anyhow::Error::new(failure).context(original),
+    }
+}
+
+#[cfg(test)]
+mod carried_tests {
+    use super::*;
+
+    #[test]
+    fn carriers_flatten_instead_of_nesting() {
+        let inner = carry(anyhow::anyhow!("first refusal"), 1u8);
+        let outer = carry(contextualize(inner, "outer context"), 2u16);
+        let merged = carry_error(anyhow::anyhow!("close refused"), outer);
+        let carried = merged.downcast::<CarriedOwners>().expect("one flat carrier");
+        assert_eq!(
+            carried.owner_names(),
+            vec!["u8", "u16", std::any::type_name::<anyhow::Error>()],
+            "every nested owner is listed at the top, with the residual refusal"
+        );
+        let (error, owners) = carried.into_parts();
+        assert_eq!(format!("{error:#}"), "close refused");
+        let residual = owners
+            .into_iter()
+            .find_map(|owner| owner.downcast::<anyhow::Error>().ok())
+            .expect("residual refusal carried");
+        assert_eq!(format!("{residual:#}"), "outer context: first refusal");
     }
 }
 
@@ -442,8 +531,9 @@ mod tests {
     /// Hand every terminal carried by a refusal back to the host census.
     fn recover_carried(host: &TestNativeHost, error: anyhow::Error) -> usize {
         let carried = error.downcast::<CarriedOwners>().expect("refusal carries its owners");
+        let (_error, owners) = carried.into_parts();
         let mut recovered = 0;
-        for owner in carried.into_owners() {
+        for owner in owners {
             let terminal = owner
                 .downcast::<OriginalNativeConnectionTerminal>()
                 .expect("carried owner is the refused terminal");

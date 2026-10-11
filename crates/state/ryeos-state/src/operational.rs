@@ -16,7 +16,7 @@ mod original;
 mod original_mutation;
 mod offline_replay;
 pub use offline_replay::{
-    CarriedOwners, RetainTerminal, activate_replay_indexes_offline, prepare_operational_schema_reference,
+    CarriedOwner, CarriedOwners, RetainTerminal, activate_replay_indexes_offline, prepare_operational_schema_reference,
 };
 mod live_native;
 pub use live_native::{LiveOperationalOpenFailure, LiveOperationalStartupRecoveryFailure, ReleasedLiveOperationalStartup, ReleasedLiveOperationalPhysicalCustody};

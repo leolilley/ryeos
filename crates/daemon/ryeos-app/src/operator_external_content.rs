@@ -30,33 +30,6 @@ mod retained_result;
 
 const BINDING_HEAD_NAMESPACE: &str = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
 
-/// Retire every predecessor external-content binding head while the node is
-/// stopped. Manifest-schema cuts change the binding coordinate itself; old
-/// active heads cannot remain roots under the new decoder and are never
-/// translated.
-pub fn discard_binding_heads_offline(
-    config: &ryeos_node_runtime::config::Config,
-    dry_run: bool,
-) -> anyhow::Result<usize> {
-    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(&ryeos_node_runtime::state_lock::default_lock_path(
-        &config.app_root,
-    ))
-    .context("external-content binding reset requires the daemon to be stopped")?;
-    let runtime_state_dir = config.runtime_state_dir();
-    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
-        .context("load node identity for external-content binding reset")?;
-    let mut trust = ryeos_state::refs::TrustStore::new();
-    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-    let state = ryeos_state::StateDb::open_for_projection_rebuild(
-        &runtime_state_dir,
-        std::sync::Arc::new(trust),
-    )
-    .context("open pinned state authority for external-content binding reset")?;
-    let authority = state.pinned_authority()?;
-    let guard = authority.acquire_exclusive_guard(!dry_run)?;
-    state.discard_external_content_binding_heads(&guard, dry_run)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportShape {

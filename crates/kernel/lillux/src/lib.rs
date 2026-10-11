@@ -120,6 +120,7 @@ pub use secure_fs::{
     matches_pinned_regular_file_identity, matches_regular_file_identity,
     normalized_portable_regular_mode, observe_open_file_identity, observe_open_regular_file,
     open_mount_entry_kind, open_pinned_regular_file_no_follow, path_owner_ids,
+    path_pin_open_regular_file,
     pin_canonical_mount_source,
     pinned_regular_file_identity, protected_system_write_roots, read_open_regular_file_bounded,
     read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,

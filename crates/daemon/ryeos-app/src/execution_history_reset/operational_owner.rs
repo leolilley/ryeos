@@ -23,6 +23,10 @@ pub(super) struct OfflineOperationalSlot {
     /// A refused schema reference after its same-owner close; its terminal,
     /// if one was issued, belongs to the census.
     released_reference: Option<ryeos_state::sqlite_schema::ReleasedNativeSchemaSqlReference>,
+    /// The phase failed before any native owner existed (input issuance or
+    /// root pinning refused). Nothing remains to close; the census counts
+    /// the phase complete and this error is kept as its record.
+    ownerless_failure: Option<anyhow::Error>,
 }
 impl std::fmt::Debug for OfflineOperationalSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -33,6 +37,7 @@ impl std::fmt::Debug for OfflineOperationalSlot {
             .field("closed", &self.closed.is_some())
             .field("reference", &self.reference.is_some())
             .field("released_reference", &self.released_reference.is_some())
+            .field("ownerless_failure", &self.ownerless_failure.is_some())
             .finish()
     }
 }
@@ -321,10 +326,13 @@ impl InspectionControllerCustody {
         let failure = match retained.downcast::<ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure>() {
             Ok(failure) => failure,
             Err(error) => {
+                // Neither an Operational nor a reference owner: the phase
+                // refused before acquiring anything native. Record it as
+                // owner-less so the census can complete without a terminal.
                 self.operational_slot(phase)
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .failure = Some(error);
+                    .ownerless_failure = Some(error);
                 return original;
             }
         };
@@ -415,7 +423,7 @@ impl InspectionControllerCustody {
                 "Operational native owner still retained; terminal census incomplete"
             );
             anyhow::ensure!(
-                !slot.issued || slot.closed.is_some(),
+                !slot.issued || slot.closed.is_some() || slot.ownerless_failure.is_some(),
                 "issued Operational native owner lacks actual close terminal"
             );
         }

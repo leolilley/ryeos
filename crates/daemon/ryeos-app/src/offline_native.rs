@@ -27,6 +27,9 @@ use std::time::Duration;
 /// Operation class of explicit replay-index activation.
 pub const REPLAY_INDEXES_CLASS: &str = "replay-indexes";
 
+/// Operation class of the explicit external-content binding cutover.
+pub const EXTERNAL_CONTENT_BINDINGS_CLASS: &str = "external-content-bindings";
+
 /// Load the complete node-signed policy generation, trusting only this
 /// node's operator signer, never installed publishers or applications.
 pub(crate) fn load_signed_maintenance_snapshot(
@@ -254,8 +257,161 @@ pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<R
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err((session, error))) => Err(retained_session(session, error)
             .context("replay indexes activated; offline native host release retained")),
-        (Err(original), Err((session, error))) => Err(retained_session(session, error).context(original)),
+        (Err(original), Err((session, error))) => {
+            let error = match original.downcast_ref::<ryeos_state::operational::CarriedOwners>() {
+                Some(carried) => {
+                    let names = carried.owner_names();
+                    error.context(format!(
+                        "offline native host release is blocked by {} carried owner(s) still alive in the activation refusal: {}",
+                        names.len(),
+                        names.join(", ")
+                    ))
+                }
+                None => error,
+            };
+            Err(retained_session(session, error).context(original))
+        }
     }
+}
+
+/// Completed external-content binding cutover (or its preview) and the
+/// released host's census.
+pub struct ExternalContentBindingReset {
+    pub bindings: usize,
+    pub census: OfflineNativeCensus,
+}
+
+/// Explicit stopped-node retirement of every external-content binding head.
+/// The caller holds the node StateLock; this pins and locks the runtime
+/// namespace, issues the `external-content-bindings` native session, opens
+/// the State authority roots with a transient projection on that session,
+/// retires (or, for `dry_run`, counts) the heads, closes State and releases
+/// the host.
+///
+/// The only SQLite this opens is the transient in-memory projection. The
+/// cutover itself unlinks signed head files and publishes the epoch file
+/// through pinned directories, each step idempotent on rerun, so nothing the
+/// native session funds outlives this process.
+pub fn reset_external_content_bindings(
+    config: &Config,
+    state_lock: &StateLock,
+    dry_run: bool,
+) -> Result<ExternalContentBindingReset> {
+    let runtime_dir = config.runtime_state_dir();
+    let runtime = Arc::new(
+        lillux::PinnedDirectory::open(&runtime_dir)?
+            .with_context(|| format!("runtime state is absent: {}", runtime_dir.display()))?,
+    );
+    let namespace = runtime
+        .lock_exclusive()
+        .context("lock runtime state namespace for external-content binding reset")?;
+    let identity = NodeIdentity::load(&config.node_signing_key_path)
+        .context("load node identity for external-content binding reset")?;
+    let mut trust = ryeos_state::refs::TrustStore::new();
+    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+    let trust = Arc::new(trust);
+    let session = OfflineNativeSession::open(
+        config,
+        &identity,
+        state_lock,
+        runtime.clone(),
+        &namespace,
+        EXTERNAL_CONTENT_BINDINGS_CLASS,
+    )?;
+    let discarded = (|| -> Result<usize> {
+        session.verify()?;
+        // SAFETY: the caller holds the node StateLock and this frame holds the
+        // runtime namespace lock for the whole call; the session host was
+        // funded under both and its destination revalidates them with the
+        // class windows on every native boundary.
+        let state = unsafe {
+            ryeos_state::StateDb::open_offline_native(
+                runtime.try_clone()?,
+                &namespace,
+                trust,
+                session.factory()?,
+                session.destination()?,
+            )
+        }
+        .context("open pinned State authority for external-content binding reset")?;
+        let discarded = (|| -> Result<usize> {
+            let authority = state.pinned_authority()?;
+            let guard = authority.acquire_exclusive_guard(!dry_run)?;
+            state.discard_external_content_binding_heads(&guard, dry_run)
+        })();
+        let terminal = match state.close_offline_native(session.factory()?) {
+            Ok(terminal) => terminal,
+            Err((state, error)) => {
+                let error = match discarded {
+                    Ok(bindings) => error.context(format!(
+                        "external-content binding reset {} {bindings} head(s); State close refused",
+                        if dry_run { "counted" } else { "retired" }
+                    )),
+                    Err(original) => error.context(original),
+                };
+                return Err(match state {
+                    Some(state) => carry_offline_owner(error, state),
+                    None => error,
+                });
+            }
+        };
+        match session.retain_terminal(terminal) {
+            Ok(()) => discarded,
+            Err((terminal, refusal)) => {
+                let error = match discarded {
+                    Ok(bindings) => refusal.context(format!(
+                        "external-content binding reset {} {bindings} head(s); projection terminal not retained",
+                        if dry_run { "counted" } else { "retired" }
+                    )),
+                    Err(original) => refusal.context(original),
+                };
+                Err(carry_offline_owner(error, terminal))
+            }
+        }
+    })();
+    match (discarded, session.finish()) {
+        (Ok(bindings), Ok(census)) => Ok(ExternalContentBindingReset { bindings, census }),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err((session, error))) => Err(retained_session(session, error)
+            .context("external-content binding reset done; offline native host release retained")),
+        (Err(original), Err((session, error))) => {
+            let error = match original.downcast_ref::<CarriedOfflineOwner>() {
+                Some(carried) => error.context(format!(
+                    "offline native host release is blocked by a carried owner still alive in the reset refusal: {}",
+                    carried.owner
+                )),
+                None => error,
+            };
+            Err(retained_session(session, error).context(original))
+        }
+    }
+}
+
+/// A refused native owner kept alive by its error until the process ends,
+/// never dropped mid-flight.
+struct CarriedOfflineOwner {
+    error: anyhow::Error,
+    owner: &'static str,
+    _owner: std::sync::Mutex<Box<dyn std::any::Any + Send>>,
+}
+impl std::fmt::Debug for CarriedOfflineOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CarriedOfflineOwner").field("error", &self.error).field("owner", &self.owner).finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for CarriedOfflineOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#} (refused owner retained: {})", self.error, self.owner)
+    }
+}
+impl std::error::Error for CarriedOfflineOwner {}
+
+fn carry_offline_owner<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
+    anyhow::Error::new(CarriedOfflineOwner {
+        error,
+        owner: std::any::type_name::<T>(),
+        _owner: std::sync::Mutex::new(Box::new(owner)),
+    })
 }
 
 /// Carry a session whose host could not be released inside the error, so

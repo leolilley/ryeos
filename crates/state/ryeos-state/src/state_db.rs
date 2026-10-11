@@ -3243,6 +3243,83 @@ impl StateDb {
         Ok(prepared.into_state(projection, None))
     }
 
+    /// Open established authority/recovery roots for an explicit stopped-node
+    /// maintenance operation, with the current-schema transient projection
+    /// on a ticket of the caller's native `factory`. Nothing is selected,
+    /// replayed or persisted; the operation works on the authority roots.
+    /// Close it with [`Self::close_offline_native`], which hands back the
+    /// projection's native terminal for the caller's census.
+    ///
+    /// # Safety
+    /// The caller must hold the exclusive stopped-node StateLock and the
+    /// runtime namespace lock `namespace` for the whole life of the store.
+    /// `factory` and `destination` must come from one native host the caller
+    /// funded under that same exclusion, and `destination` must revalidate
+    /// that exclusion on every native boundary.
+    pub unsafe fn open_offline_native(
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: &lillux::PinnedDirectoryLock,
+        trust_store: Arc<TrustStore>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+    ) -> anyhow::Result<Self> {
+        factory.require_original_process()?;
+        factory.require_runtime_binding(&runtime_state_directory)?;
+        let prepared = PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
+        // SAFETY: the caller's funded host issues this ticket under the
+        // exclusion this function's contract requires.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::StateTransient,
+                destination,
+            )?
+        };
+        let projection = ProjectionDb::open_original_transient(Arc::clone(factory), inputs)?;
+        Ok(prepared.into_state(projection, None))
+    }
+
+    /// Close a store opened by [`Self::open_offline_native`] and return its
+    /// projection's native terminal. A store that built or published
+    /// projection state is refused whole; a refused close keeps its native
+    /// owner inside the error.
+    pub fn close_offline_native(
+        self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> std::result::Result<lillux_sqlite::OriginalNativeConnectionTerminal, (Option<Self>, anyhow::Error)> {
+        if !self.original_projection_terminals.is_empty() || self.original_projection_context.is_some() {
+            return Err((Some(self), anyhow::anyhow!("offline native State carries projection build custody")));
+        }
+        let Self {
+            _runtime_state_directory,
+            _offline_namespace_lock,
+            _cas_directory,
+            _refs_directory,
+            _locators_directory,
+            _recovery_directory,
+            cas_root: _,
+            refs_root: _,
+            locators_root: _,
+            projection,
+            original_projection_terminals: _,
+            original_projection_context: _,
+            operational: _,
+            recovery: _,
+            trust_store: _,
+            head_cache: _,
+            projection_repair_sink: _,
+        } = self;
+        match projection.close_original(factory) {
+            Ok(closed) => {
+                let (outside, proof) = closed.into_outside_custody();
+                // A transient projection has no filesystem custody; only the
+                // closed native proof remains, and the caller's census takes it.
+                drop(outside);
+                Ok(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(proof))
+            }
+            Err(failure) => Err((None, anyhow::Error::new(failure).context("close offline native State projection"))),
+        }
+    }
+
     /// Actual live State opening under the same paid factory and host exclusion.
     /// Native destination admission is issued only after retaining State roots.
     /// # Safety

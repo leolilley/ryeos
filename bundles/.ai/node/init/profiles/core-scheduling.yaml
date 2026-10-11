@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-10T22:35:38Z:87ef4d5e53fd09e7688bcc15106aa7ff40faf66e38bca1161fcc1aa5ee88c173:HXR9l9I+1WLQsndCl+n3XdLawhD4S9hrk0f2x6PN4LfY1OiOfk4Z+ewgmHszBtr/sp9ANRsD9j8+1IhpSl0DCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-11T01:27:12Z:4be22aafadf552cc07c374319b1be84f1d12c915633db143edd11f7d34c38d7b:x8ZlZKQPVC3U2psTC8TjbyLJCWTiXWSYMD8iQjQxeng30C0qXN+uzI921yStqCKeN/oQtQdUoL1QbNsMj6R4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Source-only Core+scheduling profile; signing/admission/native qualification pending.
 schema: 1
 exact_bundles:
@@ -152,6 +152,13 @@ policies:
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
     # operation class. A class absent here is refused.
     offline_native:
+      external-content-bindings:
+        max_native_storage_bytes: 33554432
+        max_native_allocator_steps: 20000000
+        max_native_connections: 8
+        max_operation_millis: 300000
+        max_cleanup_millis: 60000
+        max_cleanup_steps: 400000
       replay-indexes:
         max_native_storage_bytes: 33554432
         max_native_allocator_steps: 20000000

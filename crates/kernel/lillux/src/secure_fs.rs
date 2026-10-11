@@ -799,6 +799,38 @@ pub fn same_open_file_identity(left: &File, right: &File) -> Result<bool> {
     Ok(left.device == right.device && left.inode == right.inode)
 }
 
+/// Pin the inode behind an already-open regular file as a fresh
+/// path-only descriptor. The pin grants no read or write access; the
+/// original descriptor is left untouched. The pin must name the same inode.
+pub fn path_pin_open_regular_file(file: &File) -> Result<File> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("path-only descriptor pins are available only on Linux");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let expected = observe_open_file_identity(file)?;
+        ensure!(file.metadata()?.is_file(), "path pin source is not a regular file");
+        let source = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("descriptor pin path")?;
+        // SAFETY: a valid NUL-terminated path; the returned descriptor is
+        // owned exactly once below.
+        let descriptor = unsafe { libc::open(source.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error()).context("pin open regular file as path-only");
+        }
+        // SAFETY: `descriptor` is a newly opened descriptor owned by nobody else.
+        let pin = unsafe { File::from_raw_fd(descriptor) };
+        let actual = observe_open_file_identity(&pin)?;
+        ensure!(
+            actual.device == expected.device && actual.inode == expected.inode,
+            "path pin names another inode"
+        );
+        Ok(pin)
+    }
+}
+
 /// Classify an already-open descriptor admitted as a mount source.
 pub fn open_mount_entry_kind(file: &File) -> Result<OpenMountEntryKind> {
     let metadata = file.metadata()?;

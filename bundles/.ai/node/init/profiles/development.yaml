@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-10T22:35:38Z:33728a812a737569d2d8e563ec48cd19bbbbc7f72e260031e84df69f52bdd49b:raGcA4M8BrOj7SPwOoK1RclwLiF2hq6Np4rCBLZCsOyLT0AOpb+UanviNB+Z1wLgmI3U2baCM783nZmxiQwmAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-11T01:27:12Z:0af8dddd633a5167daab29cbb34452725cdb8e793f3e704c650f9c67dbef1ca4:sVAdh0sBZg6MMAec8rhoCAEyQNTA7K8AsSkt9eKV69FxCgyD0UcRn9xMOnNyxJSgPHXkj5d1YAQGsn46Xu3IAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -216,6 +216,13 @@ policies:
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
     # operation class. A class absent here is refused.
     offline_native:
+      external-content-bindings:
+        max_native_storage_bytes: 33554432
+        max_native_allocator_steps: 20000000
+        max_native_connections: 8
+        max_operation_millis: 300000
+        max_cleanup_millis: 60000
+        max_cleanup_steps: 400000
       replay-indexes:
         max_native_storage_bytes: 33554432
         max_native_allocator_steps: 20000000

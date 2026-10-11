@@ -24,6 +24,7 @@ use crate::{
     OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority, OriginalNativeFactory,
     OriginalNativeFactoryFailure, OriginalNativeOutsideLeafEvidence,
     OriginalNativeProducerCellIndex, OriginalNativeProducerControl,
+    ReleasedOriginalNativeAcquisition,
     OriginalNativeProjectionLeaseAdmission, OriginalNativeTerminal,
     SqliteInspectionProductionControl, SqliteInspectionProductionKind,
     SqliteInspectionProductionPermit, SqliteInspectionProductionPublicationFailure,
@@ -200,6 +201,7 @@ impl OfflineNativeHost {
             issuer: OnceLock::new(),
             closed: self.closed.clone(),
             authority: self.authority.clone(),
+            ticketed: Mutex::new(Vec::new()),
         });
         self.admission = Some(admission.clone());
         self.authority.checkpoint(false)?;
@@ -322,13 +324,15 @@ impl OfflineNativeHost {
         self.authority.checkpoint(true)?;
         if let Some(factory) = self.factory.clone() {
             if self.backend.is_none() {
-                let terminals = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clone();
                 let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner).clone();
                 // The factory's own Ready acknowledgement selects the finish:
                 // initialization can refuse after Ready was published.
                 let finished = if factory.ready_acknowledged()? {
+                    let admission = self.admission.clone().context("offline admission absent")?;
+                    let released = admission.release_ticketed(&factory)?;
+                    self.terminals.lock().unwrap_or_else(PoisonError::into_inner).extend(released);
+                    let terminals = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clone();
                     if self.drained.is_none() {
-                        let admission = self.admission.clone().context("offline admission absent")?;
                         let cleanup: Arc<dyn OriginalNativeCleanupAuthority> = Arc::new(OfflineCleanup { admission });
                         // SAFETY: admission is closed above and never reopens;
                         // the cleanup authority rechecks producer quiescence
@@ -376,6 +380,9 @@ impl OfflineNativeHost {
         self.factory_failures.clear();
         drop(self.factory.take());
         drop(self.publication_failure.take());
+        if let Some(admission) = &self.admission {
+            admission.ticketed.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        }
         drop(self.admission.take());
         let authority = self.authority.clone();
         self.region.begin_close()?;
@@ -406,6 +413,21 @@ struct OfflineAdmission {
     issuer: OnceLock<OriginalNativeProducerCellIndex>,
     closed: Arc<AtomicBool>,
     authority: Arc<dyn OfflineNativeAuthority>,
+    /// Producer preparations refused after their ticket was debited. Each
+    /// keeps its cell until finish turns it into a released terminal.
+    ticketed: Mutex<Vec<OfflineTicketedPreparation>>,
+}
+
+/// A debited ticket whose producer never published: either its bind was
+/// refused, or its publication was. The cell, and the publication failure
+/// that owns it, stay here until the factory acknowledges the ticket unused.
+struct OfflineTicketedPreparation {
+    ticket: u32,
+    core: Option<OriginalNativeProducerControl>,
+    publication: Option<SqliteInspectionProductionPublicationFailure>,
+    callback: Option<Arc<dyn SqliteInspectionProductionControl>>,
+    terminal: Option<Arc<ReleasedOriginalNativeAcquisition>>,
+    recorded: bool,
 }
 
 impl OfflineAdmission {
@@ -422,15 +444,73 @@ impl OfflineAdmission {
             Err(error) => return Err(retire_unbound(core, error)),
         };
         if let Err(refusal) = core.bind_ticket(ticket) {
-            return Err(retire_unbound(core, refusal.into()));
+            // The ticket is debited: the census needs its terminal, so the
+            // cell stays with the admission until finish releases it.
+            self.retain_ticketed(OfflineTicketedPreparation {
+                ticket, core: Some(core), publication: None, callback: None, terminal: None, recorded: false,
+            });
+            anyhow::bail!("offline producer ticket {ticket} bind refused: {refusal}; retained for its released terminal");
         }
         // SAFETY: the bound cell and ticket come from this host's own region.
-        let permit = unsafe { SqliteInspectionProductionPermit::issued_from_region(kind, self.production_control(), core) }
-            .map_err(|failure| anyhow::Error::new(OfflinePublicationFailure {
-                refusal: failure.refusal,
-                _retained: failure,
-            }))?;
-        Ok((ticket, permit))
+        match unsafe { SqliteInspectionProductionPermit::issued_from_region(kind, self.production_control(), core) } {
+            Ok(permit) => Ok((ticket, permit)),
+            Err(failure) => {
+                let refusal = failure.refusal;
+                self.retain_ticketed(OfflineTicketedPreparation {
+                    ticket, core: None, publication: Some(failure), callback: None, terminal: None, recorded: false,
+                });
+                anyhow::bail!("offline producer ticket {ticket} publication refused: {refusal}; retained for its released terminal")
+            }
+        }
+    }
+
+    fn retain_ticketed(&self, preparation: OfflineTicketedPreparation) {
+        self.ticketed.lock().unwrap_or_else(PoisonError::into_inner).push(preparation);
+    }
+
+    /// Acknowledge every retained debited-but-unpublished ticket through the
+    /// factory and return the released terminals not yet recorded. A refusal
+    /// keeps every preparation, including completed ones, for a retry.
+    fn release_ticketed(&self, factory: &Arc<OriginalNativeFactory>) -> Result<Vec<OriginalNativeConnectionTerminal>> {
+        let mut retained = std::mem::take(&mut *self.ticketed.lock().unwrap_or_else(PoisonError::into_inner));
+        // No bookkeeping lock spans the native effects below.
+        let result = (|| -> Result<Vec<OriginalNativeConnectionTerminal>> {
+            for preparation in &mut retained {
+                if let Some(failure) = preparation.publication.take() {
+                    match failure.into_parts() {
+                        Ok((_, callback, core)) => {
+                            preparation.callback = Some(callback);
+                            preparation.core = Some(core);
+                        }
+                        Err(failure) => {
+                            preparation.publication = Some(failure);
+                            anyhow::bail!("offline publication custody transfer refused for ticket {}", preparation.ticket);
+                        }
+                    }
+                }
+                if preparation.terminal.is_none() {
+                    let core = preparation.core.as_ref().context("offline ticketed preparation cell absent")?;
+                    if core.observation()?.ticket == 0 {
+                        core.bind_ticket(preparation.ticket)?;
+                    }
+                    preparation.terminal = Some(factory.retire_unpublished_ticket(core)?);
+                }
+                if let Some(callback) = &preparation.callback {
+                    callback.complete()?;
+                }
+            }
+            let mut released = Vec::new();
+            for preparation in &mut retained {
+                if !preparation.recorded {
+                    let terminal = preparation.terminal.clone().context("offline released ticket terminal absent")?;
+                    released.push(OriginalNativeConnectionTerminal::Released(terminal));
+                    preparation.recorded = true;
+                }
+            }
+            Ok(released)
+        })();
+        self.ticketed.lock().unwrap_or_else(PoisonError::into_inner).extend(retained);
+        result
     }
 }
 
@@ -493,22 +573,6 @@ impl std::fmt::Display for OfflineProducerFailure {
 }
 impl std::error::Error for OfflineProducerFailure {}
 
-/// Retains a refused producer publication with its cell and callback.
-struct OfflinePublicationFailure {
-    refusal: crate::original_host_owner::FixedHostRefusal,
-    _retained: SqliteInspectionProductionPublicationFailure,
-}
-impl std::fmt::Debug for OfflinePublicationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OfflinePublicationFailure").field("refusal", &self.refusal).finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for OfflinePublicationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "offline producer publication retained: {}", self.refusal)
-    }
-}
-impl std::error::Error for OfflinePublicationFailure {}
 
 struct OfflineProductionControl {
     closed: Arc<AtomicBool>,
