@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-11T01:27:12Z:4836a2eac0df725ca8cd1fda95b275d6a3e33f04cf1d94bcdd20ec4bdecc8dff:KLYOI4sFUWVrnU2GK21O7hGYoh6lEW2TW3yRXFTnc4rW0xAxjYvQUcPaUs9wSu0VbEXDq1INqLmw1Ehq80lZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-11T11:48:46Z:d8377e9adba8c9ae6161a81ff2d0be07e7c5b8be91b82bf8b490f1fae50dac29:D1rNXyjZjIzdyYnnuyOO92wVoQ5R9HrjC3sV67QlBrT4EbsB7qsmq2eFhNtd/ffpqtIcuoXQI2YlY++QN7wWCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -177,7 +177,10 @@ policies:
       max_sql_vm_steps: 20000000
       max_memory_bytes: 67108864
       max_native_storage_bytes: 50331648
-      max_native_allocator_steps: 1048576
+      # Native SQL charges this budget as well as max_sql_vm_steps, so it must
+      # cover the whole SQL ceiling plus the host's allocation and cleanup
+      # quotes for the storage and connections here (about 1.6M together).
+      max_native_allocator_steps: 24000000
       max_native_connections: 64
       max_operation_millis: 300000
       max_cleanup_millis: 60000

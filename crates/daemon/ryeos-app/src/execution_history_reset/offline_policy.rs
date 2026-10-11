@@ -63,20 +63,6 @@ impl<'a> OfflineResetPolicyOwner<'a> {
         Ok(())
     }
 
-    /// Move every owned field while ending only the original borrowed lock
-    /// references. This token grants no mutation or disposal authority.
-    pub(super) fn into_original_outside(self) -> OriginalOfflinePolicyOutside {
-        OriginalOfflinePolicyOutside {
-            process: self.process,
-            app_root: std::mem::ManuallyDrop::new(Some(self.app_root)),
-            shared_root: std::mem::ManuallyDrop::new(None),
-            registration: None,
-            _snapshot: std::mem::ManuallyDrop::new(self.snapshot),
-            _signer_fingerprint: std::mem::ManuallyDrop::new(self.signer_fingerprint),
-            _db_target: std::mem::ManuallyDrop::new(self.db_target),
-        }
-    }
-
     /// Lifelines for copy work already issued under this authentic owner.
     /// The retained StateLockLease cannot issue stopped-node mutation authority.
     pub(super) fn retain_copy_inputs(
@@ -125,14 +111,4 @@ impl<'a> OfflineResetPolicyOwner<'a> {
         self.require_held()?;
         Ok(&self.signer_fingerprint)
     }
-}
-
-pub(super) struct OriginalOfflinePolicyOutside {
-    pub(super) process: u32,
-    pub(super) app_root: std::mem::ManuallyDrop<Option<lillux::PinnedDirectory>>,
-    pub(super) shared_root: std::mem::ManuallyDrop<Option<std::sync::Arc<lillux::PinnedDirectory>>>,
-    pub(super) registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
-    _snapshot: std::mem::ManuallyDrop<NodePolicySnapshot>,
-    _signer_fingerprint: std::mem::ManuallyDrop<String>,
-    _db_target: std::mem::ManuallyDrop<std::path::PathBuf>,
 }

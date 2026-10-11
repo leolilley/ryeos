@@ -138,19 +138,6 @@ mod controls {
 pub(super) fn disposition_name(operation_id: &str) -> String {
     format!("disposed.{operation_id}")
 }
-pub(super) fn terminal_name(operation_id: &str) -> String {
-    format!("terminal.{operation_id}")
-}
-
-pub(super) fn prepared_source_retirement_name(operation_id: &str) -> String {
-    format!("prepared.{operation_id}")
-}
-
-
-pub(super) fn account_settlement_intent_name(operation_id: &str) -> String {
-    format!("account-intent.{operation_id}")
-}
-
-pub(super) fn account_settlement_name(operation_id: &str) -> String {
-    format!("account-settled.{operation_id}")
+pub(super) fn released_name(operation_id: &str) -> String {
+    format!("released.{operation_id}")
 }

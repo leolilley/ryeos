@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-11T01:27:12Z:3133c77f4e0dce1fb7a2661e0be49811a8884759e3a942842b63ed6831885ba0:JtYKLiiOfTt8MrHgqM2ORRH/jnNgPEuHJA4N76QL/ZpSXlwRQ5sNrJqNmnPAn8l2DWk+aiGgRG7Hu2kSNZtbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-11T11:48:46Z:fb95ee07ecf14375e491451c8c11cfd02a5670b2e21d02d91ac1d858c91b03d3:O0rn6EmZLLcUoIFX5mM7fs3J5PPu6bM1pOWRQbzz6oZXL9zMG3nEXizeXYms8nXpLbydhB4xGJaylaSFgI39Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -277,7 +277,10 @@ policies:
       max_sql_vm_steps: 20000000
       max_memory_bytes: 67108864
       max_native_storage_bytes: 50331648
-      max_native_allocator_steps: 1048576
+      # Native SQL charges this budget as well as max_sql_vm_steps, so it must
+      # cover the whole SQL ceiling plus the host's allocation and cleanup
+      # quotes for the storage and connections here (about 1.6M together).
+      max_native_allocator_steps: 24000000
       max_native_connections: 64
       max_operation_millis: 300000
       max_cleanup_millis: 60000

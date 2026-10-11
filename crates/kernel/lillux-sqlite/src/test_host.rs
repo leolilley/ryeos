@@ -260,6 +260,21 @@ impl TestNativeHost {
         self.live().ticket_census().unwrap_or((u32::MAX, 0))
     }
 
+    /// Tear this host down and return its release: the finished backend's
+    /// plain facts and the region release fact.
+    pub fn release(mut self) -> crate::offline_host::OfflineNativeReleased {
+        let live = self.live.take().expect("live test host present");
+        let finished = live.finish();
+        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        match finished {
+            Ok(released) => released,
+            Err(retained) => {
+                let census = retain_leaked(retained);
+                panic!("TestNativeHost release leaked its arena: {census}");
+            }
+        }
+    }
+
     /// Tear down this arena and install a fresh one under the same serial
     /// guard, for suites that need more than one envelope of tickets.
     pub fn cycle(&mut self) {

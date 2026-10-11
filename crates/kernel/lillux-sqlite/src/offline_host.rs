@@ -30,6 +30,7 @@ use crate::{
     OriginalNativeProjectionLeaseAdmission, OriginalNativeTerminal,
     SqliteInspectionProductionControl, SqliteInspectionProductionKind,
     SqliteInspectionProductionPermit, SqliteInspectionProductionPublicationFailure,
+    CONTROL_STORAGE, MAX_NATIVE_CONNECTIONS,
 };
 use anyhow::{Context, Result, ensure};
 use lillux::PinnedDirectory;
@@ -62,6 +63,35 @@ pub fn offline_native_required_cleanup_steps(storage: u64, tickets: u32) -> Resu
     OriginalNativeFactory::required_cleanup_steps(storage, tickets)?
         .checked_add(OFFLINE_NATIVE_RELEASE_STEPS)
         .context("offline native cleanup quote overflow")
+}
+
+/// Arena block size of the native allocator.
+const NATIVE_ARENA_BLOCK_BYTES: u64 = 256;
+/// Worst-case allocator charge of one block's turnover: the request charge,
+/// the bounded bin probes, the larger-bin fallback and the free.
+const NATIVE_BLOCK_TURNOVER_STEPS: u64 = 1 + 8 + 1 + 1;
+/// Per-ticket service charges outside SQL: one lease scan (its scan bound,
+/// the ticket table and a fixed margin), two grouped shared-map reservations
+/// over the fixed map table, and the factory's own per-ticket bookkeeping.
+const NATIVE_TICKET_SERVICE_STEPS: u64 = (4096 + 64 + 16) + 2 * (64 + 1) + 8;
+
+/// Allocator steps a raw budget must fund beyond SQL opcodes and teardown
+/// for `storage` bytes and `tickets` connections: one complete turnover of
+/// every arena block at the worst-case per-request charge, plus each
+/// ticket's fixed service charges. It is a funding floor for a signed
+/// envelope, not a bound on how often SQLite reuses the arena; the envelope
+/// itself still bounds the work.
+pub fn offline_native_required_allocation_steps(storage: u64, tickets: u32) -> Result<u64> {
+    ensure!(
+        storage > CONTROL_STORAGE && tickets > 0 && tickets as usize <= MAX_NATIVE_CONNECTIONS,
+        "offline native allocation quote outside the arena's storage or ticket bounds"
+    );
+    // The arena maps at most half of the storage beyond its control block.
+    let blocks = (storage - CONTROL_STORAGE) / 2 / NATIVE_ARENA_BLOCK_BYTES;
+    blocks
+        .checked_mul(NATIVE_BLOCK_TURNOVER_STEPS)
+        .and_then(|steps| steps.checked_add(u64::from(tickets).checked_mul(NATIVE_TICKET_SERVICE_STEPS)?))
+        .context("offline native allocation quote overflow")
 }
 
 /// Plain facts of a host whose backend finished: the region's process,
@@ -771,6 +801,25 @@ impl OriginalNativeDestinationAuthority for OfflineDestination {
 mod tests {
     use super::*;
     use crate::test_host::TestNativeHost;
+
+    #[test]
+    fn allocation_quote_covers_one_arena_turnover_and_every_ticket() {
+        let storage = 50_331_648;
+        let blocks = (storage - CONTROL_STORAGE) / 2 / NATIVE_ARENA_BLOCK_BYTES;
+        assert_eq!(
+            offline_native_required_allocation_steps(storage, 64).unwrap(),
+            blocks * NATIVE_BLOCK_TURNOVER_STEPS + 64 * NATIVE_TICKET_SERVICE_STEPS
+        );
+        assert!(
+            offline_native_required_allocation_steps(storage, 2).unwrap()
+                < offline_native_required_allocation_steps(storage, 3).unwrap()
+        );
+        assert!(offline_native_required_allocation_steps(CONTROL_STORAGE, 1).is_err());
+        assert!(offline_native_required_allocation_steps(storage, 0).is_err());
+        assert!(
+            offline_native_required_allocation_steps(storage, MAX_NATIVE_CONNECTIONS as u32 + 1).is_err()
+        );
+    }
 
     #[test]
     fn released_ticket_requires_the_cell_to_carry_its_debited_ticket() {

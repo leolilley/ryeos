@@ -207,6 +207,42 @@ impl OfflineResetQuota {
                 "offline reset memory quota cannot hold native storage and bounded copy/hash buffers"
             );
         }
+        // Every native SQL opcode charges the host's native step budget as
+        // well as the SQL ceiling, so the native budget must exceed it.
+        if self.max_native_allocator_steps <= self.max_sql_vm_steps {
+            bail!(
+                "offline reset native allocator steps ({}) must exceed the SQL VM step ceiling ({}) that native SQL also charges",
+                self.max_native_allocator_steps,
+                self.max_sql_vm_steps
+            );
+        }
+        Ok(())
+    }
+
+    /// Check the native step budget against the bounds the native host owns.
+    /// Native SQL charges both the host's step budget and the SQL ceiling, so
+    /// the budget must cover the whole ceiling plus the host's allocation and
+    /// cleanup quotes for this quota's storage and connections.
+    pub fn validate_native(
+        &self,
+        required_allocation_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
+        required_cleanup_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        let allocation = required_allocation_steps(self.max_native_storage_bytes, self.max_native_connections)?;
+        let cleanup = required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
+        let required = self
+            .max_sql_vm_steps
+            .checked_add(allocation)
+            .and_then(|steps| steps.checked_add(cleanup))
+            .context("offline reset native step requirement overflow")?;
+        if self.max_native_allocator_steps < required {
+            bail!(
+                "offline reset native allocator steps ({}) cannot cover the SQL VM step ceiling ({}) plus the native allocation quote ({allocation}) and cleanup quote ({cleanup}); at least {required} are required",
+                self.max_native_allocator_steps,
+                self.max_sql_vm_steps
+            );
+        }
         Ok(())
     }
 }
@@ -353,7 +389,7 @@ mod tests {
             max_sql_vm_steps: 20000000,
             max_memory_bytes: 67108864,
             max_native_storage_bytes: 50331648,
-            max_native_allocator_steps: 1048576,
+            max_native_allocator_steps: 24000000,
             max_native_connections: 64,
             max_operation_millis: 300000,
             max_cleanup_millis: 60000,
@@ -446,6 +482,23 @@ mod tests {
         insufficient.max_operation_millis = u64::MAX / 1_000_000;
         insufficient.max_cleanup_millis = 60000;
         assert!(insufficient.validate().is_err());
+    }
+
+    #[test]
+    fn offline_reset_native_steps_cover_sql_allocation_and_cleanup() {
+        let mut undersized = quota();
+        undersized.max_native_allocator_steps = 1048576;
+        let error = undersized.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("SQL VM step ceiling"), "{error:#}");
+        let allocation = |_: u64, _: u32| Ok(1_000_000);
+        let cleanup = |_: u64, _: u32| Ok(200_000);
+        quota().validate_native(allocation, cleanup).unwrap();
+        let mut short = quota();
+        short.max_native_allocator_steps = short.max_sql_vm_steps + 1_200_000 - 1;
+        let error = short.validate_native(allocation, cleanup).unwrap_err();
+        assert!(format!("{error:#}").contains("at least 21200000"), "{error:#}");
+        short.max_native_allocator_steps += 1;
+        short.validate_native(allocation, cleanup).unwrap();
     }
 
     fn native_quota() -> OfflineNativeQuota {

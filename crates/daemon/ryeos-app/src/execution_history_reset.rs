@@ -1476,7 +1476,7 @@ impl InspectionControllerCustody {
         };
         settlement.disposition_record()?;
         settlement.dispose_witnesses()?;
-        settlement.prepare_terminal()?;
+        settlement.seal_disposition()?;
         Ok(settlement)
     }
 
@@ -2483,17 +2483,13 @@ fn run_execution_history_reset_owned(
     // namespace ownership remain in the State producer. These five real close
     // receipts cannot stand in for those other owners or financial settlement.
 
-    // Retain the native host authority's actual State lease, namespace and
-    // policy in post-ACK custody. Its host checkpoints now refuse
-    // access; ownership transfer alone is not physical closure or settlement.
-    let native_admission_lifelines = post_ack_finalization.transfer_native_admission_lifelines()?;
-    native_admission_lifelines.require_original(&post_ack_finalization)?;
-
-    let finalizer_master = post_ack_finalization.enter_finalizer_master()?;
-    finalizer_master.require_original(&post_ack_finalization)?;
+    // Outside custody begins: service and copy custody end, and the
+    // settlement admission checks and funds every later outside step.
+    post_ack_finalization.enter_outside_custody()?;
     // SAFETY: this actual ACKed State retains the same genuine producer.
-    // The remaining original ledger/reservation/policy/clock master charges
-    // the real preparation handoff; no service/native admission is renewed.
+    // The settlement admission's ledger, reservation, policy and clock
+    // checks charge the real preparation handoff; no service or native
+    // admission is renewed.
     unsafe { state_finalizer.transfer_preparation(&prepay_state_finalizer) }?;
     closed_state.require_original_finalizer(&state_finalizer)?;
     for index in 5..10 {
@@ -2549,32 +2545,17 @@ fn run_execution_history_reset_owned(
     post_ack_finalization.advance_state_destination_join()?;
     post_ack_finalization.register_state_shared_roots()?;
     post_ack_finalization.register_original_destination_and_inspection_roots()?;
-    post_ack_finalization.register_original_account_state_lock()?;
     // Actual State ACK and all mutation effects are retained above. End only
-    // borrowed mutation authority, preserving every policy/root/lock owner in
-    // the original outside controller before its first fallible registration.
+    // borrowed mutation authority; the policy owner, the StateLock and the
+    // claim's StateLock lease stay held until this function returns.
     reset_authority.phase = OfflineResetAuthorityPhase::PostAckCustody;
     drop(reset_authority);
-    let offline_policy = offline_policy.into_original_outside();
-    post_ack_finalization.retain_original_offline_parent_inputs(state_lock, offline_policy)?;
-    post_ack_finalization.register_original_offline_policy_root()?;
-    post_ack_finalization.register_original_primary_state_lock()?;
-    post_ack_finalization.register_original_reservation_removal_parent()?;
     inspection_custody.require_runtime_and_operational_roots_registered(&post_ack_finalization)?;
-    post_ack_finalization.publish_original_account_settlement_intent(&inspection_settlement)?;
-    // State's typed destination join closes its actual leaf census only after
-    // real consuming packet transfers, before physical inventory sealing.
 
-    // Lower SQL payloads, inspection and original account/lifeline owners
-    // still register below before inventory sealing; no partial census grants
-    // physical closure, native exclusion or durable account settlement.
-
-
-    // State ACK is not finalizer/reservation settlement. Until actual
-    // descriptor retirement and completion publication are connected, the
-    // unchanged full gate retains obligations and refuses a completed report.
+    // State ACK is not reservation release. Until the release tail is
+    // connected, the completion gate refuses a completed report.
     inspection_settlement.require_completed()
-        .context("original finalizer/reservation settlement remains incomplete after State acknowledgement")?;
+        .context("reservation release remains incomplete after State acknowledgement")?;
 
     let rebuilt = authoritative.rebuilt_projection.unwrap_or_default();
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
