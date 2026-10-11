@@ -180,6 +180,158 @@ impl ClaimRecord {
     }
 }
 
+/// A signed reservation left by a reset whose process is gone, read only so
+/// recovery can settle it. It funds, admits and authorizes nothing.
+pub(super) struct StaleReservation {
+    record: ClaimRecord,
+    sha256: String,
+}
+
+impl StaleReservation {
+    /// Authenticate one stale reservation as this node's current-schema
+    /// record.
+    pub(super) fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
+        Ok(Self { record: ClaimRecord::verified(bytes, identity)?, sha256: lillux::sha256_hex(bytes) })
+    }
+
+    pub(super) fn operation_id(&self) -> &str {
+        &self.record.operation_id
+    }
+
+    pub(super) fn claim_nonce(&self) -> &str {
+        &self.record.claim_nonce
+    }
+
+    /// SHA-256 of the exact signed reservation bytes.
+    pub(super) fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub(super) fn mode(&self) -> OriginalInspectionMode {
+        self.record.inspection.mode
+    }
+
+    /// The reservation must name these live roots. Its clock and policy are
+    /// not compared: they belong to the process and boot that wrote it.
+    pub(super) fn require_roots(
+        &self,
+        app_root: &lillux::PinnedDirectory,
+        runtime: &lillux::PinnedDirectory,
+        copy_root: &lillux::PinnedDirectory,
+    ) -> Result<()> {
+        ensure!(
+            self.record.app_root_identity == serde_json::to_string(&app_root.identity()?)?
+                && self.record.runtime_identity == serde_json::to_string(&runtime.identity()?)?
+                && self.record.copy_root_identity == serde_json::to_string(&copy_root.identity()?)?,
+            "stale offline reservation names another app root, runtime or inspections parent"
+        );
+        Ok(())
+    }
+
+    /// The disposition must be this reservation's own.
+    pub(super) fn require_disposition(
+        &self,
+        disposition: &super::creation_evidence::InspectionDispositionRecord,
+    ) -> Result<()> {
+        require_disposition_claim(disposition, &self.record, &self.sha256)
+    }
+
+    /// The creation witness must be this reservation's own, for the
+    /// destination `directory`.
+    pub(super) fn require_witness(&self, evidence: &CreatedDirectoryRecord, directory: &str) -> Result<()> {
+        let index = self
+            .record
+            .destinations
+            .iter()
+            .position(|plan| plan.directory_name == directory)
+            .context("creation witness names no destination of its reservation")?;
+        ensure!(
+            evidence.operation_id == self.record.operation_id
+                && evidence.claim_nonce == self.record.claim_nonce
+                && evidence.claim_sha256 == self.sha256
+                && evidence.policy_digest == self.record.policy_digest
+                && evidence.clock_binding == self.record.clock_binding
+                && evidence.source_purpose == self.record.sources[index].purpose
+                && evidence.destination_name == directory
+                && serde_json::to_string(&evidence.parent_identity)? == self.record.copy_root_identity,
+            "creation witness differs from its stale reservation"
+        );
+        Ok(())
+    }
+}
+
+/// A signed current-schema reservation of `operation_id` naming these live
+/// roots, as a process that died after publishing leaves it, for recovery
+/// tests. No source roles are selected.
+#[cfg(test)]
+pub(super) fn fixture_signed_reservation(
+    identity: &NodeIdentity,
+    roots: [&lillux::PinnedDirectory; 3],
+    operation_id: &str,
+    mode: OriginalInspectionMode,
+    quota: &OfflineResetQuota,
+) -> Vec<u8> {
+    let [app_root, runtime, copy_root] = roots;
+    let json = |directory: &lillux::PinnedDirectory| serde_json::to_string(&directory.identity().unwrap()).unwrap();
+    let sources = ["runtime", "scheduler"].map(|purpose| InspectionSourcePlan {
+        purpose: purpose.into(),
+        directory_identity: json(runtime),
+        database_name: format!("{purpose}.sqlite3"),
+        roles: std::array::from_fn(|_| None),
+    });
+    let record = ClaimRecord {
+        schema: CLAIM_SCHEMA,
+        purpose: CLAIM_PURPOSE.into(),
+        operation_id: operation_id.to_owned(),
+        claim_nonce: "b".repeat(32),
+        signer: identity.fingerprint().to_owned(),
+        policy_digest: "c".repeat(64),
+        app_root_identity: json(app_root),
+        runtime_identity: json(runtime),
+        prior_operation: None,
+        reserved: quota.clone(),
+        occupancy: lillux::time::OccupancyLimit::new(
+            lillux::time::occupancy_now().unwrap(),
+            occupancy_nanoseconds(quota).unwrap(),
+        )
+        .unwrap(),
+        // A clock binding from another boot: recovery never compares it.
+        clock_binding: "f".repeat(64),
+        inspection: OriginalInspectionPlan::original(mode, false, None, &sources),
+        operational_source: serde_json::from_value(serde_json::json!({
+            "directory_identity": json(runtime),
+            "roles": [{"device": 1, "inode": 2, "byte_length": 0}, null, null, null],
+            "marker": {"device": 1, "inode": 3, "byte_length":
+                ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len()}
+        }))
+        .unwrap(),
+        sources,
+        copy_root_identity: json(copy_root),
+        destinations: destination_plans(operation_id),
+    };
+    record.validate().unwrap();
+    let body = lillux::canonical_json(&serde_json::to_value(&record).unwrap()).unwrap();
+    lillux::signature::sign_content(&body, identity.signing_key(), "#", None).into_bytes()
+}
+
+/// Registers a claim on `ledger` as alive in this process until dropped,
+/// for recovery tests.
+#[cfg(test)]
+pub(super) struct FixtureLiveClaim(lillux::PinnedDirectoryIdentity);
+#[cfg(test)]
+impl FixtureLiveClaim {
+    pub(super) fn register(ledger: lillux::PinnedDirectoryIdentity) -> Self {
+        register_live_claim(ledger);
+        Self(ledger)
+    }
+}
+#[cfg(test)]
+impl Drop for FixtureLiveClaim {
+    fn drop(&mut self) {
+        deregister_live_claim(&self.0);
+    }
+}
+
 /// Native SQL charges both the host's native step budget and the claim's
 /// SQL ceiling, so the signed native step budget must cover the whole
 /// ceiling, plus the host's minimum allocation funding margin (a heuristic
@@ -259,9 +411,8 @@ fn deregister_live_claim(ledger: &lillux::PinnedDirectoryIdentity) {
     }
 }
 
-/// How many claims on `ledger` are alive in this process. Only the registry
-/// tests read it; no production path consults the count.
-#[cfg(test)]
+/// How many claims on `ledger` are alive in this process. Publication
+/// requires its own claim to be the only one; recovery requires none.
 pub(super) fn live_claims_on(ledger: &lillux::PinnedDirectoryIdentity) -> usize {
     LIVE_CLAIMS
         .lock()
@@ -1326,6 +1477,12 @@ impl OriginalInspectionSettlement {
                 progress.post_ack.is_none() || progress.state_ack.is_some(),
                 "quiesce before the State acknowledgement was captured"
             );
+            // Taken before any owner ends, so a busy slot refuses with
+            // nothing ended.
+            let mut disposals = self
+                ._disposals
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("original settlement disposals busy or poisoned"))?;
             let OriginalSettlementProgress {
                 release_pins,
                 post_ack,
@@ -1344,7 +1501,10 @@ impl OriginalInspectionSettlement {
             // first.
             let post_ack = post_ack.take();
             let release_pins = release_pins.take();
+            let disposals_taken = disposals.take();
+            drop(disposals);
             drop(progress);
+            let disposals = disposals_taken;
             let mut ended = Vec::new();
             if post_ack.is_some() {
                 ended.push("settlement post-acknowledgement owner");
@@ -1354,11 +1514,6 @@ impl OriginalInspectionSettlement {
             }
             drop(post_ack);
             drop(release_pins);
-            let disposals = self
-                ._disposals
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original settlement disposals busy or poisoned"))?
-                .take();
             if disposals.as_ref().is_some_and(|disposals| !disposals.is_empty()) {
                 ended.push("settlement copy disposals");
             }
@@ -2106,16 +2261,24 @@ pub(super) struct OriginalInspectionSlot {
     pub(super) never_started: bool,
 }
 impl OriginalQuotaClaim {
-    /// A destination's outside handoff. The offline native host has no
-    /// outside receiver: every destination of this claim ends in process with
-    /// its host census, so the handoff always refuses and keeps its owner.
-    fn require_destination_outside_transfer(self: &Arc<Self>,
+    /// The refusal of a destination's outside handoff. The offline native
+    /// host has no outside receiver: every destination of this claim ends in
+    /// process with its host census, so the handoff always refuses and keeps
+    /// its owner; a foreign process, factory or terminal is named first.
+    fn destination_outside_transfer_refusal(self: &Arc<Self>,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign offline destination account");
-        factory.require_original_process()?;
-        aggregate.require_original(factory)?;
-        anyhow::bail!("offline reset destinations have no outside receiver; they end with the native host census")
+        aggregate: &lillux_sqlite::OriginalNativeTerminal) -> anyhow::Error {
+        let foreign = (|| -> Result<()> {
+            ensure!(self.process == std::process::id(), "foreign offline destination account");
+            factory.require_original_process()?;
+            aggregate.require_original(factory)
+        })();
+        match foreign {
+            Err(error) => error,
+            Ok(()) => anyhow::anyhow!(
+                "offline reset destinations have no outside receiver; they end with the native host census"
+            ),
+        }
     }
 }
 
@@ -2133,10 +2296,7 @@ impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalOperationalAu
         _prepay: &dyn Fn(u64, u64) -> Result<()>)
         -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
         // The refusal keeps this authority, with its root and namespace.
-        let error = match self.claim.require_destination_outside_transfer(factory, aggregate) {
-            Err(error) => error,
-            Ok(()) => anyhow::anyhow!("offline reset destination handoff has no receiver"),
-        };
+        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
         Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
     }
 
@@ -2319,10 +2479,7 @@ impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalRuntimeMutati
         _prepay: &dyn Fn(u64, u64) -> Result<()>)
         -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
         // The refusal keeps this authority, with its root and namespace.
-        let error = match self.claim.require_destination_outside_transfer(factory, aggregate) {
-            Err(error) => error,
-            Ok(()) => anyhow::anyhow!("offline reset destination handoff has no receiver"),
-        };
+        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
         Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
     }
 
@@ -3151,250 +3308,64 @@ impl OriginalQuotaClaim {
         );
         self.require_service_window()?;
         let selected_name = format!("{PREFIX}{}", self.record.operation_id);
-        let mut records = Vec::new();
-        let mut expected_destinations = std::collections::BTreeMap::new();
-        let mut expected_evidence = std::collections::BTreeMap::new();
-        let mut original_present = false;
-        let mut original_records = std::collections::BTreeMap::new();
-        let mut disposition_records = std::collections::BTreeMap::new();
-        // Reservations and their dispositions; anything else refuses.
-        let names = self.ledger.entry_names_bounded(MAX_CLAIMS * 5 + 1)?;
+        // Recovery has settled every reservation of a process that is gone,
+        // and this process holds at most one live claim per ledger, so the
+        // ledger may hold nothing but this claim's own reservation, and the
+        // inspections parent nothing but this claim's own deposits.
         ensure!(
-            names.len() <= MAX_CLAIMS * 5,
-            "offline quota ledger exceeds complete inventory capacity"
+            live_claims_on(&self.ledger_identity) == 1,
+            "another live reset claim in this process holds the offline quota ledger"
         );
-        // A result strictly below the enumeration stop establishes EOF; an
-        // extra entry always refuses, so no truncated census authorizes debit.
-        for name in names {
-            let text = name
-                .to_str()
-                .context("offline quota ledger name is not UTF-8")?;
-            if let Some(operation) = text.strip_prefix("released.") {
-                require_operation_suffix(operation)?;
-                let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
-                    &self.ledger, &name, MAX_RECORD_BYTES)?
-                    .context("offline reset released record disappeared")?;
-                let record = super::creation_evidence::OfflineResetReleasedRecord::verified(&bytes, identity)?;
-                ensure!(record.operation_id == operation, "foreign released record coordinate");
-                return Err(super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("the release of offline reset operation {operation} is pending settlement"),
+        let mut original_present = false;
+        for name in self.ledger.entry_names_bounded(2)? {
+            let bytes = if name == OsStr::new(&selected_name) {
+                lillux_sqlite::read_regular_without_sqlite_alias(&self.ledger, &name, MAX_RECORD_BYTES)?
+            } else {
+                None
+            };
+            match bytes {
+                Some(bytes) if self.publication_entered.load(Ordering::Acquire) && bytes == self.signed => {
+                    original_present = true;
                 }
-                .into());
-            }
-            if ["terminal.", "prepared.", "account-intent.", "account-settled."]
-                .iter()
-                .any(|retired| text.starts_with(retired))
-            {
-                return Err(super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("offline quota ledger holds retired record `{text}`"),
-                }
-                .into());
-            }
-            if let Some(operation) = text.strip_prefix("disposed.") {
-                require_operation_suffix(operation)?;
-                let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
-                    &self.ledger,
-                    &name,
-                    MAX_RECORD_BYTES,
-                )?
-                .context("original disposition census record disappeared")?;
-                let record = super::creation_evidence::InspectionDispositionRecord::verified(
-                    &bytes, identity,
-                )?;
-                ensure!(
-                    record.operation_id == operation
-                        && disposition_records
-                            .insert(operation.to_owned(), (record, lillux::sha256_hex(&bytes)))
-                            .is_none(),
-                    "duplicate/foreign disposition census coordinate"
-                );
-                continue;
-            }
-            if let Some(operation) = text.strip_prefix("cleanup.reserved.") {
-                require_operation_suffix(operation)?;
-                return Err(super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("offline reset reservation quarantine `{text}` is pending"),
-                }
-                .into());
-            }
-            let suffix = text.strip_prefix(PREFIX).ok_or_else(|| {
-                super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("offline quota ledger holds unclassified deposit `{text}`"),
-                }
-            })?;
-            ensure!(
-                suffix.len() == 32
-                    && suffix
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-                "malformed offline quota claim name"
-            );
-            let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
-                &self.ledger,
-                &name,
-                MAX_RECORD_BYTES,
-            )?
-            .context("offline quota claim disappeared")?;
-            let record = ClaimRecord::verified(&bytes, identity)?;
-            ensure!(
-                record.operation_id == suffix
-                    && record.signer == self.record.signer
-                    && record.app_root_identity == self.record.app_root_identity
-                    && record.runtime_identity == self.record.runtime_identity
-                    && record.copy_root_identity == self.record.copy_root_identity
-                    && record.clock_binding == self.record.clock_binding,
-                "offline quota claim has foreign ownership"
-            );
-            if text == selected_name {
-                if !(self.publication_entered.load(Ordering::Acquire) && bytes == self.signed) {
+                Some(_) => {
                     return Err(super::creation_evidence::ResetScratchRepairRequired {
                         what: format!(
                             "another offline reservation already owns operation {}",
                             self.record.operation_id
                         ),
+                        foreign: None,
                     }
                     .into());
                 }
-                original_present = true;
-            }
-            let claim_hash = lillux::sha256_hex(&bytes);
-            ensure!(
-                original_records
-                    .insert(
-                        record.operation_id.clone(),
-                        (record.clone(), claim_hash.clone())
-                    )
-                    .is_none(),
-                "duplicate original quota reservation"
-            );
-            for (index, plan) in record.destinations.iter().enumerate() {
-                expected_destinations.insert(
-                    plan.directory_name.clone(),
-                    (record.clone(), claim_hash.clone(), index),
-                );
-                expected_evidence.insert(
-                    evidence_name(&plan.directory_name),
-                    plan.directory_name.clone(),
-                );
-            }
-            records.push(record.reserved);
-        }
-        ensure!(
-            original_records.len() <= MAX_CLAIMS,
-            "original reservation census exceeds claim capacity"
-        );
-        for (operation, (disposition, _)) in &disposition_records {
-            let (original, hash) = original_records
-                .get(operation)
-                .context("disposition has no charged original reservation")?;
-            require_disposition_claim(disposition, original, hash)?;
-        }
-        // Discover all destination deposits from authenticated reservation
-        // intents. Unknown/colliding objects refuse; no cold owner is recreated.
-        let copies = self.copy_root.entry_names_bounded(MAX_CLAIMS * 6 + 1)?;
-        ensure!(
-            copies.len() <= MAX_CLAIMS * 6,
-            "inspection destination census is incomplete"
-        );
-        let mut observed_roots = std::collections::BTreeMap::new();
-        let mut observed_evidence = std::collections::BTreeMap::new();
-        for name in copies {
-            let text = name
-                .to_str()
-                .context("inspection destination name is not UTF-8")?;
-            let entry = self
-                .copy_root
-                .entry_no_follow(&name)?
-                .context("inspection destination disappeared")?;
-            if expected_destinations.contains_key(text) {
-                ensure!(
-                    entry.entry_type == lillux::PinnedEntryType::Directory,
-                    "inspection destination is not a directory"
-                );
-                let root = self
-                    .copy_root
-                    .open_child_directory(&name)?
-                    .context("inspection destination disappeared")?;
-                root.ensure_path_binding()?;
-                observed_roots.insert(text.to_owned(), root.identity()?);
-            } else if let Some(destination) =
-                expected_evidence.get(text.strip_prefix("cleanup.").unwrap_or(text))
-            {
-                ensure!(
-                    entry.entry_type == lillux::PinnedEntryType::Regular,
-                    "created evidence is not regular"
-                );
-                let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
-                    &self.copy_root,
-                    &name,
-                    MAX_RECORD_BYTES,
-                )?
-                .context("created evidence disappeared")?;
-                let evidence = CreatedDirectoryRecord::verified(&bytes, identity)?;
-                let (record, claim_hash, index) = &expected_destinations[destination];
-                ensure!(
-                    evidence.operation_id == record.operation_id
-                        && evidence.claim_nonce == record.claim_nonce
-                        && evidence.claim_sha256 == *claim_hash
-                        && evidence.policy_digest == record.policy_digest
-                        && evidence.clock_binding == record.clock_binding
-                        && evidence.source_purpose == record.sources[*index].purpose
-                        && evidence.destination_name == *destination
-                        && serde_json::to_string(&evidence.parent_identity)?
-                            == record.copy_root_identity,
-                    "created evidence differs from authenticated original reservation"
-                );
-                ensure!(
-                    observed_evidence
-                        .insert(destination.clone(), evidence.created_identity)
-                        .is_none(),
-                    "original creation witness has duplicate public/quarantine deposit"
-                );
-                if text.starts_with("cleanup.") {
-                    ensure!(disposition_records.get(&evidence.operation_id).is_some_and(|(record, _)| record.stores.iter().any(|store| matches!(store, super::creation_evidence::InspectionStoreDispositionRecord::Removed { destination_name, witness_sha256, .. } if destination_name == destination && witness_sha256 == &lillux::sha256_hex(&bytes)))), "creation witness quarantine lacks original durable disposal join");
+                None => {
+                    return Err(super::creation_evidence::ResetScratchRepairRequired {
+                        what: format!(
+                            "offline quota ledger holds `{}` beside this reset's reservation",
+                            name.to_string_lossy()
+                        ),
+                        foreign: super::scratch::foreign_ledger_path(&name),
+                    }
+                    .into());
                 }
-            } else {
+            }
+        }
+        let own_deposit = |name: &str| {
+            let name = name.strip_prefix("cleanup.").unwrap_or(name);
+            let name = name.strip_prefix("created.").unwrap_or(name);
+            self.record.destinations.iter().any(|plan| plan.directory_name == name)
+        };
+        for name in self.copy_root.entry_names_bounded(8)? {
+            let text = name.to_string_lossy();
+            if !(original_present && own_deposit(&text)) {
                 return Err(super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("offline reset inspections hold unclassified deposit `{text}`"),
+                    what: format!("offline reset inspections hold `{text}` before this reset's reservation"),
+                    foreign: super::scratch::foreign_inspections_path(&name),
                 }
                 .into());
             }
         }
-        for (operation, (disposition, _)) in &disposition_records {
-            disposition
-                .native_quota
-                .require_quota(&original_records[operation].0.reserved)?;
-            for (index, store) in disposition.stores.iter().enumerate() {
-                let name = &original_records[operation].0.destinations[index].directory_name;
-                ensure!(
-                    !observed_roots.contains_key(name),
-                    "durably disposed/never-started root coordinate reappeared"
-                );
-                if matches!(
-                    store,
-                    super::creation_evidence::InspectionStoreDispositionRecord::NeverStarted { .. }
-                ) {
-                    ensure!(
-                        !observed_evidence.contains_key(name),
-                        "never-started disposition retains creation witness"
-                    );
-                }
-            }
-        }
-        for (name, observed) in observed_roots {
-            if observed_evidence.get(&name) != Some(&observed) {
-                return Err(super::creation_evidence::ResetScratchRepairRequired {
-                    what: format!("offline reset inspection directory `{name}` lacks its exact creation witness"),
-                }
-                .into());
-            }
-        }
-        if !original_present {
-            records.push(self.record.reserved.clone());
-        }
-        // Reserve the complete envelope conservatively. No concurrent/retained
-        // owner can borrow unused terms, reset counters, or release on error.
-        validate_aggregate(&records, owner.quota()?)?;
+        // The claim reserves its complete signed envelope.
+        validate_aggregate(std::slice::from_ref(&self.record.reserved), owner.quota()?)?;
         self.require_service_window()?;
         if !original_present {
             let parent_identity = self.ledger.identity()?;
@@ -4531,7 +4502,7 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
     }
 }
 
-fn require_operation_suffix(operation: &str) -> Result<()> {
+pub(super) fn require_operation_suffix(operation: &str) -> Result<()> {
     ensure!(
         operation.len() == 32
             && operation

@@ -707,9 +707,9 @@ mod tests {
         // The synced connection's durability pins end typed in the release.
         let released = host.release();
         assert!(
-            released.durability_pins_retired >= 1,
-            "release closed {} census durability pins",
-            released.durability_pins_retired
+            released.durability_pins.closed >= 1 && released.durability_pins.consumed_with_error == 0,
+            "release ended census durability pins {:?}",
+            released.durability_pins
         );
     }
     /// A guarded evidence read under a held projection lease succeeds only

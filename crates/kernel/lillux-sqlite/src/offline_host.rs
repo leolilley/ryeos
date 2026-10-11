@@ -127,18 +127,61 @@ pub struct OfflineNativeFacts {
 pub struct OfflineNativeReleased {
     pub facts: Option<OfflineNativeFacts>,
     pub region: Option<HostStorageRegionReleaseFact>,
-    /// Durability pins of census terminals that the release closed.
-    pub durability_pins_retired: usize,
+    /// How the durability pins of census terminals ended at the release.
+    pub durability_pins: DurabilityPinRelease,
+}
+
+/// Durability pins of census terminals that a host release ended, counted
+/// across every release attempt of the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DurabilityPinRelease {
+    /// Pins whose descriptor the release closed.
+    pub closed: usize,
+    /// Pins whose close consumed the descriptor but reported an error.
+    pub consumed_with_error: usize,
+}
+
+impl DurabilityPinRelease {
+    pub(crate) fn count(&mut self, close: crate::native::DurabilityPinClose) -> Result<()> {
+        let slot = match close {
+            crate::native::DurabilityPinClose::Closed => &mut self.closed,
+            crate::native::DurabilityPinClose::ConsumedWithError => &mut self.consumed_with_error,
+            crate::native::DurabilityPinClose::NotClosedHere => return Ok(()),
+        };
+        *slot = slot.checked_add(1).context("offline native retired pin count overflow")?;
+        Ok(())
+    }
 }
 impl std::fmt::Debug for OfflineNativeReleased {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OfflineNativeReleased")
             .field("facts", &self.facts)
             .field("region_released", &self.region.is_some())
-            .field("durability_pins_retired", &self.durability_pins_retired)
+            .field("durability_pins", &self.durability_pins)
             .finish()
     }
 }
+
+/// A host release refused because an alias of its backend terminal or its
+/// factory survives outside the host. Both stay with the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfflineNativeAliasRefusal {
+    pub backend: usize,
+    pub backend_held: usize,
+    pub factory: usize,
+    pub factory_held: usize,
+}
+impl std::fmt::Display for OfflineNativeAliasRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "offline native release refused while aliases survive: backend terminal strong count {} \
+             (host holds {}), factory strong count {} (host holds {}); both retained",
+            self.backend, self.backend_held, self.factory, self.factory_held
+        )
+    }
+}
+impl std::error::Error for OfflineNativeAliasRefusal {}
 
 /// A refused finish stage with the whole host retained for another attempt.
 pub struct OfflineNativeRetained {
@@ -183,8 +226,8 @@ pub struct OfflineNativeHost {
     facts: Option<OfflineNativeFacts>,
     /// Funded storage of `raw`, reported identically on every finish path.
     storage_bytes: u64,
-    /// Durability pins closed by release so far, kept across a retry.
-    durability_pins_retired: usize,
+    /// Durability pins ended by release so far, kept across a retry.
+    durability_pins: DurabilityPinRelease,
 }
 
 /// A refused issuance with the partially built host retained. Release it
@@ -269,7 +312,7 @@ impl OfflineNativeHost {
             backend: None,
             facts: None,
             storage_bytes: 0,
-            durability_pins_retired: 0,
+            durability_pins: DurabilityPinRelease::default(),
         }
     }
 
@@ -538,11 +581,9 @@ impl OfflineNativeHost {
         let backend_held = usize::from(self.backend.is_some());
         let factory = self.factory.as_ref().map_or(0, Arc::strong_count);
         let factory_held = usize::from(self.factory.is_some()) + backend_held;
-        ensure!(
-            backend == backend_held && factory == factory_held,
-            "offline native release refused while aliases survive: backend terminal strong count {backend} \
-             (host holds {backend_held}), factory strong count {factory} (host holds {factory_held}); both retained"
-        );
+        if backend != backend_held || factory != factory_held {
+            return Err(OfflineNativeAliasRefusal { backend, backend_held, factory, factory_held }.into());
+        }
         drop(self.backend.take());
         drop(self.factory.take());
         drop(self.publication_failure.take());
@@ -561,7 +602,7 @@ impl OfflineNativeHost {
         Ok(OfflineNativeReleased {
             facts: self.facts.clone(),
             region,
-            durability_pins_retired: self.durability_pins_retired,
+            durability_pins: self.durability_pins,
         })
     }
 
@@ -584,11 +625,9 @@ impl OfflineNativeHost {
             let terminals = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
             for terminal in terminals {
                 if let OriginalNativeConnectionTerminal::Closed(closed) = terminal {
-                    let retired = closed.retire_durability_pins(&recheck)
+                    closed
+                        .retire_durability_pins(&recheck, &mut self.durability_pins)
                         .context("offline native release refused: a census durability pin did not retire")?;
-                    self.durability_pins_retired = self.durability_pins_retired
-                        .checked_add(retired)
-                        .context("offline native retired pin count overflow")?;
                 }
             }
         }

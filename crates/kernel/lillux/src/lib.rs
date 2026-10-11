@@ -77,7 +77,8 @@ pub use local_ipc::{
     authenticated_unix_peer_from_stream,
 };
 pub use locks::{
-    ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
+    ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExactLockHeld, ExclusiveFileLock, SharedFileLock,
+    with_exclusive_file_lock,
 };
 pub use process_control::{
     ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress,

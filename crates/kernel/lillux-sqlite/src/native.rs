@@ -3270,23 +3270,26 @@ impl ClosedOriginalNativeConnection {
         Ok((leaf, pins))
     }
     /// Close this connection's durability pins at the end of its host, after
-    /// the backend finished. `recheck` runs before each close. Returns how
-    /// many pins this call closed; pins already retired are skipped, so a
+    /// the backend finished. `recheck` runs before each close, and `tally`
+    /// counts each pin as it ends; pins already retired are skipped, so a
     /// retry after a refusal closes only the rest. A refused close keeps its
     /// descriptor in the pin and stops here.
-    pub(crate) fn retire_durability_pins(&self, recheck: &dyn Fn() -> Result<()>) -> Result<usize> {
+    pub(crate) fn retire_durability_pins(
+        &self,
+        recheck: &dyn Fn() -> Result<()>,
+        tally: &mut crate::offline_host::DurabilityPinRelease,
+    ) -> Result<()> {
         require_current_native_process()?;
         let Some(body) = self.durable_body.get() else {
-            return Ok(0);
+            return Ok(());
         };
-        let mut closed = 0usize;
         for pin in std::iter::once(&body.main).chain(body.wal.iter()) {
             recheck()?;
-            if pin.close_original_descriptor()? {
-                closed += 1;
-            }
+            // Counted per pin as it ends, so a refusal of a later pin loses
+            // no count of an earlier one.
+            tally.count(pin.close_at_host_release()?)?;
         }
-        Ok(closed)
+        Ok(())
     }
 }
 // Durable facts are recorded immediately after actual file fsync. There is
@@ -4803,6 +4806,20 @@ enum OriginalMetadataPinState {
 pub struct RetainedOriginalMetadataPin {
     state: std::mem::ManuallyDrop<Mutex<OriginalMetadataPinState>>,
     identity: OnceLock<lillux::OpenFileIdentity>,
+    /// Whether a host release already reported this pin's consumed refusal.
+    consumed_error_reported: AtomicBool,
+}
+/// How one durability pin ended at its host's release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurabilityPinClose {
+    /// This call closed the descriptor.
+    Closed,
+    /// The close consumed the descriptor but reported an error. No
+    /// descriptor is left to retain or retry, so it is a fact, not a refusal.
+    ConsumedWithError,
+    /// Another path closed it, or an earlier release attempt already
+    /// reported it.
+    NotClosedHere,
 }
 impl RetainedOriginalMetadataPin {
     /// A successful physical close memo can be observed before a late account
@@ -4838,6 +4855,7 @@ impl RetainedOriginalMetadataPin {
         Arc::new(Self {
             state: std::mem::ManuallyDrop::new(Mutex::new(OriginalMetadataPinState::Open(file))),
             identity: OnceLock::new(),
+            consumed_error_reported: AtomicBool::new(false),
         })
     }
     pub fn observed_identity(&self) -> Result<lillux::OpenFileIdentity> {
@@ -4895,6 +4913,30 @@ impl RetainedOriginalMetadataPin {
         inputs.require_original(factory, terminal, self)?;
         Ok(RetiredOriginalMetadataPin {
             owner: self.clone(),
+        })
+    }
+    /// Close this pin at the end of its host. A close that consumed the
+    /// descriptor with an error is reported once as such and the release
+    /// goes on: the descriptor is gone, so refusing would only keep the
+    /// host's region forever. Any refusal that keeps the descriptor stays a
+    /// refusal.
+    pub(crate) fn close_at_host_release(&self) -> Result<DurabilityPinClose> {
+        let refusal = match self.close_original_descriptor() {
+            Ok(true) => return Ok(DurabilityPinClose::Closed),
+            Ok(false) => return Ok(DurabilityPinClose::NotClosedHere),
+            Err(refusal) => refusal,
+        };
+        let consumed = match self.state.try_lock() {
+            Ok(state) => matches!(&*state, OriginalMetadataPinState::ConsumedError { code: _, errno: _ }),
+            Err(_) => return Err(refusal.context("original metadata close outcome busy or poisoned")),
+        };
+        if !consumed {
+            return Err(refusal);
+        }
+        Ok(if self.consumed_error_reported.swap(true, Ordering::AcqRel) {
+            DurabilityPinClose::NotClosedHere
+        } else {
+            DurabilityPinClose::ConsumedWithError
         })
     }
     /// The identity-checked close of this pin's descriptor, shared by every

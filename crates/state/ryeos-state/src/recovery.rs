@@ -2606,6 +2606,42 @@ impl RecoveryStore {
         )
     }
 
+    /// Remove a thread-history discard marker written under the retired
+    /// schema, which every reader refuses. Returns that schema when such a
+    /// marker is present; a current or absent marker is left alone and
+    /// returns `None`. With `dry_run` nothing is removed.
+    pub fn clear_retired_thread_history_discard_marker(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        dry_run: bool,
+    ) -> Result<Option<u32>> {
+        self.ensure_guard(cas_mutation_guard)?;
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        let Some(pin) = self.directory.open_mount_entry(name)? else {
+            return Ok(None);
+        };
+        let Some(bytes) =
+            guarded_evidence_read(None, &self.directory, name, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES)?
+        else {
+            return Ok(None);
+        };
+        let retired = serde_json::from_slice::<ThreadHistoryDiscardMarkerSchemaProbe>(&bytes)
+            .is_ok_and(|probe| probe.schema == RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA);
+        if !retired {
+            return Ok(None);
+        }
+        if !dry_run {
+            anyhow::ensure!(
+                cas_mutation_guard.is_exclusive(),
+                "clearing a retired thread-history discard marker requires the exclusive CAS guard"
+            );
+            self.directory
+                .unlink_regular_if_same(name, &pin)
+                .context("remove retired thread-history discard marker")?;
+        }
+        Ok(Some(RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA))
+    }
+
     /// Activate the already-staged immutable operation after actual CAS
     /// admission. An uncertain acknowledgement retries this same reference.
     /// The Acknowledged record of an earlier discard is replaced in one

@@ -220,6 +220,31 @@ pub struct ExactExclusiveFileLock {
     target_name: CString,
 }
 
+/// Refusal of an exact operational lock because another open file
+/// description holds it, as distinct from every other acquisition failure
+/// (an absent lock file, a wrong file type, an I/O error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactLockHeld {
+    /// The holder's pid, or `unknown` when it cannot be read.
+    pub holder: String,
+    /// The bounded wait spent before refusing, if any.
+    pub waited: Option<std::time::Duration>,
+}
+impl std::fmt::Display for ExactLockHeld {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wait = self
+            .waited
+            .map(|timeout| format!(" after waiting {:.1}s", timeout.as_secs_f64()))
+            .unwrap_or_default();
+        write!(
+            formatter,
+            "state lock held by another process (pid: {}){wait}; stop the daemon or other standalone service before proceeding",
+            self.holder
+        )
+    }
+}
+impl std::error::Error for ExactLockHeld {}
+
 /// Identities observed from the SAME retained target and parent descriptors.
 /// This copyable data supplies neither a lock grant nor a close receipt.
 #[derive(Clone, Copy, Debug)]
@@ -374,12 +399,7 @@ impl ExactExclusiveFileLock {
                 let holder = linux_flock_holder_pid(&file)
                     .map(|pid| pid.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                let wait = wait_timeout
-                    .map(|timeout| format!(" after waiting {:.1}s", timeout.as_secs_f64()))
-                    .unwrap_or_default();
-                anyhow::bail!(
-                    "state lock held by another process (pid: {holder}){wait}; stop the daemon or other standalone service before proceeding"
-                );
+                return Err(ExactLockHeld { holder, waited: wait_timeout }.into());
             }
             if create_missing {
                 file.set_len(0)?;

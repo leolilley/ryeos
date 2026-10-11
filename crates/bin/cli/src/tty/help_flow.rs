@@ -861,6 +861,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <EPOCH> --schema-cut-to <EPOCH>] [--app-root <DIR>]",
             "--dry-run               report without mutation\n--confirm               confirm execution-history retirement\n--include-project-heads also retire project HEADs\n--confirm-project-heads confirm project-HEAD retirement\n--schema-cut-from       exact predecessor epoch for an idempotent hosted cut\n--schema-cut-to         exact current epoch for an idempotent hosted cut\n--app-root <DIR>        application root",
         ),
+        "node reset execution-history-scratch" => (
+            "ryeos node reset execution-history-scratch [--dry-run | --confirm] [--app-root <DIR>]",
+            "--dry-run         report without mutation\n--confirm         confirm removal of reset scratch\n--app-root <DIR>  application root",
+        ),
         "node reset authorization" => (
             "ryeos node reset authorization --confirm [--app-root <DIR>]",
             "--confirm         confirm retirement of all grants\n--app-root <DIR>  application root",

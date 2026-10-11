@@ -17,7 +17,7 @@ use super::{ExecutionHistoryResetOptions, ExecutionHistorySchemaCut, OfflineRese
 use ryeos_node_runtime::identity::NodeIdentity;
 use crate::runtime_db::{RuntimeDb, SqliteInspectionCopyLease};
 
-const PREFIX: &str = "execution-history-reset.operation.";
+pub(super) const PREFIX: &str = "execution-history-reset.operation.";
 const MAX_BYTES: usize = 8192;
 
 fn required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
@@ -45,6 +45,80 @@ struct OperationRecord {
     scheduler_sources: [SchedulerRetirementStoppedRolePlan; 3],
 }
 
+/// A signed staged operation file of `operation_id` with no scheduler
+/// selected, for recovery tests.
+#[cfg(test)]
+pub(super) fn fixture_signed_operation(identity: &NodeIdentity, operation_id: &str) -> Vec<u8> {
+    let record = OperationRecord {
+        schema: 2,
+        purpose: "execution_history_reset_operation_v2".to_owned(),
+        operation_id: operation_id.to_owned(),
+        owner_fingerprint: identity.fingerprint().to_owned(),
+        runtime_identity: "fixture".to_owned(),
+        app_root_identity: "fixture".to_owned(),
+        discard_project_heads: false,
+        schema_cut: None,
+        scheduler_selected: false,
+        scheduler_accounting: SchedulerFireHistoryAccounting::Exact { counts: Default::default() },
+        scheduler_sources: std::array::from_fn(|_| SchedulerRetirementStoppedRolePlan {
+            source: SchedulerRetirementStoppedSource::Absent,
+            current: None,
+        }),
+    };
+    let body = lillux::canonical_json(&serde_json::to_value(&record).unwrap()).unwrap();
+    lillux::signature::sign_content(&body, identity.signing_key(), "#", None).into_bytes()
+}
+
+/// The name `name` still holds the inode `pin` was opened on.
+fn require_pinned_entry(runtime: &lillux::PinnedDirectory, name: &str, pin: &std::fs::File) -> Result<()> {
+    let pinned = lillux::observe_open_file_identity(pin)?;
+    let entry = runtime
+        .entry_no_follow(OsStr::new(name))?
+        .context("staged reset operation disappeared")?;
+    ensure!(
+        entry.entry_type == lillux::PinnedEntryType::Regular
+            && entry.containing_device == pinned.device()
+            && entry.inode == pinned.inode(),
+        "staged reset operation was replaced"
+    );
+    Ok(())
+}
+
+fn require_same_file(left: &std::fs::File, right: &std::fs::File) -> Result<()> {
+    let (left, right) = (lillux::observe_open_file_identity(left)?, lillux::observe_open_file_identity(right)?);
+    ensure!(
+        (left.device(), left.inode()) == (right.device(), right.inode()),
+        "staged reset operation inode changed between stagings"
+    );
+    Ok(())
+}
+
+/// Authenticate a staged operation file as this node's signed record of
+/// `operation_id`, without admitting it as an operation.
+pub(super) fn require_own_operation_file(bytes: &[u8], identity: &NodeIdentity, operation_id: &str) -> Result<()> {
+    ensure!(bytes.len() <= MAX_BYTES, "staged reset operation exceeds its byte bound");
+    let raw = std::str::from_utf8(bytes)?;
+    let (body, header) = lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)?;
+    let header = header.context("staged reset operation is unsigned")?;
+    ensure!(
+        lillux::signature::is_valid_signature_for(
+            &header.content_hash,
+            &header.signature_b64,
+            &header.signer_fingerprint,
+            &body,
+            identity.verifying_key(),
+            identity.fingerprint()
+        ),
+        "staged reset operation signature is invalid"
+    );
+    let record: OperationRecord = serde_json::from_str(&body)?;
+    ensure!(
+        record.operation_id == operation_id && record.owner_fingerprint == identity.fingerprint(),
+        "staged reset operation names another operation or signer"
+    );
+    Ok(())
+}
+
 pub(super) struct OriginalOperation {
     record: OperationRecord,
     reference: ThreadHistoryDiscardOperationRef,
@@ -59,6 +133,10 @@ pub(super) struct OriginalOperation {
     // when prepared; a resumed one when its new claim adopts it. Weak, because
     // a resuming claim already holds this operation as its prior one.
     quota_claim: std::sync::OnceLock<std::sync::Weak<OriginalQuotaClaim>>,
+    /// Metadata descriptor of the staged operation file, kept from staging
+    /// (or from reading an active operation) so its removal acts on the very
+    /// inode staged rather than on whatever the name holds later.
+    staged: std::sync::OnceLock<std::fs::File>,
 }
 
 /// Preserve the same operation and its original descriptor/copy owners on
@@ -302,12 +380,16 @@ impl OriginalOperation {
         };
         reference.validate()?;
         let name = format!("{PREFIX}{}", reference.operation_id);
+        let staged = runtime
+            .open_mount_entry(OsStr::new(&name))?
+            .context("active reset marker lacks its staged signed operation")?;
         let signed = lillux_sqlite::read_regular_without_sqlite_alias(
             runtime,
             OsStr::new(&name),
             MAX_BYTES,
         )?
         .context("active reset marker lacks its staged signed operation")?;
+        require_pinned_entry(runtime, &name, &staged)?;
         ensure!(
             lillux::sha256_hex(&signed) == reference.sha256,
             "active reset operation digest mismatch"
@@ -342,6 +424,7 @@ impl OriginalOperation {
             runtime: runtime.try_clone()?,
             source_lease: std::sync::Mutex::new(None),
             quota_claim: std::sync::OnceLock::new(),
+            staged: std::sync::OnceLock::from(staged),
         };
         operation.check_record(runtime, identity, options, scheduler_selected)?;
         Ok(Some(Arc::new(operation)))
@@ -455,6 +538,7 @@ impl OriginalOperation {
             runtime: runtime.try_clone()?,
             source_lease: std::sync::Mutex::new(source_lease),
             quota_claim: std::sync::OnceLock::from(Arc::downgrade(quota_claim)),
+            staged: std::sync::OnceLock::new(),
         };
         operation.check_record(runtime, identity, options, scheduler_selected)?;
         Ok(Arc::new(operation))
@@ -507,7 +591,21 @@ impl OriginalOperation {
         }
         runtime
             .sync()
-            .context("sync staged original reset operation")
+            .context("sync staged original reset operation")?;
+        let pin = runtime
+            .open_mount_entry(OsStr::new(&name))?
+            .context("staged original reset operation disappeared")?;
+        let current = lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(&name), MAX_BYTES)?
+            .context("staged original reset operation disappeared")?;
+        ensure!(current == self.signed, "staged reset operation changed after staging");
+        require_pinned_entry(runtime, &name, &pin)?;
+        match self.staged.get() {
+            Some(retained) => require_same_file(retained, &pin),
+            None => {
+                let _ = self.staged.set(pin);
+                Ok(())
+            }
+        }
     }
 
     /// Hold this exact candidate through namespace/reservation refusal. The
@@ -633,22 +731,26 @@ impl OriginalOperation {
         );
         let name = format!("{PREFIX}{}", self.reference.operation_id);
         let quarantine = format!("cleanup.{name}");
-        let Some(file) = runtime.open_regular(OsStr::new(&name), false)? else {
-            // An earlier attempt may have stopped after its quarantine rename.
-            if let Some(file) = runtime.open_regular(OsStr::new(&quarantine), false)? {
-                let current =
-                    lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(&quarantine), MAX_BYTES)?
-                        .context("staged operation quarantine disappeared before removal")?;
-                ensure!(current == self.signed, "staged operation quarantine holds other bytes");
-                runtime.remove_if_same(OsStr::new(&quarantine), &file)?;
+        let staged = self
+            .staged
+            .get()
+            .context("staged operation removal lacks the descriptor retained at staging")?;
+        if runtime.entry_no_follow(OsStr::new(&name))?.is_none() {
+            // An earlier attempt may have stopped after its quarantine
+            // rename; only the retained inode is unlinked there.
+            if runtime.entry_no_follow(OsStr::new(&quarantine))?.is_some() {
+                runtime
+                    .unlink_regular_if_same(OsStr::new(&quarantine), staged)
+                    .context("unlink staged operation quarantine")?;
             }
             return Ok(());
-        };
+        }
+        require_pinned_entry(runtime, &name, staged)?;
         let current = lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(&name), MAX_BYTES)?
             .context("staged operation disappeared before removal")?;
         ensure!(current == self.signed, "staged operation bytes changed before removal");
         runtime
-            .remove_if_same_planned_atomic(OsStr::new(&name), &file, OsStr::new(&quarantine))
+            .remove_metadata_regular_if_same_planned_atomic(OsStr::new(&name), staged, OsStr::new(&quarantine))
             .map_err(anyhow::Error::new)
             .context("remove staged operation file")?;
         Ok(())

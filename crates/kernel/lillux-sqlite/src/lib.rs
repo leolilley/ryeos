@@ -326,7 +326,6 @@ pub trait SqliteInspectionCopyWork: Send + Sync {
     /// copy claim. Equal paths, receipts or numeric budgets cannot establish it.
     fn require_original_native_factory(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()>;
 
-
     fn begin_copy_production(
         &self,
         source: &PinnedDirectory,

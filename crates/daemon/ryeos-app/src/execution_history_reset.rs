@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 /// scheduler and Runtime writes driven by a reset keep their owners' tokens.
 pub(crate) const RESET_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("reset");
 /// Cleanup steps charged for removing the acknowledged staged operation
-/// file: two bounded opens, one guarded read, the quarantine rename, the
-/// unlink and the parent sync.
+/// file through the descriptor retained at staging: two entry lookups, one
+/// guarded read, the quarantine rename, the unlink and the parent sync.
 const STAGED_OPERATION_REMOVAL_STEPS: u64 = 8;
 use std::sync::Arc;
 
@@ -29,8 +29,16 @@ mod original_operation;
 mod original_quota_claim;
 mod operational_owner;
 mod native_backend;
+mod scratch;
+mod stale_recovery;
 #[cfg(test)]
 mod fixture_operational_source;
+pub use scratch::{
+    ExecutionHistoryScratchInspection, ExecutionHistoryScratchRepairOptions,
+    ExecutionHistoryScratchRepairReport, ScratchEntry, ScratchLocation,
+    execution_history_scratch_repair_command, inspect_execution_history_scratch,
+    repair_execution_history_scratch,
+};
 use operational_owner::OperationalOwnerPhase;
 use offline_policy::OfflineResetPolicyOwner;
 use original_operation::OriginalOperation;
@@ -472,6 +480,27 @@ pub struct SchedulerHistoryRetirement {
     pub generation: Option<[u8; 16]>,
 }
 
+/// How long the reset retries one refused scheduler retirement stage,
+/// counted from its last progress: about one minute, as the scheduler
+/// service retries its own held stages (240 attempts at 250 ms). A refusal
+/// that outlasts it is not a transient one. Tests shorten it so a refusal
+/// is observable.
+const SCHEDULER_SETTLEMENT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 60 });
+/// Pause between retries of one refused scheduler retirement stage.
+const SCHEDULER_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The refusal of a scheduler stage still refused after its window. The
+/// State discard marker stays Active and every durable record of the
+/// attempt stays, so the next reset settles this attempt and resumes it.
+fn scheduler_settlement_pending(error: anyhow::Error, stage: &str) -> anyhow::Error {
+    error.context(format!(
+        "execution-history reset could not {stage} within {}s; settlement pending; the next \
+         `ryeos node reset execution-history` recovers it",
+        SCHEDULER_SETTLEMENT_WINDOW.as_secs()
+    ))
+}
+
 pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str =
     "ryeos node reset execution-history --include-project-heads --confirm --confirm-project-heads";
 
@@ -610,6 +639,53 @@ pub struct ExecutionHistoryResetReport {
     /// SHA-256 of the signed record that released this reset's reservation.
     /// The record itself is unlinked once the release completes.
     pub released_sha256: String,
+    /// Stale attempts of earlier processes this reset settled at admission.
+    pub recovered: Vec<RecoveredReservation>,
+    /// How the native host's release ended its census durability pins.
+    pub durability_pins: DurabilityPinsReport,
+}
+
+/// Census durability pins the native host's release ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DurabilityPinsReport {
+    pub closed: usize,
+    /// Closes that consumed the descriptor but reported an error; nothing
+    /// is left open, and the count is reported rather than refused.
+    pub consumed_with_error: usize,
+}
+
+/// How a stale attempt's release ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveredReleaseOutcome {
+    /// The attempt had committed its own completed release; recovery
+    /// finished unlinking it.
+    Completed,
+    /// Recovery recorded the attempt as abandoned and removed its deposits.
+    Abandoned,
+}
+
+/// Whether an abandoned attempt's history change was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveredApplied {
+    /// State acknowledged the attempt's discard: the history reset applied.
+    Applied,
+    NotApplied,
+    /// State still marks the attempt's operation active; this reset resumes
+    /// it.
+    Resumed,
+}
+
+/// One stale attempt settled by recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveredReservation {
+    pub operation_id: String,
+    pub outcome: RecoveredReleaseOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<RecoveredApplied>,
+    pub deposits_removed: usize,
+    pub records_unlinked: usize,
 }
 
 impl ExecutionHistoryResetReport {
@@ -897,6 +973,9 @@ struct InspectionControllerCustody {
     cleanup_failures: std::sync::Mutex<Vec<anyhow::Error>>,
     runtime_released: std::sync::Mutex<Vec<Arc<RuntimeInspectionRelease>>>,
     acquisition_released: std::sync::Mutex<Vec<Arc<SqliteInspectionAcquisitionReleased>>>,
+    /// Set once this attempt's reservation is published: from then on a
+    /// failure leaves scratch that the next reset settles.
+    reservation_published: std::sync::atomic::AtomicBool,
 }
 impl InspectionControllerCustody {
     fn retain_native_census(&self, mut terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>) -> Result<()> {
@@ -1391,8 +1470,16 @@ fn run_execution_history_reset_inner(
     observer: Option<&mut dyn FnMut(&ExecutionHistoryResetProgress)>,
 ) -> Result<ExecutionHistoryResetReport> {
     let custody = Arc::new(InspectionControllerCustody::default());
-    run_execution_history_reset_owned(options, participant, observer, &custody)
-        .map_err(|error| custody.retain_failure(error))
+    run_execution_history_reset_owned(options, participant, observer, &custody).map_err(|error| {
+        let error = if custody.reservation_published.load(std::sync::atomic::Ordering::Acquire) {
+            error.context(
+                "this attempt's reservation stays charged; the next `ryeos node reset execution-history` settles it",
+            )
+        } else {
+            error
+        };
+        custody.retain_failure(error)
+    })
 }
 
 fn run_execution_history_reset_owned(
@@ -1474,6 +1561,11 @@ fn run_execution_history_reset_owned(
         .acquire_exclusive_guard(!options.dry_run)
         .context("acquire exclusive head mutation guard for execution-history reset")?;
 
+    // Settle what earlier attempts' processes left before reading the active
+    // operation: a stale claim on a resumable operation is released first,
+    // so this attempt's claim can resume it.
+    let recovered = stale_recovery::recover_stale(&offline_policy, &identity, &state_authority, &cas_guard)
+        .context("settle stale execution-history reset attempts")?;
     // Resolve activated evidence before any scheduler preview. A retry must
     // not replace the original counts with a rebuilt or absent projection.
     let active_operation = OriginalOperation::read_active(
@@ -1525,6 +1617,9 @@ fn run_execution_history_reset_owned(
             }
         }
     }
+    inspection_custody
+        .reservation_published
+        .store(true, std::sync::atomic::Ordering::Release);
     quota_claim
         .require_service_window()
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
@@ -1826,10 +1921,12 @@ fn run_execution_history_reset_owned(
         drop(closed_state);
         drop(native_factory);
         drop(scheduler_preview_permit);
-        let released_sha256 = settle_reservation_release(inspection_custody, &settlement)?;
+        let (released_sha256, durability_pins) = settle_reservation_release(inspection_custody, &settlement)?;
         publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
         let report = ExecutionHistoryResetReport {
             released_sha256,
+            recovered,
+            durability_pins,
             app_root: config.app_root,
             dry_run: options.dry_run,
             performed: false,
@@ -2105,13 +2202,23 @@ fn run_execution_history_reset_owned(
             // Keep this original same-thread frame: it owns the State lock,
             // runtime namespace pin/lock, StateDb, RuntimeDb and exclusive
             // CAS guard. An attempt error is diagnostic only; retry that same
-            // cursor and never stringify/drop its native owner.
+            // cursor and never stringify/drop its native owner. Refusals are
+            // retried for a bounded window after the last advance; past it
+            // the reset refuses with the frame still held, ending the attempt
+            // before the permit and the frame owners behind it.
             let mut last_retry_notice: Option<std::time::Instant> = None;
+            let mut window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
             let retirement = loop {
                 match attempt.advance(&permit) {
                     Ok(Some(retirement)) => break retirement,
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Ok(None) => {
+                        window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                     Err(error) => {
+                        if window.has_elapsed() {
+                            return Err(scheduler_settlement_pending(error, "advance scheduler retirement"));
+                        }
                         if last_retry_notice
                             .as_ref()
                             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5))
@@ -2121,7 +2228,7 @@ fn run_execution_history_reset_owned(
                             );
                             last_retry_notice = Some(std::time::Instant::now());
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        std::thread::sleep(SCHEDULER_RETRY_INTERVAL);
                     }
                 }
             };
@@ -2139,6 +2246,9 @@ fn run_execution_history_reset_owned(
 
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Finalizing, None);
     if let (Some(participant), Some(retirement)) = (participant, scheduler_retirement.as_ref()) {
+        // Bounded like the advance loop; a refusal past the window keeps the
+        // State marker Active, so the next reset resumes the operation.
+        let window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
         loop {
             match permit
                 .runtime_directory()
@@ -2149,10 +2259,13 @@ fn run_execution_history_reset_owned(
                     break;
                 }
                 Err(error) => {
+                    if window.has_elapsed() {
+                        return Err(scheduler_settlement_pending(error, "complete scheduler retirement"));
+                    }
                     eprintln!(
                         "execution-history reset retains its original State/CAS authority and scheduler attempt while retrying terminal completion: {error:#}"
                     );
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    std::thread::sleep(SCHEDULER_RETRY_INTERVAL);
                 }
             }
         }
@@ -2305,13 +2418,15 @@ fn run_execution_history_reset_owned(
     drop(staged_preflight_permit);
     drop(scheduler_preview_permit);
     operation.release_source_lease();
-    let released_sha256 = settle_reservation_release(inspection_custody, &inspection_settlement)
+    let (released_sha256, durability_pins) = settle_reservation_release(inspection_custody, &inspection_settlement)
         .context("history reset applied; settlement pending; the next reset settles it")?;
 
     let rebuilt = authoritative.rebuilt_projection.unwrap_or_default();
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
     let report = ExecutionHistoryResetReport {
         released_sha256,
+        recovered,
+        durability_pins,
         app_root: config.app_root,
         dry_run: false,
         performed: true,
@@ -2362,7 +2477,7 @@ fn permanent_acknowledgement_refusal(error: &anyhow::Error) -> bool {
 fn settle_reservation_release(
     custody: &Arc<InspectionControllerCustody>,
     settlement: &Arc<OriginalInspectionSettlement>,
-) -> Result<String> {
+) -> Result<(String, DurabilityPinsReport)> {
     // End every controller and settlement alias of native owners.
     custody
         .quiesce_native_aliases()
@@ -2380,7 +2495,9 @@ fn settle_reservation_release(
     settlement
         .require_completed()
         .context("original inspection settlement is not complete")?;
-    settlement.released_sha256()
+    let lillux_sqlite::offline_host::DurabilityPinRelease { closed, consumed_with_error } =
+        custody.released_durability_pins()?;
+    Ok((settlement.released_sha256()?, DurabilityPinsReport { closed, consumed_with_error }))
 }
 
 /// End the copy work and then the settlement, whose admission holds the
@@ -2733,7 +2850,7 @@ mod tests {
         }
     }
 
-    fn install_offline_policy(
+    pub(super) fn install_offline_policy(
         config: &Config,
         identity: &ryeos_node_runtime::identity::NodeIdentity,
         enabled: bool,
@@ -2921,7 +3038,7 @@ mod tests {
             .join(".ai/node/offline-reset-inspections/unclassified");
         std::fs::create_dir(&unknown_copy).unwrap();
         let blocked = first.publish(&policy, &identity).unwrap_err();
-        assert!(format!("{blocked:#}").contains("unclassified inspection destination"));
+        assert!(format!("{blocked:#}").contains("`unclassified`"), "{blocked:#}");
         assert!(unknown_copy.is_dir());
         assert_eq!(std::fs::read(&first_path).unwrap(), exact_signed);
         std::fs::remove_dir(&unknown_copy).unwrap(); // only this test's injected empty object
@@ -2957,9 +3074,9 @@ mod tests {
         std::fs::write(ledger_path.join("unclassified-partial"), b"retained").unwrap();
         assert!(second.publish(&policy, &identity).is_err());
         assert!(ledger_path.join("unclassified-partial").exists());
-        // One real charge + one visible partial +63 extra deposits =65.
-        // Refuse before authentication on an over-capacity census, regardless
-        // of whether the selected original record appears in its first64.
+        drop(second);
+        // Beside its own reservation, any other ledger name refuses the
+        // retried publication, naming the repair, and is kept.
         for index in 0..63 {
             std::fs::write(
                 ledger_path.join(format!("held.partial.{index:02}")),
@@ -2967,16 +3084,19 @@ mod tests {
             )
             .unwrap();
         }
-        let capacity = first.publish(&policy, &identity).unwrap_err();
-        assert!(format!("{capacity:#}").contains("complete inventory capacity"));
+        let foreign = first.publish(&policy, &identity).unwrap_err();
         assert!(
-            capacity
+            format!("{foreign:#}").contains(ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR),
+            "{foreign:#}"
+        );
+        assert!(
+            foreign
                 .downcast_ref::<QuotaCustodyFailure>()
                 .unwrap()
                 .retains(&first)
         );
         assert_eq!(std::fs::read_dir(&ledger_path).unwrap().count(), 65);
-        drop(capacity);
+        drop(foreign);
         drop(first);
         assert_eq!(std::fs::read(&first_path).unwrap(), exact_signed);
         assert!(
@@ -3656,6 +3776,123 @@ mod tests {
                 .last_acknowledged_thread_history_discard()
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    /// A scheduler stage refused past its window ends the reset with the
+    /// settlement pending: State still marks the operation Active, the
+    /// attempt's reservation stays, and the next reset settles that stale
+    /// attempt as resumed and completes the operation.
+    #[test]
+    fn scheduler_refusal_past_its_window_leaves_a_settlement_the_next_reset_resumes() {
+        struct Participant {
+            refuse: std::sync::atomic::AtomicBool,
+        }
+        struct Attempt;
+        impl SchedulerHistoryRetirementAttempt for Attempt {
+            fn advance(
+                &mut self,
+                permit: &SchedulerResetRetirement<'_, '_>,
+            ) -> Result<Option<SchedulerHistoryRetirement>> {
+                permit.runtime_directory()?;
+                Ok(Some(SchedulerHistoryRetirement {
+                    journal_artifacts: 0,
+                    rows: ryeos_scheduler_contract::SchedulerFireHistoryDiscardReport::default(),
+                    generation: None,
+                }))
+            }
+        }
+        impl SchedulerHistoryResetParticipant for Participant {
+            fn preflight(&self, permit: &SchedulerResetPreview<'_>) -> Result<()> {
+                permit.runtime_directory().map(|_| ())
+            }
+            fn preview(
+                &self,
+                _permit: &SchedulerResetPreview<'_>,
+            ) -> Result<ryeos_scheduler_contract::SchedulerFireHistoryAccounting> {
+                Ok(ryeos_scheduler_contract::SchedulerFireHistoryAccounting::Exact {
+                    counts: Default::default(),
+                })
+            }
+            fn begin_retirement<'a>(
+                &self,
+                permit: &'a SchedulerResetRetirement<'_, '_>,
+            ) -> Result<Box<dyn SchedulerHistoryRetirementAttempt + 'a>> {
+                permit.runtime_directory()?;
+                Ok(Box::new(Attempt))
+            }
+            fn complete(
+                &self,
+                permit: &SchedulerResetRetirement<'_, '_>,
+                _retirement: &SchedulerHistoryRetirement,
+            ) -> Result<usize> {
+                permit.runtime_directory()?;
+                anyhow::ensure!(
+                    !self.refuse.load(std::sync::atomic::Ordering::SeqCst),
+                    "scheduler terminal journal refused"
+                );
+                Ok(0)
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let config = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
+        install_offline_policy(&config, &identity, true);
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::new(trust)).unwrap());
+        drop(RuntimeDb::open(&config.db_path).unwrap());
+        drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        let participant = Participant { refuse: std::sync::atomic::AtomicBool::new(true) };
+        let options = ExecutionHistoryResetOptions {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        };
+
+        let error = run_execution_history_reset(&options, Some(&participant)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("settlement pending"), "{message}");
+        assert!(
+            message.contains("the next `ryeos node reset execution-history` recovers it"),
+            "{message}"
+        );
+        assert!(message.contains("scheduler terminal journal refused"), "{message}");
+        drop(error);
+        let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(&config.runtime_state_dir()).unwrap();
+        let active = recovery
+            .thread_history_discard_operation()
+            .unwrap()
+            .expect("the refused operation stays Active");
+        let ledger = config.app_root.join(".ai/node").join(stale_recovery::LEDGER_DIRECTORY);
+        assert!(
+            ledger.join(format!("reserved.{}", active.operation_id)).exists(),
+            "the refused attempt's reservation stays for recovery"
+        );
+
+        participant.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        let report = run_execution_history_reset(&options, Some(&participant)).unwrap();
+        assert!(report.performed);
+        let resumed: Vec<_> = report
+            .recovered
+            .iter()
+            .filter(|recovered| recovered.operation_id == active.operation_id)
+            .collect();
+        assert_eq!(resumed.len(), 1, "{:?}", report.recovered);
+        assert_eq!(resumed[0].outcome, RecoveredReleaseOutcome::Abandoned);
+        assert_eq!(resumed[0].applied, Some(RecoveredApplied::Resumed));
+        let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(&config.runtime_state_dir()).unwrap();
+        assert!(!recovery.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            recovery
+                .last_acknowledged_thread_history_discard()
+                .unwrap()
+                .map(|acknowledged| acknowledged.operation_id),
+            Some(active.operation_id)
         );
     }
 

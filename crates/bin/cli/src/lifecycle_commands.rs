@@ -10,6 +10,7 @@
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
+//!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
@@ -87,6 +88,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "reset", "execution-history"],
         summary: "Retire the local execution-history epoch",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "reset", "execution-history-scratch"],
+        summary: "Clear execution-history reset scratch the next reset cannot settle",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -188,6 +194,12 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
             run_execution_history_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("reset"))
+            if argv.get(2).map(String::as_str) == Some("execution-history-scratch") =>
+        {
+            run_execution_history_scratch_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
@@ -768,6 +780,104 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     Ok(())
 }
 
+// ── ryeos node reset execution-history-scratch ───────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset execution-history-scratch",
+    about = "Clear execution-history reset scratch the next reset cannot settle",
+    long_about = "Remove every offline execution-history reset record, inspection copy, reset temporary and inert staged operation file, and a thread-history discard marker of a retired schema. The daemon must be stopped. An ordinary `ryeos node reset execution-history` settles an interrupted attempt by itself; use this when it refuses and names this command. The staged operation of an operation State still marks active is kept, so the next reset resumes it. Names outside the reset's own grammar in its directories, and entries not of the kind their name declares, are left in place and reported; a reset still refuses while they remain, so remove them by hand. --dry-run only inspects.",
+    no_binary_name = true
+)]
+struct ExecutionHistoryScratchArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that the reset scratch is removed.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Report what would be removed without removing anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<ExecutionHistoryScratchArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("clearing execution-history reset scratch requires --confirm");
+    }
+    let report = ryeos_app::execution_history_reset::repair_execution_history_scratch(
+        &ryeos_app::execution_history_reset::ExecutionHistoryScratchRepairOptions {
+            app_root: args.app_root,
+            dry_run: args.dry_run,
+        },
+    )
+    .context("execution-history scratch repair failed")?;
+    if args.json {
+        crate::tty::write_json(&report)?;
+        return Ok(());
+    }
+    let location = |location: ryeos_app::execution_history_reset::ScratchLocation| match location {
+        ryeos_app::execution_history_reset::ScratchLocation::Ledger => "ledger",
+        ryeos_app::execution_history_reset::ScratchLocation::Inspections => "inspections",
+        ryeos_app::execution_history_reset::ScratchLocation::RuntimeNamespace => "runtime",
+    };
+    let list = |entries: &[ryeos_app::execution_history_reset::ScratchEntry]| {
+        if entries.is_empty() {
+            "none".to_owned()
+        } else {
+            entries
+                .iter()
+                .map(|entry| format!("{}/{}", location(entry.location), entry.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    let mut status = crate::tty::StatusBanner::new(
+        if report.left.is_empty() { crate::tty::Tone::Success } else { crate::tty::Tone::Warning },
+        if report.dry_run {
+            "EXECUTION HISTORY SCRATCH PREVIEW"
+        } else {
+            "EXECUTION HISTORY SCRATCH CLEARED"
+        },
+    );
+    status.detail = Some(report.app_root.display().to_string());
+    status.rows = vec![
+        crate::tty::Row::key_value(if report.dry_run { "would remove" } else { "removed" }, list(&report.removed)),
+        crate::tty::Row::key_value(
+            "left in place",
+            if report.left.is_empty() {
+                list(&report.left)
+            } else {
+                format!(
+                    "{}; a reset still refuses while these remain: remove them by hand",
+                    list(&report.left)
+                )
+            },
+        ),
+        crate::tty::Row::key_value(
+            "retired discard marker",
+            report
+                .retired_marker_schema
+                .map_or_else(|| "none".to_owned(), |schema| format!("schema {schema} cleared")),
+        ),
+        crate::tty::Row::key_value(
+            "active operation kept",
+            report.active_operation.clone().unwrap_or_else(|| "none".to_owned()),
+        ),
+    ];
+    console.success(&status)?;
+    Ok(())
+}
+
 // ── ryeos node reset execution-history ───────────────────────────────────
 
 #[derive(Parser, Debug)]
@@ -942,6 +1052,30 @@ fn run_execution_history_reset_command(
             report.projection.superseded_instances_deleted.to_string(),
         ),
         crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
+        crate::tty::Row::key_value(
+            "interrupted attempts settled",
+            if report.recovered.is_empty() {
+                "none".to_owned()
+            } else {
+                report
+                    .recovered
+                    .iter()
+                    .map(|recovered| {
+                        let applied = match recovered.applied {
+                            Some(ryeos_app::execution_history_reset::RecoveredApplied::Applied) => ", applied",
+                            Some(ryeos_app::execution_history_reset::RecoveredApplied::Resumed) => ", resumed",
+                            Some(ryeos_app::execution_history_reset::RecoveredApplied::NotApplied) | None => "",
+                        };
+                        let outcome = match recovered.outcome {
+                            ryeos_app::execution_history_reset::RecoveredReleaseOutcome::Completed => "completed",
+                            ryeos_app::execution_history_reset::RecoveredReleaseOutcome::Abandoned => "abandoned",
+                        };
+                        format!("{} ({outcome}{applied})", recovered.operation_id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
     ];
     if report.performed {
         status.rows.push(crate::tty::Row::key_value(
@@ -1568,6 +1702,45 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     } else {
         checks.push(check(
             "bundle_transactions",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
+    // Execution-history reset scratch: an interrupted reset leaves it. The
+    // next reset settles it while the node is stopped; the warning names the
+    // explicit repair for what that reset cannot attribute.
+    if initialized {
+        let repair = ryeos_app::execution_history_reset::execution_history_scratch_repair_command();
+        match ryeos_app::execution_history_reset::inspect_execution_history_scratch(&config.app_root) {
+            Ok(scratch) if scratch.is_empty() => {
+                checks.push(check("reset_scratch", OK, serde_json::json!({})))
+            }
+            Ok(scratch) => checks.push(check(
+                "reset_scratch",
+                WARN,
+                serde_json::json!({
+                    "ledger": scratch.ledger,
+                    "inspections": scratch.inspections,
+                    "runtime": scratch.runtime,
+                    "note": "an interrupted execution-history reset left scratch (or a reset is running now)",
+                    "fix": format!(
+                        "stop the node. To only inspect, run `ryeos node reset execution-history-scratch --dry-run`. To settle, run `ryeos node reset execution-history`: any reset, --dry-run included, settles interrupted attempts. If it refuses, run `{repair}`, or remove by hand the foreign name the refusal names"
+                    ),
+                }),
+            )),
+            Err(error) => checks.push(check(
+                "reset_scratch",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "fix": format!("if the next execution-history reset refuses, run `{repair}`"),
+                }),
+            )),
+        }
+    } else {
+        checks.push(check(
+            "reset_scratch",
             NA,
             serde_json::json!({ "note": "not initialized" }),
         ));

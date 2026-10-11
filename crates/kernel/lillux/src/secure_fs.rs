@@ -7297,6 +7297,45 @@ impl PinnedDirectory {
         unreachable!("quarantine operation refused unsupported platform")
     }
 
+    /// Unlink one regular child while it is still the inode `expected`
+    /// names, then sync this directory. Returns `false`, with nothing
+    /// changed, when the child is already absent.
+    ///
+    /// This is for a name that is itself debris or a quarantine: there is no
+    /// public coordinate to preserve, so no intermediate name is created.
+    /// The identity check and the unlink are not one atomic step; the caller
+    /// must hold exclusion over every cooperating writer of this namespace
+    /// for the whole call, as for [`Self::remove_empty_child_if_same`].
+    pub fn unlink_regular_if_same(&self, name: &OsStr, expected: &File) -> Result<bool> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, expected);
+            anyhow::bail!("identity-checked unlink requires Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(name)?;
+            ensure!(
+                expected.metadata()?.is_file(),
+                "identity-checked unlink expects a regular file"
+            );
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let path = self.path.join(name);
+            if self.entry_no_follow(name)?.is_none() {
+                return Ok(false);
+            }
+            ensure_entry_matches(&self.directory, &name_c, Some(expected), &path)?;
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("unlink {}", path.display()));
+            }
+            self.directory
+                .sync_all()
+                .with_context(|| format!("sync directory after unlinking {}", path.display()))?;
+            Ok(true)
+        }
+    }
+
     /// Journal callers retain one typed coordinate/identity authority; no
     /// protected SQLite descriptor is exported through this generic method.
     pub fn remove_pinned_regular_planned_atomic(
@@ -11370,5 +11409,27 @@ mod fixed_regular_entry_controls {
                 .is_err()
         );
         assert_eq!(file.metadata().unwrap().len(), 8);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod unlink_regular_if_same_tests {
+    use super::*;
+
+    #[test]
+    fn unlinks_only_the_expected_inode_and_reports_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        std::fs::write(tmp.path().join("debris"), b"one").unwrap();
+        let pin = directory.open_mount_entry(OsStr::new("debris")).unwrap().unwrap();
+        // A replacement at the same name is refused and kept.
+        std::fs::rename(tmp.path().join("debris"), tmp.path().join("moved")).unwrap();
+        std::fs::write(tmp.path().join("debris"), b"two").unwrap();
+        assert!(directory.unlink_regular_if_same(OsStr::new("debris"), &pin).is_err());
+        assert_eq!(std::fs::read(tmp.path().join("debris")).unwrap(), b"two");
+        // The expected inode is unlinked; a second call finds it absent.
+        assert!(directory.unlink_regular_if_same(OsStr::new("moved"), &pin).unwrap());
+        assert!(!tmp.path().join("moved").exists());
+        assert!(!directory.unlink_regular_if_same(OsStr::new("moved"), &pin).unwrap());
     }
 }

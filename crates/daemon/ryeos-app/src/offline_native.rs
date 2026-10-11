@@ -252,9 +252,9 @@ impl OfflineNativeSession {
     pub fn finish(self) -> std::result::Result<OfflineNativeFacts, (Option<Self>, anyhow::Error)> {
         let Self { authority, host } = self;
         match host.finish() {
-            // The region release fact and the retired pin count are plain
+            // The region release fact and the retired pin counts are plain
             // data the session does not report.
-            Ok(OfflineNativeReleased { facts, region: _, durability_pins_retired: _ }) => {
+            Ok(OfflineNativeReleased { facts, region: _, durability_pins: _ }) => {
                 facts.ok_or_else(|| {
                     (None, anyhow::anyhow!("offline native session host released without backend facts"))
                 })

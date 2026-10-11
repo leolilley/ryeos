@@ -739,17 +739,19 @@ fn begin_original_stopped<'a>(
     let db =
         match SchedulerDb::capture_stopped_projection(Arc::clone(&runtime), native_plan.clone()) {
             Ok(db) => db,
-            Err(failure) => retry_stopped_intake(failure, &native_plan, permit)?,
+            Err(failure) => retry_stopped_intake(failure, &native_plan, permit).map_err(intake_owners_end)?,
         };
     let drained = retry_while_held("acknowledge original stopped scheduler intake", || {
         permit.runtime_directory()?;
         db.retry_stopped_projection(&native_plan)
             .map_err(anyhow::Error::new)
-    })?;
+    })
+    .map_err(intake_owners_end)?;
     retry_while_held("sync original stopped scheduler intake", || {
         permit.runtime_directory()?;
         runtime.sync()
-    })?;
+    })
+    .map_err(intake_owners_end)?;
     Ok(Box::new(ServiceRetirementAttempt {
         attempt: RetirementAttempt::new_stopped(db, journal, generation, drained),
         prior_artifacts,
@@ -835,12 +837,13 @@ fn begin_stopped_recovery<'a>(
     let db =
         match SchedulerDb::capture_stopped_projection(Arc::clone(&runtime), native_plan.clone()) {
             Ok(db) => db,
-            Err(failure) => retry_stopped_intake(failure, &native_plan, permit)?,
+            Err(failure) => retry_stopped_intake(failure, &native_plan, permit).map_err(intake_owners_end)?,
         };
     let drained = retry_while_held("acknowledge stopped scheduler recovery intake", || {
         db.retry_stopped_projection(&native_plan)
             .map_err(anyhow::Error::new)
-    })?;
+    })
+    .map_err(intake_owners_end)?;
 
     // The signed parent authorizes any absent remaining role. The fresh native
     // owner has checked all fixed aliases; sync its retained directory before
@@ -848,7 +851,8 @@ fn begin_stopped_recovery<'a>(
     retry_while_held("sync authenticated stopped scheduler namespace", || {
         permit.runtime_directory()?;
         runtime.sync()
-    })?;
+    })
+    .map_err(intake_owners_end)?;
 
     // Rebuild only the already-authenticated, pre-effect prefix under the
     // child intent. The digest-free capture facts are derived from the exact
@@ -861,7 +865,8 @@ fn begin_stopped_recovery<'a>(
             retry_while_held("publish recovered scheduler capture phase", || {
                 permit.runtime_directory()?;
                 journal.append(role, SchedulerRetirementPhase::Captured, identity.clone())
-            })?;
+            })
+            .map_err(intake_owners_end)?;
         }
         phase_index += 1;
     }
@@ -875,7 +880,8 @@ fn begin_stopped_recovery<'a>(
                     SchedulerRetirementPhase::SqlDrainAuthorized,
                     identity.clone(),
                 )
-            })?;
+            })
+            .map_err(intake_owners_end)?;
         }
         phase_index += 1;
     }
@@ -885,7 +891,8 @@ fn begin_stopped_recovery<'a>(
             retry_while_held("publish recovered scheduler drain acknowledgement", || {
                 permit.runtime_directory()?;
                 journal.append(role, SchedulerRetirementPhase::SqlDrained, identity.clone())
-            })?;
+            })
+            .map_err(intake_owners_end)?;
         }
         phase_index += 1;
     }
@@ -893,6 +900,19 @@ fn begin_stopped_recovery<'a>(
         attempt: RetirementAttempt::new_recovered(db, journal, generation, drained),
         prior_artifacts: 0,
     }))
+}
+
+/// The context of a refusal returned once the stopped intake's journal or
+/// scheduler projection exists. Both are locals of the intake frame, so they
+/// end as the refusal returns: the retry notices that said they were
+/// retained held only while retrying. The reset then fails and its process
+/// exits; the journal is durable, so the next reset recovers the interrupted
+/// generation from it.
+fn intake_owners_end(error: anyhow::Error) -> anyhow::Error {
+    error.context(
+        "the stopped intake's retirement journal and scheduler projection end with this refusal; \
+         the next reset recovers the interrupted generation from its durable journal",
+    )
 }
 
 /// Retry the exact stopped intake on its retained failure owner. After

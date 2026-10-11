@@ -312,20 +312,34 @@ fn sign_inspection_record<T: Serialize>(
     Ok(bytes)
 }
 /// Reset scratch state this build refuses: a record under a retired schema,
-/// or a name no current record uses. Nothing is upgraded in place; the
-/// explicit scratch repair clears it.
+/// or a name no current record uses. Nothing is upgraded in place. A name of
+/// the reset's own grammar is cleared by the explicit scratch repair; a
+/// foreign name in the reset's directories is one that repair leaves in
+/// place, so the refusal names it for removal by hand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResetScratchRepairRequired {
     pub(super) what: String,
+    /// The app-root-relative path of a foreign name, when that is what
+    /// refused.
+    pub(super) foreign: Option<String>,
 }
 impl std::fmt::Display for ResetScratchRepairRequired {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{}; stop the node and run `{}` to clear it",
-            self.what,
-            ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR
-        )
+        match &self.foreign {
+            None => write!(
+                formatter,
+                "{}; stop the node and run `{}` to clear it",
+                self.what,
+                ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR
+            ),
+            Some(path) => write!(
+                formatter,
+                "{}; it is outside the reset's own names, so `{}` leaves it in place: \
+                 stop the node and remove `{path}` by hand",
+                self.what,
+                ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR
+            ),
+        }
     }
 }
 impl std::error::Error for ResetScratchRepairRequired {}
@@ -349,6 +363,7 @@ pub(super) fn require_current_record(
 ) -> Result<()> {
     let header: RecordHeader = serde_json::from_str(body).map_err(|_| ResetScratchRepairRequired {
         what: format!("offline reset {record} record has no recognizable schema"),
+        foreign: None,
     })?;
     if header.schema != u64::from(schema) || header.purpose != purpose {
         return Err(ResetScratchRepairRequired {
@@ -356,6 +371,7 @@ pub(super) fn require_current_record(
                 "offline reset {record} record uses retired schema {} (`{}`); this build reads schema {schema}",
                 header.schema, header.purpose
             ),
+            foreign: None,
         }
         .into());
     }
@@ -605,7 +621,15 @@ pub(super) struct OfflineResetReleasedRecord {
 }
 pub(super) const RELEASED_SCHEMA: u32 = 1;
 pub(super) const RELEASED_PURPOSE: &str = "offline_reset_reservation_released_v1";
-const MAX_ABANDONED_DEPOSITS: usize = 64;
+/// Bound on the deposits one abandoned release records. An operation's own
+/// deposits are fixed by name (two inspection directories, their witnesses
+/// and witness quarantines, the staged operation file and its quarantine);
+/// temporary debris is recorded in recovery-only releases of at most this
+/// many entries each. Every record within the bound signs within
+/// [`RECORD_BYTES`].
+pub(super) const MAX_ABANDONED_DEPOSITS: usize = 16;
+/// Bound on one signed reset record.
+pub(super) const RECORD_BYTES: usize = 8192;
 /// The operation id of a release recorded for debris that no reservation
 /// anchors.
 pub(super) const RECOVERY_ONLY_OPERATION: &str = "00000000000000000000000000000000";
@@ -818,6 +842,34 @@ impl OfflineResetReleasedRecord {
                             && deposits.iter().all(|deposit| deposit.kind == AbandonedDepositKind::SecureTemp),
                         "a recovery-only release may record only reset temporary debris"
                     );
+                } else {
+                    ensure!(
+                        deposits.iter().all(|deposit| deposit.kind != AbandonedDepositKind::SecureTemp),
+                        "temporary debris is recorded only in a recovery-only release"
+                    );
+                }
+                // A resumed operation keeps its staged file: the next attempt
+                // runs it, so its release never removes the file.
+                if *applied == AppliedEvidence::Resumed {
+                    ensure!(
+                        deposits.iter().all(|deposit| deposit.location != DepositLocation::RuntimeNamespace),
+                        "a resumed operation's release cannot remove its staged operation file"
+                    );
+                }
+                // A directory is removed as a tree only on its own creation
+                // witness, recorded beside it.
+                for deposit in deposits.iter().filter(|deposit| deposit.witness_bound) {
+                    let witness = evidence_name(&deposit.name);
+                    let quarantine = format!("cleanup.{witness}");
+                    ensure!(
+                        deposits.iter().any(|other| {
+                            other.location == DepositLocation::InspectionParent
+                                && ((other.kind == AbandonedDepositKind::Witness && other.name == witness)
+                                    || (other.kind == AbandonedDepositKind::Quarantine && other.name == quarantine))
+                        }),
+                        "witness-bound directory `{}` lacks its recorded creation witness",
+                        deposit.name
+                    );
                 }
             }
         }
@@ -864,7 +916,9 @@ fn require_deposit(operation: &str, deposit: &AbandonedDeposit) -> Result<()> {
                         .iter()
                         .any(|prefix| target.strip_prefix(prefix) == Some(operation)),
                     DepositLocation::InspectionParent => witness(target),
-                    DepositLocation::RuntimeNamespace => false,
+                    DepositLocation::RuntimeNamespace => {
+                        target.strip_prefix("execution-history-reset.operation.") == Some(operation)
+                    }
                 })
         }
         AbandonedDepositKind::SecureTemp => {
@@ -1026,7 +1080,6 @@ mod tests {
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap().identity().unwrap();
         let mut deposits = vec![
             deposit(DepositLocation::Ledger, format!("cleanup.reserved.{op}"), AbandonedDepositKind::Quarantine, file(2), false),
-            deposit(DepositLocation::Ledger, ".secure.tmp.reset.41.0".into(), AbandonedDepositKind::SecureTemp, file(3), false),
             deposit(
                 DepositLocation::InspectionParent,
                 format!("inspection.{op}.runtime"),
@@ -1049,7 +1102,13 @@ mod tests {
                 file(6),
                 false,
             ),
-            deposit(DepositLocation::RuntimeNamespace, ".secure.tmp.reset.41.1".into(), AbandonedDepositKind::SecureTemp, file(8), false),
+            deposit(
+                DepositLocation::RuntimeNamespace,
+                format!("cleanup.execution-history-reset.operation.{op}"),
+                AbandonedDepositKind::Quarantine,
+                file(8),
+                false,
+            ),
         ];
         deposits.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
         deposits
@@ -1269,6 +1328,155 @@ mod tests {
         recovery.reservation = (0, 0);
         let error = recovery.validate().unwrap_err();
         assert!(format!("{error:#}").contains("does not match its kind"), "{error:#}");
+    }
+
+    #[test]
+    fn abandoned_release_pairs_witnesses_keeps_resumed_operations_and_confines_debris() {
+        let (_tmp, identity) = signer();
+        let op = operation();
+        let refuse = |record: OfflineResetReleasedRecord, expected: &str| {
+            let error = record.validate().unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
+        };
+        // A witness-bound directory needs its witness, public or quarantined.
+        let mut unpaired = every_deposit_kind();
+        unpaired.retain(|deposit| deposit.kind != AbandonedDepositKind::Witness);
+        refuse(abandoned(&identity, unpaired.clone()), "lacks its recorded creation witness");
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap().identity().unwrap();
+        let mut quarantined = vec![
+            deposit(
+                DepositLocation::InspectionParent,
+                format!("cleanup.created.inspection.{op}.scheduler"),
+                AbandonedDepositKind::Quarantine,
+                file(5),
+                false,
+            ),
+            deposit(
+                DepositLocation::InspectionParent,
+                format!("inspection.{op}.scheduler"),
+                AbandonedDepositKind::Directory,
+                DepositIdentity::Directory { identity: directory },
+                true,
+            ),
+        ];
+        quarantined.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        abandoned(&identity, quarantined).validate().unwrap();
+        // A resumed operation's staged file and its quarantine stay.
+        let mut resumed = abandoned(&identity, every_deposit_kind());
+        if let ReleasedOutcome::Abandoned { applied, .. } = &mut resumed.outcome {
+            *applied = AppliedEvidence::Resumed;
+        }
+        refuse(resumed, "cannot remove its staged operation file");
+        let mut resumed = abandoned(
+            &identity,
+            every_deposit_kind()
+                .into_iter()
+                .filter(|deposit| deposit.location != DepositLocation::RuntimeNamespace)
+                .collect(),
+        );
+        if let ReleasedOutcome::Abandoned { applied, .. } = &mut resumed.outcome {
+            *applied = AppliedEvidence::Resumed;
+        }
+        resumed.validate().unwrap();
+        // Temporary debris belongs to recovery-only releases.
+        refuse(
+            abandoned(
+                &identity,
+                vec![deposit(DepositLocation::Ledger, ".secure.tmp.reset.41.0".into(), AbandonedDepositKind::SecureTemp, file(3), false)],
+            ),
+            "recorded only in a recovery-only release",
+        );
+    }
+
+    /// The largest abandoned records recovery can write sign within the
+    /// record bound: an operation's every fixed deposit, and a recovery-only
+    /// release of the maximum count of the longest temporary names.
+    #[test]
+    fn largest_abandoned_records_sign_within_the_record_bound() {
+        let (_tmp, identity) = signer();
+        let largest = |record: &OfflineResetReleasedRecord| {
+            let storage = lillux::cas::canonical_record_storage_quote(record, RECORD_BYTES).unwrap();
+            let signed = record.signed_bytes(&identity, &storage).unwrap();
+            assert!(signed.len() <= RECORD_BYTES, "{}", signed.len());
+            assert_eq!(&OfflineResetReleasedRecord::verified(&signed, &identity).unwrap(), record);
+        };
+        let op = operation();
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap().identity().unwrap();
+        let wide = |inode| DepositIdentity::File { device: u64::MAX, inode };
+        let mut deposits = Vec::new();
+        for purpose in ["runtime", "scheduler"] {
+            let name = format!("inspection.{op}.{purpose}");
+            deposits.push(deposit(
+                DepositLocation::InspectionParent,
+                name.clone(),
+                AbandonedDepositKind::Directory,
+                DepositIdentity::Directory { identity: directory.clone() },
+                true,
+            ));
+            deposits.push(deposit(DepositLocation::InspectionParent, format!("created.{name}"), AbandonedDepositKind::Witness, wide(u64::MAX), false));
+            deposits.push(deposit(
+                DepositLocation::InspectionParent,
+                format!("cleanup.created.{name}"),
+                AbandonedDepositKind::Quarantine,
+                wide(u64::MAX - 1),
+                false,
+            ));
+        }
+        for prefix in ["reserved.", "disposed.", "released."] {
+            deposits.push(deposit(DepositLocation::Ledger, format!("cleanup.{prefix}{op}"), AbandonedDepositKind::Quarantine, wide(u64::MAX), false));
+        }
+        deposits.push(deposit(
+            DepositLocation::RuntimeNamespace,
+            format!("execution-history-reset.operation.{op}"),
+            AbandonedDepositKind::InertOperation,
+            wide(u64::MAX),
+            false,
+        ));
+        deposits.push(deposit(
+            DepositLocation::RuntimeNamespace,
+            format!("cleanup.execution-history-reset.operation.{op}"),
+            AbandonedDepositKind::Quarantine,
+            wide(u64::MAX),
+            false,
+        ));
+        deposits.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        assert!(deposits.len() <= MAX_ABANDONED_DEPOSITS);
+        let mut record = abandoned(&identity, deposits);
+        if let ReleasedOutcome::Abandoned { recovered_at_ms, .. } = &mut record.outcome {
+            *recovered_at_ms = u64::MAX;
+        }
+        largest(&record);
+        let mut temps: Vec<_> = (0..MAX_ABANDONED_DEPOSITS)
+            .map(|index| {
+                let location = [DepositLocation::Ledger, DepositLocation::InspectionParent, DepositLocation::RuntimeNamespace][index % 3];
+                let name = format!(".secure.tmp.reset.{}.{}", u32::MAX, u64::MAX - index as u64);
+                deposit(location, name, AbandonedDepositKind::SecureTemp, wide(u64::MAX), false)
+            })
+            .collect();
+        temps.sort_by(|left, right| (left.location, left.name.as_str()).cmp(&(right.location, right.name.as_str())));
+        let mut recovery = abandoned(&identity, temps);
+        recovery.operation_id = RECOVERY_ONLY_OPERATION.into();
+        recovery.claim_sha256 = "0".repeat(64);
+        recovery.claim_nonce = "0".repeat(32);
+        recovery.reservation = (0, 0);
+        if let ReleasedOutcome::Abandoned { disposition_sha256, recovered_at_ms, .. } = &mut recovery.outcome {
+            *disposition_sha256 = None;
+            *recovered_at_ms = u64::MAX;
+        }
+        largest(&recovery);
+        // One more deposit than the bound is refused.
+        if let ReleasedOutcome::Abandoned { deposits, .. } = &mut recovery.outcome {
+            deposits.push(deposit(
+                DepositLocation::RuntimeNamespace,
+                format!(".secure.tmp.reset.{}.9", u32::MAX),
+                AbandonedDepositKind::SecureTemp,
+                wide(1),
+                false,
+            ));
+        }
+        assert!(format!("{:#}", recovery.validate().unwrap_err()).contains("finite capacity"));
     }
 
     #[test]

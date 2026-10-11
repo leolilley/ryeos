@@ -4,7 +4,8 @@
 //! an error path, and never infers release from counts or a dropped owner.
 use super::*;
 use lillux_sqlite::offline_host::{
-    OfflineNativeFacts, OfflineNativeHost, OfflineNativeHostFailure, OfflineNativeRetained,
+    DurabilityPinRelease, OfflineNativeAliasRefusal, OfflineNativeFacts, OfflineNativeHost,
+    OfflineNativeHostFailure, OfflineNativeRetained,
 };
 use lillux_sqlite::original_host_owner::backing::HostStorageRegionReleaseFact;
 
@@ -17,10 +18,10 @@ pub(super) struct OriginalBackendSlot {
     /// handover never enters the same owner twice.
     handed_terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
     handed_leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
-    /// The released host's plain facts, region release fact and the count
-    /// of census durability pins its release closed. Once the host is
-    /// released, its facts are answered from here.
-    released: Option<(OfflineNativeFacts, HostStorageRegionReleaseFact, usize)>,
+    /// The released host's plain facts, region release fact and how its
+    /// release ended the census durability pins. Once the host is released,
+    /// its facts are answered from here.
+    released: Option<(OfflineNativeFacts, HostStorageRegionReleaseFact, DurabilityPinRelease)>,
     /// Names of the controller and settlement owners the alias quiesce has
     /// ended, so a release refusal can say which known holders are gone.
     quiesced: Vec<&'static str>,
@@ -117,6 +118,13 @@ impl InspectionControllerCustody {
     pub(super) fn post_backend_factory(&self) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
         let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
         Ok(slot.host.as_ref().context("offline native host absent")?.post_backend_factory()?.clone())
+    }
+
+    /// How the released host's release ended its census durability pins.
+    pub(super) fn released_durability_pins(&self) -> Result<DurabilityPinRelease> {
+        let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+        let (_, _, pins) = slot.released.as_ref().context("offline native host is not released")?;
+        Ok(*pins)
     }
 
     /// The host's plain facts, once its backend finished; after the host is
@@ -314,11 +322,11 @@ impl InspectionControllerCustody {
         };
         match host.release() {
             Ok(released) => {
-                let lillux_sqlite::offline_host::OfflineNativeReleased { facts, region, durability_pins_retired } = released;
+                let lillux_sqlite::offline_host::OfflineNativeReleased { facts, region, durability_pins } = released;
                 let facts = facts.context("released offline native host lacks its backend facts")?;
                 let region = region.context("released offline native host lacks its region release fact")?;
                 self.native_backend.lock().unwrap_or_else(|p| p.into_inner()).released =
-                    Some((facts, region, durability_pins_retired));
+                    Some((facts, region, durability_pins));
                 Ok(region)
             }
             Err(OfflineNativeRetained { host, error }) => {
@@ -330,10 +338,17 @@ impl InspectionControllerCustody {
                     slot.quiesced.join(", ")
                 };
                 drop(slot);
-                let error = error.context(format!(
-                    "offline native host release retained; the alias quiesce already ended: {ended}; \
-                     a surviving alias is held outside controller custody"
-                ));
+                // Only a surviving strong alias points outside this custody;
+                // any other release refusal names its own cause.
+                let alias = error.chain().any(|cause| cause.downcast_ref::<OfflineNativeAliasRefusal>().is_some());
+                let error = if alias {
+                    error.context(format!(
+                        "offline native host release retained; the alias quiesce already ended: {ended}; \
+                         a surviving alias is held outside controller custody"
+                    ))
+                } else {
+                    error.context("offline native host release retained")
+                };
                 Err(self.retain_failure(error))
             }
         }

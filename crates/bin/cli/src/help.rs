@@ -942,6 +942,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire the local execution-history epoch",
             "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <EPOCH> --schema-cut-to <EPOCH>] [--json] [--app-root <DIR>]",
         ),
+        "node reset execution-history-scratch" => (
+            "ryeos node reset execution-history-scratch",
+            "Clear execution-history reset scratch the next reset cannot settle",
+            "ryeos node reset execution-history-scratch [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
         "node reset authorization" => (
             "ryeos node reset authorization",
             "Retire all grants and restore only the local operator",

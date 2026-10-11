@@ -20,9 +20,6 @@ struct RetiredStateContext {
     operation: Option<crate::recovery::ThreadHistoryDiscardOperationRef>,
     previous: Vec<Arc<ClosedOriginalProjection>>,
     generated: OriginalProjectionBuildContext,
-    _trust: Arc<TrustStore>,
-    _head_cache: Mutex<HeadCache>,
-    _repair_sink: Arc<dyn ProjectionRepairSink>,
 }
 impl RetiredStateContext {
     fn require_guard(&self, guard: &crate::recovery::CasMutationGuard) -> anyhow::Result<()> {
@@ -597,10 +594,16 @@ impl StateDb {
             original_projection_terminals: previous,
             original_projection_context: generated,
             recovery,
-            trust_store: trust,
-            head_cache,
-            projection_repair_sink: repair_sink,
-            ..
+            // Head verification state, the repair sink and the operational
+            // handle serve only live reads; a retired State performs none,
+            // so its context does not keep them.
+            trust_store: _,
+            head_cache: _,
+            projection_repair_sink: _,
+            operational: _,
+            cas_root: _,
+            refs_root: _,
+            locators_root: _,
         } = self;
         let context = RetiredStateContext {
             factory: Arc::clone(&factory),
@@ -614,9 +617,6 @@ impl StateDb {
             operation: operation.cloned(),
             previous,
             generated: generated.expect("checked original context"),
-            _trust: trust,
-            _head_cache: head_cache,
-            _repair_sink: repair_sink,
         };
         let selected = match projection.close_original(&factory) {
             Ok(selected) => selected,
