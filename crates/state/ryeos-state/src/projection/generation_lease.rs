@@ -149,6 +149,17 @@ impl OriginalGenerationLease {
         drop(retired);
         Ok(())
     }
+    /// Whether this lease is retired. Every other phase still holds a native
+    /// owner, refusal or closed disposition, and each of those holds the
+    /// factory. The custody is never dropped with the lease, so an unretired
+    /// lease keeps that factory alias for the life of the process.
+    pub(crate) fn is_retired(&self) -> Result<bool> {
+        let custody = self
+            .custody
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
+        Ok(matches!(&*custody, LeaseCustody::Retired))
+    }
     pub(crate) fn metadata(&self) -> Result<std::fs::Metadata> {
         let factory = self.factory()?;
         self.require_coordinate(&factory)?;
@@ -285,5 +296,91 @@ impl OriginalGenerationLease {
             receipt.require_original(factory)?;
         }
         Ok(receipt)
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use super::*;
+    use lillux_sqlite::offline_host::{OfflineNativeAuthority, OfflineNativeRetained};
+    use lillux_sqlite::test_host::{TestNativeEnvelope, issue_offline_host};
+
+    /// Host authority whose windows always stay open.
+    struct OpenWindows;
+    impl OfflineNativeAuthority for OpenWindows {
+        fn checkpoint(&self, _cleanup: bool) -> Result<()> {
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &lillux::PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Lease authority that admits every lease for the test's own host.
+    struct AdmittedLease;
+    impl OriginalNativeProjectionLeaseAuthority for AdmittedLease {
+        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+            Ok(())
+        }
+        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
+            -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)))
+        }
+    }
+
+    #[test]
+    fn a_closed_generation_lease_holds_the_factory_until_retired() {
+        let (mut host, _serial) =
+            issue_offline_host(TestNativeEnvelope::default(), Arc::new(OpenWindows));
+        let factory = Arc::clone(host.factory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
+        let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let authority: Arc<dyn OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        // SAFETY: the test funds the host and is the sole user of this fresh
+        // sidecar; the lease authority admits only this host's factory.
+        let lease = unsafe {
+            OriginalGenerationLease::prepare(
+                Arc::clone(&factory),
+                root,
+                OsString::from("generated.sqlite3.lease"),
+                authority,
+            )
+        }
+        .unwrap();
+        lease.acquire().unwrap();
+        // SAFETY: no consumer of this generation exists in the test.
+        let closed = unsafe { lease.close_after_consumers(&factory) }
+            .unwrap()
+            .expect("an acquired lease closes into a receipt");
+        if let Err((_, error)) = host.retain_lease(closed) {
+            panic!("lease census refused: {error:#}");
+        }
+        drop(host.finish_backend().unwrap());
+        drop(factory);
+        assert!(!lease.is_retired().unwrap());
+
+        // The closed lease still holds the factory through its receipt, so
+        // the host refuses its release and keeps everything.
+        let mut host = match host.release() {
+            Ok(_) => panic!("an unretired lease must keep the host from releasing"),
+            Err(OfflineNativeRetained { host, error }) => {
+                let error = format!("{error:#}");
+                assert!(error.contains("factory strong count 3 (host holds 2)"), "{error}");
+                host
+            }
+        };
+
+        // Retiring against the finished backend ends that alias.
+        let terminal = host.finish_backend().unwrap();
+        lease.retire_after_native_terminal(&terminal).unwrap();
+        assert!(lease.is_retired().unwrap());
+        drop(terminal);
+        if let Err(OfflineNativeRetained { error, .. }) = host.release() {
+            panic!("a retired lease must not keep the host: {error:#}");
+        }
     }
 }

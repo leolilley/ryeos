@@ -52,10 +52,13 @@ pub(super) struct OriginalOperation {
     app_root: lillux::PinnedDirectory,
     runtime: lillux::PinnedDirectory,
     // This is the same producer lease, never reconstructed from copied paths.
-    _source_lease: Option<Arc<SqliteInspectionCopyLease>>,
-    // Fresh source retains the original reservation; cold evidence has no
-    // reconstructed allocation owner and requires separate recovery admission.
-    _quota_claim: Option<Arc<OriginalQuotaClaim>>,
+    // Released once the reset quiesces, so its copy work ends before the
+    // claim's lifelines.
+    source_lease: std::sync::Mutex<Option<Arc<SqliteInspectionCopyLease>>>,
+    // The funded claim this operation runs under. A fresh operation is bound
+    // when prepared; a resumed one when its new claim adopts it. Weak, because
+    // a resuming claim already holds this operation as its prior one.
+    quota_claim: std::sync::OnceLock<std::sync::Weak<OriginalQuotaClaim>>,
 }
 
 /// Preserve the same operation and its original descriptor/copy owners on
@@ -113,18 +116,49 @@ impl std::error::Error for OperationPublicationFailure {
 impl OriginalOperation {
     #[cfg(test)]
     pub(super) fn retains_quota_claim(&self, claim: &Arc<OriginalQuotaClaim>) -> bool {
-        self._quota_claim
-            .as_ref()
-            .is_some_and(|original| Arc::ptr_eq(original, claim))
+        self.require_quota_claim(claim).is_ok()
     }
 
-    /// Live mutation must retain the actual original funded claim. Signed
-    /// cold evidence alone cannot renew a resource owner or attach a fresh
-    /// allocation to the old operation's effects.
+    /// Live mutation must run under the exact funded claim bound to this
+    /// operation. Signed cold evidence alone cannot renew a resource owner or
+    /// attach a fresh allocation to the old operation's effects.
     pub(super) fn require_quota_claim(&self, claim: &Arc<OriginalQuotaClaim>) -> Result<()> {
-        ensure!(self._quota_claim.as_ref().is_some_and(|original| Arc::ptr_eq(original, claim)),
-            "original operation does not retain this exact funded claim; cold recovery admission required");
+        ensure!(
+            self.quota_claim
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|bound| Arc::ptr_eq(&bound, claim)),
+            "original operation is not bound to this exact funded claim; cold recovery admission required"
+        );
         Ok(())
+    }
+
+    /// Bind a resumed operation to the new claim prepared for it. The claim
+    /// must name this exact operation (the same owner and reference) as its
+    /// prior one, and the operation must not be bound already.
+    pub(super) fn adopt_claim(self: &Arc<Self>, claim: &Arc<OriginalQuotaClaim>) -> Result<()> {
+        let prior = claim
+            .prior_operation()
+            .context("claim was not prepared to resume an operation")?;
+        ensure!(
+            Arc::ptr_eq(prior, self) && prior.reference() == self.reference(),
+            "claim was prepared to resume another operation"
+        );
+        self.quota_claim
+            .set(Arc::downgrade(claim))
+            .map_err(|_| anyhow::anyhow!("resumed operation is already bound to a funded claim"))
+    }
+
+    /// End the scheduler inspection lease this operation was prepared from.
+    /// Its copy work then no longer outlives the release; a second call is a
+    /// no-op.
+    pub(super) fn release_source_lease(&self) {
+        let lease = self
+            .source_lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(lease);
     }
 
     pub(super) fn reference(&self) -> &ThreadHistoryDiscardOperationRef {
@@ -306,8 +340,8 @@ impl OriginalOperation {
             signed,
             app_root,
             runtime: runtime.try_clone()?,
-            _source_lease: None,
-            _quota_claim: None,
+            source_lease: std::sync::Mutex::new(None),
+            quota_claim: std::sync::OnceLock::new(),
         };
         operation.check_record(runtime, identity, options, scheduler_selected)?;
         Ok(Some(Arc::new(operation)))
@@ -419,8 +453,8 @@ impl OriginalOperation {
             signed,
             app_root,
             runtime: runtime.try_clone()?,
-            _source_lease: source_lease,
-            _quota_claim: Some(Arc::clone(quota_claim)),
+            source_lease: std::sync::Mutex::new(source_lease),
+            quota_claim: std::sync::OnceLock::from(Arc::downgrade(quota_claim)),
         };
         operation.check_record(runtime, identity, options, scheduler_selected)?;
         Ok(Arc::new(operation))
@@ -560,6 +594,53 @@ impl OriginalOperation {
             current == self.signed,
             "original staged operation bytes changed"
         );
+        Ok(())
+    }
+
+    /// Remove the staged operation file once State has acknowledged this
+    /// operation, so a completed reset leaves no inert operation behind. The
+    /// file is removed only while its bytes are this operation's own and no
+    /// Active marker names it, through a planned quarantine whose name is
+    /// known before the effect. An absent file was removed by an earlier
+    /// attempt.
+    pub(super) fn remove_staged_after_acknowledgement(
+        &self,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+    ) -> Result<()> {
+        state.ensure_guard(guard)?;
+        self.require_app_root()?;
+        let runtime = state.runtime_directory();
+        ensure!(
+            guard.is_exclusive() && self.runtime.is_same_directory(runtime)?,
+            "staged operation removal requires its actual exclusive State runtime"
+        );
+        let recovery = state.require_recovery()?;
+        ensure!(
+            recovery.thread_history_discard_operation()?.is_none()
+                && recovery.last_acknowledged_thread_history_discard()?.as_ref() == Some(&self.reference),
+            "staged operation removal requires State to have acknowledged this exact operation"
+        );
+        let name = format!("{PREFIX}{}", self.reference.operation_id);
+        let quarantine = format!("cleanup.{name}");
+        let Some(file) = runtime.open_regular(OsStr::new(&name), false)? else {
+            // An earlier attempt may have stopped after its quarantine rename.
+            if let Some(file) = runtime.open_regular(OsStr::new(&quarantine), false)? {
+                let current =
+                    lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(&quarantine), MAX_BYTES)?
+                        .context("staged operation quarantine disappeared before removal")?;
+                ensure!(current == self.signed, "staged operation quarantine holds other bytes");
+                runtime.remove_if_same(OsStr::new(&quarantine), &file)?;
+            }
+            return Ok(());
+        };
+        let current = lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(&name), MAX_BYTES)?
+            .context("staged operation disappeared before removal")?;
+        ensure!(current == self.signed, "staged operation bytes changed before removal");
+        runtime
+            .remove_if_same_planned_atomic(OsStr::new(&name), &file, OsStr::new(&quarantine))
+            .map_err(anyhow::Error::new)
+            .context("remove staged operation file")?;
         Ok(())
     }
 

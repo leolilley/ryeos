@@ -1835,6 +1835,33 @@ impl OriginalNativeFactory {
             (Ok(value), Ok(())) => Ok(value),
         }
     }
+    /// Read a retained original witness inside this factory's native scope,
+    /// with the same census answer as the scoped evidence read above: a lease
+    /// this factory holds on another inode no longer refuses, a lease on the
+    /// witness inode still does. It does not revalidate the admission
+    /// authority, because the host authority calls it from inside its own
+    /// revalidation, which that check would re-enter. When no scope can be
+    /// entered (the arena is absent or released, or this thread already runs
+    /// in a scope of the other window), the read runs unchanged: inside an
+    /// enclosing scope of this arena it already answers for this owner, and
+    /// outside every scope it refuses while any lease is listed.
+    pub fn read_original_witness(
+        &self,
+        witness: &crate::RetainedOriginalWitnessFile,
+        maximum: usize,
+        cleanup: bool,
+    ) -> Result<Vec<u8>> {
+        self.require_process()?;
+        let arena = match self.storage() {
+            Ok(storage) if !storage.arena_released.load(Ordering::Acquire) => storage.arena.get(),
+            Ok(_) | Err(_) => None,
+        };
+        let _scope = match arena.map(|arena| arena.scope(cleanup, 0)) {
+            Some(Ok(scope)) => Some(scope),
+            Some(Err(_)) | None => None,
+        };
+        witness.read_original(maximum)
+    }
     pub fn initialize_original_backend(
         self: &Arc<Self>,
     ) -> std::result::Result<(), OriginalNativeFactoryFailure> {

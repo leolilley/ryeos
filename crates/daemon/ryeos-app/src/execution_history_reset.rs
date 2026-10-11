@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 /// ledger, its inspection witnesses and its staged operation record. State,
 /// scheduler and Runtime writes driven by a reset keep their owners' tokens.
 pub(crate) const RESET_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("reset");
+/// Cleanup steps charged for removing the acknowledged staged operation
+/// file: two bounded opens, one guarded read, the quarantine rename, the
+/// unlink and the parent sync.
+const STAGED_OPERATION_REMOVAL_STEPS: u64 = 8;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -588,9 +592,9 @@ pub struct ExecutionHistoryResetReport {
     pub scheduler_rows: ryeos_scheduler_contract::SchedulerFireHistoryAccounting,
     pub replay_indexes: ryeos_state::operational::ReplayIndexResetReport,
     pub projection: ProjectionDiscardReport,
-    // In-process native evidence, never serializable cleanup/settlement authority.
-    #[serde(skip)]
-    inspection_custody: Arc<InspectionControllerCustody>,
+    /// SHA-256 of the signed record that released this reset's reservation.
+    /// The record itself is unlinked once the release completes.
+    pub released_sha256: String,
 }
 
 impl ExecutionHistoryResetReport {
@@ -1712,6 +1716,12 @@ fn run_execution_history_reset_owned(
         inspection_mode,
         participant.is_some(),
     )?;
+    // A resumed operation runs under the new claim prepared for it.
+    if let Some(operation) = &active_operation {
+        operation
+            .adopt_claim(&quota_claim)
+            .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
+    }
     // Reserve the original aggregate envelope before Runtime inspection/copy.
     // This acknowledgement is not the unfinished native work/debit bridge.
     loop {
@@ -2006,18 +2016,36 @@ fn run_execution_history_reset_owned(
         let mut native_terminals = closed_state.native_terminals()?;
         native_terminals.extend(runtime_terminals);
         inspection_custody.retain_native_census(native_terminals)?;
+        // Seal production, dispose the copies, publish the disposition and
+        // retire the creation witnesses.
         let settlement = inspection_custody
             .prepare_inspection_settlement(&quota_claim, &copy_work, &native_factory)
             .context("prepare original two-store inspection settlement")?;
-        drop(inspection_custody.finish_native_backend()
-            .context("finish the offline native host backend after preview cleanup scope")?);
+        // Finish the host's backend and capture its facts.
+        let native_terminal = inspection_custody.finish_native_backend()
+            .context("finish the offline native host backend after preview cleanup scope")?;
         settlement.retain_native_facts(inspection_custody.native_facts()?)?;
-        settlement
-            .require_completed()
-            .context("original inspection settlement is not complete")?;
+        // Retire the source and reservation pins against the finished
+        // backend; their identities are kept as plain facts.
+        let post_backend = inspection_custody.post_backend_factory()
+            .context("offline native host post-backend factory")?;
+        drop(settlement.retire_release_pins(&post_backend, &native_terminal)
+            .context("retire the release pins after the backend finished")?);
+        // A generation lease keeps the factory through its closed receipt
+        // until retired, so every one is retired against the finished backend.
+        closed_state.retire_generation_leases_after_backend(&native_terminal)
+            .context("retire State generation leases against the finished native backend")?;
+        // Every local alias of the factory, the backend terminal and the
+        // closed owners ends before the quiesce.
+        drop(post_backend);
+        drop(native_terminal);
+        drop(closed_state);
+        drop(native_factory);
+        drop(scheduler_preview_permit);
+        let released_sha256 = settle_reservation_release(inspection_custody, &settlement)?;
         publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
-        return Ok(ExecutionHistoryResetReport {
-            inspection_custody: inspection_custody.clone(),
+        let report = ExecutionHistoryResetReport {
+            released_sha256,
             app_root: config.app_root,
             dry_run: options.dry_run,
             performed: false,
@@ -2046,7 +2074,11 @@ fn run_execution_history_reset_owned(
                 superseded_instances_deleted: authoritative_preview.superseded_projection_instances,
                 ..ProjectionDiscardReport::default()
             },
-        });
+        };
+        // The copy work and the settlement (with its ledger lock) end
+        // before the claim, whose StateLock lease ends with this frame.
+        release_settlement_lifelines(inspection_custody, copy_work, settlement);
+        return Ok(report);
     }
 
     let mut runtime_db = runtime_db
@@ -2373,17 +2405,28 @@ fn run_execution_history_reset_owned(
         .context("finish the offline native host backend after mutating cleanup scope")?;
     inspection_settlement.retain_native_facts(inspection_custody.native_facts()?)?;
     // Post-backend work joins the host's finished factory: the State final
-    // ACK, retirements after the backend and outside custody.
+    // ACK, retirements after the backend and outside custody. The admitting
+    // alias ends here, so only the post-backend one remains to quiesce.
+    drop(native_factory);
     let native_factory = inspection_custody.post_backend_factory()
         .context("offline native host post-backend factory")?;
+    // The final-ACK preparation retires every source pin and the issued
+    // reservation pin before the State acknowledgement.
     let ready_for_final_ack = inspection_settlement
-        .prepare_final_ack(&native_factory, &native_terminal)
+        .prepare_final_ack(&native_factory, &native_terminal, &operation)
         .context("prepare actual source retirement and retained funded final-ACK lifelines")?;
     // Runtime/copy close alone cannot acknowledge the complete original
     // native owner. Keep the marker until the genuine exhaustive census,
     // physical arena release and original issuer acknowledgement are joined.
     native_terminal.require_original(&native_factory)
         .context("original native issuer terminal unacknowledged; retain active State marker")?;
+    // The projection rebuild issued a generation lease whose closed receipt
+    // holds the factory until the lease is retired; dropping the State owner
+    // never releases it. Retire every lease against the finished backend
+    // while the State marker is still active, so a refusal keeps the
+    // operation resumable.
+    closed_state.retire_generation_leases_after_backend(&native_terminal)
+        .context("retire State generation leases against the finished native backend; retain active State marker")?;
 
     // All store mutations have committed above, but the cross-store discard
     // marker must remain until scheduler terminal evidence is durable. A crash
@@ -2413,6 +2456,13 @@ fn run_execution_history_reset_owned(
         verify_final_ack()?;
         match closed_state.finish_thread_history_discard_admitted(&final_ack_authority) {
             Ok(receipt) => break receipt,
+            // A refusal no retry can change ends the loop; the error keeps
+            // every owner through the controller.
+            Err(error) if permanent_acknowledgement_refusal(&error) => {
+                return Err(error.context(
+                    "State refused the final acknowledgement permanently; the reset keeps its operation active",
+                ));
+            }
             Err(error) => {
                 eprintln!("execution-history reset retains its original State/CAS authority and funded finalizer while retrying State acknowledgement: {error:#}");
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -2420,147 +2470,63 @@ fn run_execution_history_reset_owned(
         }
     };
     state_acknowledgement.require_original(&closed_state, &native_factory, &native_terminal, operation.reference())?;
-    // Retain the actual State acknowledgement and its still-funded owners in
-    // the existing settlement controller before fallible post-ACK checks.
-    // This join does not close a root, release a reservation or erase a debt.
+    // Keep the State acknowledgement as settlement data before any fallible
+    // later step. This join closes no root and releases no reservation.
     let post_ack_finalization = inspection_settlement.begin_post_ack_finalization(
         &ready_for_final_ack,
         &closed_state,
         &state_acknowledgement,
         operation.reference(),
-    ).context("retain actual State ACK under original post-ACK finalizer custody")?;
+    ).context("retain the actual State acknowledgement in the original settlement")?;
     post_ack_finalization.require_original(
         &ready_for_final_ack,
         &closed_state,
         &state_acknowledgement,
         operation.reference(),
     )?;
-    // End the borrowed ACK verifier before consuming Runtime's actual roots.
-    // The same State/ACK/Ready proof remains cached in settlement custody.
     drop(final_ack_authority);
-    drop(closed_runtime);
-    post_ack_finalization.prepay_finalizer_transfer(2048, 32)?;
-    let runtime_finalizer = inspection_custody.begin_runtime_finalizer()?;
-    let runtime_directory = runtime_finalizer.transfer_directory()?;
-    let runtime_directory_inputs = post_ack_finalization.issue_runtime_retirement_inputs(
-        &runtime_finalizer, &runtime_directory,
-    )?;
-    // Actual native close occurs outside all controller/producer bookkeeping
-    // locks. A refusal retains the same transferred owner in the producer.
-    let runtime_directory_receipt = runtime_directory.retire_after_backend(
-        &native_factory, &native_terminal, &runtime_directory_inputs,
-    )?;
-    runtime_finalizer.retain_directory_retirement(Arc::new(runtime_directory_receipt))?;
-    drop(runtime_directory_inputs);
-    // Its namespace still has actual original work/native-authority leases.
-    // Keep that obligation; closing this one directory cannot imply settlement.
-
-    let prepay_state_finalizer = |memory_bytes, cleanup_steps| {
-        post_ack_finalization.prepay_finalizer_transfer(memory_bytes, cleanup_steps)
-    };
-    // SAFETY: the actual ACK, operation, native terminal and continuously held
-    // CAS frame select this State. The callback charges the same retained
-    // post-ACK funding/clock before producer allocation or owner handoff.
-    let state_finalizer = unsafe {
-        closed_state.begin_finalizer_retirement(
-            &state_acknowledgement, &native_terminal, operation.reference(),
-            &cas_guard, &prepay_state_finalizer,
-        )
-    }?;
-    closed_state.require_original_finalizer(&state_finalizer)?;
-    for index in 0..5 {
-        post_ack_finalization.prepay_finalizer_transfer(512, 4)?;
-        // SAFETY: each finite root owner/receipt allocation is prepaid above,
-        // and the same actual State caches this genuine retained producer.
-        let owner = unsafe { state_finalizer.transfer_root(index) }?;
-        let inputs = post_ack_finalization.issue_state_retirement_inputs(&state_finalizer, &owner)?;
-        // Actual close runs outside State/controller/producer bookkeeping.
-        // The producer already retains each same original descriptor owner.
-        let receipt = owner.retire_after_backend(&native_factory, &native_terminal, &inputs)?;
-        state_finalizer.retain_root_retirement(index, Arc::new(receipt))?;
-    }
-    // Recovery/preparation roots, generated holders, projection leases and
-    // namespace ownership remain in the State producer. These five real close
-    // receipts cannot stand in for those other owners or financial settlement.
-
-    // Outside custody begins: service and copy custody end, and the
-    // settlement admission checks and funds every later outside step.
-    post_ack_finalization.enter_outside_custody()?;
-    // SAFETY: this actual ACKed State retains the same genuine producer.
-    // The settlement admission's ledger, reservation, policy and clock
-    // checks charge the real preparation handoff; no service or native
-    // admission is renewed.
-    unsafe { state_finalizer.transfer_preparation(&prepay_state_finalizer) }?;
-    closed_state.require_original_finalizer(&state_finalizer)?;
-    for index in 5..10 {
-        post_ack_finalization.prepay_finalizer_transfer(512, 4)?;
-        // SAFETY: each owner/receipt allocation is paid by the same original
-        // post-ACK master before moving its private actual preparation slot.
-        let owner = unsafe { state_finalizer.transfer_root(index) }?;
-        let inputs = post_ack_finalization.issue_state_retirement_inputs(&state_finalizer, &owner)?;
-        let receipt = owner.retire_after_backend(&native_factory, &native_terminal, &inputs)?;
-        state_finalizer.retain_root_retirement(index, Arc::new(receipt))?;
-    }
-    // Native preparation callbacks now refuse; its namespace/recovery/trust
-    // still belong to the State producer and are not retired by these roots.
-
-    // Consume the exact ACKed State after its ten actual root retirements.
-    // The post-ACK producer is retained in the settlement/controller before
-    // removing redundant caller/controller aliases. Refusal stores the whole
-    // authentic State/ACK/finalizer tuple for an original-custody retry.
-    inspection_custody.retire_redundant_closed_state_alias(&closed_state, &state_finalizer)?;
-    drop(state_acknowledgement);
-    drop(closed_state);
-    post_ack_finalization.transfer_state_outside(Some(state_finalizer), &cas_guard)?;
-    // The same signed envelope prepays Runtime's actual outside packet before
-    // consuming its sole finalizer; controller custody precedes late effects.
-    post_ack_finalization.prepay_outside_continuation(4096, 32)?;
-    inspection_custody.transfer_runtime_outside(runtime_finalizer, &native_factory, &native_terminal)?;
-    let retire_aliases = |canonical: &lillux_sqlite::OriginalNativeConnectionTerminal| {
-        inspection_custody.retire_redundant_census_aliases(
-            &post_ack_finalization, &native_factory, &native_terminal, canonical,
-        )
-    };
-    let prepay_operational = |bytes, steps| post_ack_finalization.prepay_outside_continuation(bytes, steps);
-    inspection_custody.transfer_operational_outside(OperationalOwnerPhase::Inspection,
-        &native_factory, &native_terminal, &prepay_operational)?;
-    inspection_custody.transfer_operational_outside(OperationalOwnerPhase::Mutation,
-        &native_factory, &native_terminal, &prepay_operational)?;
-    post_ack_finalization.retire_outside_state_native_references(&retire_aliases)?;
-    inspection_custody.retire_runtime_native_references(&native_factory, &native_terminal, &retire_aliases)?;
-    post_ack_finalization.prepare_state_physical_custody()?;
-    post_ack_finalization.retire_state_metadata_pins()?;
-    inspection_custody.retire_operational_native_references(OperationalOwnerPhase::Inspection,
-        &native_factory, &native_terminal, &retire_aliases)?;
-    inspection_custody.retire_operational_native_references(OperationalOwnerPhase::Mutation,
-        &native_factory, &native_terminal, &retire_aliases)?;
-    inspection_custody.register_runtime_shared_roots(&post_ack_finalization)?;
-    inspection_custody.register_operational_shared_roots(OperationalOwnerPhase::Inspection, &post_ack_finalization)?;
-    inspection_custody.register_operational_shared_roots(OperationalOwnerPhase::Mutation, &post_ack_finalization)?;
-    post_ack_finalization.transfer_original_destination_packets()?;
-    post_ack_finalization.retain_original_inspection_group(&inspection_custody)?;
-    post_ack_finalization.coalesce_original_inspection_group()?;
-    post_ack_finalization.advance_original_inspection_group()?;
-    post_ack_finalization.join_original_inspection_contexts()?;
-    post_ack_finalization.advance_state_destination_join()?;
-    post_ack_finalization.register_state_shared_roots()?;
-    post_ack_finalization.register_original_destination_and_inspection_roots()?;
-    // Actual State ACK and all mutation effects are retained above. End only
-    // borrowed mutation authority; the policy owner, the StateLock and the
-    // claim's StateLock lease stay held until this function returns.
+    // Every mutation is acknowledged. End only the borrowed mutation
+    // authority; the policy owner, the StateLock and the claim's StateLock
+    // lease stay held until this function returns.
     reset_authority.phase = OfflineResetAuthorityPhase::PostAckCustody;
     drop(reset_authority);
-    inspection_custody.require_runtime_and_operational_roots_registered(&post_ack_finalization)?;
-
-    // State ACK is not reservation release. Until the release tail is
-    // connected, the completion gate refuses a completed report.
-    inspection_settlement.require_completed()
-        .context("reservation release remains incomplete after State acknowledgement")?;
+    // The offline host finished every native connection in-process when its
+    // backend finished. Each State, Runtime and Operational terminal stays in
+    // the host's census and ends with the host release, as on the preview
+    // path. The closed owners hold descriptors and aliases of this reset's
+    // own lifelines (namespace lock, recovery roots), which end at the
+    // quiesce and with this frame, so none is handed to an outside receiver.
+    // The acknowledged staged operation file goes first, under the same
+    // settlement admission and cleanup window.
+    post_ack_finalization
+        .debit_post_ack_cleanup(STAGED_OPERATION_REMOVAL_STEPS)
+        .and_then(|()| {
+            operation
+                .remove_staged_after_acknowledgement(&state_authority, &cas_guard)
+                .context("remove the acknowledged staged operation file")
+        })
+        .context("history reset applied; settlement pending; the next reset settles it")?;
+    // Every local alias of the factory, the backend terminal, the release
+    // pins and the closed owners ends before the quiesce, as do the
+    // scheduler permits that borrow the claim and copy work and hold closed
+    // inspection owners.
+    drop(post_ack_finalization);
+    drop(state_acknowledgement);
+    drop(closed_state);
+    drop(closed_runtime);
+    drop(ready_for_final_ack);
+    drop(native_terminal);
+    drop(native_factory);
+    drop(staged_preflight_permit);
+    drop(scheduler_preview_permit);
+    operation.release_source_lease();
+    let released_sha256 = settle_reservation_release(inspection_custody, &inspection_settlement)
+        .context("history reset applied; settlement pending; the next reset settles it")?;
 
     let rebuilt = authoritative.rebuilt_projection.unwrap_or_default();
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
-    Ok(ExecutionHistoryResetReport {
-        inspection_custody: inspection_custody.clone(),
+    let report = ExecutionHistoryResetReport {
+        released_sha256,
         app_root: config.app_root,
         dry_run: false,
         performed: true,
@@ -2587,7 +2553,62 @@ fn run_execution_history_reset_owned(
             events_projected: rebuilt.events_projected,
             superseded_instances_deleted: authoritative.superseded_projection_instances,
         },
+    };
+    // The copy work and the settlement (with its ledger lock) end
+    // before the claim, whose StateLock lease ends with this frame.
+    release_settlement_lifelines(inspection_custody, copy_work, inspection_settlement);
+    Ok(report)
+}
+
+/// Whether `error` is a final-acknowledgement refusal that no retry can
+/// change: the marker is gone, names another operation, or uses a retired
+/// schema.
+fn permanent_acknowledgement_refusal(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<ryeos_state::ThreadHistoryDiscardAcknowledgementRefused>().is_some()
+            || cause.downcast_ref::<ryeos_state::RetiredThreadHistoryDiscardMarker>().is_some()
     })
+}
+
+/// The release tail from the alias quiesce to the completion gate, shared
+/// by both modes; the caller has ended its own aliases of the factory, the
+/// backend terminal and the closed owners. Every refusal keeps the host and the settlement in the
+/// controller, so a retry on the same custody resumes at the refused step.
+fn settle_reservation_release(
+    custody: &Arc<InspectionControllerCustody>,
+    settlement: &Arc<OriginalInspectionSettlement>,
+) -> Result<String> {
+    // End every controller and settlement alias of native owners.
+    custody
+        .quiesce_native_aliases()
+        .context("quiesce native aliases before the host release")?;
+    // Release the host; no factory, terminal or region API after this.
+    let region = custody.release_native_host()?;
+    settlement.retain_region_release(region)?;
+    // Commit `released.<op>` from captured facts.
+    settlement.commit_release()?;
+    // Unlink the reservation, the disposition and the released record.
+    settlement
+        .unlink_release()
+        .context("unlink the released reservation records")?;
+    // The completion gate, over captured facts and receipts only.
+    settlement
+        .require_completed()
+        .context("original inspection settlement is not complete")?;
+    settlement.released_sha256()
+}
+
+/// End the copy work and then the settlement, whose admission holds the
+/// ledger lock, before the caller's claim and StateLock lease.
+fn release_settlement_lifelines(
+    custody: &Arc<InspectionControllerCustody>,
+    copy_work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+    settlement: Arc<OriginalInspectionSettlement>,
+) {
+    let retained = custody.settlement.lock().unwrap_or_else(|p| p.into_inner()).take();
+    drop(copy_work);
+    drop(settlement);
+    drop(retained);
 }
 
 fn publish_progress(

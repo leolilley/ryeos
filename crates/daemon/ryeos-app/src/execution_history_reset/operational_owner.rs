@@ -41,6 +41,31 @@ impl std::fmt::Debug for OfflineOperationalSlot {
             .finish()
     }
 }
+impl OfflineOperationalSlot {
+    /// End this phase's closed owner and reference aliases once the host's
+    /// census holds their terminals. A live or refused owner refuses: it has
+    /// not finished and is kept. Returns whether any alias was ended.
+    pub(super) fn quiesce(&mut self) -> Result<bool> {
+        let Self {
+            issued: _,
+            factory,
+            retained,
+            failure,
+            closed,
+            reference,
+            released_reference,
+            ownerless_failure: _,
+        } = self;
+        ensure!(
+            retained.is_none() && failure.is_none(),
+            "Operational phase still holds a live or refused owner; quiesce refused"
+        );
+        let ended = (closed.take(), reference.take(), released_reference.take(), factory.take());
+        let any = ended.0.is_some() || ended.1.is_some() || ended.2.is_some() || ended.3.is_some();
+        drop(ended);
+        Ok(any)
+    }
+}
 enum OwnedOperational {
     Prepared(PreparedReplayIndexReset),
     Activated {

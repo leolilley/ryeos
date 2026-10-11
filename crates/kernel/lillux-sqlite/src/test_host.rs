@@ -136,6 +136,65 @@ fn install_with(
     })
 }
 
+/// Take the process-wide serial guard for one host, panicking naming the
+/// current holder past the acquire deadline, or with the leaked census if a
+/// previous host could not release its arena.
+fn acquire_serial() -> MutexGuard<'static, ()> {
+    let started = Instant::now();
+    let serial = loop {
+        match SERIAL.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if started.elapsed() >= ACQUIRE_DEADLINE {
+                    let holder = HOLDER.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    panic!(
+                        "TestNativeHost acquire deadline elapsed after {:?}; held by {}",
+                        ACQUIRE_DEADLINE,
+                        holder.as_deref().unwrap_or("<unknown>")
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    };
+    if let Some(census) = LEAKED.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        panic!("previous TestNativeHost leaked its arena: {census}");
+    }
+    *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(current_holder());
+    serial
+}
+
+/// The serial guard of a production host whose teardown a consumer's own
+/// controller performs. Keep it until that host is released.
+pub struct TestHostSerial {
+    _serial: MutexGuard<'static, ()>,
+    _thread: PhantomData<*const ()>,
+}
+impl Drop for TestHostSerial {
+    fn drop(&mut self) {
+        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+/// Issue a production [`OfflineNativeHost`] under the serial guard with the
+/// caller's authority, for a consumer whose controller owns the host and
+/// its staged teardown. Panics on a refused install, like
+/// [`TestNativeHost::acquire_with`].
+pub fn issue_offline_host(
+    envelope: TestNativeEnvelope,
+    authority: Arc<dyn OfflineNativeAuthority>,
+) -> (OfflineNativeHost, TestHostSerial) {
+    let serial = acquire_serial();
+    match install_with(envelope, authority) {
+        Ok(host) => (host, TestHostSerial { _serial: serial, _thread: PhantomData }),
+        Err(census) => {
+            *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
+            panic!("offline test host {census}");
+        }
+    }
+}
+
 impl TestNativeHost {
     /// Default envelope: 16 MiB storage, 64 tickets, 10^9 allocator steps.
     pub fn acquire() -> Self {
@@ -146,28 +205,7 @@ impl TestNativeHost {
     /// acquire deadline, and with the leaked census if a previous host could
     /// not release its arena.
     pub fn acquire_with(envelope: TestNativeEnvelope) -> Self {
-        let started = Instant::now();
-        let serial = loop {
-            match SERIAL.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    if started.elapsed() >= ACQUIRE_DEADLINE {
-                        let holder = HOLDER.lock().unwrap_or_else(PoisonError::into_inner).clone();
-                        panic!(
-                            "TestNativeHost acquire deadline elapsed after {:?}; held by {}",
-                            ACQUIRE_DEADLINE,
-                            holder.as_deref().unwrap_or("<unknown>")
-                        );
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            }
-        };
-        if let Some(census) = LEAKED.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-            panic!("previous TestNativeHost leaked its arena: {census}");
-        }
-        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(current_holder());
+        let serial = acquire_serial();
         let live = match install(envelope) {
             Ok(live) => live,
             Err(census) => {
@@ -177,6 +215,7 @@ impl TestNativeHost {
         };
         Self { envelope, live: Some(live), _serial: serial, _thread: PhantomData }
     }
+
 
     fn live(&self) -> &OfflineNativeHost {
         self.live.as_ref().expect("live test host present outside teardown")
@@ -857,6 +896,102 @@ mod tests {
         assert_eq!(facts.tickets_issued as usize, facts.terminals);
     }
 
+    /// Revalidates a published witness at every checkpoint, as a host
+    /// authority that rereads its charged reservation does. `scoped` reads it
+    /// through the host's own bound factory.
+    struct WitnessCheckpoint {
+        witness: Arc<crate::RetainedOriginalWitnessFile>,
+        factory: std::sync::OnceLock<std::sync::Weak<OriginalNativeFactory>>,
+        scoped: std::sync::atomic::AtomicBool,
+    }
+    impl OfflineNativeAuthority for WitnessCheckpoint {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            let bound = self.factory.get().and_then(std::sync::Weak::upgrade);
+            let bytes = match bound {
+                Some(factory) if self.scoped.load(std::sync::atomic::Ordering::Acquire) => {
+                    factory.read_original_witness(&self.witness, 64, cleanup)?
+                }
+                Some(_) | None => self.witness.read_original(64)?,
+            };
+            ensure!(bytes == b"charged witness", "witness bytes changed");
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A host authority that rereads its witness on every checkpoint refuses
+    /// every open once the host holds a projection lease, when that reread
+    /// runs outside a native scope: the lease census has no owner to answer
+    /// for it. Read through the host's own factory, the same open, the lease
+    /// close and the host teardown all complete.
+    #[test]
+    fn witness_revalidation_admits_opens_under_the_hosts_own_lease_only_when_scoped() {
+        let _serial = serial();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let name = OsStr::new("reserved.witness");
+        let witness = Arc::new(crate::RetainedOriginalWitnessFile::created(
+            root.atomic_create_regular(name, b"charged witness", 0o600, crate::SQLITE_TEMP_PURPOSE)
+                .unwrap()
+                .unwrap(),
+            root.identity().unwrap(),
+            name.to_os_string(),
+        ));
+        let authority = Arc::new(WitnessCheckpoint {
+            witness,
+            factory: std::sync::OnceLock::new(),
+            scoped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
+        assert!(authority.factory.set(Arc::downgrade(host.factory().unwrap())).is_ok());
+        std::fs::File::create(tmp.path().join("generated.sqlite3.lease")).unwrap();
+        let metadata = root.open_mount_entry(OsStr::new("generated.sqlite3.lease")).unwrap().unwrap();
+        let lease_authority: Arc<dyn crate::OriginalNativeProjectionLeaseAuthority> = Arc::new(AdmittedLease);
+        // SAFETY: test-only lease under this host's own funded factory; the
+        // metadata inode is a fresh regular file no SQLite role uses.
+        let inputs = unsafe {
+            crate::OriginalProjectionLeaseInputs::issued(
+                Arc::clone(&root), metadata, crate::OriginalProjectionLeaseMode::Shared, lease_authority,
+            )
+        };
+        let lease = match host.factory().unwrap().acquire_projection_lease(inputs) {
+            Ok(lease) => lease,
+            Err(failure) => panic!("test lease refused: {failure}"),
+        };
+        let refused = match transient(&host) {
+            Ok(_) => panic!("an unscoped witness reread must refuse under the held lease"),
+            Err(failure) => failure,
+        };
+        let error = format!("{refused}");
+        authority.scoped.store(true, std::sync::atomic::Ordering::Release);
+        let released = refused.retry_close().unwrap_or_else(|failure| panic!("release retained: {failure}"));
+        retained(&host, OriginalNativeConnectionTerminal::Released(released));
+        assert!(error.contains("guarded SQLite evidence read refused (5)"), "{error}");
+        let connection = transient(&host).unwrap_or_else(|failure| panic!("scoped reread refused the open: {failure}"));
+        let value: i64 = connection.with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?)).unwrap();
+        assert_eq!(value, 7);
+        let closed = connection.close().unwrap_or_else(|failure| panic!("close refused: {failure}"));
+        retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
+        match lease.close() {
+            Ok(crate::OriginalProjectionLeaseDisposition::Closed(closed)) => {
+                if let Err((_lease, error)) = host.retain_lease(closed) {
+                    panic!("lease refused: {error:#}");
+                }
+            }
+            Ok(_) => panic!("held lease closed as never acquired"),
+            Err(failure) => panic!("test lease close retained: {failure}"),
+        }
+        let facts = host.finish().unwrap().facts.expect("ready host facts");
+        assert_eq!((facts.tickets_issued, facts.terminals, facts.ticketless, facts.leases), (2, 1, 1, 1));
+    }
+
     /// Charges SQL VM steps to its own ceiling and stops SQL at its own
     /// in-memory deadline, as a caller's SQL quota does.
     struct SqlQuota {
@@ -1057,5 +1192,55 @@ mod tests {
         assert!(format!("{:#}", retained.error).contains("aliases survive"), "{:#}", retained.error);
         drop(alias);
         retained.host.finish().unwrap();
+    }
+
+    /// An unlinked original output retires after the native backend shut
+    /// SQLite down and released the arena. While SQLite is live, an inode
+    /// alias of an open connection refuses unconsumed; once the host is
+    /// finished, the inactive path still refuses a linked file and a foreign
+    /// identity unconsumed, then consumes the exact unlinked coordinate.
+    #[test]
+    fn original_output_retires_after_native_shutdown_and_refuses_while_aliased() {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::unix::fs::MetadataExt;
+        let (host, _serial) = issue_offline_host(TestNativeEnvelope::default(), Arc::new(TestAuthority));
+        let factory = host.factory().unwrap().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("aliased.sqlite3");
+        let (connection, ticket) = factory
+            .arm_raw_for_test(|| rusqlite::Connection::open(&path).unwrap())
+            .unwrap();
+        factory
+            .raw_scope_for_test(|| connection.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);").unwrap())
+            .unwrap();
+        let output = std::fs::File::open(&path).unwrap();
+        let (dev, ino) = { let metadata = output.metadata().unwrap(); (metadata.dev(), metadata.ino()) };
+        std::fs::remove_file(&path).unwrap();
+        let aliased = crate::binding::close_original_output(output.as_raw_fd(), dev, ino, 1 << 20);
+        assert!(!aliased.consumed);
+        assert_eq!(aliased.code, libsqlite3_sys::SQLITE_BUSY);
+        factory.raw_scope_for_test(|| connection.close().unwrap()).unwrap();
+        let terminal = factory.retire_raw_for_test(ticket).unwrap();
+        if let Err((_terminal, error)) = host.retain_terminal(terminal) {
+            panic!("terminal does not belong to this host: {error:#}");
+        }
+        drop(factory);
+        if let Err(retained) = host.finish() {
+            panic!("host finish retained: {:#}", retained.error);
+        }
+
+        let linked = std::fs::File::create(tmp.path().join("linked")).unwrap();
+        let metadata = linked.metadata().unwrap();
+        let refused = crate::binding::close_original_output(linked.as_raw_fd(), metadata.dev(), metadata.ino(), 1023);
+        assert!(!refused.consumed);
+        assert_eq!(refused.code, libsqlite3_sys::SQLITE_MISMATCH);
+        let foreign = crate::binding::close_original_output(output.as_raw_fd(), dev, ino.wrapping_add(1), 1023);
+        assert!(!foreign.consumed);
+        assert_eq!(foreign.code, libsqlite3_sys::SQLITE_MISMATCH);
+        assert_eq!(output.metadata().unwrap().ino(), ino);
+        let retired = crate::binding::close_original_output(output.into_raw_fd(), dev, ino, 1023);
+        assert!(retired.consumed);
+        assert_eq!((retired.code, retired.observed_errno), (libsqlite3_sys::SQLITE_OK, 0));
+        drop(linked);
     }
 }

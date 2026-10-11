@@ -3,7 +3,10 @@
 //! controller keeps it across every refusal, so no native owner is dropped on
 //! an error path, and never infers release from counts or a dropped owner.
 use super::*;
-use lillux_sqlite::offline_host::{OfflineNativeFacts, OfflineNativeHost, OfflineNativeHostFailure};
+use lillux_sqlite::offline_host::{
+    OfflineNativeFacts, OfflineNativeHost, OfflineNativeHostFailure, OfflineNativeRetained,
+};
+use lillux_sqlite::original_host_owner::backing::HostStorageRegionReleaseFact;
 
 #[derive(Default)]
 pub(super) struct OriginalBackendSlot {
@@ -14,6 +17,12 @@ pub(super) struct OriginalBackendSlot {
     /// handover never enters the same owner twice.
     handed_terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
     handed_leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
+    /// The released host's plain facts and region release fact. Once the
+    /// host is released, its facts are answered from here.
+    released: Option<(OfflineNativeFacts, HostStorageRegionReleaseFact)>,
+    /// Names of the controller and settlement owners the alias quiesce has
+    /// ended, so a release refusal can say which known holders are gone.
+    quiesced: Vec<&'static str>,
 }
 
 fn same_terminal(
@@ -110,10 +119,214 @@ impl InspectionControllerCustody {
         Ok(slot.host.as_ref().context("offline native host absent")?.post_backend_factory()?.clone())
     }
 
-    /// The host's plain facts, once its backend finished.
+    /// The host's plain facts, once its backend finished; after the host is
+    /// released, the facts it was released with.
     pub(super) fn native_facts(&self) -> Result<OfflineNativeFacts> {
         let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        slot.host.as_ref().context("offline native host absent")?.facts()
+        match (&slot.host, &slot.released) {
+            (Some(host), _) => host.facts(),
+            (None, Some((facts, _))) => Ok(facts.clone()),
+            (None, None) => anyhow::bail!("offline native host absent"),
+        }
+    }
+
+    /// Once the host's census and facts are captured, end every alias of
+    /// the host's factory, backend terminal and native inputs that this
+    /// controller and the settlement hold, so the host can be released. A
+    /// slot that still holds a live or refused owner refuses and keeps it.
+    /// Nothing native runs: every owner ended here has already handed its
+    /// terminal to the host, whose facts record it. The names of the owners
+    /// ended are kept, so a later release refusal can name what was already
+    /// ended and so point at a holder outside this custody.
+    pub(super) fn quiesce_native_aliases(&self) -> Result<()> {
+        self.native_facts().context("quiesce before the host's backend facts")?;
+        let mut ended: Vec<&'static str> = Vec::new();
+        let settlement = self.settlement.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(settlement) = &settlement {
+            ended.extend(settlement.quiesce_native_owners()?);
+        }
+        drop(settlement);
+        // Post-acknowledgement outside custody joined the census owners, so
+        // it ends first.
+        let runtime_outside = self.runtime_outside.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if runtime_outside.is_some() {
+            ended.push("Runtime outside finalizer");
+        }
+        drop(runtime_outside);
+        let operational_outside = {
+            let mut outside = self.operational_outside.lock().unwrap_or_else(|p| p.into_inner());
+            [outside[0].owner.take(), outside[1].owner.take()]
+        };
+        if operational_outside.iter().any(Option::is_some) {
+            ended.push("Operational outside custody");
+        }
+        drop(operational_outside);
+        for (phase, name) in [
+            (&self.operational_inspection, "Operational inspection"),
+            (&self.operational_mutation, "Operational mutation"),
+        ] {
+            if phase.lock().unwrap_or_else(|p| p.into_inner()).quiesce()? {
+                ended.push(name);
+            }
+        }
+        {
+            let mut slot = self.state_projection.lock().unwrap_or_else(|p| p.into_inner());
+            let OfflineStateProjectionSlot { issued: _, factory, retained, closed, close_failure } = &mut *slot;
+            ensure!(
+                retained.is_none() && close_failure.is_none(),
+                "State projection still holds a live or refused owner; quiesce refused"
+            );
+            // An unretired generation lease would keep its factory alias
+            // after the closed State ends, beyond any later reach; the closed
+            // State is kept until its leases are retired.
+            if let Some(closed) = closed.as_ref() {
+                let unretired = closed.unretired_generation_leases()?;
+                ensure!(
+                    unretired == 0,
+                    "State projection holds {unretired} unretired generation lease(s), each a factory alias; quiesce refused"
+                );
+            }
+            let ended_state = (closed.take(), factory.take());
+            if ended_state.0.is_some() || ended_state.1.is_some() {
+                ended.push("State projection");
+            }
+            drop(slot);
+            drop(ended_state);
+        }
+        {
+            let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
+            let OfflineRuntimeSlot {
+                issued: _,
+                retained,
+                closed,
+                finalizer,
+                close_failure,
+                reference,
+                released_reference,
+                refused_reference,
+            } = &mut *slot;
+            ensure!(
+                retained.is_none() && close_failure.is_none() && refused_reference.is_none(),
+                "Runtime still holds a live or refused owner; quiesce refused"
+            );
+            let ended_runtime = (closed.take(), finalizer.take(), reference.take(), released_reference.take());
+            if ended_runtime.0.is_some()
+                || ended_runtime.1.is_some()
+                || ended_runtime.2.is_some()
+                || ended_runtime.3.is_some()
+            {
+                ended.push("Runtime mutation");
+            }
+            drop(slot);
+            drop(ended_runtime);
+        }
+        let references = std::mem::take(
+            &mut self.runtime_inspection_reference.lock().unwrap_or_else(|p| p.into_inner()).references,
+        );
+        if !references.is_empty() {
+            ended.push("Runtime inspection references");
+        }
+        drop(references);
+        let cleanup = std::mem::take(&mut *self.cleanup.lock().unwrap_or_else(|p| p.into_inner()));
+        let disposals = std::mem::take(&mut *self.completed_disposals.lock().unwrap_or_else(|p| p.into_inner()));
+        let closed = std::mem::take(&mut *self.closed.lock().unwrap_or_else(|p| p.into_inner()));
+        let acquired = std::mem::take(&mut *self.acquisition_released.lock().unwrap_or_else(|p| p.into_inner()));
+        let runtime = std::mem::take(&mut *self.runtime_released.lock().unwrap_or_else(|p| p.into_inner()));
+        let failures = std::mem::take(&mut *self.cleanup_failures.lock().unwrap_or_else(|p| p.into_inner()));
+        for (empty, name) in [
+            (cleanup.is_empty(), "inspection cleanup owners"),
+            (disposals.is_empty(), "completed copy disposals"),
+            (closed.is_empty(), "closed inspections"),
+            (acquired.is_empty(), "released inspection acquisitions"),
+            (runtime.is_empty(), "released Runtime inspections"),
+            (failures.is_empty(), "retained cleanup refusals"),
+        ] {
+            if !empty {
+                ended.push(name);
+            }
+        }
+        // Cleanup owners and disposals hold the closed owners, so they end
+        // before them; retained refusals end last.
+        drop(cleanup);
+        drop(disposals);
+        drop(closed);
+        drop(acquired);
+        drop(runtime);
+        drop(failures);
+        let census = {
+            let mut slot = self.native_census.lock().unwrap_or_else(|p| p.into_inner());
+            let OriginalNativeCensusSlot { terminals, cleanup_inputs } = &mut *slot;
+            (cleanup_inputs.take(), terminals.take())
+        };
+        if census.0.is_some() || census.1.is_some() {
+            ended.push("native census and cleanup inputs");
+        }
+        drop(census);
+        let handed = {
+            let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+            let OriginalBackendSlot {
+                host: _,
+                issue_failure: _,
+                handed_terminals,
+                handed_leases,
+                released: _,
+                quiesced: _,
+            } = &mut *slot;
+            (std::mem::take(handed_terminals), std::mem::take(handed_leases))
+        };
+        if !handed.0.is_empty() || !handed.1.is_empty() {
+            ended.push("handed host terminals and leases");
+        }
+        drop(handed);
+        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+        for name in ended {
+            if !slot.quiesced.contains(&name) {
+                slot.quiesced.push(name);
+            }
+        }
+        Ok(())
+    }
+
+    /// Release the host. It refuses, naming the strong counts and keeping
+    /// everything, while any factory or backend-terminal alias survives; the
+    /// refused host is filed back for another attempt. On success the host's
+    /// facts and region release fact are kept here and the region fact is
+    /// returned. After this no factory, terminal or region API is reachable.
+    pub(super) fn release_native_host(self: &Arc<Self>) -> Result<HostStorageRegionReleaseFact> {
+        let host = {
+            let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+            match slot.host.take() {
+                Some(host) => host,
+                None => {
+                    let (_, region) = slot.released.as_ref().context("offline native host absent; nothing to release")?;
+                    return Ok(*region);
+                }
+            }
+        };
+        match host.release() {
+            Ok(released) => {
+                let lillux_sqlite::offline_host::OfflineNativeReleased { facts, region } = released;
+                let facts = facts.context("released offline native host lacks its backend facts")?;
+                let region = region.context("released offline native host lacks its region release fact")?;
+                self.native_backend.lock().unwrap_or_else(|p| p.into_inner()).released = Some((facts, region));
+                Ok(region)
+            }
+            Err(OfflineNativeRetained { host, error }) => {
+                let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+                slot.host = Some(host);
+                let ended = if slot.quiesced.is_empty() {
+                    "none".to_owned()
+                } else {
+                    slot.quiesced.join(", ")
+                };
+                drop(slot);
+                let error = error.context(format!(
+                    "offline native host release retained; the alias quiesce already ended: {ended}; \
+                     a surviving alias is held outside controller custody"
+                ));
+                Err(self.retain_failure(error))
+            }
+        }
     }
 
     /// Hand closed projection leases to the host's census. SQL terminals
@@ -122,7 +335,8 @@ impl InspectionControllerCustody {
     pub(super) fn retain_native_leases(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>) -> Result<()> {
         let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        let OriginalBackendSlot { host, issue_failure: _, handed_terminals: _, handed_leases } = &mut *slot;
+        let OriginalBackendSlot { host, issue_failure: _, handed_terminals: _, handed_leases, released: _, quiesced: _ } =
+            &mut *slot;
         let host = host.as_ref().context("offline native host absent; leases not retained")?;
         let mut refused = Vec::new();
         for lease in leases {
@@ -152,7 +366,8 @@ impl InspectionControllerCustody {
         terminals: &[lillux_sqlite::OriginalNativeConnectionTerminal],
     ) -> Result<()> {
         let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        let OriginalBackendSlot { host, issue_failure: _, handed_terminals, handed_leases: _ } = &mut *slot;
+        let OriginalBackendSlot { host, issue_failure: _, handed_terminals, handed_leases: _, released: _, quiesced: _ } =
+            &mut *slot;
         let host = host.as_ref().context("offline native host absent; terminals not retained")?;
         let mut refused = Vec::new();
         for terminal in terminals {
@@ -212,5 +427,82 @@ impl InspectionControllerCustody {
             .context("backend finish lacks original sealed cleanup inputs")?;
         // No controller lock spans the authority's checks.
         inputs.require_original(factory)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use lillux_sqlite::offline_host::OfflineNativeAuthority;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Test authority whose cleanup window can be closed on demand.
+    struct CleanupGate {
+        refuse: AtomicBool,
+    }
+    impl OfflineNativeAuthority for CleanupGate {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            ensure!(!(cleanup && self.refuse.load(Ordering::Acquire)), "cleanup window refused");
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &lillux::PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn host_release_keeps_the_host_until_every_alias_is_quiesced() {
+        let gate = Arc::new(CleanupGate { refuse: AtomicBool::new(false) });
+        let (host, _serial) = lillux_sqlite::test_host::issue_offline_host(
+            lillux_sqlite::test_host::TestNativeEnvelope::default(),
+            gate.clone(),
+        );
+        let custody = Arc::new(InspectionControllerCustody::default());
+        let factory = custody.adopt_native_host(Ok(host)).unwrap();
+        // The State projection slot keeps a factory alias, as its permit does.
+        custody.state_projection.lock().unwrap().factory = Some(factory.clone());
+        assert!(custody.quiesce_native_aliases().is_err(), "quiesce needs the host's backend facts");
+        let terminal = custody
+            .native_backend
+            .lock()
+            .unwrap()
+            .host
+            .as_mut()
+            .unwrap()
+            .finish_backend()
+            .unwrap();
+        let facts = custody.native_facts().unwrap();
+
+        // A closed cleanup window refuses the release and keeps the host.
+        gate.refuse.store(true, Ordering::Release);
+        let refused = custody.release_native_host().err().expect("closed cleanup window refuses");
+        assert!(format!("{refused:#}").contains("cleanup window refused"), "{refused:#}");
+        assert!(custody.native_backend.lock().unwrap().host.is_some(), "refusal keeps the host");
+        gate.refuse.store(false, Ordering::Release);
+
+        // Surviving aliases refuse the release, naming the strong counts.
+        let refused = format!("{:#}", custody.release_native_host().err().expect("terminal alias refuses"));
+        assert!(refused.contains("backend terminal strong count 2"), "{refused}");
+        drop(terminal);
+        drop(factory);
+        let refused = format!("{:#}", custody.release_native_host().err().expect("controller alias refuses"));
+        assert!(refused.contains("factory strong count 3 (host holds 2)"), "{refused}");
+        assert!(refused.contains("the alias quiesce already ended: none"), "{refused}");
+        assert!(custody.native_backend.lock().unwrap().host.is_some(), "refusal keeps the host");
+
+        // The quiesce ends the controller alias; the release then succeeds.
+        custody.quiesce_native_aliases().unwrap();
+        assert!(custody.state_projection.lock().unwrap().factory.is_none());
+        let region = custody.release_native_host().unwrap();
+        assert_eq!(region.generation().unwrap(), facts.generation);
+        assert_eq!(u64::try_from(region.bytes().unwrap()).unwrap(), facts.region_bytes);
+        // After the release the facts are answered from the record, a retry
+        // returns the same region fact, and no factory is reachable.
+        assert_eq!(custody.native_facts().unwrap(), facts);
+        assert_eq!(custody.release_native_host().unwrap().generation().unwrap(), facts.generation);
+        assert!(custody.post_backend_factory().is_err());
     }
 }

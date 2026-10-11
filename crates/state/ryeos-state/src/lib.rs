@@ -121,7 +121,7 @@ pub use recovery::{
     DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, HeadOperation, PendingChainHeadTransition,
     PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
     RecoveryStore, RetiredThreadHistoryDiscardMarker, StagedCasRootHashes, StagedCasRootLease,
-    ThreadHistoryDiscardOperationRef, TransitionPhase,
+    ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

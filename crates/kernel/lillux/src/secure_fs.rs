@@ -14,6 +14,11 @@ use anyhow::{Context, Result, ensure};
 
 mod descriptor_observation;
 pub use descriptor_observation::RetainedFileDescriptorObservation;
+
+/// The platform's pathname bound in bytes, the terminating NUL included.
+#[cfg(unix)]
+pub const PATH_MAX_BYTES: u64 = libc::PATH_MAX as u64;
+
 mod temp_name;
 /// Owner token for the recovery marker Lillux itself publishes around a
 /// conditional byte replacement.

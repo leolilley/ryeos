@@ -228,12 +228,16 @@ impl RecoveryAcknowledgementCustody {
         cas_mutation_guard.ensure_protects_pinned_runtime(&self.runtime_directory)?;
         operation.validate()?;
         let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        let (pin, marker) = pin_thread_history_discard_marker(&self.directory, work)?
-            .context("thread-history discard acknowledgement found no marker to acknowledge")?;
-        anyhow::ensure!(
-            &marker.operation == operation,
-            "thread-history discard acknowledgement differs from its marker's operation"
-        );
+        let Some((pin, marker)) = pin_thread_history_discard_marker(&self.directory, work)? else {
+            return Err(ThreadHistoryDiscardAcknowledgementRefused::Absent.into());
+        };
+        if &marker.operation != operation {
+            return Err(ThreadHistoryDiscardAcknowledgementRefused::OtherOperation {
+                acknowledged: marker.phase == ThreadHistoryDiscardPhase::Acknowledged,
+                operation_id: marker.operation.operation_id,
+            }
+            .into());
+        }
         match marker.phase {
             ThreadHistoryDiscardPhase::Acknowledged => {
                 work.steps += 1;
@@ -245,9 +249,23 @@ impl RecoveryAcknowledgementCustody {
                 let acknowledged = ThreadHistoryDiscardMarker::for_operation(
                     operation,
                     ThreadHistoryDiscardPhase::Acknowledged,
-                )?
-                .canonical_bytes()?;
-                work.memory_bytes += acknowledged.capacity() as u64 + ACK_TEMP_NAME_SCRATCH_BYTES;
+                )?;
+                work.memory_bytes += (std::mem::size_of::<ThreadHistoryDiscardMarker>()
+                    + acknowledged.kind.capacity()
+                    + acknowledged.operation.operation_id.capacity()
+                    + acknowledged.operation.sha256.capacity()) as u64;
+                let acknowledged = acknowledged.canonical_bytes()?;
+                // The conditional write joins the directory path with the
+                // marker name for its identity check, and encodes the name.
+                let path = self.directory.path().as_os_str().len() as u64;
+                anyhow::ensure!(
+                    path <= ACK_DIRECTORY_PATH_MAX_BYTES,
+                    "thread-history discard directory path exceeds the acknowledgement quote"
+                );
+                work.memory_bytes += acknowledged.capacity() as u64
+                    + ACK_TEMP_NAME_SCRATCH_BYTES
+                    + path
+                    + ACK_MARKER_PATH_SCRATCH_BYTES;
                 work.steps += ACK_ATOMIC_WRITE_STEPS;
                 self.directory
                     .atomic_write_if_same(
@@ -280,6 +298,16 @@ pub(crate) struct AcknowledgementWork {
 /// decimal u32 pid (10), a separator, a decimal u64 sequence (20) and the NUL.
 const ACK_TEMP_NAME_SCRATCH_BYTES: u64 = 12 + 16 + 1 + 10 + 1 + 20 + 1;
 
+/// Largest recovery-directory path an ACK admits, the platform `PATH_MAX`.
+/// The conditional write builds one joined path from it.
+const ACK_DIRECTORY_PATH_MAX_BYTES: u64 = lillux::PATH_MAX_BYTES;
+
+/// Path scratch of the conditional write beyond the directory path: the
+/// separator and the marker name of the joined path, and the marker name
+/// encoded once more with its NUL.
+const ACK_MARKER_PATH_SCRATCH_BYTES: u64 =
+    1 + THREAD_HISTORY_DISCARD_MARKER.len() as u64 + THREAD_HISTORY_DISCARD_MARKER.len() as u64 + 1;
+
 /// Filesystem steps inside one conditional atomic write: temporary create,
 /// mode set, write, fsync, interruption hook check, incumbent identity check,
 /// rename and directory sync.
@@ -292,19 +320,24 @@ const MARKER_PINNED_INTAKE_STEPS: u64 = 5;
 /// The prepaid bound of one ACK attempt that rewrites an Active marker to
 /// Acknowledged. Reads: every admitted marker byte plus the one growth probe.
 /// Memory: the read buffer, the decoded marker with its three strings, the
-/// canonical re-encoding it is compared against, the encoded Acknowledged
-/// bytes and the temporary-name scratch. Steps: pinned
-/// intake, the conditional atomic write and the final directory sync. A retry
-/// over an Acknowledged marker does strictly less.
+/// canonical re-encoding it is compared against, the Acknowledged marker
+/// with its three strings, its encoded bytes, the temporary-name scratch and
+/// the joined-path scratch of the conditional write. Steps: pinned intake,
+/// the conditional atomic write and the final directory sync. A retry over an
+/// Acknowledged marker does strictly less.
 pub(crate) const fn thread_history_discard_acknowledgement_quote() -> AcknowledgementWork {
     let max = THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64;
+    let marker = std::mem::size_of::<ThreadHistoryDiscardMarker>() as u64 + max;
     AcknowledgementWork {
         read_bytes: max + 1,
         memory_bytes: (max + 1)
-            + (std::mem::size_of::<ThreadHistoryDiscardMarker>() as u64 + max)
+            + marker
             + max
+            + marker
             + max
-            + ACK_TEMP_NAME_SCRATCH_BYTES,
+            + ACK_TEMP_NAME_SCRATCH_BYTES
+            + ACK_DIRECTORY_PATH_MAX_BYTES
+            + ACK_MARKER_PATH_SCRATCH_BYTES,
         steps: MARKER_PINNED_INTAKE_STEPS + ACK_ATOMIC_WRITE_STEPS + 1,
     }
 }
@@ -501,6 +534,38 @@ impl std::fmt::Display for RetiredThreadHistoryDiscardMarker {
 }
 
 impl std::error::Error for RetiredThreadHistoryDiscardMarker {}
+
+/// A thread-history discard acknowledgement that no retry can complete: the
+/// marker it would acknowledge is gone, or names another operation. Retrying
+/// the same acknowledgement only repeats the refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadHistoryDiscardAcknowledgementRefused {
+    /// No discard marker exists to acknowledge.
+    Absent,
+    /// The marker belongs to another operation.
+    OtherOperation {
+        /// Whether that marker is the acknowledged record of a completed
+        /// discard rather than an active one.
+        acknowledged: bool,
+        operation_id: String,
+    },
+}
+
+impl std::fmt::Display for ThreadHistoryDiscardAcknowledgementRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => formatter
+                .write_str("thread-history discard acknowledgement found no marker to acknowledge"),
+            Self::OtherOperation { acknowledged, operation_id } => write!(
+                formatter,
+                "thread-history discard acknowledgement differs from its marker's operation (the {} marker names {operation_id})",
+                if *acknowledged { "acknowledged" } else { "active" }
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ThreadHistoryDiscardAcknowledgementRefused {}
 
 /// Opaque activation reference. Shape validation is not operation authority:
 /// App must authenticate the staged signed bytes, options and original owners.
@@ -4643,6 +4708,14 @@ mod tests {
                 error.to_string().contains("differs from its marker's operation"),
                 "{error:#}"
             );
+            assert_eq!(
+                error.downcast_ref::<ThreadHistoryDiscardAcknowledgementRefused>(),
+                Some(&ThreadHistoryDiscardAcknowledgementRefused::OtherOperation {
+                    acknowledged: true,
+                    operation_id: operation.operation_id.clone(),
+                }),
+                "a permanent refusal must be typed: {error:#}"
+            );
             assert_eq!(std::fs::read(&marker).unwrap(), before);
         }
         assert_eq!(
@@ -4661,6 +4734,10 @@ mod tests {
             .finish_thread_history_discard(&guard, &discard_operation('a', 'b'))
             .unwrap_err();
         assert!(error.to_string().contains("found no marker"), "{error:#}");
+        assert_eq!(
+            error.downcast_ref::<ThreadHistoryDiscardAcknowledgementRefused>(),
+            Some(&ThreadHistoryDiscardAcknowledgementRefused::Absent)
+        );
         assert!(recovery_entry_names(&store).is_empty());
     }
 
@@ -4781,6 +4858,13 @@ mod tests {
             u64::MAX
         );
         assert!(longest.len() as u64 + 1 <= ACK_TEMP_NAME_SCRATCH_BYTES);
+        // The joined-path term is the directory's own path plus the name.
+        let joined = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        assert!(
+            joined.as_os_str().len() as u64
+                <= store.root().as_os_str().len() as u64 + ACK_MARKER_PATH_SCRATCH_BYTES
+        );
+        assert!(store.root().as_os_str().len() as u64 <= ACK_DIRECTORY_PATH_MAX_BYTES);
         assert_eq!(quote.read_bytes, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64 + 1);
     }
 

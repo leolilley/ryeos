@@ -941,6 +941,7 @@ fn run_execution_history_reset_command(
             "old projection stores",
             report.projection.superseded_instances_deleted.to_string(),
         ),
+        crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
     ];
     if report.performed {
         status.rows.push(crate::tty::Row::key_value(

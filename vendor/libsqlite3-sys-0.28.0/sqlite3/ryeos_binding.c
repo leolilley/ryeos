@@ -1524,7 +1524,8 @@ static int ryeosFdLive(int fd){
   return 0;
 }
 /* Original Rust output retirement. No allocation/reaper/callback, one-shot
-   Unix-global -> gate trylocks and precharged finite identity traversal. */
+   Unix-global (or install claim when SQLite is inactive) -> gate trylocks
+   and precharged finite identity traversal. */
 static int ryeosOutputScanStep(int *remaining){
   if(!ryeos_native_process_matches()){return 0;}
   if(*remaining<=0) return 0;
@@ -1567,61 +1568,109 @@ SQLITE_API int ryeos_sqlite_close_original_metadata_pin(int fd,sqlite3_uint64 de
   if(close(fd)==0)return SQLITE_OK;
   *observed_errno=errno;return SQLITE_IOERR_CLOSE;
 }
-SQLITE_API int ryeos_sqlite_close_original_output(int fd,sqlite3_uint64 dev,sqlite3_uint64 ino,int maximum,int *consumed,int *observed_errno){
+/* Identity and alias census shared by both retirement paths. The caller
+   holds the gate mutex and has excluded every inodeList transition, either
+   with the Unix global mutex or by proving SQLite inactive. Returns
+   SQLITE_OK only when the descriptor is the unlinked original regular file
+   and no SQLite inode, SHM node, gate file or pending/retiring binding
+   context refers to that inode; an alias refuses with SQLITE_BUSY. Every
+   visit is charged to the same finite scan bound. */
+static int ryeosOutputAliasScan(int fd,sqlite3_uint64 dev,sqlite3_uint64 ino,int *remaining,int *observed_errno){
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
-  int rc=SQLITE_BUSY,remaining=maximum,locked; struct stat expected,actual;
-  unixInodeInfo *inode; RyeosGateFd *node; RyeosBinding *context; int list,i;
-  if(consumed) *consumed=0;
-  if(observed_errno) *observed_errno=0;
-  if(!consumed || !observed_errno || fd<0 || maximum<=0) return SQLITE_MISUSE;
-  if(!unixBigLock) return SQLITE_NOTFOUND;
-  if(sqlite3_mutex_try(unixBigLock)!=SQLITE_OK) return SQLITE_BUSY;
-  locked=pthread_mutex_trylock(&ryeosGateMutex);
-  if(locked){ *observed_errno=locked; sqlite3_mutex_leave(unixBigLock); return SQLITE_BUSY; }
-  if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-  if(osFstat(fd,&expected)!=0){ *observed_errno=errno; rc=SQLITE_IOERR_FSTAT; goto done; }
+  struct stat expected,actual; unixInodeInfo *inode; RyeosGateFd *node;
+  RyeosBinding *context; int list,i;
+  if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+  if(osFstat(fd,&expected)!=0){ *observed_errno=errno; return SQLITE_IOERR_FSTAT; }
   if(!S_ISREG(expected.st_mode) || (sqlite3_uint64)expected.st_dev!=dev
-      || (sqlite3_uint64)expected.st_ino!=ino || expected.st_nlink!=0){ rc=SQLITE_MISMATCH; goto done; }
+      || (sqlite3_uint64)expected.st_ino!=ino || expected.st_nlink!=0) return SQLITE_MISMATCH;
   for(inode=inodeList;inode;inode=inode->pNext){
     unixShmNode *shm;
-    if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-    if(inode->nRef>0 && inode->fileId.dev==expected.st_dev && inode->fileId.ino==(u64)expected.st_ino) goto done;
+    if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+    if(inode->nRef>0 && inode->fileId.dev==expected.st_dev && inode->fileId.ino==(u64)expected.st_ino) return SQLITE_BUSY;
     shm=inode->pShmNode;
     if(shm && shm->nRef>0 && shm->hShm>=0){
-      if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-      if(osFstat(shm->hShm,&actual)!=0){ *observed_errno=errno; rc=SQLITE_IOERR_FSTAT; goto done; }
-      if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino) goto done;
+      if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+      if(osFstat(shm->hShm,&actual)!=0){ *observed_errno=errno; return SQLITE_IOERR_FSTAT; }
+      if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino) return SQLITE_BUSY;
     }
   }
   for(node=ryeosGateFiles;node;node=node->next){
-    if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-    if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-    if(osFstat(node->fd,&actual)!=0){ *observed_errno=errno; rc=SQLITE_IOERR_FSTAT; goto done; }
-    if(actual.st_dev!=node->dev || actual.st_ino!=node->ino){ rc=SQLITE_MISMATCH; goto done; }
-    if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino) goto done;
+    if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+    if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+    if(osFstat(node->fd,&actual)!=0){ *observed_errno=errno; return SQLITE_IOERR_FSTAT; }
+    if(actual.st_dev!=node->dev || actual.st_ino!=node->ino) return SQLITE_MISMATCH;
+    if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino) return SQLITE_BUSY;
   }
   /* Pending contexts can also be present in retiring; duplicate visits are
      charged, never omitted on that assumption. */
   for(list=0;list<2;list++) for(context=list?ryeosPending:ryeosRetiring;context;context=list?context->pendingNext:context->retireNext){
-    if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
+    if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
     if(context->stoppedIntake) for(i=0;i<3;i++){
-      if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-      if(context->stoppedSelected[i]>=0 && context->stoppedDev[i]==dev && context->stoppedIno[i]==ino) goto done;
+      if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+      if(context->stoppedSelected[i]>=0 && context->stoppedDev[i]==dev && context->stoppedIno[i]==ino) return SQLITE_BUSY;
     }
     for(i=0;i<7;i++){
       int other=i<3?context->files[i]:i<6?context->pins[i-3]:context->failureFd;
-      if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
+      if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
       if(other<0) continue;
-      if(!ryeosOutputScanStep(&remaining)){ rc=SQLITE_TOOBIG; goto done; }
-      if(osFstat(other,&actual)!=0){ *observed_errno=errno; rc=SQLITE_IOERR_FSTAT; goto done; }
-      if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino) goto done;
+      if(!ryeosOutputScanStep(remaining)) return SQLITE_TOOBIG;
+      if(osFstat(other,&actual)!=0){ *observed_errno=errno; return SQLITE_IOERR_FSTAT; }
+      if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino) return SQLITE_BUSY;
     }
   }
+  return SQLITE_OK;
+}
+static int ryeosOutputCloseCleared(int fd,int *consumed,int *observed_errno){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
   /* Linux consumes the coordinate even on late error/EINTR. NEVER retry it. */
   *consumed=1;
-  if(close(fd)==0) rc=SQLITE_OK;
-  else { *observed_errno=errno; rc=SQLITE_IOERR_CLOSE; }
-done:
+  if(close(fd)==0) return SQLITE_OK;
+  *observed_errno=errno; return SQLITE_IOERR_CLOSE;
+}
+/* Retirement while SQLite is inactive: never initialized, or shut down so
+   that sqlite3_os_end cleared the Unix global mutex. With that mutex absent
+   nothing can be taken to freeze inodeList, so inactivity itself is proved
+   and held for the whole census and close:
+   - The install claim is taken first. sqlite3_initialize passes its native
+     gate only inside a scope of the installed arena, and an arena is
+     installed only by the caller that wins this same claim. While it is
+     held no arena can appear, so no thread can initialize SQLite, register
+     a VFS, open a file, create a binding or allocate a gate node.
+   - A claim won with no installed arena also means no thread is inside an
+     arena scope: release unmaps an arena only with zero scopes and with
+     SQLite uninitialized, so isInit, the Unix global mutex and inodeList
+     are stable and must read as inactive and empty.
+   - The gate mutex is then taken as on the locked path, and the shared
+     census still runs over every gate file and binding context.
+   A held claim, an installed arena or any sign of live SQLite refuses
+   unconsumed with SQLITE_BUSY; the caller keeps its descriptor. */
+static int ryeosCloseOriginalOutputInactive(int fd,sqlite3_uint64 dev,sqlite3_uint64 ino,int maximum,int *consumed,int *observed_errno){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  int rc,remaining=maximum,locked,expected=0;
+  if(!atomic_compare_exchange_strong(&ryeosNativeInstall,&expected,1)) return SQLITE_BUSY;
+  if(atomic_load(&ryeosNativeOwner) || sqlite3GlobalConfig.isInit || unixBigLock || inodeList){
+    atomic_store(&ryeosNativeInstall,0); return SQLITE_BUSY;
+  }
+  locked=pthread_mutex_trylock(&ryeosGateMutex);
+  if(locked){ *observed_errno=locked; atomic_store(&ryeosNativeInstall,0); return SQLITE_BUSY; }
+  rc=ryeosOutputAliasScan(fd,dev,ino,&remaining,observed_errno);
+  if(rc==SQLITE_OK) rc=ryeosOutputCloseCleared(fd,consumed,observed_errno);
+  pthread_mutex_unlock(&ryeosGateMutex);
+  atomic_store(&ryeosNativeInstall,0);
+  return rc;
+}
+SQLITE_API int ryeos_sqlite_close_original_output(int fd,sqlite3_uint64 dev,sqlite3_uint64 ino,int maximum,int *consumed,int *observed_errno){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  int rc,remaining=maximum,locked;
+  if(consumed) *consumed=0;
+  if(observed_errno) *observed_errno=0;
+  if(!consumed || !observed_errno || fd<0 || maximum<=0) return SQLITE_MISUSE;
+  if(!unixBigLock) return ryeosCloseOriginalOutputInactive(fd,dev,ino,maximum,consumed,observed_errno);
+  if(sqlite3_mutex_try(unixBigLock)!=SQLITE_OK) return SQLITE_BUSY;
+  locked=pthread_mutex_trylock(&ryeosGateMutex);
+  if(locked){ *observed_errno=locked; sqlite3_mutex_leave(unixBigLock); return SQLITE_BUSY; }
+  rc=ryeosOutputAliasScan(fd,dev,ino,&remaining,observed_errno);
+  if(rc==SQLITE_OK) rc=ryeosOutputCloseCleared(fd,consumed,observed_errno);
   pthread_mutex_unlock(&ryeosGateMutex);
   sqlite3_mutex_leave(unixBigLock);
   return rc;

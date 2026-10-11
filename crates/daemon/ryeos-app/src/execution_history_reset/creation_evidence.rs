@@ -82,7 +82,6 @@ impl CreatedDirectoryRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OriginalNativeQuotaEvidence {
-    pub admitted: bool,
     pub storage_bytes: u64,
     pub allocator_steps: u64,
     pub cleanup_reserved: u64,
@@ -90,30 +89,15 @@ pub(super) struct OriginalNativeQuotaEvidence {
     pub connections_issued: u32,
 }
 impl OriginalNativeQuotaEvidence {
-    pub(super) fn unissued() -> Self {
-        Self {
-            admitted: false,
-            storage_bytes: 0,
-            allocator_steps: 0,
-            cleanup_reserved: 0,
-            cleanup_steps: 0,
-            connections_issued: 0,
-        }
-    }
+    /// Every disposed reset ran on an issued host, so its counters are
+    /// always present.
     pub(super) fn validate(&self) -> Result<()> {
-        if !self.admitted {
-            ensure!(
-                *self == Self::unissued(),
-                "unissued native admission has counters"
-            );
-        } else {
-            ensure!(
-                self.storage_bytes > 0
-                    && self.cleanup_reserved > 0
-                    && self.cleanup_steps <= self.cleanup_reserved,
-                "invalid original native admission counter shape"
-            );
-        }
+        ensure!(
+            self.storage_bytes > 0
+                && self.cleanup_reserved > 0
+                && self.cleanup_steps <= self.cleanup_reserved,
+            "invalid original native admission counter shape"
+        );
         Ok(())
     }
     pub(super) fn require_quota(
@@ -217,8 +201,8 @@ pub(super) struct InspectionDispositionRecord {
     pub stores: [InspectionStoreDispositionRecord; 2],
     pub held: Vec<OriginalLocalSettlementObligation>,
 }
-pub(super) const DISPOSITION_SCHEMA: u32 = 3;
-pub(super) const DISPOSITION_PURPOSE: &str = "offline_reset_inspection_disposition_v3";
+pub(super) const DISPOSITION_SCHEMA: u32 = 4;
+pub(super) const DISPOSITION_PURPOSE: &str = "offline_reset_inspection_disposition_v4";
 impl InspectionDispositionRecord {
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
@@ -243,21 +227,19 @@ impl InspectionDispositionRecord {
             );
         }
         require_canonical_obligations(&self.held)?;
-        // A disposed reset still holds its published reservation and the
-        // issued reservation pin. The host's allocation accounting is held
-        // exactly when the host was issued.
+        // A disposed reset still holds its published reservation, the
+        // issued reservation pin and its host's allocation accounting.
         ensure!(
             self.held.contains(&OriginalLocalSettlementObligation::ReservationPublicationDescriptor)
                 && self.held.contains(&OriginalLocalSettlementObligation::IssuedReservationPin),
             "disposition omits the held reservation"
         );
         ensure!(
-            self.native_quota.admitted
-                == self.held.iter().any(|obligation| matches!(
-                    obligation,
-                    OriginalLocalSettlementObligation::NativeAllocationAccounting { attempted: _ }
-                )),
-            "disposition native accounting obligation differs from its native admission"
+            self.held.iter().any(|obligation| matches!(
+                obligation,
+                OriginalLocalSettlementObligation::NativeAllocationAccounting { attempted: _ }
+            )),
+            "disposition omits its host's native allocation accounting"
         );
         for (store, purpose) in self.stores.iter().zip(["runtime", "scheduler"]) {
             let (selected, name) = match store {
@@ -442,7 +424,6 @@ pub(super) enum NativeArenaRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OfflineNativeFactsRecord {
-    pub admitted: bool,
     pub generation: u64,
     pub region_bytes: u64,
     pub storage_bytes: u64,
@@ -480,7 +461,6 @@ impl OfflineNativeFactsRecord {
             connections_issued,
         } = budget;
         let record = Self {
-            admitted: true,
             generation: *generation,
             region_bytes: *region_bytes,
             storage_bytes: *storage_bytes,
@@ -502,8 +482,7 @@ impl OfflineNativeFactsRecord {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.admitted
-                && self.generation > 0
+            self.generation > 0
                 && self.region_bytes > 0
                 && self.storage_bytes > 0
                 && self.cleanup_reserved > 0
@@ -650,6 +629,8 @@ pub(super) struct CompletedReleaseFacts<'a> {
     pub held: &'a [OriginalLocalSettlementObligation],
     pub pins: Vec<RetiredPinFact>,
     pub state_ack: Option<ryeos_state::ThreadHistoryDiscardOperationRef>,
+    /// Whether the release prepared a State final acknowledgement.
+    pub acknowledgement_expected: bool,
 }
 
 impl OfflineResetReleasedRecord {
@@ -659,7 +640,20 @@ impl OfflineResetReleasedRecord {
     pub(super) fn completed(binding: ReleasedBinding, facts: CompletedReleaseFacts<'_>) -> Result<Self> {
         let ReleasedBinding { signer, operation_id, claim_sha256, claim_nonce, ledger_identity, reservation } =
             binding;
-        let CompletedReleaseFacts { mode, disposition_sha256, native, region, held, pins, state_ack } = facts;
+        let CompletedReleaseFacts {
+            mode,
+            disposition_sha256,
+            native,
+            region,
+            held,
+            pins,
+            state_ack,
+            acknowledgement_expected,
+        } = facts;
+        ensure!(
+            state_ack.is_some() == acknowledgement_expected,
+            "State acknowledgement presence differs from the prepared final acknowledgement"
+        );
         require_canonical_obligations(held)?;
         let discharged = held
             .iter()
@@ -747,12 +741,12 @@ impl OfflineResetReleasedRecord {
                     discharged.contains(&OriginalLocalSettlementObligation::IssuedReservationPin),
                     "completed release omits the issued reservation pin"
                 );
-                let accounted = discharged.iter().any(|obligation| {
-                    matches!(obligation, OriginalLocalSettlementObligation::NativeAllocationAccounting { attempted: _ })
-                });
                 ensure!(
-                    accounted == native.admitted,
-                    "native allocation accounting differs from the host's admission"
+                    discharged.iter().any(|obligation| matches!(
+                        obligation,
+                        OriginalLocalSettlementObligation::NativeAllocationAccounting { attempted: _ }
+                    )),
+                    "completed release omits its host's native allocation accounting"
                 );
                 let source_count = discharged
                     .iter()
@@ -784,9 +778,11 @@ impl OfflineResetReleasedRecord {
                     sources == source_count && issued == 1,
                     "retired pins differ from the discharged pin obligations"
                 );
+                // Only a mutating reset acknowledges State. One that found
+                // the schema already current applied nothing and records none.
                 ensure!(
-                    state_ack.is_some()
-                        == (*mode == super::inspection_destination::OriginalInspectionMode::Mutating),
+                    state_ack.is_none()
+                        || *mode == super::inspection_destination::OriginalInspectionMode::Mutating,
                     "State acknowledgement presence differs from the reset mode"
                 );
                 if let Some(acknowledged) = state_ack {
@@ -826,6 +822,12 @@ impl OfflineResetReleasedRecord {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn signed_bytes(&self, identity: &NodeIdentity,
+        storage: &lillux::cas::CanonicalRecordStorageQuote) -> Result<Vec<u8>> {
+        self.validate()?;
+        sign_inspection_record(self, &self.signer, identity, storage)
     }
 
     pub(super) fn verified(bytes: &[u8], identity: &NodeIdentity) -> Result<Self> {
@@ -977,6 +979,7 @@ mod tests {
                 region: released.region.as_ref().expect("released region"),
                 held: &held(),
                 pins: pins(),
+                acknowledgement_expected: state_ack.is_some(),
                 state_ack,
             },
         )
@@ -1144,7 +1147,7 @@ mod tests {
                     discharged.remove(0);
                 }
             },
-            "native allocation accounting differs",
+            "omits its host's native allocation accounting",
         );
         refuse(&|record| record.operation_id = RECOVERY_ONLY_OPERATION.into(), "names a reservation");
         // A held list that is not canonical is refused before any record exists.
@@ -1160,10 +1163,36 @@ mod tests {
                 held: &unsorted,
                 pins: pins(),
                 state_ack: None,
+                acknowledgement_expected: false,
             },
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("unsorted"), "{error:#}");
+        // A prepared final acknowledgement must be recorded, and an
+        // unprepared one must not be.
+        for (state_ack, acknowledgement_expected) in [
+            (None, true),
+            (
+                Some(ryeos_state::ThreadHistoryDiscardOperationRef { operation_id: operation(), sha256: "d".repeat(64) }),
+                false,
+            ),
+        ] {
+            let error = OfflineResetReleasedRecord::completed(
+                binding(&identity),
+                CompletedReleaseFacts {
+                    mode: OriginalInspectionMode::Mutating,
+                    disposition_sha256: "e".repeat(64),
+                    native: released.facts.as_ref().unwrap(),
+                    region: released.region.as_ref().unwrap(),
+                    held: &held(),
+                    pins: pins(),
+                    state_ack,
+                    acknowledgement_expected,
+                },
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("prepared final acknowledgement"), "{error:#}");
+        }
     }
 
     #[test]

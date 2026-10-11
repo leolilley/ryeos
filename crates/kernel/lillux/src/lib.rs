@@ -107,6 +107,8 @@ pub use exec::{
     ReceivedDescriptorAuthority, ReceivedDescriptorTransfer, inherited_descriptor_transfer_pair,
     take_inherited_descriptor_transfer_sender,
 };
+#[cfg(unix)]
+pub use secure_fs::PATH_MAX_BYTES;
 pub use secure_fs::{
     SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
     parse_secure_temp_name,

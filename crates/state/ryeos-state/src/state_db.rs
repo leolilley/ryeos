@@ -9142,6 +9142,88 @@ mod tests {
         assert!(marker.is_file());
     }
 
+    const ACK_RENAMED_ABORT_CHILD: &str = "RYEOS_STATE_ACK_RENAMED_ABORT_CHILD";
+
+    /// Child half of `crash_after_acknowledgement_rename_keeps_the_acknowledged_record`.
+    /// It acknowledges completely, then dies before its caller can observe
+    /// the result. It does nothing unless that test spawned this process.
+    #[test]
+    fn acknowledgement_renamed_abort_child() {
+        let Ok(root) = std::env::var(ACK_RENAMED_ABORT_CHILD) else {
+            return;
+        };
+        lillux::disable_process_core_dumps().unwrap();
+        let root = Path::new(&root);
+        let store = crate::recovery::RecoveryStore::from_runtime_state_dir(root).unwrap();
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(root).unwrap();
+        store
+            .finish_thread_history_discard(&guard, &discard_operation_for_startup())
+            .unwrap();
+        std::process::abort();
+    }
+
+    #[test]
+    fn crash_after_acknowledgement_rename_keeps_the_acknowledged_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let operation = discard_operation_for_startup();
+        let store = crate::recovery::RecoveryStore::from_runtime_state_dir(dir.path()).unwrap();
+        crate::recovery::CasMutationGuard::ensure_anchor(dir.path()).unwrap();
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        drop(guard);
+        let marker = store.root().join("thread-history-discard.json");
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state_db::tests::acknowledgement_renamed_abort_child",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(ACK_RENAMED_ABORT_CHILD, dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = child.wait_with_output().unwrap().status;
+        assert!(!status.success() && status.code().is_none(), "{status:?}");
+
+        // The rename landed before the crash: the marker is the Acknowledged
+        // record of this operation, no longer Active, and no temporary of the
+        // write survives beside it.
+        let acknowledged = std::fs::read(&marker).unwrap();
+        assert_eq!(store.thread_history_discard_operation().unwrap(), None);
+        assert!(!store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation.clone())
+        );
+        let names: Vec<std::ffi::OsString> = std::fs::read_dir(store.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("thread-history-discard.json")]);
+
+        // A retry of the same acknowledgement only syncs; the bytes stay.
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        drop(guard);
+        assert_eq!(std::fs::read(&marker).unwrap(), acknowledged);
+        drop(store);
+
+        if let Some(error) = locked_open_error(dir.path()) {
+            assert!(
+                !error.contains("reset is incomplete") && !error.contains("thread-history discard"),
+                "an Acknowledged marker must not block startup: {error}"
+            );
+        }
+        assert!(marker.is_file());
+    }
+
     #[derive(Default)]
     struct RecordingRepairSink {
         requests: Mutex<Vec<ProjectionRepairRequest>>,

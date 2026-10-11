@@ -936,8 +936,9 @@ impl OutsideOriginalOperationalCustody {
             match original.into_outside_custody(terminal) {
                 Ok(custody) => self.sql_custody.push(custody),
                 Err(failure) => {
+                    let message = format!("Operational native transfer retains original terminal: {failure:#}");
                     self.native_failure = Some(failure);
-                    anyhow::bail!("Operational native transfer retains original terminal");
+                    anyhow::bail!(message);
                 }
             }
         }

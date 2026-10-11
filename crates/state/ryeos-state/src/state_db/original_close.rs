@@ -213,6 +213,71 @@ impl ClosedOriginalState {
         }
         Ok(terminals)
     }
+    /// Every generation lease this State issued, from its retained context or
+    /// its finalizer. Leases already moved to an outside owner are not here.
+    fn generation_lease_registry(
+        &self,
+    ) -> anyhow::Result<Vec<Arc<crate::projection::OriginalGenerationLease>>> {
+        let finalizer = {
+            let custody = self
+                .context
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("State generation registry custody busy or poisoned"))?;
+            match &*custody {
+                StateContextCustody::Retained(context) => {
+                    return Ok(context
+                        .generated
+                        .generation_leases
+                        .try_lock()
+                        .map_err(|_| anyhow::anyhow!("State generation registry busy or poisoned"))?
+                        .clone());
+                }
+                StateContextCustody::Finalizer(finalizer) => finalizer.clone(),
+            }
+        };
+        let roots = finalizer
+            .roots
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("State finalizer generation registry busy or poisoned"))?;
+        let Some(remaining) = roots.remaining.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let leases = remaining
+            .generated
+            .generation_leases
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("State generation registry busy or poisoned"))?
+            .clone();
+        Ok(leases)
+    }
+    /// Retire every generation lease against the finished native backend.
+    /// A closed lease keeps its closed receipt, and with it a factory alias,
+    /// until it is retired; dropping the lease never releases them. Run once
+    /// the backend terminal exists and before the native host is released.
+    /// A retry skips leases already retired; a lease that never reached its
+    /// closed disposition refuses and stays in the registry.
+    pub fn retire_generation_leases_after_backend(
+        &self,
+        terminal: &OriginalNativeTerminal,
+    ) -> anyhow::Result<()> {
+        self.factory.require_original_process()?;
+        terminal.require_original(&self.factory)?;
+        for lease in self.generation_lease_registry()? {
+            lease.retire_after_native_terminal(terminal)?;
+        }
+        Ok(())
+    }
+    /// The number of generation leases not yet retired; each still holds a
+    /// factory alias.
+    pub fn unretired_generation_leases(&self) -> anyhow::Result<usize> {
+        let mut unretired = 0;
+        for lease in self.generation_lease_registry()? {
+            if !lease.is_retired()? {
+                unretired += 1;
+            }
+        }
+        Ok(unretired)
+    }
     /// Close actual generation locks after all SQL owners have supplied their
     /// genuine terminals and the original exclusive CAS frame has quiesced
     /// generation consumers. Refusals stay in the retained registry for retry.
@@ -1587,10 +1652,11 @@ impl OriginalOutsideStateFinalizer {
             match original.into_outside_custody(terminal) {
                 Ok(custody) => self.sql_custody.push(custody),
                 Err(failure) => {
-                    self.native_transfer_failure = Some(failure);
-                    anyhow::bail!(
-                        "outside State SQL receipt still has original aliases or obligations"
+                    let message = format!(
+                        "outside State SQL receipt still has original aliases or obligations: {failure:#}"
                     );
+                    self.native_transfer_failure = Some(failure);
+                    anyhow::bail!(message);
                 }
             }
         }
