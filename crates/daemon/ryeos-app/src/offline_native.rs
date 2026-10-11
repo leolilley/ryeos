@@ -11,7 +11,8 @@
 
 use anyhow::{Context, Result, ensure};
 use lillux_sqlite::offline_host::{
-    OfflineNativeAuthority, OfflineNativeFacts, OfflineNativeHost, OfflineNativeRetained,
+    OfflineNativeAuthority, OfflineNativeFacts, OfflineNativeHost, OfflineNativeReleased,
+    OfflineNativeRetained,
 };
 use lillux_sqlite::{
     OriginalNativeBudget, OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority,
@@ -22,6 +23,8 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_node_runtime::state_lock::{StateLock, StateLockLease};
 use ryeos_scheduler_contract::{NodeMaintenancePolicy, OfflineNativeQuota};
+use ryeos_state::operational::CarriedOwners;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,6 +60,34 @@ pub(crate) fn load_signed_maintenance_snapshot(
         "offline maintenance policy lacks its exact canonical generation digest"
     );
     Ok(snapshot)
+}
+
+/// Refuse a node that has never completed its first start. Init creates the
+/// runtime state directory, but only the first start creates the Operational
+/// initialization marker and the CAS mutation lock the offline resets open;
+/// without them the resets would fail deep inside native admission.
+pub(crate) fn require_started_once(runtime: &lillux::PinnedDirectory) -> Result<()> {
+    let mut absent = Vec::new();
+    let operational = ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME;
+    if runtime.open_regular(OsStr::new(operational), false)?.is_none() {
+        absent.push(operational.to_owned());
+    }
+    let recovery = ryeos_state::recovery::RECOVERY_DIRECTORY_NAME;
+    let lock = ryeos_state::recovery::CAS_MUTATION_LOCK_FILENAME;
+    let lock_present = match runtime.open_child_directory(OsStr::new(recovery))? {
+        Some(directory) => directory.open_regular(OsStr::new(lock), false)?.is_some(),
+        None => false,
+    };
+    if !lock_present {
+        absent.push(format!("{recovery}/{lock}"));
+    }
+    ensure!(
+        absent.is_empty(),
+        "this node has never started; start it once, then rerun (first-start artefacts absent in {}: {})",
+        runtime.path().display(),
+        absent.join(", ")
+    );
+    Ok(())
 }
 
 /// Revalidated on every native boundary of the session's host.
@@ -118,6 +149,7 @@ impl OfflineNativeSession {
             "offline native session runtime differs from this node's runtime state directory {}",
             runtime_dir.display()
         );
+        require_started_once(&runtime)?;
         ryeos_scheduler_contract::validate_offline_native_class(class)?;
         let snapshot = load_signed_maintenance_snapshot(config, identity)?;
         let quota: OfflineNativeQuota = snapshot
@@ -194,20 +226,19 @@ impl OfflineNativeSession {
         self.host.retain_terminal(terminal)
     }
 
-    /// Finish the host's backend, capture its facts, then release the host.
-    /// A refusal keeps the session and its host for retry.
-    pub fn finish(self) -> std::result::Result<OfflineNativeFacts, (Self, anyhow::Error)> {
-        let Self { authority, mut host } = self;
-        let facts = match host.finish_backend().and_then(|backend| {
-            drop(backend);
-            host.facts()
-        }) {
-            Ok(facts) => facts,
-            Err(error) => return Err((Self { authority, host }, error)),
-        };
-        match host.release() {
-            Ok(_) => Ok(facts),
-            Err(OfflineNativeRetained { host, error }) => Err((Self { authority, host }, error)),
+    /// Finish the host and return the facts its release captured. A refusal
+    /// keeps the session and its host for retry; a release that captured no
+    /// facts has already ended the host, so only the refusal remains.
+    pub fn finish(self) -> std::result::Result<OfflineNativeFacts, (Option<Self>, anyhow::Error)> {
+        let Self { authority, host } = self;
+        match host.finish() {
+            // The region release fact is plain data the session does not report.
+            Ok(OfflineNativeReleased { facts, region: _ }) => {
+                facts.ok_or_else(|| {
+                    (None, anyhow::anyhow!("offline native session host released without backend facts"))
+                })
+            }
+            Err(OfflineNativeRetained { host, error }) => Err((Some(Self { authority, host }), error)),
         }
     }
 }
@@ -269,17 +300,7 @@ pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<R
         (Ok(_), Err((session, error))) => Err(retained_session(session, error)
             .context("replay indexes activated; offline native host release retained")),
         (Err(original), Err((session, error))) => {
-            let error = match original.downcast_ref::<ryeos_state::operational::CarriedOwners>() {
-                Some(carried) => {
-                    let names = carried.owner_names();
-                    error.context(format!(
-                        "offline native host release is blocked by {} carried owner(s) still alive in the activation refusal: {}",
-                        names.len(),
-                        names.join(", ")
-                    ))
-                }
-                None => error,
-            };
+            let error = blocked_by_carried(&original, error, "activation");
             Err(retained_session(session, error).context(original))
         }
     }
@@ -361,7 +382,7 @@ pub fn reset_external_content_bindings(
                     Err(original) => error.context(original),
                 };
                 return Err(match state {
-                    Some(state) => carry_offline_owner(error, state),
+                    Some(state) => CarriedOwners::carry(error, state),
                     None => error,
                 });
             }
@@ -376,7 +397,7 @@ pub fn reset_external_content_bindings(
                     )),
                     Err(original) => refusal.context(original),
                 };
-                Err(carry_offline_owner(error, terminal))
+                Err(CarriedOwners::carry(error, terminal))
             }
         }
     })();
@@ -386,49 +407,35 @@ pub fn reset_external_content_bindings(
         (Ok(_), Err((session, error))) => Err(retained_session(session, error)
             .context("external-content binding reset done; offline native host release retained")),
         (Err(original), Err((session, error))) => {
-            let error = match original.downcast_ref::<CarriedOfflineOwner>() {
-                Some(carried) => error.context(format!(
-                    "offline native host release is blocked by a carried owner still alive in the reset refusal: {}",
-                    carried.owner
-                )),
-                None => error,
-            };
+            let error = blocked_by_carried(&original, error, "reset");
             Err(retained_session(session, error).context(original))
         }
     }
 }
 
-/// A refused native owner kept alive by its error until the process ends,
-/// never dropped mid-flight.
-struct CarriedOfflineOwner {
-    error: anyhow::Error,
-    owner: &'static str,
-    _owner: std::sync::Mutex<Box<dyn std::any::Any + Send>>,
-}
-impl std::fmt::Debug for CarriedOfflineOwner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CarriedOfflineOwner").field("error", &self.error).field("owner", &self.owner).finish_non_exhaustive()
+/// Name the owners an operation refusal still carries, which keep the host's
+/// factory or terminals alive and so block its release.
+fn blocked_by_carried(original: &anyhow::Error, error: anyhow::Error, operation: &str) -> anyhow::Error {
+    match original.downcast_ref::<CarriedOwners>() {
+        Some(carried) => {
+            let names = carried.owner_names();
+            error.context(format!(
+                "offline native host release is blocked by {} carried owner(s) still alive in the {operation} refusal: {}",
+                names.len(),
+                names.join(", ")
+            ))
+        }
+        None => error,
     }
-}
-impl std::fmt::Display for CarriedOfflineOwner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#} (refused owner retained: {})", self.error, self.owner)
-    }
-}
-impl std::error::Error for CarriedOfflineOwner {}
-
-fn carry_offline_owner<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
-    anyhow::Error::new(CarriedOfflineOwner {
-        error,
-        owner: std::any::type_name::<T>(),
-        _owner: std::sync::Mutex::new(Box::new(owner)),
-    })
 }
 
 /// Carry a session whose host could not be released inside the error, so
 /// the owner survives until the process ends rather than being dropped.
-fn retained_session(session: OfflineNativeSession, error: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(RetainedOfflineNativeSession { error, _session: session })
+fn retained_session(session: Option<OfflineNativeSession>, error: anyhow::Error) -> anyhow::Error {
+    match session {
+        Some(session) => anyhow::Error::new(RetainedOfflineNativeSession { error, _session: session }),
+        None => error,
+    }
 }
 
 struct RetainedOfflineNativeSession {
@@ -446,3 +453,34 @@ impl std::fmt::Display for RetainedOfflineNativeSession {
     }
 }
 impl std::error::Error for RetainedOfflineNativeSession {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime(dir: &std::path::Path) -> lillux::PinnedDirectory {
+        lillux::PinnedDirectory::open(dir).unwrap().unwrap()
+    }
+
+    #[test]
+    fn never_started_root_is_refused_up_front_naming_the_absent_artefacts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("recovery/thread-projection")).unwrap();
+        let error = require_started_once(&runtime(dir.path())).expect_err("an init-only root is refused");
+        let message = format!("{error:#}");
+        assert!(message.contains("this node has never started; start it once, then rerun"), "{message}");
+        assert!(message.contains("operational.initialized") && message.contains("recovery/cas-mutation.lock"), "{message}");
+
+        std::fs::write(
+            dir.path().join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT,
+        )
+        .unwrap();
+        let error = require_started_once(&runtime(dir.path())).expect_err("a missing CAS lock is still refused");
+        let message = format!("{error:#}");
+        assert!(message.contains("never started") && !message.contains("operational.initialized"), "{message}");
+
+        std::fs::write(dir.path().join("recovery/cas-mutation.lock"), b"").unwrap();
+        require_started_once(&runtime(dir.path())).expect("a started root is admitted");
+    }
+}

@@ -31,35 +31,49 @@ pub fn prepare_operational_schema_reference(
 pub type RetainTerminal<'a> = &'a dyn Fn(OriginalNativeConnectionTerminal)
     -> std::result::Result<(), (OriginalNativeConnectionTerminal, anyhow::Error)>;
 
-/// One owner kept alive by a refusal, with the name of its type.
-pub type CarriedOwner = Box<dyn std::any::Any + Send + Sync>;
+/// One owner kept alive by a refusal. [`CarriedOwners`] keeps each one with
+/// the name of its type.
+pub type CarriedOwner = Box<dyn std::any::Any + Send>;
 
 /// An error that keeps every refused owner alive until the error itself ends,
 /// so no native owner is dropped on a refusal path. Carriers never nest:
-/// every helper in this module flattens a carried error into one carrier, so
-/// the owners listed here are all the owners the refusal holds.
+/// every helper in this module, and [`CarriedOwners::carry`], flattens a
+/// carried error into one carrier, so the owners listed here are all the
+/// owners the refusal holds.
 pub struct CarriedOwners {
     error: anyhow::Error,
-    owners: Vec<(&'static str, CarriedOwner)>,
+    /// Owners need only be `Send`; the mutex makes the carrier `Sync`.
+    owners: Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>,
 }
 impl CarriedOwners {
+    /// Carry `owner` with `error`, merging any owners `error` already carries.
+    pub fn carry<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
+        let (error, mut owners) = Self::split(error);
+        owners.push((std::any::type_name::<T>(), std::sync::Mutex::new(Box::new(owner))));
+        Self::join(error, owners)
+    }
     /// The refusal and every carried owner, in the order they were refused.
     /// The error is returned too: dropping it is the caller's decision.
     pub fn into_parts(self) -> (anyhow::Error, Vec<CarriedOwner>) {
-        (self.error, self.owners.into_iter().map(|(_, owner)| owner).collect())
+        let owners = self
+            .owners
+            .into_iter()
+            .map(|(_, owner)| owner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .collect();
+        (self.error, owners)
     }
     /// Type names of the carried owners, in the order they were refused.
     pub fn owner_names(&self) -> Vec<&'static str> {
         self.owners.iter().map(|(name, _)| *name).collect()
     }
     /// Split `error` into its refusal and the owners it carries, if any.
-    fn split(error: anyhow::Error) -> (anyhow::Error, Vec<(&'static str, CarriedOwner)>) {
+    fn split(error: anyhow::Error) -> (anyhow::Error, Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>) {
         match error.downcast::<CarriedOwners>() {
             Ok(carried) => (carried.error, carried.owners),
             Err(error) => (error, Vec::new()),
         }
     }
-    fn join(error: anyhow::Error, owners: Vec<(&'static str, CarriedOwner)>) -> anyhow::Error {
+    fn join(error: anyhow::Error, owners: Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>) -> anyhow::Error {
         if owners.is_empty() {
             return error;
         }
@@ -78,11 +92,8 @@ impl std::fmt::Display for CarriedOwners {
 }
 impl std::error::Error for CarriedOwners {}
 
-/// Carry `owner` with `error`, merging any owners `error` already carries.
-fn carry<T: std::any::Any + Send + Sync>(error: anyhow::Error, owner: T) -> anyhow::Error {
-    let (error, mut owners) = CarriedOwners::split(error);
-    owners.push((std::any::type_name::<T>(), Box::new(owner)));
-    CarriedOwners::join(error, owners)
+fn carry<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
+    CarriedOwners::carry(error, owner)
 }
 
 /// Merge the owners carried by `carried` into `error`. What remains of
@@ -92,7 +103,7 @@ fn carry_error(error: anyhow::Error, carried: anyhow::Error) -> anyhow::Error {
     let (error, mut owners) = CarriedOwners::split(error);
     let (residual, carried) = CarriedOwners::split(carried);
     owners.extend(carried);
-    owners.push((std::any::type_name::<anyhow::Error>(), Box::new(residual)));
+    owners.push((std::any::type_name::<anyhow::Error>(), std::sync::Mutex::new(Box::new(residual))));
     CarriedOwners::join(error, owners)
 }
 
@@ -328,15 +339,21 @@ fn release_reference_failure(
                 },
                 Ok(None) => {
                     // Refused before any ticket: nothing joins the census.
-                    // Dropping `released` deliberately leaks its unused
-                    // transient inputs, and with them one Arc of the
-                    // destination authority. The offline host's destination
-                    // holds only a Weak to the factory, so the leak keeps
-                    // neither the factory nor its region alive and the
-                    // host's region seal is unaffected; it also carries no
-                    // descriptor, ticket or budget.
-                    drop(released);
-                    original
+                    // The unused transient inputs hold the caller's
+                    // destination authority, and through it the stopped-node
+                    // lock descriptors, so they are consumed here rather than
+                    // left to outlive the session.
+                    match released.release_unused(factory) {
+                        Ok(prior) => {
+                            // `original` already renders this refusal.
+                            drop(prior);
+                            original
+                        }
+                        Err((released, refusal)) => carry(
+                            original.context(format!("unused schema reference inputs not released: {refusal:#}")),
+                            released,
+                        ),
+                    }
                 }
                 Err(refusal) => carry(
                     original.context(format!("released schema reference refused: {refusal:#}")),
@@ -575,6 +592,36 @@ mod tests {
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH - 1);
         let error = activate(&host, &root, &|| Ok(())).expect_err("no ticket left for the reference");
         assert!(format!("{error:#}").contains("schema reference refused"), "{error:#}");
+        assert_census_complete(&host);
+    }
+
+    #[test]
+    fn reference_refused_before_its_ticket_releases_its_unused_inputs() {
+        let host = TestNativeHost::acquire();
+        let destination = host.destination();
+        let baseline = Arc::strong_count(&destination);
+        // SAFETY: test-only issuance under the test host's own funded factory;
+        // the purpose deliberately differs from the reference's.
+        let inputs = unsafe {
+            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, destination.clone())
+        }
+        .unwrap();
+        assert_eq!(Arc::strong_count(&destination), baseline + 1, "the inputs hold the destination");
+        let failure = match prepare_operational_schema_reference(host.factory().clone(), inputs) {
+            Ok(_) => panic!("a reference input of another purpose is refused"),
+            Err(failure) => failure,
+        };
+        let error = release_reference_failure(host.factory(), failure, &|terminal| {
+            host.retain_terminal(terminal);
+            Ok(())
+        });
+        assert!(format!("{error:#}").contains("schema reference refused"), "{error:#}");
+        assert!(error.downcast_ref::<CarriedOwners>().is_none(), "nothing is carried: {error:#}");
+        assert_eq!(
+            Arc::strong_count(&destination),
+            baseline,
+            "the unused inputs released their destination authority instead of leaking it"
+        );
         assert_census_complete(&host);
     }
 }

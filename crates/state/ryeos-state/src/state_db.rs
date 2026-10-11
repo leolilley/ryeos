@@ -2678,6 +2678,35 @@ impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalPreparedProje
     }
 }
 
+/// Destination of the transient projection of a store opened by
+/// [`StateDb::open_offline_native`]: the caller host's destination, gated on
+/// a clone of the store's own captured State preparation. The projection
+/// finishes in-process, so it has no outside custody receiver.
+struct OfflineNativeStateDestination {
+    preparation: PreparedOfflineProjection,
+    host: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+}
+impl lillux_sqlite::OriginalNativeDestinationAuthority for OfflineNativeStateDestination {
+    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+        self.preparation.require_custody()?;
+        anyhow::ensure!(self.preparation.namespace_lock.is_some(), "offline State namespace exclusion absent");
+        // Close and cleanup pass here after admission closes, so the factory's
+        // admission-window runtime binding is checked once at open; the
+        // host's destination enforces its own windows.
+        self.host.require_original(factory)
+    }
+    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _aggregate: &lillux_sqlite::OriginalNativeTerminal, _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        _prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>)
+        -> Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+            factory.clone(),
+            self,
+            anyhow::anyhow!("offline native State projection finishes in-process; no outside custody receiver"),
+        ))
+    }
+}
+
 /// Cloneable, descriptor-bound authority for maintenance work that must run
 /// after releasing the [`StateDb`] mutex.
 ///
@@ -3266,12 +3295,22 @@ impl StateDb {
         factory.require_original_process()?;
         factory.require_runtime_binding(&runtime_state_directory)?;
         let prepared = PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
-        // SAFETY: the caller's funded host issues this ticket under the
-        // exclusion this function's contract requires.
+        let state_destination = Arc::new(OfflineNativeStateDestination {
+            preparation: prepared.try_clone_preparation()?,
+            host: destination,
+        });
+        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(state_destination.as_ref(), factory)?;
+        // SAFETY: StateTransient requires the actual prepared State custody.
+        // `state_destination` retains a clone of the same captured roots,
+        // recovery, trust and namespace exclusion this store keeps, and
+        // revalidates them and the caller's host destination on every native
+        // boundary; the factory's runtime binding was checked above; the
+        // caller's funded host issues the ticket under the exclusion this
+        // function's contract requires.
         let inputs = unsafe {
             lillux_sqlite::OriginalNativeTransientInputs::issued(
                 lillux_sqlite::OriginalNativeDomain::StateTransient,
-                destination,
+                state_destination,
             )?
         };
         let projection = ProjectionDb::open_original_transient(Arc::clone(factory), inputs)?;
@@ -3279,13 +3318,21 @@ impl StateDb {
     }
 
     /// Close a store opened by [`Self::open_offline_native`] and return its
-    /// projection's native terminal. A store that built or published
-    /// projection state is refused whole; a refused close keeps its native
-    /// owner inside the error.
+    /// projection's native terminal. A store that was not opened offline
+    /// (no retained namespace exclusion, or Operational access), or that
+    /// built or published projection state, is refused whole; a refused
+    /// close keeps its native owner inside the error.
     pub fn close_offline_native(
         self,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
     ) -> std::result::Result<lillux_sqlite::OriginalNativeConnectionTerminal, (Option<Self>, anyhow::Error)> {
+        if !matches!(self.operational, OperationalAccess::ProjectionMaintenance)
+            || self._offline_namespace_lock.is_none()
+        {
+            return Err((Some(self), anyhow::anyhow!(
+                "offline native close refused: State was not opened offline under retained namespace exclusion"
+            )));
+        }
         if !self.original_projection_terminals.is_empty() || self.original_projection_context.is_some() {
             return Err((Some(self), anyhow::anyhow!("offline native State carries projection build custody")));
         }
@@ -9603,5 +9650,73 @@ mod tests {
         let (_dir, db) = open_temp();
         let threads = db.list_threads_by_chain("no-such-chain").unwrap();
         assert!(threads.is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod offline_native_tests {
+    use super::*;
+    use lillux_sqlite::OriginalNativeDestinationAuthority;
+    use lillux_sqlite::test_host::TestNativeHost;
+
+    fn runtime(dir: &Path) -> lillux::PinnedDirectory {
+        for name in ["objects", "refs", "locators", "recovery/thread-projection"] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        lillux::PinnedDirectory::open(dir).unwrap().unwrap()
+    }
+
+    #[test]
+    fn close_offline_native_refuses_a_store_without_offline_exclusion() {
+        let host = TestNativeHost::acquire();
+        let dir = tempfile::tempdir().unwrap();
+        let root = runtime(dir.path());
+        let namespace = root.lock_exclusive().unwrap();
+        // SAFETY: the test host funds the factory; the test is the sole user
+        // of this temporary runtime directory and holds its namespace lock.
+        let mut state = unsafe {
+            StateDb::open_offline_native(
+                root.try_clone().unwrap(),
+                &namespace,
+                Arc::new(TrustStore::new()),
+                host.factory(),
+                host.destination(),
+            )
+        }
+        .unwrap();
+        let lock = state._offline_namespace_lock.take();
+        let (returned, error) = match state.close_offline_native(host.factory()) {
+            Ok(_) => panic!("a store without retained namespace exclusion must be refused"),
+            Err(refused) => refused,
+        };
+        assert!(format!("{error:#}").contains("not opened offline"), "{error:#}");
+        let mut state = returned.expect("the refused store is handed back whole");
+        state._offline_namespace_lock = lock;
+        let terminal = match state.close_offline_native(host.factory()) {
+            Ok(terminal) => terminal,
+            Err((_, error)) => panic!("offline store close refused: {error:#}"),
+        };
+        host.retain_terminal(terminal);
+        let (issued, recorded) = host.ticket_census();
+        assert_eq!((issued, recorded), (1, 1), "the projection's terminal reaches the census");
+    }
+
+    #[test]
+    fn offline_state_destination_revalidates_the_captured_state_roots() {
+        let host = TestNativeHost::acquire();
+        let dir = tempfile::tempdir().unwrap();
+        let root = runtime(dir.path());
+        let namespace = root.lock_exclusive().unwrap();
+        let preparation =
+            PreparedOfflineProjection::capture(root.try_clone().unwrap(), Arc::new(TrustStore::new()), &namespace)
+                .unwrap();
+        let destination = OfflineNativeStateDestination { preparation, host: host.destination() };
+        destination.require_original(host.factory()).expect("captured State roots admitted");
+        std::fs::rename(dir.path().join("refs"), dir.path().join("refs.moved")).unwrap();
+        destination
+            .require_original(host.factory())
+            .expect_err("a replaced State root is refused");
+        std::fs::rename(dir.path().join("refs.moved"), dir.path().join("refs")).unwrap();
+        destination.require_original(host.factory()).expect("restored State roots admitted again");
     }
 }

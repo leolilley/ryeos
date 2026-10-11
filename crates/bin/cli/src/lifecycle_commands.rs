@@ -622,8 +622,12 @@ fn run_node_external_content_reset_command(
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("external-content binding reset requires the daemon to be stopped")?;
-    let reset = ryeos_app::offline_native::reset_external_content_bindings(&config, &state_lock, args.dry_run)
-        .context("reset external-content bindings through the offline native host")?;
+    let reset = ryeos_app::offline_native::reset_external_content_bindings(
+        &config,
+        &state_lock,
+        args.dry_run,
+    )
+    .context("reset external-content bindings through the offline native host")?;
     let bindings = reset.bindings;
     if args.json {
         crate::tty::write_json(&serde_json::json!({

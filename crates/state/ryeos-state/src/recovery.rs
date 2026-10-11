@@ -29,6 +29,11 @@ where
 }
 
 pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
+
+/// Runtime-state child holding the State recovery roots and the CAS lock.
+pub const RECOVERY_DIRECTORY_NAME: &str = "recovery";
+/// The CAS mutation lock inside [`RECOVERY_DIRECTORY_NAME`].
+pub const CAS_MUTATION_LOCK_FILENAME: &str = "cas-mutation.lock";
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;

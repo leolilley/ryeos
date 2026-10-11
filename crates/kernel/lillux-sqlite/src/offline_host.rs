@@ -55,10 +55,13 @@ pub fn offline_native_required_cleanup_steps(storage: u64, tickets: u32) -> Resu
         .context("offline native cleanup quote overflow")
 }
 
-/// Plain facts of a host whose backend finished: the region it pins, the
-/// arena disposition and budget evidence of the backend terminal, and the
-/// ticket and terminal census. No field carries an owner, so callers keep
-/// them across [`OfflineNativeHost::release`].
+/// Plain facts of a host whose backend finished: the region's process,
+/// generation and size; the raw budget's funded storage; the backend
+/// terminal's arena disposition; the budget handle's counters at its
+/// retirement; and the census of issued tickets, ticketed terminals
+/// (including released unpublished tickets), ticketless refusals and leases.
+/// No field carries an owner, so callers keep them across
+/// [`OfflineNativeHost::release`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfflineNativeFacts {
     pub process: u32,
@@ -359,8 +362,16 @@ impl OfflineNativeHost {
         self.factory.as_ref().context("offline native factory absent")
     }
 
-    /// Issued ticket count and recorded terminals plus leases.
+    /// Issued ticket count and recorded terminals plus leases. Once the
+    /// backend finished this answers from [`Self::facts`], and it refuses
+    /// while the backend terminal exists without its facts, so it can never
+    /// contradict them.
     pub fn ticket_census(&self) -> Result<(u32, usize)> {
+        if let Some(facts) = &self.facts {
+            let recorded = facts.terminals.checked_add(facts.leases).context("offline native census overflow")?;
+            return Ok((facts.tickets_issued, recorded));
+        }
+        ensure!(self.backend.is_none(), "offline native census closed: backend finished without its facts");
         let factory = self.factory.as_ref().context("offline native factory absent")?;
         let issued = factory.budget_snapshot()?.connections_issued;
         let recorded = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).len()
@@ -600,8 +611,15 @@ impl OfflineAdmission {
                 }
                 if preparation.terminal.is_none() {
                     let core = preparation.core.as_ref().context("offline ticketed preparation cell absent")?;
-                    if core.observation()?.ticket == 0 {
+                    let observed = core.observation()?.ticket;
+                    if observed == 0 {
                         core.bind_ticket(preparation.ticket)?;
+                    } else {
+                        ensure!(
+                            observed == preparation.ticket,
+                            "offline ticketed preparation cell carries ticket {observed}, not its debited ticket {}",
+                            preparation.ticket
+                        );
                     }
                     preparation.terminal = Some(factory.retire_unpublished_ticket(core)?);
                 }
@@ -735,5 +753,65 @@ impl OriginalNativeDestinationAuthority for OfflineDestination {
             self,
             anyhow::anyhow!("offline native host finishes its connections in-process; no outside custody receiver"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_host::TestNativeHost;
+
+    #[test]
+    fn released_ticket_requires_the_cell_to_carry_its_debited_ticket() {
+        let test = TestNativeHost::acquire();
+        let host = test.live_host();
+        let admission = host.admission.clone().expect("installed admission");
+        let factory = host.factory().expect("admitting factory").clone();
+        let core = admission
+            .region
+            .claim_producer_control(SqliteInspectionProductionKind::Native)
+            .expect("producer cell");
+        let ticket = admission.budget.debit_connection_ticket().expect("debited ticket");
+        core.bind_ticket(ticket).map_err(|refusal| anyhow::anyhow!("{refusal}")).expect("bound cell");
+        admission.retain_ticketed(OfflineTicketedPreparation {
+            ticket: ticket + 1,
+            core: Some(core),
+            publication: None,
+            callback: None,
+            terminal: None,
+            recorded: false,
+        });
+        let error = match admission.release_ticketed(&factory) {
+            Ok(_) => panic!("a foreign cell ticket is refused"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("carries ticket {ticket}, not its debited ticket {}", ticket + 1)),
+            "{message}"
+        );
+        {
+            let mut retained = admission.ticketed.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(retained.len(), 1, "the refused preparation is kept for a retry");
+            assert!(retained[0].core.is_some() && retained[0].terminal.is_none() && !retained[0].recorded);
+            // Restore the debited ticket so the host's own finish releases
+            // the cell into the census.
+            retained[0].ticket = ticket;
+        }
+        drop(factory);
+        drop(admission);
+        drop(test);
+    }
+
+    #[test]
+    fn census_answers_from_facts_once_the_backend_finished() {
+        let mut test = TestNativeHost::acquire();
+        let connection = test.open_transient();
+        test.close(connection);
+        let host = test.live_host_mut();
+        drop(host.finish_backend().expect("backend finished"));
+        let facts = host.facts().expect("facts recorded");
+        assert_eq!(host.ticket_census().expect("census"), (facts.tickets_issued, facts.terminals + facts.leases));
+        assert_eq!(host.ticket_census().expect("census"), (1, 1));
     }
 }

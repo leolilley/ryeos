@@ -525,6 +525,44 @@ impl ReleasedNativeSchemaSqlReference {
     }
     pub fn prior_refusal(&self) -> &anyhow::Error { &self.prior_refusal }
 
+    /// End a construction refused before any ticket was issued: consume its
+    /// unused one-shot transient inputs in their issuing process, which ends
+    /// their destination authority, and return the original refusal. A
+    /// released reference that holds a terminal or outside custody belongs to
+    /// a census and is handed back whole, as is one whose inputs belong to
+    /// another process or whose factory is foreign.
+    pub fn release_unused(
+        self,
+        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> std::result::Result<anyhow::Error, (Self, anyhow::Error)> {
+        if let Err(error) = self.terminal(factory) {
+            return Err((self, error));
+        }
+        if self.terminal.is_some() || self.outside_custody.is_some() || self.outside_failure.is_some() {
+            return Err((self, anyhow::anyhow!(
+                "released schema reference holds a native terminal; it belongs to the census")));
+        }
+        let Self { factory: original_factory, terminal, unused_transient_inputs, prior_refusal,
+            _definition, outside_custody, outside_failure } = self;
+        let Some(inputs) = unused_transient_inputs else {
+            drop(original_factory);
+            return Ok(prior_refusal);
+        };
+        match std::mem::ManuallyDrop::into_inner(inputs).into_original_parts() {
+            Ok((_domain, authority)) => {
+                drop(authority);
+                drop(original_factory);
+                Ok(prior_refusal)
+            }
+            Err(inputs) => Err((
+                Self { factory: original_factory, terminal,
+                    unused_transient_inputs: Some(std::mem::ManuallyDrop::new(inputs)), prior_refusal,
+                    _definition, outside_custody, outside_failure },
+                anyhow::anyhow!("unused schema reference inputs belong to another process"),
+            )),
+        }
+    }
+
     /// Transfer an acknowledged failed schema attempt into the same outside
     /// source graph as its Store. Every refused terminal handoff stays inside
     /// this owner with its original definition and diagnostic.

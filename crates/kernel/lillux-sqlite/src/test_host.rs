@@ -8,7 +8,8 @@
 //! that use it need nextest or `--test-threads=1`. Acquire the host before any
 //! fork lease and never wait for it while holding one.
 use crate::offline_host::{
-    OfflineNativeAuthority, OfflineNativeHost, offline_native_required_cleanup_steps,
+    OfflineNativeAuthority, OfflineNativeHost, OfflineNativeHostFailure,
+    offline_native_required_cleanup_steps,
 };
 use crate::{
     OriginalNativeBoundInputs, OriginalNativeBoundMode, OriginalNativeBudget,
@@ -78,6 +79,15 @@ pub struct TestNativeHost {
 }
 
 fn install(envelope: TestNativeEnvelope) -> std::result::Result<OfflineNativeHost, String> {
+    install_with(envelope, Arc::new(TestAuthority))
+}
+
+/// A refused install whose partial host also refuses its release keeps that
+/// host in [`RETAINED`] and records the refusal as leaked.
+fn install_with(
+    envelope: TestNativeEnvelope,
+    authority: Arc<dyn OfflineNativeAuthority>,
+) -> std::result::Result<OfflineNativeHost, String> {
     let cleanup = offline_native_required_cleanup_steps(envelope.storage_bytes, envelope.tickets)
         .map_err(|error| format!("cleanup quote refused: {error:#}"))?;
     // SAFETY: test-only funding; this host is the sole issuer of the envelope.
@@ -89,11 +99,18 @@ fn install(envelope: TestNativeEnvelope) -> std::result::Result<OfflineNativeHos
     .map_err(|refusal| format!("funding refused: {refusal}"))?;
     // SAFETY: the process-wide serial guard held by every caller of this
     // function excludes any other host; tests use private directories.
-    unsafe { OfflineNativeHost::issue(raw, Arc::new(TestAuthority)) }.map_err(|failure| {
+    unsafe { OfflineNativeHost::issue(raw, authority) }.map_err(|failure| {
         let message = format!("install refused: {:#}", failure.error);
         match failure.release() {
             Ok(_) => message,
-            Err(retained) => format!("{message}; partial host retained: {:#}", retained.error),
+            Err(OfflineNativeHostFailure { host, error }) => {
+                let census = format!("{message}; partial host retained: {error:#}");
+                *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
+                if let Some(host) = host {
+                    RETAINED.lock().unwrap_or_else(PoisonError::into_inner).push(host);
+                }
+                census
+            }
         }
     })
 }
@@ -256,6 +273,13 @@ impl Drop for TestNativeHost {
 
 #[cfg(test)]
 impl TestNativeHost {
+    /// The live production host, for this crate's host tests.
+    pub(crate) fn live_host(&self) -> &OfflineNativeHost {
+        self.live()
+    }
+    pub(crate) fn live_host_mut(&mut self) -> &mut OfflineNativeHost {
+        self.live.as_mut().expect("live test host present outside teardown")
+    }
     /// Arm one ticket around a raw open in this crate's tests.
     pub(crate) fn armed<T>(&self, open: impl FnOnce() -> T) -> (T, crate::native::RawTestTicket) {
         self.factory().arm_raw_for_test(open).expect("armed raw test ticket")
@@ -283,6 +307,44 @@ impl TestNativeHost {
 mod tests {
     use super::*;
     use anyhow::ensure;
+
+    /// Refuses every checkpoint while `withdrawn` is set.
+    struct SwitchAuthority {
+        withdrawn: std::sync::atomic::AtomicBool,
+    }
+    impl OfflineNativeAuthority for SwitchAuthority {
+        fn checkpoint(&self, _cleanup: bool) -> Result<()> {
+            ensure!(!self.withdrawn.load(std::sync::atomic::Ordering::Acquire), "test authority withdrawn");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn refused_partial_host_release_is_retained_not_dropped() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let authority = Arc::new(SwitchAuthority { withdrawn: std::sync::atomic::AtomicBool::new(true) });
+        let before = RETAINED.lock().unwrap_or_else(PoisonError::into_inner).len();
+        let census = install_with(TestNativeEnvelope::default(), authority.clone())
+            .err()
+            .expect("withdrawn authority refuses the install and its release");
+        assert!(census.contains("partial host retained"), "{census}");
+        assert_eq!(
+            LEAKED.lock().unwrap_or_else(PoisonError::into_inner).as_deref(),
+            Some(census.as_str()),
+            "the refused release is recorded as leaked"
+        );
+        let host = {
+            let mut retained = RETAINED.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(retained.len(), before + 1, "the partial host is kept, not dropped");
+            retained.pop().expect("retained partial host")
+        };
+        // Restore the authority and release the retained host, so the
+        // process-wide arena and the leak record are clear for later tests.
+        authority.withdrawn.store(false, std::sync::atomic::Ordering::Release);
+        let released = host.release().expect("restored authority releases the partial host");
+        assert!(released.facts.is_none() && released.region.is_none());
+        *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
 
     #[test]
     fn unarmed_open_is_refused_with_misuse() {

@@ -58,6 +58,27 @@ impl std::fmt::Debug for OfflineOperationalOutsideSlot {
     }
 }
 
+/// A phase refusal raised before any native owner existed: input issuance
+/// or root pinning. Only these are recorded as owner-less; every other
+/// unrecognised refusal stays retained and blocks the census.
+pub(super) struct OwnerlessOperationalFailure(anyhow::Error);
+impl OwnerlessOperationalFailure {
+    pub(super) fn mark(error: anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(Self(error))
+    }
+}
+impl std::fmt::Debug for OwnerlessOperationalFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OwnerlessOperationalFailure").field(&self.0).finish()
+    }
+}
+impl std::fmt::Display for OwnerlessOperationalFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+impl std::error::Error for OwnerlessOperationalFailure {}
+
 pub(super) struct OfflineOperationalPermit {
     custody: Arc<InspectionControllerCustody>,
     phase: OperationalOwnerPhase,
@@ -325,16 +346,27 @@ impl InspectionControllerCustody {
     ) -> anyhow::Error {
         let failure = match retained.downcast::<ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure>() {
             Ok(failure) => failure,
-            Err(error) => {
-                // Neither an Operational nor a reference owner: the phase
-                // refused before acquiring anything native. Record it as
-                // owner-less so the census can complete without a terminal.
-                self.operational_slot(phase)
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .ownerless_failure = Some(error);
-                return original;
-            }
+            Err(error) => match error.downcast::<OwnerlessOperationalFailure>() {
+                Ok(OwnerlessOperationalFailure(error)) => {
+                    // Marked at its source: the phase refused before
+                    // acquiring anything native, so the census completes
+                    // without a terminal and this error is its record.
+                    self.operational_slot(phase)
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .ownerless_failure = Some(error);
+                    return original;
+                }
+                Err(error) => {
+                    // Not known to be owner-less: it stays retained, and the
+                    // census refuses while it does.
+                    self.operational_slot(phase)
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .failure = Some(error);
+                    return original.context("unclassified Operational refusal remains retained");
+                }
+            },
         };
         match failure.close_retained() {
             Ok(released) => {
@@ -442,19 +474,21 @@ pub(super) fn open_original_operational(
     let permit = custody.begin_operational(phase, factory.clone())?;
     let mut reference = None;
     let opened = (|| -> Result<PreparedReplayIndexReset> {
-        let root = Arc::new(root.try_clone()?);
+        let root = Arc::new(root.try_clone().map_err(OwnerlessOperationalFailure::mark)?);
         let read_only = matches!(phase, OperationalOwnerPhase::Inspection);
         let target = root.path().join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
-        let reference_inputs =
-            claim.issue_operational_reference_inputs(factory, root.clone(), namespace, &target)?;
+        let reference_inputs = claim
+            .issue_operational_reference_inputs(factory, root.clone(), namespace, &target)
+            .map_err(OwnerlessOperationalFailure::mark)?;
         let closed = ryeos_state::operational::prepare_operational_schema_reference(
             factory.clone(),
             reference_inputs,
         )
         .map_err(anyhow::Error::new)?;
         let closed = reference.insert(closed);
-        let inputs =
-            claim.issue_operational_reset_inputs(factory, root.clone(), namespace, &target, read_only)?;
+        let inputs = claim
+            .issue_operational_reset_inputs(factory, root.clone(), namespace, &target, read_only)
+            .map_err(OwnerlessOperationalFailure::mark)?;
         PreparedReplayIndexReset::prepare_original(
             root,
             namespace.clone(),
@@ -477,5 +511,53 @@ pub(super) fn open_original_operational(
     match opened {
         Ok(owner) => Ok(permit.adopt(owner)),
         Err(error) => Err(permit.retain_failure(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refuse(custody: &InspectionControllerCustody, error: anyhow::Error) -> anyhow::Error {
+        {
+            let mut slot = custody.operational_slot(OperationalOwnerPhase::Inspection).lock().unwrap();
+            slot.issued = true;
+            slot.failure = Some(error);
+        }
+        custody.retry_operational_failure(OperationalOwnerPhase::Inspection, anyhow::anyhow!("phase refused"))
+    }
+
+    #[test]
+    fn only_a_source_marked_refusal_is_recorded_owner_less() {
+        let custody = InspectionControllerCustody::default();
+        let error = refuse(
+            &custody,
+            OwnerlessOperationalFailure::mark(anyhow::anyhow!("reset inputs refused")),
+        );
+        assert_eq!(format!("{error:#}"), "phase refused");
+        {
+            let slot = custody.operational_slot(OperationalOwnerPhase::Inspection).lock().unwrap();
+            assert!(slot.failure.is_none());
+            let recorded = slot.ownerless_failure.as_ref().expect("owner-less record");
+            assert_eq!(format!("{recorded:#}"), "reset inputs refused");
+        }
+        let mut terminals = Vec::new();
+        custody.append_operational_terminals(&mut terminals).expect("owner-less phase completes the census");
+        assert!(terminals.is_empty());
+    }
+
+    #[test]
+    fn an_unmarked_refusal_stays_retained_and_blocks_the_census() {
+        let custody = InspectionControllerCustody::default();
+        let error = refuse(&custody, anyhow::anyhow!("unknown refusal"));
+        assert!(format!("{error:#}").contains("unclassified Operational refusal remains retained"), "{error:#}");
+        {
+            let slot = custody.operational_slot(OperationalOwnerPhase::Inspection).lock().unwrap();
+            assert!(slot.ownerless_failure.is_none(), "an unmarked refusal is never treated as owner-less");
+            assert!(slot.failure.is_some(), "the unmarked refusal stays retained");
+        }
+        let mut terminals = Vec::new();
+        let census = custody.append_operational_terminals(&mut terminals).expect_err("census refuses");
+        assert!(format!("{census:#}").contains("still retained"), "{census:#}");
     }
 }
