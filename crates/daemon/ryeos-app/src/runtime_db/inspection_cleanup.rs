@@ -570,11 +570,12 @@ impl OriginalInspectionCopyGroup {
             ..MAX_INSPECTION_GROUP_ROOT_REGISTRATIONS
         {
             if let Some(binding) = &self.registrations[index] { registry.require_membership(binding)?; continue; }
-            let source = if index == 2 { &mut context.namespace } else { &mut lease.source_lock };
+            let source: &mut Option<lillux::PinnedDirectoryLock> =
+                if index == 2 { &mut context.namespace } else { &mut lease.source_lock };
             let original = source.take().context("actual original inspection namespace owner absent")?;
             match unsafe { registry.register_namespace(original, prepay) } {
                 Ok(binding) => self.registrations[index] = Some(binding),
-                Err((original, error)) => { **source = Some(original); return Err(error); }
+                Err((original, error)) => { *source = Some(original); return Err(error); }
             }
         }
         let scratch = self.scratch.as_mut().context("actual original finite scratch custody absent")?;
@@ -681,7 +682,7 @@ impl OriginalInspectionCopyGroup {
             match unsafe { guard.into_outside_finite_removal(receipt, prepay) } {
                 Ok(scratch) => *self.scratch = Some(scratch),
                 Err((guard, error)) => {
-                    *lease.guard = Some(guard);
+                    lease.guard = Some(guard);
                     return Err(error);
                 }
             }
@@ -718,8 +719,8 @@ impl OriginalInspectionCopyGroup {
         // Canonical typed lease and SQL work have moved into this new context
         // before their exact redundant opaque aliases are surrendered.
         *self.copy_context = Some(OriginalInspectionCopyContext {
-            process, lease: std::mem::ManuallyDrop::new(Some(std::mem::ManuallyDrop::into_inner(lease))),
-            sql, work: copy_work, namespace, database_name, body_root: std::mem::ManuallyDrop::new(Some(std::mem::ManuallyDrop::into_inner(root))),
+            process, lease: std::mem::ManuallyDrop::new(Some(lease)),
+            sql: std::mem::ManuallyDrop::new(sql), work: copy_work, namespace: std::mem::ManuallyDrop::new(namespace), database_name, body_root: std::mem::ManuallyDrop::new(Some(std::mem::ManuallyDrop::into_inner(root))),
             primitive_root: std::mem::ManuallyDrop::new(Some(std::mem::ManuallyDrop::into_inner(primitive_root))), removed: std::mem::ManuallyDrop::new(Some(std::mem::ManuallyDrop::into_inner(removed))), roles, deadline,
         });
         drop(std::mem::ManuallyDrop::into_inner(body_lease));
@@ -737,20 +738,18 @@ impl OriginalInspectionCopyGroup {
         let proof = wrapper.proof.take().context("actual original primitive proof absent")?;
         let consumed = match proof {
             super::original_inspection::OriginalInspectionPrimitiveProof::Closed(original) => {
-                let original = std::mem::ManuallyDrop::into_inner(original);
                 original.into_outside_parts().map_err(|(original, error)|
-                    (super::original_inspection::OriginalInspectionPrimitiveProof::Closed(std::mem::ManuallyDrop::new(original)), error))
+                    (super::original_inspection::OriginalInspectionPrimitiveProof::Closed(original), error))
             }
             super::original_inspection::OriginalInspectionPrimitiveProof::Released(original) => {
-                let original = std::mem::ManuallyDrop::into_inner(original);
                 original.into_outside_parts().map_err(|(original, error)|
-                    (super::original_inspection::OriginalInspectionPrimitiveProof::Released(std::mem::ManuallyDrop::new(original)), error))
+                    (super::original_inspection::OriginalInspectionPrimitiveProof::Released(original), error))
             }
         };
         match consumed {
             Ok(parts) => *self.primitive_parts = Some(parts),
             Err((proof, error)) => {
-                *wrapper.proof = Some(proof);
+                wrapper.proof = Some(proof);
                 return Err(error);
             }
         }

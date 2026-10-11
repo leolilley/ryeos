@@ -63,21 +63,28 @@ impl<'a> OfflineResetPolicyOwner<'a> {
         Ok(())
     }
 
-    /// Lifelines for copy work already issued under this authentic owner.
-    /// The retained StateLockLease cannot issue stopped-node mutation authority.
+    /// The claim's own StateLock lease. Only the claim retains one; copy work
+    /// and the native host take their lifelines from [`Self::retain_copy_inputs`].
+    /// The lease cannot issue stopped-node mutation authority.
+    pub(super) fn retain_state_lease(&self) -> Result<ryeos_node_runtime::state_lock::StateLockLease> {
+        self.require_held()?;
+        Ok(self.state_lock.retain())
+    }
+
+    /// The runtime namespace lock alone, for capture under the claim.
+    pub(super) fn retain_namespace(&self) -> Result<lillux::PinnedDirectoryLock> {
+        self.require_held()?;
+        Ok(self.namespace_lock.clone())
+    }
+
+    /// Lifelines for copy work and the native host issued under this
+    /// authentic owner: the namespace lock and the signed policy. No
+    /// StateLock lease is minted here; the claim already holds one.
     pub(super) fn retain_copy_inputs(
         &self,
-    ) -> Result<(
-        ryeos_node_runtime::state_lock::StateLockLease,
-        lillux::PinnedDirectoryLock,
-        NodePolicySnapshot,
-    )> {
+    ) -> Result<(lillux::PinnedDirectoryLock, NodePolicySnapshot)> {
         self.require_held()?;
-        Ok((
-            self.state_lock.retain(),
-            self.namespace_lock.clone(),
-            self.snapshot.clone(),
-        ))
+        Ok((self.namespace_lock.clone(), self.snapshot.clone()))
     }
 
     pub(super) fn db_target(&self) -> Result<&std::path::Path> {

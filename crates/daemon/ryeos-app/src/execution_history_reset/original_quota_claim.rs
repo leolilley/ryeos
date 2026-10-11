@@ -736,7 +736,9 @@ struct OriginalSettlementProgress {
 /// Complete two-slot ORIGINAL resource custody. This is not successful accounting.
 pub(super) struct OriginalInspectionSettlement {
     seal: Arc<OriginalProductionSeal>,
-    _disposals: Mutex<Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>>> ,
+    /// Canonical copy disposals, moved whole into the post-ACK inspection
+    /// group; dropped with the settlement when no post-ACK path takes them.
+    _disposals: Mutex<Option<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>>,
     admission: Arc<OriginalSettlementAdmission>,
     disposition: super::creation_evidence::InspectionDispositionRecord,
     signed_disposition: Vec<u8>,
@@ -1014,7 +1016,7 @@ impl OriginalQuotaClaim {
             let signed_disposition = disposition.signed_bytes(&self.signer, &storage)?;
             Ok(Arc::new(OriginalInspectionSettlement {
                 seal: seal.clone(),
-                _disposals: Mutex::new(Some(std::mem::ManuallyDrop::new(disposals.clone()))),
+                _disposals: Mutex::new(Some(disposals.clone())),
                 admission,
                 disposition,
                 signed_disposition,
@@ -1658,7 +1660,7 @@ impl OriginalQuotaClaim {
             }
             // The claim already holds the StateLock lease; the host's own
             // lifelines are the namespace lock and the signed policy.
-            let (_, namespace, policy) = owner.retain_copy_inputs()?;
+            let (namespace, policy) = owner.retain_copy_inputs()?;
             let authority = Arc::new(ResetNativeAuthority {
                 claim: self.clone(),
                 lifelines: OriginalNativeAdmissionLifelines { namespace, policy },
@@ -2434,7 +2436,8 @@ impl OriginalQuotaClaim {
             operation.require_staged(runtime)?;
         }
         let (sources, source_roots, source_pins) = capture_sources(runtime, owner.db_target()?)?;
-        let (state_lease, operational_namespace, _) = owner.retain_copy_inputs()?;
+        let state_lease = owner.retain_state_lease()?;
+        let operational_namespace = owner.retain_namespace()?;
         let (operational_source, operational_source_pins) =
             OperationalSourcePlan::capture(runtime, &operational_namespace, &sources)?;
         // One narrowly owned ledger outside the scheduler's native inventory.
@@ -2829,7 +2832,7 @@ impl OriginalQuotaClaim {
             self.publication_acknowledged.load(Ordering::Acquire),
             "copy work requires acknowledged original aggregate reservation"
         );
-        let (_, namespace, policy) = owner.retain_copy_inputs()?;
+        let (namespace, policy) = owner.retain_copy_inputs()?;
         let inspection_namespace = self.retain_inspection_namespace()?;
         self.require_service_window()?;
         let work = Arc::new(OriginalCopyWork {
@@ -3339,7 +3342,7 @@ enum OriginalSqlRootCustody {
 struct OriginalSqlWork {
     copy: Arc<OriginalCopyWork>,
     store: usize,
-    root: std::mem::ManuallyDrop<Mutex<OriginalSqlRootCustody>>,
+    root: Mutex<OriginalSqlRootCustody>,
 }
 impl OriginalSqlWork {
     fn service_root(&self) -> Result<Arc<lillux::PinnedDirectory>> {
@@ -3961,7 +3964,7 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
         Ok(Arc::new(OriginalSqlWork {
             store: index,
             copy: self,
-            root: std::mem::ManuallyDrop::new(Mutex::new(OriginalSqlRootCustody::Owned(roots[index].as_ref().unwrap().clone()))),
+            root: Mutex::new(OriginalSqlRootCustody::Owned(roots[index].as_ref().unwrap().clone())),
         }))
     }
 
@@ -4784,7 +4787,7 @@ mod clock_controls {
         let mut short = original.clone();
         short.reserved.max_native_allocator_steps = short.reserved.max_sql_vm_steps + 1;
         let error = short.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("allocation quote"), "{error:#}");
+        assert!(format!("{error:#}").contains("allocation funding margin"), "{error:#}");
         let mut missing = serde_json::to_value(&original).unwrap();
         missing
             .as_object_mut()
@@ -5098,6 +5101,41 @@ mod clock_controls {
     }
 }
 
+#[cfg(test)]
+mod inventory_release_tests {
+    use super::OriginalControllerInspectionGroup;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct DropProbe(Arc<AtomicUsize>);
+    impl std::fmt::Display for DropProbe {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("retained refusal") }
+    }
+    impl std::error::Error for DropProbe {}
+    impl Drop for DropProbe {
+        fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+    }
+
+    #[test]
+    fn controller_inspection_group_ends_its_inventories_instead_of_leaking() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let group = OriginalControllerInspectionGroup {
+            failures: Some(vec![anyhow::Error::new(DropProbe(Arc::clone(&dropped)))]),
+            closed: Some(Vec::new()),
+            acquisition: Some(Vec::new()),
+            runtime: Some(Vec::new()),
+            cleanup: Some(Vec::new()),
+            controller_disposals: Some(Vec::new()),
+            settlement_disposals: Some(Vec::new()),
+            groups: None,
+        };
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(group);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the group ended its retained refusal");
+    }
+}
+
 /// Actual source retirement plus native terminal. The charged reservation and
 /// original finalizer lifelines remain owned; this is not full completion.
 pub(super) struct OriginalReadyForFinalAck {
@@ -5379,23 +5417,26 @@ pub(super) struct OriginalPostAckFinalization {
     ready: Arc<OriginalReadyForFinalAck>,
     state: Mutex<OriginalPostAckStateCustody>,
     sql_custody: Mutex<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
-    destination_packets: Mutex<Option<std::mem::ManuallyDrop<Vec<OriginalDestinationPacketProgress>>>>,
+    destination_packets: Mutex<Option<Vec<OriginalDestinationPacketProgress>>>,
     physical_registry: Mutex<OriginalOutsideRegistryCustody>,
     descriptor_retirements: Mutex<Vec<OriginalOutsideDescriptorRetirement>>,
     metadata_retirements: Mutex<Vec<OriginalOutsideMetadataRetirement>>,
     operation: ThreadHistoryDiscardOperationRef,
 }
 /// Complete concrete controller inventories, moved without allocating new
-/// vectors. MD retains every alias/resource across partial transfer and unwind.
+/// vectors. The supervisor keeps the group across partial transfer and
+/// restores it before any refusal. Field order is drop order: retained
+/// failures and redundant aliases end before the canonical disposals and
+/// copy groups that own the resources.
 struct OriginalControllerInspectionGroup {
-    groups: Option<std::mem::ManuallyDrop<Vec<crate::runtime_db::OriginalInspectionCopyGroup>>>,
-    closed: Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::SqliteInspectionClosed>>>>,
-    acquisition: Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::SqliteInspectionAcquisitionReleased>>>>,
-    runtime: Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::RuntimeInspectionRelease>>>>,
-    cleanup: Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::InspectionCopyCleanup>>>>,
-    controller_disposals: Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>>,
-    settlement_disposals: Option<std::mem::ManuallyDrop<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>>,
-    failures: Option<std::mem::ManuallyDrop<Vec<anyhow::Error>>>,
+    failures: Option<Vec<anyhow::Error>>,
+    closed: Option<Vec<Arc<crate::runtime_db::SqliteInspectionClosed>>>,
+    acquisition: Option<Vec<Arc<crate::runtime_db::SqliteInspectionAcquisitionReleased>>>,
+    runtime: Option<Vec<Arc<crate::runtime_db::RuntimeInspectionRelease>>>,
+    cleanup: Option<Vec<Arc<crate::runtime_db::InspectionCopyCleanup>>>,
+    controller_disposals: Option<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>,
+    settlement_disposals: Option<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>,
+    groups: Option<Vec<crate::runtime_db::OriginalInspectionCopyGroup>>,
 }
 struct OriginalOutsideMetadataRetirement {
     pin: Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
@@ -5479,36 +5520,41 @@ unsafe impl lillux_sqlite::OriginalOutsideFinalizerFileRetirementAuthority
     }
 }
 
+/// Unused bound inputs of one destination packet. Field order is drop order,
+/// the bound inputs' own: the root, then the inspection lease and SQL work.
 struct OriginalOutsideBoundResources {
-    root: std::mem::ManuallyDrop<Option<Arc<lillux::PinnedDirectory>>>,
+    root: Option<Arc<lillux::PinnedDirectory>>,
     name: lillux_sqlite::OriginalNativeOutsideBoundCoordinate,
     mode: lillux_sqlite::OriginalNativeBoundMode,
     domain: lillux_sqlite::OriginalNativeDomain,
-    inspection: std::mem::ManuallyDrop<Option<(lillux_sqlite::SqliteCopyLease, Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>>,
+    inspection: Option<(lillux_sqlite::SqliteCopyLease, Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>,
     registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
 }
+/// One native packet's progress toward outside custody. Each stage takes the
+/// previous stage's owner and restores it on refusal. Field order is drop
+/// order: the native packet and its parts end before the destination authority
+/// and custody, and the unused bound roots last.
 struct OriginalDestinationPacketProgress {
-    raw: std::mem::ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
-    parts: std::mem::ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    bound: std::mem::ManuallyDrop<Option<OriginalOutsideBoundResources>>,
-    authority: std::mem::ManuallyDrop<Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>>,
-    destination: std::mem::ManuallyDrop<Option<lillux_sqlite::OriginalDestinationOutsideCustody>>,
+    raw: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
+    parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
     refusal: Option<lillux_sqlite::OriginalDestinationCustodyFailure>,
+    authority: Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>,
+    destination: Option<lillux_sqlite::OriginalDestinationOutsideCustody>,
+    bound: Option<OriginalOutsideBoundResources>,
     normalized: bool,
     requires_destination: bool,
 }
 impl OriginalDestinationPacketProgress {
     fn from_original(raw: lillux_sqlite::OriginalNativeOutsideConnectionCustody) -> Self {
-        Self { raw: std::mem::ManuallyDrop::new(Some(raw)), parts: std::mem::ManuallyDrop::new(None),
-            bound: std::mem::ManuallyDrop::new(None), authority: std::mem::ManuallyDrop::new(None),
-            destination: std::mem::ManuallyDrop::new(None), refusal: None, normalized: false, requires_destination: false }
+        Self { raw: Some(raw), parts: None, refusal: None, authority: None, destination: None,
+            bound: None, normalized: false, requires_destination: false }
     }
     fn normalize_original(&mut self) -> Result<()> {
         if self.normalized { return Ok(()); }
         if let Some(raw) = self.raw.take() {
             match raw.into_original_parts() {
-                Ok(parts) => *self.parts = Some(parts),
-                Err(raw) => { *self.raw = Some(raw); anyhow::bail!("actual native packet extraction refused"); }
+                Ok(parts) => self.parts = Some(parts),
+                Err(raw) => { self.raw = Some(raw); anyhow::bail!("actual native packet extraction refused"); }
             }
         }
         let parts = self.parts.as_mut().context("actual original native packet parts absent")?;
@@ -5519,13 +5565,13 @@ impl OriginalDestinationPacketProgress {
                 Ok(bound) => bound,
                 Err(bound) => { parts.bound_inputs = Some(bound); anyhow::bail!("actual original bound inputs extraction refused"); }
             };
-            *self.authority = Some(bound.authority);
-            *self.bound = Some(OriginalOutsideBoundResources {
-                root: std::mem::ManuallyDrop::new(Some(bound.root)), name: bound.name,
+            self.authority = Some(bound.authority);
+            self.bound = Some(OriginalOutsideBoundResources {
+                root: Some(bound.root), name: bound.name,
                 mode: bound.mode, domain: bound.domain,
-                inspection: std::mem::ManuallyDrop::new(bound.inspection), registration: None,
+                inspection: bound.inspection, registration: None,
             });
-        } else { *self.authority = parts.transient.take(); }
+        } else { self.authority = parts.transient.take(); }
         self.requires_destination = self.authority.is_some();
         self.normalized = true;
         Ok(())
@@ -5765,9 +5811,9 @@ impl OriginalPostAckFinalization {
             let mut group = self.inspection_group.try_lock()
                 .map_err(|_| anyhow::anyhow!("inspection group registration busy or poisoned"))?;
             if group.is_none() {
-                *group = Some(OriginalControllerInspectionGroup { groups: None, closed: None, acquisition: None,
-                    runtime: None, cleanup: None, controller_disposals: None,
-                    settlement_disposals: None, failures: None });
+                *group = Some(OriginalControllerInspectionGroup { failures: None, closed: None,
+                    acquisition: None, runtime: None, cleanup: None, controller_disposals: None,
+                    settlement_disposals: None, groups: None });
             }
         }
         // Each prefix is stored in the supervisor before another gate can
@@ -5780,7 +5826,7 @@ impl OriginalPostAckFinalization {
                     .map_err(|_| anyhow::anyhow!("actual inspection receiver busy or poisoned"))?;
                 let receiver = receiver.as_mut().expect("prepaid actual inspection receiver");
                 if receiver.$field.is_none() {
-                    receiver.$field = Some(std::mem::ManuallyDrop::new(std::mem::take(&mut *original)));
+                    receiver.$field = Some(std::mem::take(&mut *original));
                 } else {
                     ensure!(original.is_empty(), "original inspection inventory grew after sealed transfer");
                 }
@@ -5887,7 +5933,7 @@ impl OriginalPostAckFinalization {
             if group.groups.is_none() {
                 ensure!(group.settlement_disposals.as_ref().context("canonical disposal inventory absent")?.len() == count,
                     "original copy group grew after precharge");
-                group.groups = Some(std::mem::ManuallyDrop::new(Vec::with_capacity(count)));
+                group.groups = Some(Vec::with_capacity(count));
             }
         }
         let mut group = self.inspection_group.try_lock()
@@ -5968,7 +6014,7 @@ impl OriginalPostAckFinalization {
                     let parts = packet.parts.as_mut().context("actual destination primitive parts absent")?;
                     parts.leaf_evidence.require_original(&self.ready.factory, &self.ready.terminal)?;
                     for original in groups.iter_mut() {
-                        let bound = packet.bound.as_mut().map(|bound| &mut *bound.inspection);
+                        let bound = packet.bound.as_mut().map(|bound| &mut bound.inspection);
                         original.coalesce_native_packet_context(parts, bound)?;
                     }
                     if parts.domain == Some(lillux_sqlite::OriginalNativeDomain::RuntimeInspection) {
@@ -6018,13 +6064,13 @@ impl OriginalPostAckFinalization {
             ensure!(destination.is_none() && source.len() == count, "actual destination packet inventory changed after quote");
             let mut actual = Vec::with_capacity(count);
             actual.extend(source.drain(..).map(OriginalDestinationPacketProgress::from_original));
-            *destination = Some(std::mem::ManuallyDrop::new(actual));
+            *destination = Some(actual);
         }
         let mut actual = self.destination_packets.try_lock()
             .map_err(|_| anyhow::anyhow!("actual destination packet checkout busy or poisoned"))?
             .take().context("actual destination packet inventory absent")?;
         let result = {
-            let packets = std::cell::RefCell::new(&mut *actual);
+            let packets = std::cell::RefCell::new(&mut actual);
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
                 for packet in &mut **packets.borrow_mut() {
                     packet.normalize_original()?;
@@ -6036,7 +6082,7 @@ impl OriginalPostAckFinalization {
                                     packet.refusal = Some(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory, authority, error));
                                     anyhow::bail!("retained packet refusal selected another original factory");
                                 }
-                                *packet.authority = Some(authority);
+                                packet.authority = Some(authority);
                                 let parts = packet.parts.as_mut().expect("normalized original packet");
                                 parts.original_error = Some(match parts.original_error.take() {
                                     Some(previous) => error.context(previous),
@@ -6050,7 +6096,7 @@ impl OriginalPostAckFinalization {
                     let leaf = &packet.parts.as_ref().expect("normalized genuine packet").leaf_evidence;
                     match authority.into_outside_custody(&self.ready.factory, &self.ready.terminal, leaf,
                         &|bytes, steps| self.prepay_outside_continuation(bytes, steps)) {
-                        Ok(destination) => *packet.destination = Some(destination),
+                        Ok(destination) => packet.destination = Some(destination),
                         Err(refusal) => {
                             packet.refusal = Some(refusal);
                             anyhow::bail!("actual destination authority transfer refused; whole packet retained");
@@ -6171,7 +6217,7 @@ impl OriginalPostAckFinalization {
                         // exact original shared registry and prepaid transfer.
                         match unsafe { registry.register_directory(original, prepay) } {
                             Ok(binding) => bound.registration = Some(binding),
-                            Err((original, error)) => { *bound.root = Some(original); return Err(error); }
+                            Err((original, error)) => { bound.root = Some(original); return Err(error); }
                         }
                     }
                 }

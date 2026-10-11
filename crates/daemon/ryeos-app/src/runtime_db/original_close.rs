@@ -1029,16 +1029,20 @@ impl OriginalRuntimeFinalizer {
 
 /// Actual Runtime continuation after its original directory retirement.
 /// Native receipt transfer and physical namespace retirement remain separate.
-/// Destruction cannot close these retained roots or stand in for settlement.
+/// Destruction cannot stand in for settlement.
+///
+/// Field order is drop order, matching the finalizer it consumes: native
+/// terminals, the schema reference and SQL custody end first, then the shared
+/// registration, and the retained roots (directory before namespace lock) last.
 pub(crate) struct OriginalOutsideRuntimeFinalizer {
     process: u32,
-    roots: std::mem::ManuallyDrop<RuntimeFinalizerRoots>,
-    shared_registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>; 1],
-    terminals: std::mem::ManuallyDrop<[Option<OriginalNativeConnectionTerminal>; 2]>,
-    schema_reference: std::mem::ManuallyDrop<Option<sqlite_schema::ClosedNativeSchemaSqlReference>>,
+    terminals: [Option<OriginalNativeConnectionTerminal>; 2],
+    schema_reference: Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
     schema_definition: Option<sqlite_schema::SchemaSqlDefinition>,
     native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
     sql_custody: Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
+    shared_registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>; 1],
+    roots: RuntimeFinalizerRoots,
 }
 impl std::fmt::Debug for OriginalOutsideRuntimeFinalizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1084,13 +1088,13 @@ impl OriginalRuntimeFinalizer {
         let process = std::process::id();
         let outside = OriginalOutsideRuntimeFinalizer {
             process,
-            roots: std::mem::ManuallyDrop::new(roots.into_inner().unwrap_or_else(|p| p.into_inner())),
-            shared_registrations: [None],
-            terminals: std::mem::ManuallyDrop::new([Some(OriginalNativeConnectionTerminal::Closed(proof)), None]),
-            schema_reference: std::mem::ManuallyDrop::new(schema_reference),
+            terminals: [Some(OriginalNativeConnectionTerminal::Closed(proof)), None],
+            schema_reference,
             schema_definition: None,
             native_failure: None,
             sql_custody: Vec::new(),
+            shared_registrations: [None],
+            roots: roots.into_inner().unwrap_or_else(|p| p.into_inner()),
         };
         drop(factory);
         Ok(outside)
@@ -1565,5 +1569,73 @@ mod outside_quote_tests {
         assert_eq!(quote_runtime_retired_shared_roots(1).unwrap(),
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 54 });
         assert!(quote_runtime_retired_shared_roots(MAX_UNUSED_RUNTIME_ROOT_REGISTRATIONS + 1).is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod outside_finalizer_release_tests {
+    use super::{OriginalOutsideRuntimeFinalizer, RuntimeFinalizerRoots};
+    use lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry;
+
+    fn finalizer(root: &lillux::PinnedDirectory) -> OriginalOutsideRuntimeFinalizer {
+        OriginalOutsideRuntimeFinalizer {
+            process: std::process::id(),
+            terminals: [None, None],
+            schema_reference: None,
+            schema_definition: None,
+            native_failure: None,
+            sql_custody: Vec::new(),
+            shared_registrations: [None],
+            roots: RuntimeFinalizerRoots {
+                directory: None,
+                namespace: Some(root.lock_exclusive().unwrap()),
+                directory_owner: None,
+                namespace_owner: None,
+                directory_receipt: None,
+                namespace_receipt: None,
+            },
+        }
+    }
+
+    fn namespace_held(root: &lillux::PinnedDirectory) -> bool {
+        root.try_lock_exclusive().unwrap().is_none()
+    }
+
+    #[test]
+    fn outside_runtime_namespace_moves_by_registration_and_refusal_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let mut outside = finalizer(&root);
+        // SAFETY: a private test registry with no other producer.
+        let mut registry = unsafe { OriginalPhysicalRegistry::issued(4, &|_, _| Ok(())) }.unwrap();
+
+        // A refused prepayment leaves the namespace with this owner.
+        let refused = unsafe {
+            outside.register_shared_roots(&mut registry, &|_, _| anyhow::bail!("prepay refused"))
+        };
+        assert!(refused.is_err());
+        assert!(outside.roots.namespace.is_some(), "refusal keeps the namespace owner");
+        assert!(outside.shared_registrations[0].is_none());
+        assert!(namespace_held(&root));
+
+        // The consuming registration moves the same lock into the registry.
+        // Its later check refuses (no directory receipt in this frame), but
+        // the transfer itself is complete and nothing was dropped.
+        let _ = unsafe { outside.register_shared_roots(&mut registry, &|_, _| Ok(())) };
+        assert!(outside.roots.namespace.is_none(), "registration consumed the namespace");
+        assert!(outside.shared_registrations[0].is_some(), "registration is recorded");
+        assert!(namespace_held(&root), "the registry now holds the lock");
+        drop(registry);
+        drop(outside);
+    }
+
+    #[test]
+    fn discarded_outside_runtime_frame_ends_its_namespace_instead_of_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let outside = finalizer(&root);
+        assert!(namespace_held(&root));
+        drop(outside);
+        assert!(!namespace_held(&root), "the dropped frame released its namespace lock");
     }
 }

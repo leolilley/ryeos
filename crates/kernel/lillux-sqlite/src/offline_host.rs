@@ -75,23 +75,25 @@ const NATIVE_BLOCK_TURNOVER_STEPS: u64 = 1 + 8 + 1 + 1;
 /// over the fixed map table, and the factory's own per-ticket bookkeeping.
 const NATIVE_TICKET_SERVICE_STEPS: u64 = (4096 + 64 + 16) + 2 * (64 + 1) + 8;
 
-/// Allocator steps a raw budget must fund beyond SQL opcodes and teardown
-/// for `storage` bytes and `tickets` connections: one complete turnover of
-/// every arena block at the worst-case per-request charge, plus each
-/// ticket's fixed service charges. It is a funding floor for a signed
-/// envelope, not a bound on how often SQLite reuses the arena; the envelope
-/// itself still bounds the work.
-pub fn offline_native_required_allocation_steps(storage: u64, tickets: u32) -> Result<u64> {
+/// Minimum allocator funding margin, in native steps, that a raw budget must
+/// carry beyond SQL opcodes and teardown for `storage` bytes and `tickets`
+/// connections. It is a heuristic margin, NOT a bound: it prices one complete
+/// turnover of every arena block at the worst-case per-request charge, plus
+/// each ticket's fixed service charges, but SQLite may reuse the arena any
+/// number of times. A budget that meets this margin can still exhaust; native
+/// exhaustion then fails closed. The signed envelope, not this margin, bounds
+/// the work.
+pub fn offline_native_allocation_funding_margin_steps(storage: u64, tickets: u32) -> Result<u64> {
     ensure!(
         storage > CONTROL_STORAGE && tickets > 0 && tickets as usize <= MAX_NATIVE_CONNECTIONS,
-        "offline native allocation quote outside the arena's storage or ticket bounds"
+        "offline native allocation funding margin outside the arena's storage or ticket bounds"
     );
     // The arena maps at most half of the storage beyond its control block.
     let blocks = (storage - CONTROL_STORAGE) / 2 / NATIVE_ARENA_BLOCK_BYTES;
     blocks
         .checked_mul(NATIVE_BLOCK_TURNOVER_STEPS)
         .and_then(|steps| steps.checked_add(u64::from(tickets).checked_mul(NATIVE_TICKET_SERVICE_STEPS)?))
-        .context("offline native allocation quote overflow")
+        .context("offline native allocation funding margin overflow")
 }
 
 /// Plain facts of a host whose backend finished: the region's process,
@@ -803,21 +805,21 @@ mod tests {
     use crate::test_host::TestNativeHost;
 
     #[test]
-    fn allocation_quote_covers_one_arena_turnover_and_every_ticket() {
+    fn allocation_funding_margin_prices_one_arena_turnover_and_every_ticket() {
         let storage = 50_331_648;
         let blocks = (storage - CONTROL_STORAGE) / 2 / NATIVE_ARENA_BLOCK_BYTES;
         assert_eq!(
-            offline_native_required_allocation_steps(storage, 64).unwrap(),
+            offline_native_allocation_funding_margin_steps(storage, 64).unwrap(),
             blocks * NATIVE_BLOCK_TURNOVER_STEPS + 64 * NATIVE_TICKET_SERVICE_STEPS
         );
         assert!(
-            offline_native_required_allocation_steps(storage, 2).unwrap()
-                < offline_native_required_allocation_steps(storage, 3).unwrap()
+            offline_native_allocation_funding_margin_steps(storage, 2).unwrap()
+                < offline_native_allocation_funding_margin_steps(storage, 3).unwrap()
         );
-        assert!(offline_native_required_allocation_steps(CONTROL_STORAGE, 1).is_err());
-        assert!(offline_native_required_allocation_steps(storage, 0).is_err());
+        assert!(offline_native_allocation_funding_margin_steps(CONTROL_STORAGE, 1).is_err());
+        assert!(offline_native_allocation_funding_margin_steps(storage, 0).is_err());
         assert!(
-            offline_native_required_allocation_steps(storage, MAX_NATIVE_CONNECTIONS as u32 + 1).is_err()
+            offline_native_allocation_funding_margin_steps(storage, MAX_NATIVE_CONNECTIONS as u32 + 1).is_err()
         );
     }
 

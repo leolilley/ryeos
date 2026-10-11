@@ -18,14 +18,22 @@ pub(super) enum AcquisitionCustody {
 }
 
 /// A refused acquisition retains its actual factory, native body and namespace.
-/// Neither an error nor dropping it constitutes a cleanup acknowledgement.
+/// Neither an error nor dropping it constitutes a cleanup acknowledgement; the
+/// consuming release is [`Self::retry_close`], which returns the same owner on
+/// refusal so the caller's error carrier keeps it until a retry succeeds.
+///
+/// Field order is drop order: the native body and its schema reference end
+/// before the factory alias, the pinned root and, last, the namespace lock.
+/// A native body dropped unreleased stays retained by its lower native
+/// owner, so its ticket is never counted as closed; discarding this frame
+/// never relabels that body as released.
 pub(crate) struct OriginalRuntimeAcquisitionFailure {
     pub(super) error: anyhow::Error,
-    pub(super) factory: std::mem::ManuallyDrop<Arc<OriginalNativeFactory>>,
-    pub(super) root: std::mem::ManuallyDrop<Arc<lillux::PinnedDirectory>>,
-    pub(super) namespace: std::mem::ManuallyDrop<lillux::PinnedDirectoryLock>,
-    pub(super) custody: std::mem::ManuallyDrop<Mutex<AcquisitionCustody>>,
-    pub(super) schema_reference: std::mem::ManuallyDrop<Option<sqlite_schema::ClosedNativeSchemaSqlReference>>,
+    pub(super) custody: Mutex<AcquisitionCustody>,
+    pub(super) schema_reference: Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
+    pub(super) factory: Arc<OriginalNativeFactory>,
+    pub(super) root: Arc<lillux::PinnedDirectory>,
+    pub(super) namespace: lillux::PinnedDirectoryLock,
 }
 impl std::fmt::Debug for OriginalRuntimeAcquisitionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,16 +101,7 @@ impl OriginalRuntimeAcquisitionFailure {
         custody: AcquisitionCustody,
         schema_reference: Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
     ) -> Self {
-        // Discard is not disposition: keep original namespace and admission
-        // owners inert until the explicit same-process recovery checkout.
-        Self {
-            error,
-            factory: std::mem::ManuallyDrop::new(factory),
-            root: std::mem::ManuallyDrop::new(root),
-            namespace: std::mem::ManuallyDrop::new(namespace),
-            custody: std::mem::ManuallyDrop::new(Mutex::new(custody)),
-            schema_reference: std::mem::ManuallyDrop::new(schema_reference),
-        }
+        Self { error, custody: Mutex::new(custody), schema_reference, factory, root, namespace }
     }
     /// Consume retained custody before effects; no bookkeeping mutex is held
     /// across native close. Retry the actual partial owner, never reopen SQL.
@@ -114,17 +113,12 @@ impl OriginalRuntimeAcquisitionFailure {
         }
         let Self {
             mut error,
+            custody,
+            schema_reference,
             factory,
             root,
             namespace,
-            custody,
-            schema_reference,
         } = self;
-        let factory = std::mem::ManuallyDrop::into_inner(factory);
-        let root = std::mem::ManuallyDrop::into_inner(root);
-        let namespace = std::mem::ManuallyDrop::into_inner(namespace);
-        let schema_reference = std::mem::ManuallyDrop::into_inner(schema_reference);
-        let custody = std::mem::ManuallyDrop::into_inner(custody);
         let custody = custody
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -453,5 +447,66 @@ mod native_reference_tests {
         // Live, current and predecessor phases each paid one main and one
         // reference ticket, and every ticket reached the census.
         assert_eq!(host.ticket_census(), (6, 6));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod release_tests {
+    use super::*;
+    use lillux_sqlite::test_host::TestNativeHost;
+
+    fn namespace_held(root: &lillux::PinnedDirectory) -> bool {
+        root.try_lock_exclusive().unwrap().is_none()
+    }
+
+    #[test]
+    fn refused_acquisition_release_consumes_owners_and_refusal_keeps_them() {
+        let host = TestNativeHost::acquire();
+        let factory = Arc::clone(host.factory());
+        let base = Arc::strong_count(&factory);
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let namespace = root.lock_exclusive().unwrap();
+
+        let failure = OriginalRuntimeAcquisitionFailure::retained(
+            anyhow::anyhow!("acquisition refused"), Arc::clone(&factory), Arc::clone(&root),
+            namespace, AcquisitionCustody::BeforeOpen(None), None);
+        // A custody with no owner to retire refuses and returns the SAME owner.
+        let failure = match failure.retry_close() {
+            Ok(_) => panic!("an empty pre-open custody cannot release"),
+            Err(failure) => failure,
+        };
+        assert_eq!(Arc::strong_count(&factory), base + 1, "refusal keeps the factory alias");
+        assert_eq!(Arc::strong_count(&root), 2, "refusal keeps the pinned root");
+        assert!(namespace_held(&root), "refusal keeps the namespace lock");
+
+        // The consuming release moves every owner into the released frame.
+        *failure.custody.lock().unwrap() = AcquisitionCustody::NotAcquired;
+        let released = failure.retry_close().expect("never-acquired custody releases");
+        assert!(released.terminal.is_none());
+        assert_eq!(Arc::strong_count(&factory), base + 1);
+        assert!(namespace_held(&root), "the released frame still holds the namespace");
+        drop(released);
+        assert_eq!(Arc::strong_count(&factory), base, "released frame ends its factory alias");
+        assert_eq!(Arc::strong_count(&root), 1, "released frame ends its root alias");
+        assert!(!namespace_held(&root), "released frame ends its namespace lock");
+    }
+
+    #[test]
+    fn discarded_acquisition_failure_ends_its_owners_instead_of_leaking() {
+        let host = TestNativeHost::acquire();
+        let factory = Arc::clone(host.factory());
+        let base = Arc::strong_count(&factory);
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let failure = OriginalRuntimeAcquisitionFailure::retained(
+            anyhow::anyhow!("acquisition refused"), Arc::clone(&factory), Arc::clone(&root),
+            root.lock_exclusive().unwrap(), AcquisitionCustody::NotAcquired, None);
+        assert!(namespace_held(&root));
+        drop(failure);
+        // Nothing is forgotten: the host can release once its test ends.
+        assert_eq!(Arc::strong_count(&factory), base);
+        assert_eq!(Arc::strong_count(&root), 1);
+        assert!(!namespace_held(&root));
     }
 }

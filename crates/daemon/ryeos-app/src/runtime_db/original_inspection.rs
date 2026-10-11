@@ -124,9 +124,7 @@ impl OriginalNativeDestinationAuthority for InspectionDestination {
         let Self { factory: _, runtime, root, source, namespace, copy, sql, work } = original;
         let continuation = Box::new(InspectionOutsideContinuation {
             process: std::process::id(), leaf: leaf.clone(), joined_leaf: None,
-            copy: std::mem::ManuallyDrop::new(Some(copy)),
-            sql: std::mem::ManuallyDrop::new(Some(sql)),
-            work: std::mem::ManuallyDrop::new(Some(work)),
+            copy: Some(copy), sql: Some(sql), work: Some(work),
         });
         let sources = vec![
             lillux_sqlite::OriginalDestinationPhysicalSource::Directory(runtime),
@@ -135,7 +133,8 @@ impl OriginalNativeDestinationAuthority for InspectionDestination {
             lillux_sqlite::OriginalDestinationPhysicalSource::Namespace(namespace),
         ];
         // SAFETY: genuine exact leaf/account checks and original prepayment
-        // precede allocation. Every copy/SQL/work holder remains in MD custody.
+        // precede allocation. Every copy/SQL/work holder moves into the
+        // continuation, which keeps it until the consuming group join.
         Ok(unsafe { lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation) })
     }
 
@@ -297,14 +296,17 @@ pub(super) fn issue_inspection_reference_inputs(
 }
 
 /// Actual inspection group receiver. Opaque copy/SQL/work interfaces still
-/// retain source pins, guard, cleanup and account owners; no Drop disposes them.
+/// retain source pins, guard, cleanup and account owners. The consuming group
+/// join takes each alias once the receiver holds the same owner; until then
+/// these are plain aliases of owners the destination authority already held,
+/// dropped in the authority's own order (copy, SQL, work).
 struct InspectionOutsideContinuation {
     process: u32,
     leaf: lillux_sqlite::OriginalNativeOutsideLeafEvidence,
     joined_leaf: Option<lillux_sqlite::OriginalNativeOutsideLeafEvidence>,
-    copy: std::mem::ManuallyDrop<Option<Arc<SqliteInspectionCopyLease>>>,
-    sql: std::mem::ManuallyDrop<Option<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>>,
-    work: std::mem::ManuallyDrop<Option<Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>>>,
+    copy: Option<Arc<SqliteInspectionCopyLease>>,
+    sql: Option<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
+    work: Option<Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>>,
 }
 // SAFETY: all actual resources remain owned, including on unwind/refusal.
 // Incomplete group consumption explicitly blocks physical retirement.
@@ -365,14 +367,17 @@ unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for Inspection
     }
 }
 
+/// The consumed copy lease's owners. Field order is drop order and is the
+/// lease's own: cleanup back-reference, source pins, receipts, scratch guard,
+/// source lock, then copy work.
 pub(super) struct OriginalInspectionCopyLeaseParts {
     pub(super) process: u32,
-    pub(super) source_pins: std::mem::ManuallyDrop<Vec<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>>,
-    pub(super) guard: std::mem::ManuallyDrop<Option<crate::temp_dir_guard::TempDirGuard>>,
-    pub(super) source_lock: std::mem::ManuallyDrop<Option<lillux::PinnedDirectoryLock>>,
-    pub(super) work: std::mem::ManuallyDrop<Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>>,
-    pub(super) receipts: std::mem::ManuallyDrop<Option<Vec<(OsString, Option<lillux_sqlite::SqliteInspectionCopyReceipt>)>>>,
-    cleanup: std::mem::ManuallyDrop<Option<Weak<super::inspection_cleanup::InspectionCopyCleanup>>>,
+    _cleanup: Option<Weak<super::inspection_cleanup::InspectionCopyCleanup>>,
+    pub(super) source_pins: Vec<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>,
+    _receipts: Option<Vec<(OsString, Option<lillux_sqlite::SqliteInspectionCopyReceipt>)>>,
+    pub(super) guard: Option<crate::temp_dir_guard::TempDirGuard>,
+    pub(super) source_lock: Option<lillux::PinnedDirectoryLock>,
+    pub(super) work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
 }
 pub(super) fn consume_copy_lease(original: Arc<SqliteInspectionCopyLease>,
     factory: &Arc<OriginalNativeFactory>, aggregate: &lillux_sqlite::OriginalNativeTerminal,
@@ -396,35 +401,38 @@ pub(super) fn consume_copy_lease(original: Arc<SqliteInspectionCopyLease>,
         Err(original) => return Err((original, anyhow!("original copy lease still has aliases"))),
     };
     let SqliteInspectionCopyLease { cleanup, _source_pins, source_receipts, _guard, _source_lock, _copy_work } = original;
-    let mut files = std::mem::ManuallyDrop::new(_source_pins);
-    let mut pins = std::mem::ManuallyDrop::new(Vec::with_capacity(files.len()));
+    let mut files = _source_pins;
+    let mut pins = Vec::with_capacity(files.len());
     while let Some(file) = files.pop() {
         // SAFETY: same original O_PATH source pin, moved once after its native
         // context completed; concrete owner/control storage prepaid above.
         pins.push(unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(file) });
     }
-    drop(std::mem::ManuallyDrop::into_inner(files));
+    drop(files);
     Ok(OriginalInspectionCopyLeaseParts {
-        process, source_pins: pins,
-        guard: std::mem::ManuallyDrop::new(Some(_guard)),
-        source_lock: std::mem::ManuallyDrop::new(Some(_source_lock)),
-        work: std::mem::ManuallyDrop::new(_copy_work),
-        receipts: std::mem::ManuallyDrop::new(source_receipts.into_inner()),
-        cleanup: std::mem::ManuallyDrop::new(cleanup.into_inner().unwrap_or_else(|p| p.into_inner())),
+        process,
+        _cleanup: cleanup.into_inner().unwrap_or_else(|p| p.into_inner()),
+        source_pins: pins,
+        _receipts: source_receipts.into_inner(),
+        guard: Some(_guard),
+        source_lock: Some(_source_lock),
+        work: _copy_work,
     })
 }
 
 pub(super) enum OriginalInspectionPrimitiveProof {
-    Closed(std::mem::ManuallyDrop<Arc<lillux_sqlite::ClosedSqliteInspection>>),
-    Released(std::mem::ManuallyDrop<Arc<lillux_sqlite::ReleasedSqliteInspection>>),
+    Closed(Arc<lillux_sqlite::ClosedSqliteInspection>),
+    Released(Arc<lillux_sqlite::ReleasedSqliteInspection>),
 }
+/// The consumed terminal wrapper's owners. Field order is drop order and is
+/// the wrapper's own: primitive proof, copy lease, SQL work, then namespace.
 pub(super) struct OriginalInspectionWrapperParts {
     pub(super) process: u32,
-    pub(super) proof: std::mem::ManuallyDrop<Option<OriginalInspectionPrimitiveProof>>,
-    pub(super) lease: std::mem::ManuallyDrop<Arc<SqliteInspectionCopyLease>>,
-    pub(super) sql: std::mem::ManuallyDrop<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
+    pub(super) proof: Option<OriginalInspectionPrimitiveProof>,
+    pub(super) lease: Arc<SqliteInspectionCopyLease>,
+    pub(super) sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
     pub(super) database_name: OsString,
-    pub(super) namespace: std::mem::ManuallyDrop<Option<lillux::PinnedDirectoryLock>>,
+    pub(super) namespace: Option<lillux::PinnedDirectoryLock>,
 }
 pub(super) fn require_wrapper_transfer(process: u32,
     native: &std::sync::Mutex<Option<(Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal)>>) -> Result<()> {
@@ -443,9 +451,8 @@ pub(super) fn consume_closed_wrapper(original: Arc<SqliteInspectionClosed>)
         Err(original) => return Err((original, anyhow!("original closed inspection wrapper still has aliases"))),
     };
     let SqliteInspectionClosed { process, proof, native: _, lease, sql, database_name, _namespace } = original;
-    Ok(OriginalInspectionWrapperParts { process, proof: std::mem::ManuallyDrop::new(Some(OriginalInspectionPrimitiveProof::Closed(std::mem::ManuallyDrop::new(proof)))),
-        lease: std::mem::ManuallyDrop::new(lease), sql: std::mem::ManuallyDrop::new(sql), database_name,
-        namespace: std::mem::ManuallyDrop::new(_namespace) })
+    Ok(OriginalInspectionWrapperParts { process, proof: Some(OriginalInspectionPrimitiveProof::Closed(proof)),
+        lease, sql, database_name, namespace: _namespace })
 }
 pub(super) fn consume_acquisition_wrapper(original: Arc<SqliteInspectionAcquisitionReleased>)
     -> std::result::Result<OriginalInspectionWrapperParts, (Arc<SqliteInspectionAcquisitionReleased>, anyhow::Error)> {
@@ -460,9 +467,8 @@ pub(super) fn consume_acquisition_wrapper(original: Arc<SqliteInspectionAcquisit
 }
 pub(super) fn acquisition_wrapper_parts(original: SqliteInspectionAcquisitionReleased) -> OriginalInspectionWrapperParts {
     let SqliteInspectionAcquisitionReleased { process, proof, native: _, lease, sql, database_name, _namespace } = original;
-    OriginalInspectionWrapperParts { process, proof: std::mem::ManuallyDrop::new(Some(OriginalInspectionPrimitiveProof::Released(std::mem::ManuallyDrop::new(proof)))),
-        lease: std::mem::ManuallyDrop::new(lease), sql: std::mem::ManuallyDrop::new(sql), database_name,
-        namespace: std::mem::ManuallyDrop::new(_namespace) }
+    OriginalInspectionWrapperParts { process, proof: Some(OriginalInspectionPrimitiveProof::Released(proof)),
+        lease, sql, database_name, namespace: _namespace }
 }
 
 enum NativeBody {
@@ -1021,5 +1027,79 @@ mod reference_destination_tests {
         host.retain_terminal(terminal);
         drop(reference);
         assert_eq!(host.ticket_census(), (1, 1));
+    }
+
+    fn namespace_held(root: &lillux::PinnedDirectory) -> bool {
+        root.try_lock_exclusive().unwrap().is_none()
+    }
+
+    fn inert_lease(source: &lillux::PinnedDirectory, scratch_root: &std::path::Path,
+        lock: lillux::PinnedDirectoryLock) -> Arc<SqliteInspectionCopyLease> {
+        std::fs::create_dir(scratch_root.join("scratch")).unwrap();
+        let scratch = Arc::new(lillux::PinnedDirectory::open(&scratch_root.join("scratch")).unwrap().unwrap());
+        Arc::new(SqliteInspectionCopyLease {
+            cleanup: std::sync::Mutex::new(None),
+            _source_pins: Vec::new(),
+            source_receipts: std::sync::OnceLock::new(),
+            _guard: crate::temp_dir_guard::TempDirGuard::new_pinned(
+                source.try_clone().unwrap(), OsString::from("scratch"), scratch),
+            _source_lock: lock,
+            _copy_work: Arc::new(InertWork),
+        })
+    }
+
+    #[test]
+    fn dropped_copy_lease_parts_end_their_lock_and_work_instead_of_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let locked = tempfile::tempdir().unwrap();
+        let locked = lillux::PinnedDirectory::open(locked.path()).unwrap().unwrap();
+        std::fs::create_dir(dir.path().join("scratch")).unwrap();
+        let scratch = Arc::new(lillux::PinnedDirectory::open(&dir.path().join("scratch")).unwrap().unwrap());
+        let work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork> = Arc::new(InertWork);
+        let parts = OriginalInspectionCopyLeaseParts {
+            process: std::process::id(),
+            _cleanup: None,
+            source_pins: Vec::new(),
+            _receipts: None,
+            guard: Some(crate::temp_dir_guard::TempDirGuard::new_pinned(
+                source.try_clone().unwrap(), OsString::from("scratch"), scratch)),
+            source_lock: Some(locked.lock_exclusive().unwrap()),
+            work: Arc::clone(&work),
+        };
+        assert_eq!(Arc::strong_count(&work), 2);
+        assert!(namespace_held(&locked));
+        drop(parts);
+        assert_eq!(Arc::strong_count(&work), 1, "the parts ended their work alias");
+        assert!(!namespace_held(&locked), "the parts ended their source lock");
+    }
+
+    #[test]
+    fn dropped_wrapper_parts_end_their_lease_and_namespace_instead_of_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let locked = tempfile::tempdir().unwrap();
+        let locked = lillux::PinnedDirectory::open(locked.path()).unwrap().unwrap();
+        let lease_lock = tempfile::tempdir().unwrap();
+        let lease_lock = lillux::PinnedDirectory::open(lease_lock.path()).unwrap().unwrap();
+        let lease = inert_lease(&source, dir.path(), lease_lock.lock_exclusive().unwrap());
+        let sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork> = Arc::new(InertWork);
+        let parts = OriginalInspectionWrapperParts {
+            process: std::process::id(),
+            proof: None,
+            lease: Arc::clone(&lease),
+            sql: Arc::clone(&sql),
+            database_name: OsString::from("runtime.sqlite3"),
+            namespace: Some(locked.lock_exclusive().unwrap()),
+        };
+        assert_eq!(Arc::strong_count(&lease), 2);
+        drop(parts);
+        assert_eq!(Arc::strong_count(&lease), 1, "the parts ended their lease alias");
+        assert_eq!(Arc::strong_count(&sql), 1, "the parts ended their SQL alias");
+        assert!(!namespace_held(&locked), "the parts ended their namespace lock");
+        // The last lease owner still ends the lease's own source lock.
+        assert!(namespace_held(&lease_lock));
+        drop(lease);
+        assert!(!namespace_held(&lease_lock));
     }
 }

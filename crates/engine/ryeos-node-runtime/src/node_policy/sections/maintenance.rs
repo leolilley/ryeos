@@ -48,10 +48,10 @@ pub fn validate_offline_native_quota(quota: &ryeos_scheduler_contract::OfflineNa
 }
 
 /// Check the signed offline reset quota's native step budget against the
-/// native host's allocation and cleanup quotes.
+/// native host's minimum allocation funding margin and exact cleanup quote.
 pub fn validate_offline_reset_quota(quota: &ryeos_scheduler_contract::OfflineResetQuota) -> anyhow::Result<()> {
     quota.validate_native(
-        lillux_sqlite::offline_host::offline_native_required_allocation_steps,
+        lillux_sqlite::offline_host::offline_native_allocation_funding_margin_steps,
         lillux_sqlite::offline_host::offline_native_required_cleanup_steps,
     )
 }
@@ -103,14 +103,15 @@ mod tests {
             .iter()
             .find_map(|(_, policy)| policy.offline_reset.clone())
             .expect("a shipped offline reset quota");
-        // The previous shipped value: enough for allocation and cleanup, far
+        // The previous shipped value: enough for the allocation margin and cleanup, far
         // below the SQL ceiling that native SQL also charges.
         quota.max_native_allocator_steps = 1_048_576;
         let error = validate_offline_reset_quota(&quota).unwrap_err();
         assert!(format!("{error:#}").contains("SQL VM step ceiling"), "{error:#}");
-        // Above the ceiling but short of the allocation and cleanup quotes.
+        // Above the ceiling but short of the allocation funding margin and
+        // the cleanup quote.
         quota.max_native_allocator_steps = quota.max_sql_vm_steps + 1;
         let error = validate_offline_reset_quota(&quota).unwrap_err();
-        assert!(format!("{error:#}").contains("allocation quote"), "{error:#}");
+        assert!(format!("{error:#}").contains("allocation funding margin"), "{error:#}");
     }
 }

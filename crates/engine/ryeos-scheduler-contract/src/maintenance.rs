@@ -219,17 +219,20 @@ impl OfflineResetQuota {
         Ok(())
     }
 
-    /// Check the native step budget against the bounds the native host owns.
+    /// Check the native step budget against what the native host owns.
     /// Native SQL charges both the host's step budget and the SQL ceiling, so
-    /// the budget must cover the whole ceiling plus the host's allocation and
-    /// cleanup quotes for this quota's storage and connections.
+    /// the budget must cover the whole ceiling, plus the host's minimum
+    /// allocation funding margin, plus its exact cleanup quote, for this
+    /// quota's storage and connections. The allocation margin is a heuristic
+    /// floor, not a bound on allocator work; native exhaustion still fails
+    /// closed at run time.
     pub fn validate_native(
         &self,
-        required_allocation_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
+        allocation_funding_margin_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
         required_cleanup_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
     ) -> anyhow::Result<()> {
         self.validate()?;
-        let allocation = required_allocation_steps(self.max_native_storage_bytes, self.max_native_connections)?;
+        let allocation = allocation_funding_margin_steps(self.max_native_storage_bytes, self.max_native_connections)?;
         let cleanup = required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
         let required = self
             .max_sql_vm_steps
@@ -238,7 +241,7 @@ impl OfflineResetQuota {
             .context("offline reset native step requirement overflow")?;
         if self.max_native_allocator_steps < required {
             bail!(
-                "offline reset native allocator steps ({}) cannot cover the SQL VM step ceiling ({}) plus the native allocation quote ({allocation}) and cleanup quote ({cleanup}); at least {required} are required",
+                "offline reset native allocator steps ({}) cannot cover the SQL VM step ceiling ({}) plus the minimum native allocation funding margin ({allocation}) and the cleanup quote ({cleanup}); at least {required} are required",
                 self.max_native_allocator_steps,
                 self.max_sql_vm_steps
             );
@@ -485,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_reset_native_steps_cover_sql_allocation_and_cleanup() {
+    fn offline_reset_native_steps_cover_sql_allocation_margin_and_cleanup() {
         let mut undersized = quota();
         undersized.max_native_allocator_steps = 1048576;
         let error = undersized.validate().unwrap_err();
@@ -497,6 +500,7 @@ mod tests {
         short.max_native_allocator_steps = short.max_sql_vm_steps + 1_200_000 - 1;
         let error = short.validate_native(allocation, cleanup).unwrap_err();
         assert!(format!("{error:#}").contains("at least 21200000"), "{error:#}");
+        assert!(format!("{error:#}").contains("minimum native allocation funding margin"), "{error:#}");
         short.max_native_allocator_steps += 1;
         short.validate_native(allocation, cleanup).unwrap();
     }
