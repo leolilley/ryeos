@@ -17,6 +17,12 @@ pub(super) struct OfflineOperationalSlot {
     retained: Option<OwnedOperational>,
     failure: Option<anyhow::Error>,
     closed: Option<Arc<ClosedOriginalOperational>>,
+    /// Closed current-schema reference the owner was matched against; its
+    /// terminal belongs to the same native census.
+    reference: Option<ryeos_state::sqlite_schema::ClosedNativeSchemaSqlReference>,
+    /// A refused schema reference after its same-owner close; its terminal,
+    /// if one was issued, belongs to the census.
+    released_reference: Option<ryeos_state::sqlite_schema::ReleasedNativeSchemaSqlReference>,
 }
 impl std::fmt::Debug for OfflineOperationalSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -25,6 +31,8 @@ impl std::fmt::Debug for OfflineOperationalSlot {
             .field("retained", &self.retained.is_some())
             .field("failure", &self.failure.is_some())
             .field("closed", &self.closed.is_some())
+            .field("reference", &self.reference.is_some())
+            .field("released_reference", &self.released_reference.is_some())
             .finish()
     }
 }
@@ -279,11 +287,7 @@ impl InspectionControllerCustody {
         let failure = match retained.downcast::<ryeos_state::OriginalOperationalFailure>() {
             Ok(owner) => owner,
             Err(error) => {
-                self.operational_slot(phase)
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .failure = Some(error);
-                return original;
+                return self.retry_reference_failure(phase, error, original);
             }
         };
         match failure.retry_close() {
@@ -302,6 +306,43 @@ impl InspectionControllerCustody {
                     .unwrap_or_else(|p| p.into_inner())
                     .failure = Some(anyhow::Error::new(failure));
                 original.context("same-owner Operational cleanup retry remains retained")
+            }
+        }
+    }
+
+    /// The same-owner close of a refused schema reference. A released
+    /// reference joins the census; a still-refused one stays in the slot.
+    fn retry_reference_failure(
+        &self,
+        phase: OperationalOwnerPhase,
+        retained: anyhow::Error,
+        original: anyhow::Error,
+    ) -> anyhow::Error {
+        let failure = match retained.downcast::<ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure>() {
+            Ok(failure) => failure,
+            Err(error) => {
+                self.operational_slot(phase)
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .failure = Some(error);
+                return original;
+            }
+        };
+        match failure.close_retained() {
+            Ok(released) => {
+                // Cleanup evidence only; the original refusal is returned.
+                self.operational_slot(phase)
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .released_reference = Some(released);
+                original
+            }
+            Err(failure) => {
+                self.operational_slot(phase)
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .failure = Some(anyhow::Error::new(failure));
+                original.context("same-owner schema reference cleanup remains retained")
             }
         }
     }
@@ -347,6 +388,21 @@ impl InspectionControllerCustody {
                 .operational_slot(phase)
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
+            if let Some(reference) = &slot.reference {
+                terminals.push(reference.terminal().clone());
+            }
+            if let Some(released) = &slot.released_reference {
+                let factory = slot
+                    .factory
+                    .as_ref()
+                    .context("released schema reference census lacks its factory")?;
+                // A reference refused before any ticket has no census entry.
+                if let Some(terminal) = released.terminal(factory)? {
+                    if terminal.ticket().is_some() {
+                        terminals.push(terminal.clone());
+                    }
+                }
+            }
             if let Some(closed) = &slot.closed {
                 terminals.push(closed.terminal());
                 anyhow::ensure!(
@@ -376,27 +432,40 @@ pub(super) fn open_original_operational(
     phase: OperationalOwnerPhase,
 ) -> Result<OfflineOperationalLoan> {
     let permit = custody.begin_operational(phase, factory.clone())?;
+    let mut reference = None;
     let opened = (|| -> Result<PreparedReplayIndexReset> {
         let root = Arc::new(root.try_clone()?);
         let read_only = matches!(phase, OperationalOwnerPhase::Inspection);
-        let inputs = claim.issue_operational_reset_inputs(
-            factory,
-            root.clone(),
-            namespace,
-            &root
-                .path()
-                .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME),
-            read_only,
-        )?;
+        let target = root.path().join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
+        let reference_inputs =
+            claim.issue_operational_reference_inputs(factory, root.clone(), namespace, &target)?;
+        let closed = ryeos_state::operational::prepare_operational_schema_reference(
+            factory.clone(),
+            reference_inputs,
+        )
+        .map_err(anyhow::Error::new)?;
+        let closed = reference.insert(closed);
+        let inputs =
+            claim.issue_operational_reset_inputs(factory, root.clone(), namespace, &target, read_only)?;
         PreparedReplayIndexReset::prepare_original(
             root,
             namespace.clone(),
             factory.clone(),
             inputs,
+            closed,
             read_only,
         )
         .map_err(anyhow::Error::new)
     })();
+    // The closed reference joins this phase's census whatever the outcome;
+    // no custody mutex spans the native work above.
+    if let Some(reference) = reference {
+        custody
+            .operational_slot(phase)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .reference = Some(reference);
+    }
     match opened {
         Ok(owner) => Ok(permit.adopt(owner)),
         Err(error) => Err(permit.retain_failure(error)),

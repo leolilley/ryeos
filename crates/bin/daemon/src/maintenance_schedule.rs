@@ -500,7 +500,8 @@ mod tests {
         .unwrap();
     }
 
-    const POLICY: &str = r#"schema: 4
+    const POLICY: &str = r#"schema: 5
+offline_native: {}
 offline_reset: null
 schedules:
   - schedule_id: maintenance-gc
@@ -740,8 +741,9 @@ schedules:
         write_operator_schedule(&node_dir, &id, "operator-job");
 
         let empty = NodeMaintenancePolicy {
-            schema: 4,
+            schema: 5,
             offline_reset: None,
+            offline_native: Default::default(),
             schedules: Vec::new(),
         };
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();

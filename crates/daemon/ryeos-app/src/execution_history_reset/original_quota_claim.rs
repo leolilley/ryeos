@@ -28,7 +28,6 @@ use ryeos_node_runtime::identity::NodeIdentity;
 
 use lillux_sqlite::original_host_owner::region::NativeHostRegion;
 pub(super) const HOST_RELEASE_ATTEMPTS: u64 = 8;
-static OFFLINE_RESIDENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 const PREFIX: &str = "reserved.";
 const MAX_RECORD_BYTES: usize = 8192;
@@ -2340,16 +2339,17 @@ impl OriginalQuotaClaim {
         self.require_service_window()?;
         Ok(())
     }
-    pub(super) fn issue_operational_reset_inputs(
+    /// Same genuine source checks as the bound Operational role; returns the
+    /// destination authority both the bound role and its schema reference use.
+    fn operational_reset_authority(
         self: &Arc<Self>,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        root: Arc<lillux::PinnedDirectory>,
+        root: &Arc<lillux::PinnedDirectory>,
         namespace: &lillux::PinnedDirectoryLock,
         target: &std::path::Path,
-        read_only: bool,
-    ) -> Result<lillux_sqlite::OriginalNativeBoundInputs> {
+    ) -> Result<Arc<OriginalOperationalAuthority>> {
         self.require_service_window()?;
-        namespace.ensure_protects(&root)?;
+        namespace.ensure_protects(root)?;
         root.ensure_path_binding()?;
         ensure!(
             target.parent() == Some(root.path())
@@ -2362,7 +2362,7 @@ impl OriginalQuotaClaim {
         );
         self.record
             .operational_source
-            .require_current(&root, &self.operational_source_pins)?;
+            .require_current(root, &self.operational_source_pins)?;
         let authority = Arc::new(OriginalOperationalAuthority {
             claim: self.clone(),
             factory: Arc::downgrade(factory),
@@ -2373,6 +2373,38 @@ impl OriginalQuotaClaim {
             authority.as_ref(),
             factory,
         )?;
+        Ok(authority)
+    }
+
+    /// One paid ticket for the current Operational schema reference that the
+    /// original Operational owner matches against.
+    pub(super) fn issue_operational_reference_inputs(
+        self: &Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        root: Arc<lillux::PinnedDirectory>,
+        namespace: &lillux::PinnedDirectoryLock,
+        target: &std::path::Path,
+    ) -> Result<lillux_sqlite::OriginalNativeTransientInputs> {
+        let authority = self.operational_reset_authority(factory, &root, namespace, target)?;
+        // SAFETY: same genuine signed source, retained pins/namespace/funding
+        // as the bound Operational role; the fixed reference purpose is chosen here.
+        unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference,
+                authority,
+            )
+        }
+    }
+
+    pub(super) fn issue_operational_reset_inputs(
+        self: &Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        root: Arc<lillux::PinnedDirectory>,
+        namespace: &lillux::PinnedDirectoryLock,
+        target: &std::path::Path,
+        read_only: bool,
+    ) -> Result<lillux_sqlite::OriginalNativeBoundInputs> {
+        let authority = self.operational_reset_authority(factory, &root, namespace, target)?;
         let (mode, domain) = if read_only {
             (
                 lillux_sqlite::OriginalNativeBoundMode::ReadonlySource,
@@ -2893,9 +2925,8 @@ impl OriginalQuotaClaim {
         let destinations = destination_plans(&operation_id);
         let resident_layout = lillux_sqlite::original_host_owner::backing::HostStorage::quote_native_region()
             .map_err(anyhow::Error::msg)?;
-        let resident_generation = OFFLINE_RESIDENT_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire,
-            |value| value.checked_add(1).filter(|next| *next != 0))
-            .map_err(|_| anyhow::anyhow!("offline resident generation exhausted"))?;
+        // One process-wide counter shared with every other resident issuer.
+        let resident_generation = lillux_sqlite::original_host_owner::region::next_resident_generation()?;
         let record = ClaimRecord {
             schema: 9,
             purpose: "offline_reset_local_quota_reservation_v9".into(),

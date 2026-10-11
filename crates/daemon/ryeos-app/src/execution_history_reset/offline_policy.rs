@@ -6,7 +6,7 @@ use ryeos_scheduler_contract::{NodeMaintenancePolicy, OfflineResetQuota};
 
 use ryeos_node_runtime::config::Config;
 use ryeos_node_runtime::identity::NodeIdentity;
-use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
+use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 use ryeos_node_runtime::state_lock::StateLock;
 
 /// Retain the original compiled signed generation under the actual stopped
@@ -36,26 +36,8 @@ impl<'a> OfflineResetPolicyOwner<'a> {
         runtime.ensure_path_binding()?;
         let app_root = lillux::PinnedDirectory::open(&config.app_root)?
             .context("offline reset policy app root is absent")?;
-        // Trust only this node's operator signer, never installed publishers,
-        // application sessions, or a central-auth application.
-        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
-            ryeos_engine::trust::TrustedSigner {
-                fingerprint: identity.fingerprint().to_owned(),
-                verifying_key: *identity.verifying_key(),
-                label: Some("offline maintenance node operator".to_owned()),
-            },
-        ]);
-        let snapshot =
-            ryeos_node_runtime::node_policy::load_snapshot(&config.app_root, &trust, &NodePolicyTable::new())
-                .context("load complete node-signed offline reset policy generation")?;
-        let digest = snapshot.generation_digest();
-        ensure!(
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "offline reset policy lacks its exact canonical generation digest"
-        );
+        let snapshot = crate::offline_native::load_signed_maintenance_snapshot(config, identity)
+            .context("load complete node-signed offline reset policy generation")?;
         let owner = Self {
             process: std::process::id(),
             state_lock,

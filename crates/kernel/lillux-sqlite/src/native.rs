@@ -28,8 +28,11 @@ fn require_current_native_process() -> Result<()> {
     Ok(())
 }
 
-const MAX_NATIVE_CONNECTIONS: usize = 64;
-const CONTROL_STORAGE: u64 = 65_536;
+/// Fixed connection-ticket capacity of one native arena.
+pub const MAX_NATIVE_CONNECTIONS: usize = 64;
+/// Storage an arena reserves for its own control block; a funded envelope
+/// must exceed it.
+pub const CONTROL_STORAGE: u64 = 65_536;
 /// Compare-exchange attempts on one budget counter before refusing as busy.
 /// Each lost attempt means a concurrent debit succeeded, so the bound limits
 /// starvation under contention without changing what any debit charges.
@@ -73,6 +76,10 @@ impl OriginalNativeBudget {
         Ok(Self { storage_bytes, allocator_steps_limit: allocator_steps, cleanup_reserved,
             connections_limit: connections, reserved: 0, allocator_steps: AtomicU64::new(0),
             cleanup_steps: AtomicU64::new(0), connections_issued: AtomicU32::new(0), reserved_atomic: AtomicU32::new(0) })
+    }
+    /// Connection tickets this exact envelope admits.
+    pub fn connections_limit(&self) -> u32 {
+        self.connections_limit
     }
     pub fn snapshot(&self) -> OriginalNativeBudgetSnapshot {
         OriginalNativeBudgetSnapshot {
@@ -1730,6 +1737,13 @@ impl OriginalNativeFactory {
         Arc::ptr_eq(self, other)
     }
     /// Check actual bootstrap and issuer handoff while original service remains admitted.
+    /// Whether the issuer acknowledged Ready. Observation only: it selects
+    /// the matching finish (drain after Ready, initialization refusal before
+    /// it) and grants no service.
+    pub fn ready_acknowledged(&self) -> Result<bool> {
+        require_current_native_process()?;
+        Ok(self.storage()?.ready_acknowledged.load(Ordering::Acquire))
+    }
     pub fn require_ready(&self) -> Result<()> {
         self.require_original(false)?;
         ensure!(
@@ -4533,6 +4547,15 @@ impl std::fmt::Display for OriginalNativeOutsideCustodyFailure {
 }
 impl std::error::Error for OriginalNativeOutsideCustodyFailure {}
 impl OriginalNativeConnectionTerminal {
+    /// The connection ticket this terminal ends, or `None` for an acquisition
+    /// refused before any ticket was debited. Only ticketed terminals belong
+    /// to the backend finish census.
+    pub fn ticket(&self) -> Option<u32> {
+        match self {
+            Self::Closed(p) => Some(p.ticket),
+            Self::Released(p) => p.ticket,
+        }
+    }
     pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         require_current_native_process()?;
         match self {

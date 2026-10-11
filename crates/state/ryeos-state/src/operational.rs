@@ -14,6 +14,10 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 use crate::sqlite_schema;
 mod original;
 mod original_mutation;
+mod offline_replay;
+pub use offline_replay::{
+    CarriedOwners, RetainTerminal, activate_replay_indexes_offline, prepare_operational_schema_reference,
+};
 mod live_native;
 pub use live_native::{LiveOperationalOpenFailure, LiveOperationalStartupRecoveryFailure, ReleasedLiveOperationalStartup, ReleasedLiveOperationalPhysicalCustody};
 #[doc(hidden)]
@@ -920,6 +924,9 @@ enum OperationalConnection {
     Original {
         owner: lillux_sqlite::OriginalNativeConnection,
         factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        /// Current-schema definition observed through the same factory's
+        /// closed reference connection; the caller retains its terminal.
+        reference: sqlite_schema::SchemaSqlDefinition,
     },
 }
 
@@ -1179,16 +1186,6 @@ thread_local! {
 }
 
 impl PreparedReplayIndexReset {
-    fn new(db: OperationalDb, read_only: bool) -> Result<Self> {
-        let report = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path, db.current_schema_reference()))?;
-        Ok(Self {
-            db: Some(db),
-            report,
-            read_only,
-            activation: ReplayResetActivationPhase::Prepared,
-        })
-    }
-
     pub fn report(&self) -> ReplayIndexResetReport {
         self.report
     }
@@ -1203,13 +1200,6 @@ impl PreparedReplayIndexReset {
     /// Errors leave this same connection and namespace owner in preparation.
     /// A commit followed by a failed acknowledgement is retried through that
     /// owner; the original report is never replaced by a current-epoch zero.
-    pub fn activate(&mut self) -> Result<ReplayIndexResetReport> {
-        if self.db.as_ref().is_some_and(|db| matches!(&db.conn, OperationalConnection::Original { .. })) {
-            anyhow::bail!("original Operational activation requires its durable-intent caller authority");
-        }
-        self.activate_after_authority()
-    }
-
     fn activate_after_authority(&mut self) -> Result<ReplayIndexResetReport> {
         if self.read_only {
             anyhow::bail!("read-only replay-index preview cannot activate a reset");
@@ -1241,13 +1231,6 @@ impl PreparedReplayIndexReset {
 
     /// Transfer is allowed exactly once after activation validation. Refusal
     /// leaves the original owner here, including after an activation error.
-    pub fn take_activated(&mut self) -> Result<(OperationalDb, ReplayIndexResetReport)> {
-        if self.db.as_ref().is_some_and(|db| matches!(&db.conn, OperationalConnection::Original { .. })) {
-            anyhow::bail!("original Operational transfer requires its durable-intent caller authority");
-        }
-        self.take_activated_after_authority()
-    }
-
     fn take_activated_after_authority(&mut self) -> Result<(OperationalDb, ReplayIndexResetReport)> {
         if self.activation != ReplayResetActivationPhase::Validated {
             anyhow::bail!("replay reset database is not validated for transfer");
@@ -1277,13 +1260,13 @@ impl OperationalDb {
         }
     }
 
-    /// Live owners carry a prepared native reference; plain owners use the
-    /// stock reference build. Original replay-reset owners carry none.
+    /// Native owners carry a prepared native reference; plain owners use the
+    /// stock reference build.
     fn current_schema_reference(&self) -> Option<&sqlite_schema::SchemaSqlDefinition> {
         match &self.conn {
             OperationalConnection::Live(live) => Some(live.references.current()),
             OperationalConnection::Plain(_) => None,
-            OperationalConnection::Original { owner: _, factory: _ } => None,
+            OperationalConnection::Original { owner: _, factory: _, reference } => Some(reference),
         }
     }
 
@@ -1402,27 +1385,6 @@ impl OperationalDb {
         Ok(db)
     }
 
-    /// Explicit clean-cut activation for runtime-only replay indexes.
-    ///
-    /// This path is intentionally unavailable through ordinary open. The
-    /// caller must already have stopped the daemon and obtained node-state
-    /// ownership. It preserves every other operational table. For the exact
-    /// unified predecessor it retires only dispatch-effect rows and preserves
-    /// provider-call evidence; older pre-unified layouts are discarded as one
-    /// explicit clean cut.
-    pub fn prepare_explicit_replay_reset(path: &Path) -> Result<PreparedReplayIndexReset> {
-        let (directory, name) = pin_operational_parent(path, false)?;
-        let directory_lock = directory.lock_exclusive()?;
-        let db = Self::open_in_pinned_directory(
-            &directory,
-            &name,
-            OperationalOpenMode::PrepareReplayReset { read_only: false },
-            directory_lock,
-        )?;
-        db.with_sql(|connection| assert_integrity(connection, path))?;
-        PreparedReplayIndexReset::new(db, false)
-    }
-
     /// Strictly open established operational state while sharing the caller's
     /// already-held runtime-state namespace lock. Offline GC uses this to
     /// preserve mirrored CAS roots and refuse active sync jobs without
@@ -1441,23 +1403,6 @@ impl OperationalDb {
                 OperationalOpenMode::ExistingReadWrite
             },
         )
-    }
-
-    /// Inspect replay retirement while retaining the caller's exact offline
-    /// namespace authority. No replay rows are changed until `activate`.
-    /// History reset uses this before durable intent, including for dry-run;
-    /// it must not open a normal replay handle merely to preserve credentials.
-    pub fn prepare_replay_reset_with_namespace_authority(
-        runtime_directory: &lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-        read_only: bool,
-    ) -> Result<PreparedReplayIndexReset> {
-        let db = Self::open_established_with_namespace_authority(
-            runtime_directory,
-            directory_lock,
-            OperationalOpenMode::PrepareReplayReset { read_only },
-        )?;
-        PreparedReplayIndexReset::new(db, read_only)
     }
 
     fn open_established_with_namespace_authority(
@@ -1592,23 +1537,13 @@ impl OperationalDb {
         if mode.may_initialize() && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
             sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, &path)?;
         }
-        if !mode.is_read_only()
-            && !matches!(mode, OperationalOpenMode::PrepareReplayReset { .. })
-        {
+        if !mode.is_read_only() {
             migrate_forward_if_owned(&conn, &path, None)?;
         }
-        // Preparing a reset is observation before durable intent. It cannot
-        // repair a schema or advance source-of-truth versions implicitly.
 
         assert_operational_identity(&conn, &path)?;
-        if matches!(mode, OperationalOpenMode::PrepareReplayReset { .. }) {
-            // This handle remains private to PreparedReplayIndexReset. Validate
-            // the reset scope without exposing or interpreting stale replay.
-            inspect_replay_index_reset(&conn, &path, None)?;
-        } else {
-            enforce_replay_index_epoch(&conn, &path, false, None)?;
-            assert_current(&conn, &path, None)?;
-        }
+        enforce_replay_index_epoch(&conn, &path, false, None)?;
+        assert_current(&conn, &path, None)?;
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .context("read operational journal mode")?;
@@ -1892,7 +1827,6 @@ enum OperationalOpenMode {
     CreateOrOpen,
     ExistingReadWrite,
     ExistingReadOnly,
-    PrepareReplayReset { read_only: bool },
 }
 
 impl OperationalOpenMode {
@@ -1905,10 +1839,7 @@ impl OperationalOpenMode {
     }
 
     fn is_read_only(self) -> bool {
-        matches!(
-            self,
-            Self::ExistingReadOnly | Self::PrepareReplayReset { read_only: true }
-        )
+        matches!(self, Self::ExistingReadOnly)
     }
 }
 
@@ -2150,7 +2081,7 @@ fn ensure_operational_bindings(db: &OperationalDb) -> Result<()> {
             "live Operational marker", &db.path)?;
         return Ok(());
     }
-    if let OperationalConnection::Original { owner, factory } = &db.conn {
+    if let OperationalConnection::Original { owner, factory, reference: _ } = &db.conn {
         anyhow::ensure!(db._database_file.is_none() && db._wal_file.is_none()
             && db._shm_file.is_none() && db._initialization_marker.is_none(),
             "original Operational owner must not duplicate lower source/keeper custody");
@@ -4684,45 +4615,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_preparation_refuses_schema_changes_before_intent() {
-        for appended_intermediate in [false, true] {
-            let tempdir = tempfile::tempdir().unwrap();
-            let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-            {
-                let db = OperationalDb::open(&path).unwrap();
-                create_migration_fixture(&db);
-                rewrite_current_sync_jobs_as_v5(&db);
-                if appended_intermediate {
-                    db.with_sql(|connection| Ok(connection.execute_batch(SYNC_JOB_OPERATION_DDL)?)).unwrap();
-                    db.with_sql(|connection| Ok(connection.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)?)).unwrap();
-                }
-            }
-            let snapshot = |connection: &Connection| {
-                let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-                let layout = connection.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name")
-                    .unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
-                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-                let job: (String, String, i64) = connection.query_row(
-                    "SELECT job_id, operation_type, attempt_count FROM sync_jobs WHERE job_id='job:predecessor'",
-                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
-                let credential: (i64, i64, String) = connection.query_row(
-                    "SELECT authority_revision, credential_generation, state FROM credential_profiles WHERE profile_id='profile-preserved'",
-                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
-                (version, layout, job, credential)
-            };
-            let before = {
-                let connection = Connection::open(&path).unwrap();
-                snapshot(&connection)
-            };
-            assert!(OperationalDb::prepare_explicit_replay_reset(&path).is_err(),
-                "reset preparation cannot migrate or repair a source-of-truth schema");
-            let connection = Connection::open(&path).unwrap();
-            assert_eq!(snapshot(&connection), before,
-                "preparation refusal must preserve schema, job and credential authority");
-        }
-    }
-
-    #[test]
     fn v5_forward_migration_rebuilds_exact_sync_job_schema_and_preserves_authority() {
         assert!(SCHEMA_SQL.contains(SYNC_JOBS_V6_DDL));
         let tempdir = tempfile::tempdir().unwrap();
@@ -4960,474 +4852,6 @@ mod tests {
         let mut divergent = profile.clone();
         divergent.state = "revoked".to_string();
         assert!(db.merge_credential_profile(&divergent).is_err());
-    }
-
-    #[test]
-    fn predecessor_store_refuses_until_only_replay_indexes_are_reset() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            // Rewind a fresh store to the exact schema-1 shape. Forward
-            // migration reconstructs the predecessor replay tables and
-            // installs only the predecessor epoch marker; ordinary open must
-            // still refuse until the explicit clean cut.
-            let db = OperationalDb::open(&path).unwrap();
-            db.record_cas_entry(&NewCasEntryAttribution {
-                hash: "d".repeat(64),
-                entry_kind: CasEntryKind::Object,
-                bytes: 7,
-                source_principal: None,
-                source_peer: None,
-                job_id: None,
-                state: CasEntryState::Mirrored,
-            })
-            .unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "DROP INDEX idx_credential_profiles_owner_state;
-                     DROP TABLE credential_profiles;
-                     DROP INDEX idx_replay_records_retention;
-                     DROP INDEX idx_replay_records_record_hash;
-                     DROP TABLE replay_records;
-                     DROP TABLE replay_index_epoch;
-                     PRAGMA user_version=1;",
-                )?))
-                .unwrap();
-        }
-
-        let error = OperationalDb::open(&path)
-            .err()
-            .expect("predecessor replay epoch must refuse");
-        assert!(
-            error
-                .downcast_ref::<ReplayIndexActivationRequired>()
-                .is_some()
-        );
-        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
-        prepared.activate().unwrap();
-        let (db, _) = prepared.take_activated().unwrap();
-        let version: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?))
-            .unwrap();
-        assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
-        // Non-replay operational rows survive. The two runtime-only replay
-        // indexes are current and empty; no predecessor row is translated.
-        assert_eq!(
-            db.list_cas_entries_by_state(CasEntryState::Mirrored)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
-        assert!(db.list_replay_record_hashes().unwrap().is_empty());
-    }
-
-    #[test]
-    fn replay_reset_discards_predecessor_rows_instead_of_translating_them() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            // Rewind a fresh store to the exact predecessor replay-table
-            // shape with a row that must be discarded, never decoded or
-            // translated.
-            let db = OperationalDb::open(&path).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "DROP INDEX idx_credential_profiles_owner_state;
-                     DROP TABLE credential_profiles;
-                     DROP INDEX idx_replay_records_retention;
-                     DROP INDEX idx_replay_records_record_hash;
-                     DROP TABLE replay_records;
-                     DROP TABLE replay_index_epoch;
-                     PRAGMA user_version=3;",
-                )?))
-                .unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(EFFECT_RECORDS_DDL)?)).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(PROVIDER_CALL_RECORDS_DDL)?)).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "INSERT INTO effect_records VALUES (
-                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z'
-                     );",
-                )?))
-                .unwrap();
-        }
-
-        let error = OperationalDb::open(&path)
-            .err()
-            .expect("predecessor replay epoch must refuse");
-        assert!(
-            error
-                .downcast_ref::<ReplayIndexActivationRequired>()
-                .is_some()
-        );
-        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
-        prepared.activate().unwrap();
-        let (db, _) = prepared.take_activated().unwrap();
-        assert!(db.list_replay_record_hashes().unwrap().is_empty());
-    }
-
-    #[test]
-    fn replay_reset_refuses_malformed_unified_layout_without_mutation() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            let db = OperationalDb::open(&path).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "INSERT INTO replay_records VALUES (
-                        'provider.call',
-                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z'
-                     );
-                     ALTER TABLE replay_records ADD COLUMN unexpected TEXT;
-                     UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;",
-                )?))
-                .unwrap();
-        }
-
-        assert!(OperationalDb::prepare_explicit_replay_reset(&path).is_err());
-        let conn = Connection::open(&path).unwrap();
-        assert_eq!(replay_index_epoch(&conn).unwrap(), 6);
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM replay_records", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
-        let unexpected: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('replay_records') WHERE name = 'unexpected'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(unexpected, 1);
-    }
-
-    #[test]
-    fn replay_reset_refuses_malformed_legacy_layout_without_mutation() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            let db = OperationalDb::open(&path).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "DROP INDEX idx_replay_records_retention;
-                     DROP INDEX idx_replay_records_record_hash;
-                     DROP TABLE replay_records;
-                     CREATE TABLE effect_records (
-                        cache_key TEXT PRIMARY KEY,
-                        answer_digest TEXT NOT NULL,
-                        record_hash TEXT NOT NULL,
-                        produced_at TEXT NOT NULL,
-                        last_replayed_at TEXT NOT NULL,
-                        unexpected TEXT
-                     );
-                     CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
-                     CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
-                     CREATE TABLE provider_call_records (
-                        cache_key TEXT PRIMARY KEY,
-                        answer_digest TEXT NOT NULL,
-                        record_hash TEXT NOT NULL,
-                        produced_at TEXT NOT NULL,
-                        last_replayed_at TEXT NOT NULL
-                     );
-                     CREATE INDEX idx_provider_call_records_last_replayed
-                        ON provider_call_records(last_replayed_at);
-                     CREATE INDEX idx_provider_call_records_record_hash
-                        ON provider_call_records(record_hash);
-                     INSERT INTO effect_records VALUES (
-                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z',
-                        'retained'
-                     );
-                     UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
-                )?))
-                .unwrap();
-        }
-
-        assert!(OperationalDb::prepare_explicit_replay_reset(&path).is_err());
-        let conn = Connection::open(&path).unwrap();
-        assert_eq!(replay_index_epoch(&conn).unwrap(), 4);
-        let retained: String = conn
-            .query_row("SELECT unexpected FROM effect_records", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(retained, "retained");
-        let unified: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='replay_records'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(unified, 0);
-    }
-
-    #[test]
-    fn replay_reset_preparation_preserves_credentials_and_is_non_mutating() {
-        for epochs_back in [0, 1, 2] {
-            let tempdir = tempfile::tempdir().unwrap();
-            let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-            let profile = OperationalCredentialProfileRecord {
-                profile_id: "preserved".to_owned(),
-                owner_principal: "operator".to_owned(),
-                home_id: "private-home".to_owned(),
-                authority_revision: 7,
-                credential_generation: 2,
-                state: "active".to_owned(),
-                active_login_id: None,
-                login_epoch: 1,
-                login_expires_at_ms: None,
-                sanitized_account: Some(serde_json::json!({"account_id":"account"})),
-                created_at_ms: 1,
-                updated_at_ms: 2,
-            };
-            {
-                let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
-                db.merge_credential_profile(&profile).unwrap();
-                db.with_sql(|connection| Ok(connection.execute_batch(
-                        "INSERT INTO replay_records VALUES ('dispatch.effect',
-                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                     'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                     '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
-                    )?))
-                    .unwrap();
-                db.with_sql(|connection| Ok(connection.execute(
-                        "UPDATE replay_index_epoch SET epoch = ?1",
-                        [REPLAY_INDEX_EPOCH - epochs_back],
-                    )?))
-                    .unwrap();
-            }
-            let directory = lillux::PinnedDirectory::open(tempdir.path())
-                .unwrap()
-                .unwrap();
-            let lock = directory.lock_exclusive().unwrap();
-            let mut preview = OperationalDb::prepare_replay_reset_with_namespace_authority(
-                &directory,
-                lock.clone(),
-                true,
-            )
-            .unwrap();
-            let expected = preview.report();
-            assert_eq!(
-                expected.scope,
-                match epochs_back {
-                    0 => ReplayIndexResetScope::Unchanged,
-                    1 => ReplayIndexResetScope::DispatchEffects,
-                    _ => ReplayIndexResetScope::AllReplayRecords,
-                }
-            );
-            assert_eq!(
-                preview.credential_profiles().unwrap(),
-                vec![profile.clone()]
-            );
-            assert!(preview.activate().is_err());
-            // Dropping preparation (including a crashed caller before intent)
-            // leaves the old epoch and rows intact. No full replay handle escapes.
-            let prepared = OperationalDb::prepare_replay_reset_with_namespace_authority(
-                &directory,
-                lock.clone(),
-                false,
-            )
-            .unwrap();
-            assert_eq!(prepared.report(), expected);
-            drop(prepared);
-            {
-                let conn = Connection::open(&path).unwrap();
-                assert_eq!(
-                    replay_index_epoch(&conn).unwrap(),
-                    REPLAY_INDEX_EPOCH - epochs_back
-                );
-                assert_eq!(
-                    conn.query_row("SELECT COUNT(*) FROM replay_records", [], |r| r
-                        .get::<_, i64>(0))
-                        .unwrap(),
-                    1
-                );
-            }
-            if epochs_back > 0 {
-                assert!(
-                    OperationalDb::open_existing_current_with_namespace_authority(
-                        &directory,
-                        lock.clone(),
-                        false
-                    )
-                    .is_err()
-                );
-            }
-            let mut prepared = OperationalDb::prepare_replay_reset_with_namespace_authority(
-                &directory,
-                lock.clone(),
-                false,
-            )
-            .unwrap();
-            assert!(prepared.take_activated().is_err());
-            if epochs_back > 0 {
-                FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.set(true));
-                assert!(prepared.activate().is_err());
-                assert!(prepared.take_activated().is_err());
-                assert_eq!(prepared.report(), expected);
-                assert_eq!(
-                    prepared.credential_profiles().unwrap(),
-                    vec![profile.clone()]
-                );
-            }
-            assert_eq!(prepared.activate().unwrap(), expected);
-            let (db, actual) = prepared.take_activated().unwrap();
-            assert!(prepared.take_activated().is_err());
-            assert!(prepared.activate().is_err());
-            assert_eq!(actual, expected);
-            assert_eq!(db.credential_profiles().unwrap(), vec![profile]);
-            assert_eq!(
-                db.list_replay_record_hashes().unwrap().len(),
-                usize::from(epochs_back == 0)
-            );
-            drop(db);
-            let mut repeated = OperationalDb::prepare_replay_reset_with_namespace_authority(
-                &directory, lock, false,
-            )
-            .unwrap();
-            assert_eq!(repeated.report().scope, ReplayIndexResetScope::Unchanged);
-            repeated.activate().unwrap();
-        }
-    }
-
-    #[test]
-    fn replay_reset_preparation_refuses_future_epoch_and_wrong_namespace_lock() {
-        let tempdir = tempfile::tempdir().unwrap();
-        {
-            let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
-            db.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE replay_index_epoch SET epoch = ?1",
-                    [REPLAY_INDEX_EPOCH + 1],
-                )?))
-                .unwrap();
-        }
-        let directory = lillux::PinnedDirectory::open(tempdir.path())
-            .unwrap()
-            .unwrap();
-        let lock = directory.lock_exclusive().unwrap();
-        for read_only in [true, false] {
-            assert!(
-                OperationalDb::prepare_replay_reset_with_namespace_authority(
-                    &directory,
-                    lock.clone(),
-                    read_only,
-                )
-                .is_err()
-            );
-        }
-        let unrelated = tempfile::tempdir().unwrap();
-        let other = lillux::PinnedDirectory::open(unrelated.path())
-            .unwrap()
-            .unwrap();
-        assert!(
-            OperationalDb::prepare_replay_reset_with_namespace_authority(
-                &directory,
-                other.lock_exclusive().unwrap(),
-                false,
-            )
-            .is_err()
-        );
-        let conn = Connection::open(tempdir.path().join(OPERATIONAL_DB_FILENAME)).unwrap();
-        assert_eq!(replay_index_epoch(&conn).unwrap(), REPLAY_INDEX_EPOCH + 1);
-    }
-
-    #[test]
-    fn skipped_replay_generations_discard_all_unproven_rows() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            let db = OperationalDb::open(&path).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "INSERT INTO replay_records VALUES (
-                        'dispatch.effect',
-                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z'
-                     );
-                     INSERT INTO replay_records VALUES (
-                        'provider.call',
-                        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
-                        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-                        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z'
-                     );
-                     UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
-                )?))
-                .unwrap();
-        }
-
-        let error = OperationalDb::open(&path)
-            .err()
-            .expect("predecessor effect-key epoch must refuse");
-        assert!(
-            error
-                .downcast_ref::<ReplayIndexActivationRequired>()
-                .is_some()
-        );
-        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
-        prepared.activate().unwrap();
-        let (db, report) = prepared.take_activated().unwrap();
-        assert_eq!(report.scope, ReplayIndexResetScope::AllReplayRecords);
-        assert!(db.list_replay_record_hashes().unwrap().is_empty());
-        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
-    }
-
-    #[test]
-    fn immediate_replay_predecessor_preserves_provider_rows_only() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            let db = OperationalDb::open(&path).unwrap();
-            db.with_sql(|connection| Ok(connection.execute_batch(
-                    "INSERT INTO replay_records VALUES (
-                        'dispatch.effect',
-                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z'
-                     );
-                     INSERT INTO replay_records VALUES (
-                        'provider.call',
-                        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
-                        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-                        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
-                        '2026-01-01T00:00:00Z',
-                        '2026-01-01T00:00:00Z'
-                     );",
-                )?))
-                .unwrap();
-            db.with_sql(|connection| Ok(connection.execute(
-                    "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
-                    rusqlite::params![REPLAY_INDEX_EPOCH - 1],
-                )?))
-                .unwrap();
-        }
-
-        assert!(OperationalDb::open(&path).is_err());
-        let mut prepared = OperationalDb::prepare_explicit_replay_reset(&path).unwrap();
-        prepared.activate().unwrap();
-        let (db, report) = prepared.take_activated().unwrap();
-        assert_eq!(report.scope, ReplayIndexResetScope::DispatchEffects);
-        let rows: Vec<(String, String)> = db.with_sql(|connection| {
-            let mut statement = connection.prepare("SELECT namespace, record_hash FROM replay_records ORDER BY namespace")?;
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(rows)
-        }).unwrap();
-        assert_eq!(rows, vec![("provider.call".to_string(), "f".repeat(64),)]);
-        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
     #[test]

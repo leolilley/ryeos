@@ -3,6 +3,7 @@
 //! Provisional source: no qualification until independent review and controls.
 mod binding;
 mod native;
+pub mod offline_host;
 pub mod original_host_owner;
 pub mod original_physical_custody;
 #[cfg(any(test, feature = "test-support"))]

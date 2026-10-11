@@ -16,8 +16,8 @@ pub use execution::{
 };
 pub use expression::{parse_iso_ts, validate_expression, validate_schedule_id, validate_timezone};
 pub use maintenance::{
-    NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy, OfflineResetQuota, SECTION_NAME,
-    OFFLINE_RESET_SOURCE_ROLES,
+    NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy, OfflineNativeQuota, OfflineResetQuota, SECTION_NAME,
+    OFFLINE_RESET_SOURCE_ROLES, validate_offline_native_class,
 };
 pub use vocabulary::{MisfirePolicy, OverlapPolicy, parse_misfire_policy, parse_overlap_policy};
 

@@ -19,6 +19,100 @@ pub struct NodeMaintenancePolicy {
     /// allocation. Null disables offline reset admission. Missing is invalid.
     #[serde(deserialize_with = "required_nullable_quota")]
     pub offline_reset: Option<OfflineResetQuota>,
+    /// Native envelopes for stopped-node maintenance, keyed by operation
+    /// class. A class absent from this map is refused; an empty map
+    /// disables every stopped-node native consumer.
+    pub offline_native: BTreeMap<String, OfflineNativeQuota>,
+}
+
+/// Process-scoped native envelope for one stopped-node operation class.
+///
+/// The holder issues it only while it owns the exclusive node StateLock and
+/// the runtime namespace lock, so no live daemon or other maintainer runs
+/// concurrently. The arena is private process memory reclaimed by the kernel
+/// when the process ends, so nothing charged here outlives the process and no
+/// durable debit is recorded. A consumer that creates an obligation outliving
+/// its process must use a durable claim instead of this envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineNativeQuota {
+    /// Page-rounded native arena plus allocator metadata.
+    pub max_native_storage_bytes: u64,
+    /// Irreversible allocator work across the host's lifetime, including the
+    /// reserved cleanup steps below.
+    pub max_native_allocator_steps: u64,
+    /// Connection tickets, including failed and abandoned opens.
+    pub max_native_connections: u32,
+    pub max_operation_millis: u64,
+    pub max_cleanup_millis: u64,
+    /// Reserved teardown steps. Issuance refuses when this is below the
+    /// native quote for the storage and connections above.
+    pub max_cleanup_steps: u64,
+}
+
+impl OfflineNativeQuota {
+    /// Shape checks that need no native layout knowledge.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.max_native_connections == 0 {
+            bail!("offline native connections must be positive");
+        }
+        for (name, value) in [
+            ("native storage bytes", self.max_native_storage_bytes),
+            ("native allocator steps", self.max_native_allocator_steps),
+            ("operation milliseconds", self.max_operation_millis),
+            ("cleanup milliseconds", self.max_cleanup_millis),
+            ("cleanup steps", self.max_cleanup_steps),
+        ] {
+            if value == 0 || value > i64::MAX as u64 {
+                bail!("offline native {name} quota must be positive and fit signed accounting");
+            }
+        }
+        if self.max_cleanup_steps >= self.max_native_allocator_steps {
+            bail!("offline native cleanup steps must be a strict sub-reservation of allocator steps");
+        }
+        self.max_operation_millis
+            .checked_add(self.max_cleanup_millis)
+            .and_then(|millis| millis.checked_mul(1_000_000))
+            .context("offline native service/cleanup occupancy exceeds native clock range")?;
+        Ok(())
+    }
+
+    /// Bounds owned by the native host, supplied by its owner: the arena's
+    /// control storage, its fixed ticket capacity and the cleanup quote for
+    /// this quota's storage and connections.
+    pub fn validate_native(
+        &self,
+        control_storage: u64,
+        max_connections: u32,
+        required_cleanup_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        if self.max_native_storage_bytes <= control_storage {
+            bail!("offline native storage must exceed the arena's {control_storage}-byte control storage");
+        }
+        if self.max_native_connections > max_connections {
+            bail!("offline native connections exceed the arena's {max_connections}-ticket capacity");
+        }
+        let required = required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
+        if self.max_cleanup_steps < required {
+            bail!(
+                "offline native cleanup reserves {} steps; the arena quote requires {required}",
+                self.max_cleanup_steps
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Operation class keys are lowercase ASCII words joined by `.` or `-`.
+pub fn validate_offline_native_class(class: &str) -> anyhow::Result<()> {
+    if class.is_empty()
+        || class.len() > 64
+        || !class.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-')
+    {
+        bail!("offline native class `{class}` must match [a-z0-9.-]{{1,64}}");
+    }
+    Ok(())
 }
 
 /// Hard envelope for an aggregate offline maintenance owner. The production
@@ -138,13 +232,19 @@ pub struct NodeMaintenanceSchedulePolicy {
 
 impl NodeMaintenancePolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 4 {
-            bail!("node maintenance policy schema is not current");
+        if self.schema != 5 {
+            bail!("node maintenance policy schema is not current; reset the node policy generation");
         }
         if let Some(quota) = &self.offline_reset {
             quota
                 .validate()
                 .context("validate offline reset local quota")?;
+        }
+        for (class, quota) in &self.offline_native {
+            validate_offline_native_class(class)?;
+            quota
+                .validate()
+                .with_context(|| format!("validate offline native quota `{class}`"))?;
         }
         let mut schedule_ids = HashSet::with_capacity(self.schedules.len());
         for schedule in &self.schedules {
@@ -225,8 +325,9 @@ mod tests {
             capabilities: vec!["ryeos.execute.service.maintenance/gc".into()],
         };
         let policy = NodeMaintenancePolicy {
-            schema: 4,
+            schema: 5,
             offline_reset: None,
+            offline_native: BTreeMap::new(),
             schedules: vec![schedule.clone(), schedule],
         };
         assert!(policy.validate().is_err());
@@ -264,24 +365,32 @@ mod tests {
     #[test]
     fn offline_quota_requires_explicit_current_policy_and_every_dimension() {
         let disabled: NodeMaintenancePolicy = serde_json::from_value(
-            serde_json::json!({"schema": 4, "schedules": [], "offline_reset": null}),
+            serde_json::json!({"schema": 5, "schedules": [], "offline_reset": null, "offline_native": {}}),
         )
         .unwrap();
         disabled.validate().unwrap();
         assert!(
             serde_json::from_value::<NodeMaintenancePolicy>(
-                serde_json::json!({"schema": 4, "schedules": []})
+                serde_json::json!({"schema": 5, "schedules": [], "offline_native": {}})
             )
             .is_err()
         );
         let enabled = NodeMaintenancePolicy {
-            schema: 4,
+            schema: 5,
             schedules: vec![],
             offline_reset: Some(quota()),
+            offline_native: BTreeMap::new(),
         };
         enabled.validate().unwrap();
+        assert!(
+            serde_json::from_value::<NodeMaintenancePolicy>(
+                serde_json::json!({"schema": 5, "schedules": [], "offline_reset": null})
+            )
+            .is_err(),
+            "offline_native is required"
+        );
         let mut old = enabled.clone();
-        old.schema = 3;
+        old.schema = 4;
         assert!(old.validate().is_err());
         let record = serde_json::to_value(&enabled).unwrap();
         for name in record["offline_reset"].as_object().unwrap().keys() {
@@ -337,5 +446,54 @@ mod tests {
         insufficient.max_operation_millis = u64::MAX / 1_000_000;
         insufficient.max_cleanup_millis = 60000;
         assert!(insufficient.validate().is_err());
+    }
+
+    fn native_quota() -> OfflineNativeQuota {
+        OfflineNativeQuota {
+            max_native_storage_bytes: 33554432,
+            max_native_allocator_steps: 20000000,
+            max_native_connections: 8,
+            max_operation_millis: 300000,
+            max_cleanup_millis: 60000,
+            max_cleanup_steps: 400000,
+        }
+    }
+
+    #[test]
+    fn offline_native_classes_are_data_keyed_and_every_dimension_is_bounded() {
+        let mut policy = NodeMaintenancePolicy {
+            schema: 5,
+            schedules: vec![],
+            offline_reset: None,
+            offline_native: BTreeMap::from([("replay-indexes".to_owned(), native_quota())]),
+        };
+        policy.validate().unwrap();
+        policy.offline_native.insert("Replay_Indexes".to_owned(), native_quota());
+        assert!(policy.validate().is_err());
+        policy.offline_native.remove("Replay_Indexes");
+        let record = serde_json::to_value(native_quota()).unwrap();
+        for name in record.as_object().unwrap().keys() {
+            let mut zero = record.clone();
+            zero[name] = serde_json::json!(0);
+            let zero: OfflineNativeQuota = serde_json::from_value(zero).unwrap();
+            assert!(zero.validate().is_err(), "{name}");
+            let mut missing = record.clone();
+            missing.as_object_mut().unwrap().remove(name);
+            assert!(serde_json::from_value::<OfflineNativeQuota>(missing).is_err(), "{name}");
+        }
+        let quote = |_: u64, _: u32| Ok(1000);
+        native_quota().validate_native(65_536, 64, quote).unwrap();
+        let mut over = native_quota();
+        over.max_native_connections = 65;
+        assert!(over.validate_native(65_536, 64, quote).is_err());
+        let mut small = native_quota();
+        small.max_native_storage_bytes = 65_536;
+        assert!(small.validate_native(65_536, 64, quote).is_err());
+        let mut short = native_quota();
+        short.max_cleanup_steps = 999;
+        assert!(short.validate_native(65_536, 64, quote).is_err());
+        let mut cleanup = native_quota();
+        cleanup.max_cleanup_steps = cleanup.max_native_allocator_steps;
+        assert!(cleanup.validate().is_err());
     }
 }

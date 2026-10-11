@@ -7,31 +7,23 @@
 //! from the acquiring thread only, with current-thread runtimes. Test binaries
 //! that use it need nextest or `--test-threads=1`. Acquire the host before any
 //! fork lease and never wait for it while holding one.
-use crate::original_host_owner::backing::HostStorage;
-use crate::original_host_owner::region::NativeHostRegion;
-use crate::original_host_owner::OriginalNativeRegionHandle;
-use crate::{
-    OriginalDestinationCustodyFailure, OriginalDestinationOutsideCustody,
-    OriginalLiveNativeDrainInputs, OriginalNativeAdmissionAuthority, OriginalNativeBoundInputs,
-    OriginalNativeBoundMode, OriginalNativeBudget, OriginalNativeBudgetOwner,
-    OriginalNativeCleanupAuthority, OriginalNativeConnection, OriginalNativeConnectionAdmission,
-    OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority, OriginalNativeDomain,
-    OriginalNativeFactory, OriginalNativeOpenFailure, OriginalNativeOutsideLeafEvidence,
-    OriginalNativeProducerCellIndex, OriginalNativeProducerControl,
-    OriginalNativeProjectionLeaseAdmission, OriginalNativeTerminal, OriginalNativeTransientInputs,
-    SqliteInspectionProductionControl, SqliteInspectionProductionKind,
-    SqliteInspectionProductionPermit,
+use crate::offline_host::{
+    OfflineNativeAuthority, OfflineNativeHost, offline_native_required_cleanup_steps,
 };
-use anyhow::{Context, Result, ensure};
+use crate::{
+    OriginalNativeBoundInputs, OriginalNativeBoundMode, OriginalNativeBudget,
+    OriginalNativeConnection, OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority,
+    OriginalNativeDomain, OriginalNativeFactory, OriginalNativeOpenFailure,
+    OriginalNativeTransientInputs,
+};
+use anyhow::Result;
 use lillux::PinnedDirectory;
-use std::cell::RefCell;
 use std::ffi::OsStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 const MIB: u64 = 1024 * 1024;
-const RELEASE_ATTEMPTS: u64 = 8;
 const ACQUIRE_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Native envelope one test host installs. The SQLite arena is
@@ -52,18 +44,48 @@ impl Default for TestNativeEnvelope {
 static SERIAL: Mutex<()> = Mutex::new(());
 static HOLDER: Mutex<Option<String>> = Mutex::new(None);
 static LEAKED: Mutex<Option<String>> = Mutex::new(None);
-static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn current_holder() -> String {
     let thread = std::thread::current();
     format!("{} ({:?})", thread.name().unwrap_or("<unnamed>"), thread.id())
 }
 
-/// Serialized owner of one real native arena at a time.
+/// Test authority: the serial guard is the only exclusion and has no deadline.
+struct TestAuthority;
+impl OfflineNativeAuthority for TestAuthority {
+    fn checkpoint(&self, _cleanup: bool) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialized owner of one real native arena at a time, issued through the
+/// production [`OfflineNativeHost`] with test funding.
 pub struct TestNativeHost {
     envelope: TestNativeEnvelope,
-    live: Option<LiveTestHost>,
+    live: Option<OfflineNativeHost>,
     _serial: MutexGuard<'static, ()>,
+    _thread: PhantomData<*const ()>,
+}
+
+fn install(envelope: TestNativeEnvelope) -> std::result::Result<OfflineNativeHost, String> {
+    let cleanup = offline_native_required_cleanup_steps(envelope.storage_bytes, envelope.tickets)
+        .map_err(|error| format!("cleanup quote refused: {error:#}"))?;
+    // SAFETY: test-only funding; this host is the sole issuer of the envelope.
+    let raw = unsafe {
+        OriginalNativeBudget::prepaid_by_original_issuer(
+            envelope.storage_bytes, envelope.allocator_steps, envelope.tickets, cleanup,
+        )
+    }
+    .map_err(|refusal| format!("funding refused: {refusal}"))?;
+    // SAFETY: the process-wide serial guard held by every caller of this
+    // function excludes any other host; tests use private directories.
+    unsafe { OfflineNativeHost::issue(raw, Arc::new(TestAuthority)) }.map_err(|failure| {
+        let message = format!("install refused: {:#}", failure.error);
+        match failure.release() {
+            Ok(_) => message,
+            Err(retained) => format!("{message}; partial host retained: {:#}", retained.error),
+        }
+    })
 }
 
 impl TestNativeHost {
@@ -98,28 +120,27 @@ impl TestNativeHost {
             panic!("previous TestNativeHost leaked its arena: {census}");
         }
         *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(current_holder());
-        let live = match LiveTestHost::install(envelope) {
+        let live = match install(envelope) {
             Ok(live) => live,
-            Err(error) => {
-                let census = format!("install refused: {error:#}");
+            Err(census) => {
                 *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
                 panic!("TestNativeHost {census}");
             }
         };
-        Self { envelope, live: Some(live), _serial: serial }
+        Self { envelope, live: Some(live), _serial: serial, _thread: PhantomData }
     }
 
-    fn live(&self) -> &LiveTestHost {
+    fn live(&self) -> &OfflineNativeHost {
         self.live.as_ref().expect("live test host present outside teardown")
     }
 
     pub fn factory(&self) -> &Arc<OriginalNativeFactory> {
-        &self.live().factory
+        self.live().factory().expect("test host factory admitting")
     }
 
     /// Destination authority for opens this host issues directly.
     pub fn destination(&self) -> Arc<dyn OriginalNativeDestinationAuthority> {
-        self.live().destination.clone()
+        self.live().destination().expect("test host destination")
     }
 
     /// One in-memory connection on a fresh ticket.
@@ -174,34 +195,35 @@ impl TestNativeHost {
 
     /// Record a terminal produced by code under test.
     pub fn retain_terminal(&self, terminal: OriginalNativeConnectionTerminal) {
-        terminal.require_original(self.factory()).expect("terminal belongs to this test host");
-        self.live().terminals.borrow_mut().push(terminal);
+        if let Err((_terminal, error)) = self.live().retain_terminal(terminal) {
+            panic!("terminal does not belong to this test host: {error:#}");
+        }
     }
 
     /// Record a closed projection lease for the final census.
     pub fn retain_lease(&self, lease: Arc<crate::ClosedOriginalProjectionLease>) {
-        self.live().leases.borrow_mut().push(lease);
+        if let Err((_lease, error)) = self.live().retain_lease(lease) {
+            panic!("lease does not belong to this test host: {error:#}");
+        }
     }
 
-    /// Issued ticket count and recorded terminals.
+    /// Issued ticket count and recorded terminals plus leases.
     pub fn ticket_census(&self) -> (u32, usize) {
-        let live = self.live();
-        let issued = live.factory.budget_snapshot().map(|snapshot| snapshot.connections_issued).unwrap_or(u32::MAX);
-        (issued, live.terminals.borrow().len())
+        self.live().ticket_census().unwrap_or((u32::MAX, 0))
     }
 
     /// Tear down this arena and install a fresh one under the same serial
     /// guard, for suites that need more than one envelope of tickets.
     pub fn cycle(&mut self) {
-        let live = self.live.take().expect("live test host present");
-        if let Err(census) = live.finish() {
+        let mut live = self.live.take().expect("live test host present");
+        if let Err(error) = live.finish() {
+            let census = format!("{error:#}");
             *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
             panic!("TestNativeHost cycle leaked its arena: {census}");
         }
-        match LiveTestHost::install(self.envelope) {
+        match install(self.envelope) {
             Ok(live) => self.live = Some(live),
-            Err(error) => {
-                let census = format!("reinstall refused: {error:#}");
+            Err(census) => {
                 *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
                 panic!("TestNativeHost {census}");
             }
@@ -211,272 +233,16 @@ impl TestNativeHost {
 
 impl Drop for TestNativeHost {
     fn drop(&mut self) {
-        let Some(live) = self.live.take() else { return };
+        let Some(mut live) = self.live.take() else { return };
         let finished = live.finish();
         *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        if let Err(census) = finished {
+        if let Err(error) = finished {
+            let census = format!("{error:#}");
             *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
             if !std::thread::panicking() {
                 panic!("TestNativeHost leaked its arena: {census}");
             }
         }
-    }
-}
-
-struct LiveTestHost {
-    region: NativeHostRegion,
-    admission: Arc<TestAdmission>,
-    destination: Arc<TestDestination>,
-    factory: Arc<OriginalNativeFactory>,
-    terminals: RefCell<Vec<OriginalNativeConnectionTerminal>>,
-    leases: RefCell<Vec<Arc<crate::ClosedOriginalProjectionLease>>>,
-}
-
-impl LiveTestHost {
-    fn install(envelope: TestNativeEnvelope) -> Result<Self> {
-        let layout = HostStorage::quote_native_region().map_err(anyhow::Error::msg)?;
-        let cleanup = OriginalNativeFactory::required_cleanup_steps(envelope.storage_bytes, envelope.tickets)?
-            .checked_add(RELEASE_ATTEMPTS)
-            .context("test cleanup quote overflow")?;
-        // SAFETY: test-only funding; this host is the sole issuer of the envelope.
-        let raw = unsafe {
-            OriginalNativeBudget::prepaid_by_original_issuer(
-                envelope.storage_bytes, envelope.allocator_steps, envelope.tickets, cleanup,
-            )
-        }?;
-        let mut host_region = NativeHostRegion::new(layout);
-        host_region.enter(raw, RELEASE_ATTEMPTS, || Ok(()))?;
-        host_region.map_resident(|| Ok(()))?;
-        let generation = GENERATION.fetch_add(1, Ordering::AcqRel);
-        // SAFETY: test-only funding of this host's own quote; the generation
-        // comes from a process-wide counter and is never reused.
-        let budget: Arc<OriginalNativeBudgetOwner> = unsafe { host_region.initialize(generation) }?;
-        let region = host_region.handle()?;
-        let admission = Arc::new_cyclic(|original| TestAdmission {
-            original: original.clone(),
-            budget,
-            region,
-            issuer: OnceLock::new(),
-            closed: AtomicBool::new(false),
-        });
-        let core = admission.region.claim_producer_control(SqliteInspectionProductionKind::FactoryIssuer)?;
-        admission
-            .issuer
-            .set(core.index())
-            .map_err(|_| anyhow::anyhow!("test issuer index already set"))?;
-        let control: Arc<dyn SqliteInspectionProductionControl> = Arc::new(TestProductionControl);
-        // SAFETY: the issuer cell belongs to this host's own region.
-        let permit = unsafe {
-            SqliteInspectionProductionPermit::issued_from_region(
-                SqliteInspectionProductionKind::FactoryIssuer, control, core,
-            )
-        }
-        .map_err(|failure| anyhow::anyhow!("test issuer publication refused: {}", failure.refusal))?;
-        let authority: Arc<dyn OriginalNativeAdmissionAuthority> = admission.clone();
-        // SAFETY: test-only installation of this host's funded region.
-        let factory = unsafe {
-            OriginalNativeFactory::install_from_original_issuer(admission.region.try_clone()?, authority, permit)
-        }
-        .map_err(anyhow::Error::new)?;
-        factory.initialize_original_backend().map_err(anyhow::Error::new)?;
-        let destination = Arc::new(TestDestination { factory: Arc::downgrade(&factory) });
-        Ok(Self {
-            region: host_region,
-            admission,
-            destination,
-            factory,
-            terminals: RefCell::new(Vec::new()),
-            leases: RefCell::new(Vec::new()),
-        })
-    }
-
-    /// Drain, finish, seal and release. A refusal returns the census text.
-    fn finish(self) -> std::result::Result<(), String> {
-        let LiveTestHost { mut region, admission, destination, factory, terminals, leases } = self;
-        let terminals = terminals.into_inner();
-        let leases = leases.into_inner();
-        let resident_bytes = region.bytes();
-        let census = || {
-            let issued = factory.budget_snapshot().map(|snapshot| snapshot.connections_issued);
-            format!(
-                "issued tickets {issued:?}, recorded terminals {}, resident region {} bytes",
-                terminals.len(),
-                resident_bytes
-            )
-        };
-        admission.closed.store(true, Ordering::Release);
-        let cleanup: Arc<dyn OriginalNativeCleanupAuthority> = Arc::new(TestCleanup { admission: admission.clone() });
-        // SAFETY: admission is closed above; the cleanup authority rechecks
-        // producer quiescence before every native effect.
-        let drained = match unsafe { OriginalLiveNativeDrainInputs::issued(factory.clone(), cleanup) } {
-            Ok(inputs) => inputs,
-            Err(error) => return Err(format!("drain refused: {error:#}; {}", census())),
-        };
-        let terminal = match factory.finish_live_backend(&terminals, &leases, &drained) {
-            Ok(terminal) => terminal,
-            Err(failure) => return Err(format!("finish refused: {failure}; {}", census())),
-        };
-        if let Err(error) = admission.budget.retire_original_handle(&factory, &terminal) {
-            return Err(format!("budget retirement refused: {error:#}; {}", census()));
-        }
-        let summary = census();
-        drop(terminal);
-        drop(drained);
-        drop(terminals);
-        drop(leases);
-        drop(destination);
-        drop(factory);
-        drop(admission);
-        let release = (|| -> std::result::Result<(), String> {
-            region.begin_close().map_err(|refusal| format!("{refusal:#}"))?;
-            let census = region.census().map_err(|refusal| format!("{refusal:#}"))?;
-            region
-                .release(|| Ok(()))
-                .map_err(|refusal| format!("release refused ({refusal:#}); region {census:?}"))?;
-            region.require_released().map_err(|refusal| format!("{refusal:#}"))
-        })();
-        release.map_err(|error| format!("{error}; {summary}"))
-    }
-}
-
-struct TestAdmission {
-    original: Weak<TestAdmission>,
-    budget: Arc<OriginalNativeBudgetOwner>,
-    region: OriginalNativeRegionHandle,
-    issuer: OnceLock<OriginalNativeProducerCellIndex>,
-    closed: AtomicBool,
-}
-
-impl TestAdmission {
-    fn begin_ticket(&self, kind: SqliteInspectionProductionKind) -> Result<(u32, SqliteInspectionProductionPermit)> {
-        ensure!(!self.closed.load(Ordering::Acquire), "test native admission closed");
-        ensure!(self.original.strong_count() > 0, "test admission no longer retained");
-        let core = self.region.claim_producer_control(kind)?;
-        let ticket = match self.budget.debit_connection_ticket() {
-            Ok(ticket) => ticket,
-            Err(error) => return Err(anyhow::Error::new(TestProducerFailure { error, _core: Some(core) })),
-        };
-        if let Err(refusal) = core.bind_ticket(ticket) {
-            return Err(anyhow::Error::new(TestProducerFailure { error: refusal.into(), _core: Some(core) }));
-        }
-        let control: Arc<dyn SqliteInspectionProductionControl> = Arc::new(TestProductionControl);
-        // SAFETY: the bound cell and ticket come from this host's own region.
-        let permit = unsafe { SqliteInspectionProductionPermit::issued_from_region(kind, control, core) }
-            .map_err(|failure| anyhow::Error::new(TestPublicationFailure {
-                refusal: failure.refusal,
-                _retained: failure,
-            }))?;
-        Ok((ticket, permit))
-    }
-}
-
-impl OriginalNativeAdmissionAuthority for TestAdmission {
-    fn require_original(&self, cleanup: bool) -> Result<()> {
-        ensure!(cleanup || !self.closed.load(Ordering::Acquire), "test native admission closed");
-        Ok(())
-    }
-    fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {
-        self.require_original(false)?;
-        runtime.ensure_path_binding()
-    }
-    fn budget(&self) -> Arc<OriginalNativeBudgetOwner> {
-        self.budget.clone()
-    }
-    fn debit_sql_vm_steps(&self, steps: u64) -> Result<()> {
-        self.budget.debit_steps(steps, false)
-    }
-    fn begin_connection(&self) -> Result<OriginalNativeConnectionAdmission> {
-        let (ticket, permit) = self.begin_ticket(SqliteInspectionProductionKind::Native)?;
-        // SAFETY: ticket and interval come from this host's own budget.
-        unsafe { OriginalNativeConnectionAdmission::issued(self.budget.clone(), ticket, permit) }
-            .map_err(anyhow::Error::new)
-    }
-    fn begin_projection_lease(&self) -> Result<OriginalNativeProjectionLeaseAdmission> {
-        let (ticket, permit) = self.begin_ticket(SqliteInspectionProductionKind::ProjectionLease)?;
-        // SAFETY: ticket and interval come from this host's own budget.
-        unsafe { OriginalNativeProjectionLeaseAdmission::issued(self.budget.clone(), ticket, permit) }
-            .map_err(anyhow::Error::new)
-    }
-}
-
-/// Retains the claimed producer cell of a refused ticket preparation.
-struct TestProducerFailure {
-    error: anyhow::Error,
-    _core: Option<OriginalNativeProducerControl>,
-}
-impl std::fmt::Debug for TestProducerFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TestProducerFailure").field("error", &self.error).finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for TestProducerFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "test producer preparation retained: {}", self.error)
-    }
-}
-impl std::error::Error for TestProducerFailure {}
-
-/// Retains a refused producer publication with its cell and callback.
-struct TestPublicationFailure {
-    refusal: crate::original_host_owner::FixedHostRefusal,
-    _retained: crate::SqliteInspectionProductionPublicationFailure,
-}
-impl std::fmt::Debug for TestPublicationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TestPublicationFailure").field("refusal", &self.refusal).finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for TestPublicationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "test producer publication retained: {}", self.refusal)
-    }
-}
-impl std::error::Error for TestPublicationFailure {}
-
-struct TestProductionControl;
-impl SqliteInspectionProductionControl for TestProductionControl {
-    fn checkpoint(&self) -> Result<()> {
-        Ok(())
-    }
-    fn complete(&self) -> Result<()> {
-        Ok(())
-    }
-    fn abandoned(&self) {}
-}
-
-struct TestCleanup {
-    admission: Arc<TestAdmission>,
-}
-impl OriginalNativeCleanupAuthority for TestCleanup {
-    fn require_original(&self, _factory: &Arc<OriginalNativeFactory>) -> Result<()> {
-        ensure!(self.admission.closed.load(Ordering::Acquire), "test producer admission still open");
-        let issuer = self.admission.issuer.get().context("test issuer cell absent")?;
-        self.admission.region.require_quiescent_nonissuer_producers(*issuer)?;
-        Ok(())
-    }
-}
-
-struct TestDestination {
-    factory: Weak<OriginalNativeFactory>,
-}
-impl OriginalNativeDestinationAuthority for TestDestination {
-    fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
-        let original = self.factory.upgrade().context("test destination factory gone")?;
-        ensure!(Arc::ptr_eq(&original, factory), "test destination selects foreign factory");
-        Ok(())
-    }
-    fn into_outside_custody(
-        self: Arc<Self>,
-        factory: &Arc<OriginalNativeFactory>,
-        _aggregate: &OriginalNativeTerminal,
-        _leaf: &OriginalNativeOutsideLeafEvidence,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<OriginalDestinationOutsideCustody, OriginalDestinationCustodyFailure> {
-        Err(OriginalDestinationCustodyFailure::retain(
-            factory.clone(),
-            self,
-            anyhow::anyhow!("test destination has no outside custody receiver"),
-        ))
     }
 }
 
@@ -508,6 +274,7 @@ impl TestNativeHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
 
     #[test]
     fn unarmed_open_is_refused_with_misuse() {
@@ -831,5 +598,147 @@ mod tests {
             crate::read_regular_without_sqlite_alias(&root, OsStr::new("generation.json"), 64).unwrap(),
             Some(b"{}".to_vec())
         );
+    }
+
+    /// Window-switchable authority for the production offline host.
+    struct Windows {
+        operation: std::sync::atomic::AtomicBool,
+    }
+    impl OfflineNativeAuthority for Windows {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            ensure!(cleanup || self.operation.load(std::sync::atomic::Ordering::Acquire),
+                "operation window closed");
+            Ok(())
+        }
+    }
+
+    fn serial() -> MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn raw(storage: u64, tickets: u32, cleanup: u64) -> OriginalNativeBudget {
+        // SAFETY: test-only funding of one host under the serial guard.
+        unsafe { OriginalNativeBudget::prepaid_by_original_issuer(storage, 50_000_000, tickets, cleanup) }.unwrap()
+    }
+
+    fn issue(raw: OriginalNativeBudget, authority: Arc<dyn OfflineNativeAuthority>)
+        -> std::result::Result<OfflineNativeHost, crate::offline_host::OfflineNativeHostFailure> {
+        // SAFETY: each test holds the process-wide serial guard and uses only
+        // private temporary state, so the exclusion is structural.
+        unsafe { OfflineNativeHost::issue(raw, authority) }
+    }
+
+    fn retained(host: &OfflineNativeHost, terminal: OriginalNativeConnectionTerminal) {
+        if let Err((_terminal, error)) = host.retain_terminal(terminal) {
+            panic!("terminal refused: {error:#}");
+        }
+    }
+
+    /// Refuses the `n`th operation-window checkpoint, then admits again.
+    struct RefuseNth {
+        n: usize,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+    impl OfflineNativeAuthority for RefuseNth {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            if cleanup {
+                return Ok(());
+            }
+            let seen = self.seen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+            ensure!(seen != self.n, "injected refusal at checkpoint {seen}");
+            Ok(())
+        }
+    }
+
+    /// Every refusal point of issuance, including those after the factory
+    /// is installed, leaves a partial host that releases its whole arena.
+    #[test]
+    fn every_issuance_refusal_point_releases_the_partial_host() {
+        let _serial = serial();
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut stages = Vec::new();
+        for n in 1..200 {
+            let authority = Arc::new(RefuseNth { n, seen: std::sync::atomic::AtomicUsize::new(0) });
+            match issue(raw(16 * MIB, 4, cleanup), authority) {
+                Ok(mut host) => {
+                    host.finish().unwrap();
+                    break;
+                }
+                Err(failure) => {
+                    let error = failure.release().unwrap_or_else(|retained| {
+                        panic!("refusal at checkpoint {n} retained its partial host: {retained}")
+                    });
+                    stages.push(format!("{error:#}"));
+                }
+            }
+        }
+        assert!(!stages.is_empty() && stages.len() < 199, "{stages:?}");
+        assert!(
+            stages.iter().any(|stage| stage.contains("install refused") || stage.contains("initialization refused")),
+            "no refusal after the factory install was exercised: {stages:#?}"
+        );
+    }
+
+    fn transient(host: &OfflineNativeHost) -> std::result::Result<OriginalNativeConnection, OriginalNativeOpenFailure> {
+        // SAFETY: test-only issuance under this host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, host.destination().unwrap())
+        }
+        .unwrap();
+        host.factory().unwrap().open_transient(inputs)
+    }
+
+    #[test]
+    fn offline_host_refuses_underfunded_cleanup_and_releases_the_partial_host() {
+        let _serial = serial();
+        let required = offline_native_required_cleanup_steps(32 * MIB, 8).unwrap();
+        assert!(required < 400_000, "shipped replay-indexes cleanup quota must cover {required}");
+        let failure = match issue(raw(32 * MIB, 8, required - 1), Arc::new(TestAuthority)) {
+            Ok(_) => panic!("underfunded cleanup must refuse"),
+            Err(failure) => failure,
+        };
+        let error = failure.release().unwrap_or_else(|retained| panic!("partial host retained: {retained}"));
+        assert!(format!("{error:#}").contains("cleanup steps"), "{error:#}");
+        let mut host = issue(raw(32 * MIB, 8, required), Arc::new(TestAuthority)).unwrap();
+        let census = host.finish().unwrap();
+        assert_eq!((census.connections_issued, census.terminals), (0, 0));
+    }
+
+    #[test]
+    fn offline_host_window_closes_admission_while_cleanup_completes() {
+        let _serial = serial();
+        let authority = Arc::new(Windows { operation: std::sync::atomic::AtomicBool::new(true) });
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
+        let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
+        let value: i64 = connection.with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?)).unwrap();
+        assert_eq!(value, 7);
+        authority.operation.store(false, std::sync::atomic::Ordering::Release);
+        assert!(connection.with_sql(|sql| Ok(sql.execute_batch("SELECT 1")?)).is_err(),
+            "SQL refused once the operation window closes");
+        let closed = connection.close().unwrap_or_else(|failure| panic!("close in cleanup window refused: {failure}"));
+        retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
+        match transient(&host) {
+            Ok(_) => panic!("admission must refuse after the operation window"),
+            Err(failure) => {
+                let released = failure.retry_close().unwrap_or_else(|failure| panic!("release retained: {failure}"));
+                retained(&host, OriginalNativeConnectionTerminal::Released(released));
+            }
+        }
+        let census = host.finish().unwrap();
+        assert_eq!(census.connections_issued as usize, census.terminals);
+    }
+
+    #[test]
+    fn offline_host_finish_retains_custody_while_an_alias_survives_and_resumes() {
+        let _serial = serial();
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
+        let alias = host.factory().unwrap().clone();
+        let refused = host.finish().expect_err("seal must refuse while a factory alias survives");
+        assert!(format!("{refused:#}").contains("release retained"), "{refused:#}");
+        drop(alias);
+        host.finish().unwrap();
+        host.finish().unwrap();
     }
 }

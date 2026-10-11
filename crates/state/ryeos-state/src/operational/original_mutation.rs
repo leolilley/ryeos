@@ -15,11 +15,15 @@ pub struct OriginalOperationalMutationAuthority<'frame> {
 }
 impl<'frame> OriginalOperationalMutationAuthority<'frame> {
     /// # Safety
-    /// The verifier must retain and revalidate the actual authenticated staged
-    /// OriginalOperation, pointer-identical original funded claim, original
-    /// offline mutation frame and exclusive State/CAS guard. It must require
-    /// the exact durable discard marker under that same State incarnation.
-    /// A phase enum, decoded operation reference or fresh claim is insufficient.
+    /// The verifier must revalidate the caller's actual stopped-node mutation
+    /// authority on every call. For execution-history reset that is the
+    /// authenticated staged OriginalOperation, pointer-identical original
+    /// funded claim, original offline mutation frame and exclusive State/CAS
+    /// guard, plus the exact durable discard marker under that same State
+    /// incarnation. For explicit replay-index activation it is the exclusive
+    /// node StateLock, the runtime namespace lock and the operation window of
+    /// the native host that funded `factory` under that exclusion. A phase
+    /// enum, decoded operation reference or fresh claim is insufficient.
     /// All borrowed owners must remain live throughout this capability's use.
     pub unsafe fn issued(
         root: &'frame lillux::PinnedDirectory,
@@ -41,7 +45,7 @@ impl<'frame> OriginalOperationalMutationAuthority<'frame> {
         // Actual intent/funding/State/CAS checks precede any admitted SQL or
         // mutable Operational action. They are repeated on every retry.
         (self.verify)()?;
-        let OperationalConnection::Original { owner, factory } = &db.conn else {
+        let OperationalConnection::Original { owner, factory, reference: _ } = &db.conn else {
             anyhow::bail!(
                 "original mutation authority cannot authorize an ordinary Operational owner"
             )

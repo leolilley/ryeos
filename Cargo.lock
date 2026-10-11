@@ -3345,6 +3345,7 @@ dependencies = [
  "base64 0.22.1",
  "directories",
  "lillux",
+ "lillux-sqlite",
  "rand 0.8.6",
  "ryeos-accounting",
  "ryeos-bundle",

@@ -10,6 +10,18 @@ use super::{OriginalNativeRegionCensus, OriginalNativeRegionHandle, OriginalNati
 use super::backing::{HostReleaseCredit, HostStorage, HostStorageLayout, HostStorageRegionReleaseFact,
     HostStorageReleased};
 
+static RESIDENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The next resident-region generation of this process. Every issuer in the
+/// process draws from this one counter, so no two regions ever share a
+/// generation; it refuses rather than wrap.
+pub fn next_resident_generation() -> Result<u64> {
+    use std::sync::atomic::Ordering;
+    RESIDENT_GENERATION
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1).filter(|next| *next != 0))
+        .map_err(|_| anyhow::anyhow!("resident region generation exhausted"))
+}
+
 /// Every field is retained before the corresponding effect. No Drop performs
 /// native cleanup, backing release, quota settlement or authority renewal.
 pub struct NativeHostRegion {

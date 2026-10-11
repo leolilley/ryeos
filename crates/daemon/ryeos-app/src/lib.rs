@@ -60,6 +60,7 @@ pub mod managed_external_content_operation;
 pub mod node_config;
 pub mod object_contracts;
 pub mod operator_authority;
+pub mod offline_native;
 pub mod operator_external_content;
 pub mod operator_guest_runtime_materialization;
 pub mod operator_runtime_snapshot;

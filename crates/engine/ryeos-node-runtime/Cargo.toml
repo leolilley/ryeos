@@ -12,6 +12,7 @@ test-support = ["ryeos-engine/test-support", "ryeos-state/test-support"]
 [dependencies]
 anyhow.workspace = true
 lillux.workspace = true
+lillux-sqlite.workspace = true
 ryeos-engine.workspace = true
 ryeos-state.workspace = true
 serde.workspace = true

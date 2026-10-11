@@ -1296,7 +1296,7 @@ fn advance_close(
         Custody::Operational(db) => {
             let checked = (|| -> Result<()> {
                 match &db.conn {
-                    OperationalConnection::Original { owner, factory } => {
+                    OperationalConnection::Original { owner, factory, reference: _ } => {
                         anyhow::ensure!(
                             !context.live_domain
                                 && context.factory.same_original(factory)
@@ -1324,7 +1324,7 @@ fn advance_close(
                 });
             }
             let owner = match db.conn {
-                OperationalConnection::Original { owner, .. } => owner,
+                OperationalConnection::Original { owner, factory: _, reference: _ } => owner,
                 OperationalConnection::Live(live) => {
                     context.live = Some(LiveClosedOperationalContext {
                         schema_sources: std::mem::ManuallyDrop::new(Vec::new()),
@@ -1406,12 +1406,16 @@ impl PreparedReplayIndexReset {
     }
 
     /// Caller supplies the exact original issued inputs for this runtime root
-    /// and mode. No ordinary connection, initialization or schema repair fallback.
+    /// and mode, plus the closed current-schema reference it built through the
+    /// same factory (see [`prepare_operational_schema_reference`]); the caller
+    /// keeps that reference's terminal for its census. No ordinary connection,
+    /// initialization or schema repair fallback.
     pub fn prepare_original(
         root: Arc<lillux::PinnedDirectory>,
         namespace: lillux::PinnedDirectoryLock,
         factory: Arc<OriginalNativeFactory>,
         inputs: OriginalNativeBoundInputs,
+        reference: &sqlite_schema::ClosedNativeSchemaSqlReference,
         read_only: bool,
     ) -> std::result::Result<Self, OriginalOperationalFailure> {
         let context = ContextOwner {
@@ -1426,6 +1430,10 @@ impl PreparedReplayIndexReset {
         let prepared = (|| -> Result<ReplayIndexResetReport> {
             context.require_roots()?;
             context.factory.require_runtime_binding(&context.root)?;
+            reference.require_original_closed(
+                &context.factory,
+                lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference,
+            )?;
             let directory = context.root.clone();
             anyhow::ensure!(
                 inputs.domain() == context.domain(),
@@ -1469,6 +1477,7 @@ impl PreparedReplayIndexReset {
                 conn: OperationalConnection::Original {
                     owner,
                     factory: context.factory.clone(),
+                    reference: reference.definition().clone(),
                 },
                 path,
                 _runtime_directory: directory,
@@ -1540,7 +1549,7 @@ impl OperationalDb {
             live_domain: false,
         };
         let checked = (|| -> Result<()> {
-            let OperationalConnection::Original { owner, factory } = &self.conn else {
+            let OperationalConnection::Original { owner, factory, reference: _ } = &self.conn else {
                 anyhow::bail!("ordinary Operational handle cannot provide original close evidence")
             };
             anyhow::ensure!(

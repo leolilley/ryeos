@@ -535,29 +535,15 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
         &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("replay-index reset requires the daemon to be stopped")?;
-    let path = config
-        .runtime_state_dir()
-        .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
-    let mut prepared = ryeos_state::OperationalDb::prepare_explicit_replay_reset(&path)
-        .with_context(|| format!("prepare replay indexes in {}", path.display()))?;
-    let (db, report) = loop {
-        _state_lock.ensure_protects_app_root(&config.app_root)?;
-        match prepared.activate().and_then(|_| prepared.take_activated()) {
-            Ok(activated) => break activated,
-            Err(error) => {
-                eprintln!(
-                    "replay-index reset retains its original database and stopped-node lock while retrying activation: {error:#}"
-                );
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        }
-    };
-    drop(db);
+    let activation = ryeos_app::offline_native::reset_replay_indexes(&config, &_state_lock)
+        .context("activate current replay indexes through the offline native host")?;
+    let (path, report, census) = (activation.database, activation.report, activation.census);
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "activated",
             "database": path,
             "replay_indexes": report,
+            "native_connections": census.connections_issued,
         }))?;
     } else {
         let mut status =

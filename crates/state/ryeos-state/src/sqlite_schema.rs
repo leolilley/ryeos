@@ -345,7 +345,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SchemaSqlEntry {
     object_type: String,
     name: String,
@@ -354,6 +354,7 @@ struct SchemaSqlEntry {
 }
 
 /// Exact same-library schema observation, not execution or mutation authority.
+#[derive(Clone)]
 pub struct SchemaSqlDefinition(Vec<SchemaSqlEntry>);
 impl SchemaSqlDefinition {
     pub fn capture_reference(reference: &Connection) -> Result<Self> {
