@@ -86,6 +86,12 @@ unsafe extern "C" {
         capacity: c_int,
         written: *mut c_int,
     ) -> c_int;
+    fn ryeos_sqlite_read_unbound_witness(
+        pin: c_int,
+        buffer: *mut u8,
+        capacity: c_int,
+        written: *mut c_int,
+    ) -> c_int;
     fn ryeos_sqlite_read_unbound_regular_chunk(
         pin: c_int,
         offset: u64,
@@ -187,6 +193,23 @@ pub(super) fn sync_closed_main(
 
 #[cfg(target_os = "linux")]
 pub(super) fn read_unbound_regular(pin: &std::fs::File, maximum_bytes: usize) -> Result<Vec<u8>> {
+    read_unbound(pin, maximum_bytes, ryeos_sqlite_read_unbound_regular)
+}
+
+/// The same guarded read of a retained original witness, whose projection
+/// lease census is not charged to the arena budget. It refuses exactly as
+/// [`read_unbound_regular`] does.
+#[cfg(target_os = "linux")]
+pub(super) fn read_unbound_witness(pin: &std::fs::File, maximum_bytes: usize) -> Result<Vec<u8>> {
+    read_unbound(pin, maximum_bytes, ryeos_sqlite_read_unbound_witness)
+}
+
+#[cfg(target_os = "linux")]
+fn read_unbound(
+    pin: &std::fs::File,
+    maximum_bytes: usize,
+    read: unsafe extern "C" fn(c_int, *mut u8, c_int, *mut c_int) -> c_int,
+) -> Result<Vec<u8>> {
     use std::os::fd::AsRawFd;
     ensure!(
         maximum_bytes > 0 && maximum_bytes <= 262_144,
@@ -197,7 +220,7 @@ pub(super) fn read_unbound_regular(pin: &std::fs::File, maximum_bytes: usize) ->
     let mut bytes = vec![0u8; maximum_bytes + 1];
     let mut written = 0;
     let code = unsafe {
-        ryeos_sqlite_read_unbound_regular(
+        read(
             pin.as_raw_fd(),
             bytes.as_mut_ptr(),
             bytes.len() as c_int,

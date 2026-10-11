@@ -294,10 +294,6 @@ impl OperationalMarkerSource {
     }
 }
 
-pub fn quote_operational_offline_context() -> OutsideWork {
-    OutsideWork { bytes: 4096, steps: 32 }
-}
-
 pub fn quote_operational_metadata() -> Result<OutsideWork> {
     Ok(OutsideWork {
         bytes: u64::try_from(std::mem::size_of::<LiveOperationalMetadataCustody>())?,
@@ -601,83 +597,6 @@ impl ClosedOriginalOperational {
         // The supplied original factory and actual State parent remain owned
         // by the outside supervisor. Every resource-bearing field is cached.
         drop(source_factory);
-        Ok(outside)
-    }
-    /// # Safety
-    /// The original outside controller has quiesced this actual offline
-    /// consumer and prepaid the complete handoff against its original envelope.
-    /// Cache either outcome before subsequent effects. A live service retains
-    /// a different graph and cannot use this offline continuation as a shortcut.
-    pub unsafe fn into_outside_custody(
-        self: Arc<Self>,
-        terminal: &lillux_sqlite::OriginalNativeTerminal,
-        prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> std::result::Result<OutsideOriginalOperationalCustody, (Arc<Self>, anyhow::Error)> {
-        let checked = (|| -> Result<()> {
-            self.context.factory.require_original_process()?;
-            terminal.require_original(&self.context.factory)?;
-            self.require_original(&self.context.factory)?;
-            anyhow::ensure!(
-                !self.context.live_domain && self.context.live.is_none(),
-                "offline Operational transfer cannot consume a live service graph"
-            );
-            anyhow::ensure!(
-                Arc::strong_count(&self) == 1 && Arc::weak_count(&self) == 0,
-                "Operational terminal still shared"
-            );
-            let quote = quote_operational_offline_context();
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
-                prepay(quote.bytes, quote.steps))?;
-            // A callback may return in an inherited process. Reject that
-            // incarnation before unwrapping or dropping any original owner.
-            self.context.factory.require_original_process()?;
-            terminal.require_original(&self.context.factory)?;
-            self.require_original(&self.context.factory)
-        })();
-        if let Err(error) = checked {
-            return Err((self, error));
-        }
-        let actual = match Arc::try_unwrap(self) {
-            Ok(actual) => actual,
-            Err(actual) => {
-                return Err((
-                    actual,
-                    anyhow::anyhow!("Operational consuming transfer lost unique ownership"),
-                ));
-            }
-        };
-        let Self {
-            context,
-            terminal,
-            prior_refusal,
-        } = actual;
-        let ContextOwner {
-            factory,
-            root,
-            namespace,
-            ..
-        } = context;
-        let outside = OutsideOriginalOperationalCustody {
-            process: std::process::id(),
-            live: std::mem::ManuallyDrop::new(None),
-            live_metadata: std::mem::ManuallyDrop::new(None),
-            live_domain: false,
-            root: Some(root),
-            namespace: Some(namespace),
-            terminal: std::mem::ManuallyDrop::new(Some(terminal)),
-            native_failure: None,
-            sql_custody: Vec::new(),
-            shared_registrations: std::array::from_fn(|_| None),
-            shared_registry_identity: None,
-            retired_shared_roots_consumed: false,
-            marker_source: OperationalMarkerSource::new(),
-            descriptor_owners: Vec::new(),
-            descriptor_receipts: Vec::new(),
-            prior_refusal,
-        };
-        // Actual terminal and physical owners remain in the outside token.
-        // Removing only this redundant factory alias grants no disposal proof.
-        drop(factory);
         Ok(outside)
     }
 }
@@ -1194,20 +1113,6 @@ impl OutsideOriginalOperationalCustody {
 
     pub fn descriptor_owners(&self) -> &[Arc<lillux_sqlite::RetainedOriginalFinalizerFile>] {
         &self.descriptor_owners
-    }
-    pub fn retain_descriptor_retirement(
-        &mut self,
-        index: usize,
-        receipt: Arc<lillux_sqlite::RetiredOriginalFinalizerFile>,
-    ) -> Result<()> {
-        self.require_process()?;
-        let actual = self
-            .descriptor_owners
-            .get(index)
-            .context("Operational outside descriptor slot absent")?;
-        receipt.require_original(actual)?;
-        self.descriptor_receipts[index] = Some(receipt);
-        Ok(())
     }
     /// Only actual descriptor obligations, not durable/account settlement.
     pub fn descriptors_retired(&self) -> bool {

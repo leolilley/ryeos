@@ -223,9 +223,6 @@ pub(super) struct OriginalQuotaClaim {
     inspection_namespace: Mutex<Option<lillux::PinnedDirectoryLock>>,
     publication_entered: AtomicBool,
     publication_acknowledged: AtomicBool,
-    /// Set once post-acknowledgement custody begins; service and the copy
-    /// work's own custody end there.
-    outside_custody_entered: AtomicBool,
     reservation_publication: Mutex<Option<Arc<lillux_sqlite::RetainedOriginalWitnessFile>>>,
     copy_usage: Mutex<CopyUsage>,
     production: Mutex<OriginalProductionState>,
@@ -262,8 +259,8 @@ fn deregister_live_claim(ledger: &lillux::PinnedDirectoryIdentity) {
     }
 }
 
-/// How many claims on `ledger` are alive in this process. Recovery of stale
-/// ledger entries refuses while this is above zero.
+/// How many claims on `ledger` are alive in this process. Only the registry
+/// tests read it; no production path consults the count.
 #[cfg(test)]
 pub(super) fn live_claims_on(ledger: &lillux::PinnedDirectoryIdentity) -> usize {
     LIVE_CLAIMS
@@ -2108,70 +2105,17 @@ pub(super) struct OriginalInspectionSlot {
     pub(super) accounting: InspectionAccountingRequirement,
     pub(super) never_started: bool,
 }
-enum OriginalOfflineDestinationSemantics {
-    Operational,
-    Runtime { name: std::ffi::OsString, main_identity: (u64, u64) },
-}
-/// This removes only a redundant account alias after the actual original
-/// supervisor retains the canonical account. No account owner is disposed.
-struct OriginalOfflineDestinationContinuation {
-    leaf: lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-    process: u32,
-    claim: std::sync::Weak<OriginalQuotaClaim>,
-    semantics: OriginalOfflineDestinationSemantics,
-}
-// SAFETY: concrete original domain fields/account alias, copied issuer PID;
-// directory/namespace owners are moved into the shared physical source token.
-// The real account controller retains its own complete physical obligations.
-unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for OriginalOfflineDestinationContinuation {
-    fn require_original_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original offline destination continuation");
-        Ok(())
-    }
-    fn retire_native_references(&mut self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
-        self.require_original_process()?;
-        self.leaf.require_original(factory, aggregate)?;
-        let claim = self.claim.upgrade().context("actual canonical offline account owner absent")?;
-        claim.require_destination_outside_transfer(factory, aggregate)
-        // This context owns no factory, budget or region handle. The canonical
-        // account's independently retained native controls still count and
-        // MUST be consumed by that account controller before region sealing.
-    }
-    unsafe fn register_shared_roots(&mut self,
-        _registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-        _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
-        self.require_original_process()
-        // All actual roots/namespace owners of this concrete destination were
-        // moved to OriginalDestinationPhysicalSource; none are hidden here.
-    }
-    fn physical_holders_retired(&self) -> Result<bool> {
-        self.require_original_process()?;
-        Ok(true) // No physical holder in this semantic-only weak alias.
-    }
-    fn physical_holders_retirement_quote(&self) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
-        self.require_original_process()?;
-        Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 4 })
-    }
-}
 impl OriginalQuotaClaim {
+    /// A destination's outside handoff. The offline native host has no
+    /// outside receiver: every destination of this claim ends in process with
+    /// its host census, so the handoff always refuses and keeps its owner.
     fn require_destination_outside_transfer(self: &Arc<Self>,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal) -> Result<()> {
         ensure!(self.process == std::process::id(), "foreign offline destination account");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let issued = self.issued_native_factory()?;
-        ensure!(Arc::ptr_eq(&issued, factory), "destination transfer selects another genuine factory");
-        ensure!(self.outside_custody_entered.load(Ordering::Acquire),
-            "post-acknowledgement outside custody not entered");
-        ensure!(!self.native_cleanup_deadline.has_elapsed(), "original destination cleanup deadline elapsed");
-        let state = self.production.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual destination production seal busy or poisoned"))?;
-        ensure!(state.phase == OriginalProductionPhase::Sealed && state.active.is_empty(),
-            "original destination account producer not sealed");
-        Ok(())
+        anyhow::bail!("offline reset destinations have no outside receiver; they end with the native host census")
     }
 }
 
@@ -2185,43 +2129,15 @@ struct OriginalOperationalAuthority {
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalOperationalAuthority {
     fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        prepay: &dyn Fn(u64, u64) -> Result<()>)
+        _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        _prepay: &dyn Fn(u64, u64) -> Result<()>)
         -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
-        let checked = (|| -> Result<()> {
-            let actual: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = self.clone();
-            leaf.require_original_authority(&actual, factory, aggregate)?;
-            drop(actual);
-            self.claim.require_destination_outside_transfer(factory, aggregate)?;
-            let original = self.factory.upgrade().context("actual original destination affinity absent")?;
-            ensure!(Arc::ptr_eq(&original, factory), "outside destination selects foreign factory affinity");
-            ensure!(Arc::strong_count(&self) == 1,
-                "actual original destination authority still has aliases");
-            let bytes = std::mem::size_of::<OriginalOfflineDestinationContinuation>()
-                .checked_add(std::mem::size_of::<lillux_sqlite::OriginalDestinationOutsideCustody>())
-                .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>()))
-                .context("outside destination concrete custody quote overflow")?;
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| prepay(u64::try_from(bytes)?, 16))?;
-            self.claim.require_destination_outside_transfer(factory, aggregate)
-        })();
-        if let Err(error) = checked {
-            return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error));
-        }
-        let original = match Arc::try_unwrap(self) {
-            Ok(original) => original,
-            Err(original) => return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
-                factory.clone(), original, anyhow::anyhow!("actual original destination alias appeared during transfer"))),
+        // The refusal keeps this authority, with its root and namespace.
+        let error = match self.claim.require_destination_outside_transfer(factory, aggregate) {
+            Err(error) => error,
+            Ok(()) => anyhow::anyhow!("offline reset destination handoff has no receiver"),
         };
-        let Self { claim, factory: _, root, namespace } = original;
-        let continuation = Box::new(OriginalOfflineDestinationContinuation {
-            leaf: leaf.clone(), process: claim.process, claim: Arc::downgrade(&claim), semantics: OriginalOfflineDestinationSemantics::Operational,
-        });
-        let sources = vec![lillux_sqlite::OriginalDestinationPhysicalSource::Directory(root),
-            lillux_sqlite::OriginalDestinationPhysicalSource::Namespace(namespace)];
-        // SAFETY: post-acknowledgement outside custody is entered under the
-        // claim's settlement admission, the aggregate is genuine and the
-        // storage was charged before any Vec/Box allocation.
-        Ok(unsafe { lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation) })
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
     }
 
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
@@ -2399,43 +2315,15 @@ struct OriginalRuntimeMutationAuthority {
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalRuntimeMutationAuthority {
     fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        prepay: &dyn Fn(u64, u64) -> Result<()>)
+        _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        _prepay: &dyn Fn(u64, u64) -> Result<()>)
         -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
-        let checked = (|| -> Result<()> {
-            let actual: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = self.clone();
-            leaf.require_original_authority(&actual, factory, aggregate)?;
-            drop(actual);
-            self.claim.require_destination_outside_transfer(factory, aggregate)?;
-            let original = self.factory.upgrade().context("actual original destination affinity absent")?;
-            ensure!(Arc::ptr_eq(&original, factory), "outside destination selects foreign factory affinity");
-            ensure!(Arc::strong_count(&self) == 1,
-                "actual original destination authority still has aliases");
-            let bytes = std::mem::size_of::<OriginalOfflineDestinationContinuation>()
-                .checked_add(std::mem::size_of::<lillux_sqlite::OriginalDestinationOutsideCustody>())
-                .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>()))
-                .context("outside destination concrete custody quote overflow")?;
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| prepay(u64::try_from(bytes)?, 16))?;
-            self.claim.require_destination_outside_transfer(factory, aggregate)
-        })();
-        if let Err(error) = checked {
-            return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error));
-        }
-        let original = match Arc::try_unwrap(self) {
-            Ok(original) => original,
-            Err(original) => return Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
-                factory.clone(), original, anyhow::anyhow!("actual original destination alias appeared during transfer"))),
+        // The refusal keeps this authority, with its root and namespace.
+        let error = match self.claim.require_destination_outside_transfer(factory, aggregate) {
+            Err(error) => error,
+            Ok(()) => anyhow::anyhow!("offline reset destination handoff has no receiver"),
         };
-        let Self { claim, factory: _, root, namespace, name, main_identity } = original;
-        let continuation = Box::new(OriginalOfflineDestinationContinuation {
-            leaf: leaf.clone(), process: claim.process, claim: Arc::downgrade(&claim), semantics: OriginalOfflineDestinationSemantics::Runtime { name, main_identity },
-        });
-        let sources = vec![lillux_sqlite::OriginalDestinationPhysicalSource::Directory(root),
-            lillux_sqlite::OriginalDestinationPhysicalSource::Namespace(namespace)];
-        // SAFETY: post-acknowledgement outside custody is entered under the
-        // claim's settlement admission, the aggregate is genuine and the
-        // storage was charged before any Vec/Box allocation.
-        Ok(unsafe { lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation) })
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
     }
 
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
@@ -2863,7 +2751,6 @@ impl OriginalQuotaClaim {
             inspection_namespace: Mutex::new(None),
             publication_entered: AtomicBool::new(false),
             publication_acknowledged: AtomicBool::new(false),
-            outside_custody_entered: AtomicBool::new(false),
             reservation_publication: Mutex::new(None),
             copy_usage: Mutex::new(CopyUsage::default()),
             production: Mutex::new(OriginalProductionState::default()),
@@ -2907,10 +2794,6 @@ impl OriginalQuotaClaim {
     }
 
     pub(super) fn require_service_window(&self) -> Result<std::time::Duration> {
-        ensure!(
-            !self.outside_custody_entered.load(Ordering::Acquire),
-            "post-acknowledgement custody entered; service/copy admission refused"
-        );
         self.record.validate()?;
         ensure!(
             self.record.clock_binding == self.clock.binding_digest(),
@@ -3186,7 +3069,6 @@ impl OriginalQuotaClaim {
         let inspection_namespace = self.retain_inspection_namespace()?;
         self.require_service_window()?;
         let work = Arc::new(OriginalCopyWork {
-            outside_admission: Mutex::new(None),
             claim: Arc::clone(self),
             namespace,
             inspection_namespace,
@@ -3685,9 +3567,6 @@ impl std::error::Error for CreatedEvidenceFailure {
 /// Field order is drop order: the work's own locks, policy and reservation
 /// pin end before the claim, whose StateLock lease outlives them.
 struct OriginalCopyWork {
-    /// The settlement admission that checks and funds this work's outside
-    /// callbacks once post-acknowledgement custody begins.
-    outside_admission: Mutex<Option<std::sync::Weak<OriginalSettlementAdmission>>>,
     namespace: lillux::PinnedDirectoryLock,
     inspection_namespace: lillux::PinnedDirectoryLock,
     policy: ryeos_node_runtime::node_policy::NodePolicySnapshot,
@@ -3841,22 +3720,6 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
 }
 
 impl OriginalCopyWork {
-    /// The settlement admission registered when post-acknowledgement custody
-    /// began; it must select this work and its claim.
-    fn outside_admission(&self) -> Result<Arc<OriginalSettlementAdmission>> {
-        let admission = self
-            .outside_admission
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("copy outside admission lookup busy or poisoned"))?
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .context("copy outside admission not registered")?;
-        ensure!(
-            std::ptr::eq(admission.original.as_ref(), self) && Arc::ptr_eq(&admission.claim, &self.claim),
-            "copy selects another outside settlement admission"
-        );
-        Ok(admission)
-    }
     fn original_reservation_identity(&self) -> Result<lillux::OpenFileIdentity> {
         let custody = self
             .reservation_pin
@@ -3894,10 +3757,6 @@ impl OriginalCopyWork {
         moved.clone().context("issued reservation pin left without its release")
     }
     fn require_custody(&self) -> Result<()> {
-        ensure!(
-            !self.claim.outside_custody_entered.load(Ordering::Acquire),
-            "post-acknowledgement custody entered; copy custody refused"
-        );
         self.claim
             .state_lease
             .ensure_protects_app_root(self.claim.app_root.path())?;
@@ -4130,26 +3989,6 @@ impl OriginalCopyWork {
 }
 
 impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
-    fn debit_original_outside_steps(&self,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>, aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        steps: u64) -> Result<()> {
-        self.require_original_outside_master(factory, aggregate)?;
-        ensure!(steps > 0, "original outside inspection debit is empty");
-        self.outside_admission()?.debit_original(steps)
-    }
-
-    fn require_original_outside_master(
-        &self,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-    ) -> Result<()> {
-        ensure!(self.claim.process == std::process::id(),
-            "copy outside custody belongs to another original process");
-        self.claim.require_destination_outside_transfer(factory, aggregate)?;
-        // The lookup gate is released before the settlement checkpoint.
-        // This consumes the existing cleanup allowance, never service credit.
-        self.outside_admission()?.checkpoint_original()
-    }
 
     fn require_original_native_factory(
         &self,
@@ -5529,41 +5368,6 @@ mod live_claim_tests {
     }
 }
 
-#[cfg(test)]
-mod inventory_release_tests {
-    use super::OriginalControllerInspectionGroup;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Debug)]
-    struct DropProbe(Arc<AtomicUsize>);
-    impl std::fmt::Display for DropProbe {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("retained refusal") }
-    }
-    impl std::error::Error for DropProbe {}
-    impl Drop for DropProbe {
-        fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
-    }
-
-    #[test]
-    fn controller_inspection_group_ends_its_inventories_instead_of_leaking() {
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let group = OriginalControllerInspectionGroup {
-            failures: Some(vec![anyhow::Error::new(DropProbe(Arc::clone(&dropped)))]),
-            closed: Some(Vec::new()),
-            acquisition: Some(Vec::new()),
-            runtime: Some(Vec::new()),
-            cleanup: Some(Vec::new()),
-            controller_disposals: Some(Vec::new()),
-            settlement_disposals: Some(Vec::new()),
-            groups: None,
-        };
-        assert_eq!(dropped.load(Ordering::SeqCst), 0);
-        drop(group);
-        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the group ended its retained refusal");
-    }
-}
-
 /// Actual source retirement plus native terminal. The charged reservation and
 /// original finalizer lifelines remain owned; this is not full completion.
 pub(super) struct OriginalReleasePins {
@@ -5895,195 +5699,19 @@ impl OriginalInspectionSettlement {
 /// Field order is drop order: every post-acknowledgement owner ends before
 /// `ready`, whose release pins, factory and backend terminal they joined.
 pub(super) struct OriginalPostAckFinalization {
-    inspection_group: Mutex<Option<OriginalControllerInspectionGroup>>,
-    state: Mutex<OriginalPostAckStateCustody>,
-    sql_custody: Mutex<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
-    destination_packets: Mutex<Option<Vec<OriginalDestinationPacketProgress>>>,
-    physical_registry: Mutex<OriginalOutsideRegistryCustody>,
-    descriptor_retirements: Mutex<Vec<OriginalOutsideDescriptorRetirement>>,
-    metadata_retirements: Mutex<Vec<OriginalOutsideMetadataRetirement>>,
+    state: Arc<ryeos_state::state_db::ClosedOriginalState>,
+    acknowledgement: Arc<ryeos_state::state_db::OriginalStateAcknowledgement>,
     operation: ThreadHistoryDiscardOperationRef,
     ready: Arc<OriginalReleasePins>,
 }
-/// Complete concrete controller inventories, moved without allocating new
-/// vectors. The supervisor keeps the group across partial transfer and
-/// restores it before any refusal. Field order is drop order: retained
-/// failures and redundant aliases end before the canonical disposals and
-/// copy groups that own the resources.
-struct OriginalControllerInspectionGroup {
-    failures: Option<Vec<anyhow::Error>>,
-    closed: Option<Vec<Arc<crate::runtime_db::SqliteInspectionClosed>>>,
-    acquisition: Option<Vec<Arc<crate::runtime_db::SqliteInspectionAcquisitionReleased>>>,
-    runtime: Option<Vec<Arc<crate::runtime_db::RuntimeInspectionRelease>>>,
-    cleanup: Option<Vec<Arc<crate::runtime_db::InspectionCopyCleanup>>>,
-    controller_disposals: Option<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>,
-    settlement_disposals: Option<Vec<Arc<crate::runtime_db::InspectionCopyDisposal>>>,
-    groups: Option<Vec<crate::runtime_db::OriginalInspectionCopyGroup>>,
-}
-struct OriginalOutsideMetadataRetirement {
-    pin: Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
-    inputs: Option<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>>,
-    receipt: Option<Arc<lillux_sqlite::RetiredOriginalMetadataPin>>,
-}
-struct OriginalOutsideStateMetadataAuthority {
-    post_ack: std::sync::Weak<OriginalPostAckFinalization>,
-    pin: Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
-}
-impl lillux_sqlite::OriginalMetadataPinRetirementAuthority for OriginalOutsideStateMetadataAuthority {
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        terminal: &Arc<lillux_sqlite::OriginalNativeTerminal>, pin: &Arc<lillux_sqlite::RetainedOriginalMetadataPin>) -> Result<()> {
-        let post_ack = self.post_ack.upgrade().context("actual outside State metadata producer absent")?;
-        ensure!(post_ack.ready.seal.claim.process == std::process::id(),
-            "outside State metadata belongs to original process");
-        ensure!(Arc::ptr_eq(factory, &post_ack.ready.factory)
-            && Arc::ptr_eq(terminal, &post_ack.ready.terminal) && Arc::ptr_eq(pin, &self.pin),
-            "State metadata retirement selects foreign native/actual pin custody");
-        terminal.require_original(factory)?;
-        post_ack.ready.admission.checkpoint_original()?;
-        let custody = post_ack.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("State physical metadata membership busy or poisoned"))?;
-        let OriginalPostAckStateCustody::Physical(physical) = &*custody else {
-            anyhow::bail!("actual State physical metadata token absent");
-        };
-        ensure!(physical.operation() == &post_ack.operation
-            && physical.durability_pins().iter().any(|actual| Arc::ptr_eq(actual, pin)),
-            "State metadata pin is not in its exact original physical custody");
-        Ok(())
-    }
-    fn debit_original_steps(&self, steps: u64) -> Result<()> {
-        let post_ack = self.post_ack.upgrade().context("actual original State metadata producer absent")?;
-        post_ack.ready.admission.debit_original(steps)
-    }
-}
 
-fn retained_original_outside_callback(call: impl Fn() -> Result<()>) -> Result<()> {
-    lillux_sqlite::original_physical_custody::retain_callback_refusal(&call)
-}
-
-enum OriginalOutsideRegistryCustody {
-    Unissued,
-    InFlight,
-    Original(lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry),
-}
-struct OriginalOutsideDescriptorRetirement {
-    owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-    inputs: Arc<lillux_sqlite::OriginalOutsideFinalizerFileRetirementInputs>,
-    receipt: Option<Arc<lillux_sqlite::RetiredOriginalFinalizerFile>>,
-}
-struct OriginalOutsideSharedDescriptorAuthority {
-    post_ack: std::sync::Weak<OriginalPostAckFinalization>,
-    registration: lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
-    owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-}
-// SAFETY: private issuance binds the actual opaque original registry member
-// and its exact cached File. The settlement admission checks and debits the
-// same ledger, clock and cleanup custody outside the native resident graph.
-unsafe impl lillux_sqlite::OriginalOutsideFinalizerFileRetirementAuthority
-    for OriginalOutsideSharedDescriptorAuthority {
-    fn require_original(&self, owner: &Arc<lillux_sqlite::RetainedOriginalFinalizerFile>) -> Result<()> {
-        let post_ack = self.post_ack.upgrade().context("actual outside physical producer absent")?;
-        ensure!(post_ack.ready.seal.claim.process == std::process::id(),
-            "outside shared descriptor belongs to original process");
-        ensure!(Arc::ptr_eq(owner, &self.owner), "outside retirement selects another actual descriptor");
-        post_ack.ready.admission.checkpoint_original()?;
-        let custody = post_ack.physical_registry.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual original physical membership busy or poisoned"))?;
-        let OriginalOutsideRegistryCustody::Original(registry) = &*custody else {
-            anyhow::bail!("actual original shared registry absent or transferring");
-        };
-        registry.require_membership(&self.registration)?;
-        ensure!(Arc::ptr_eq(&self.registration.owner()?, owner),
-            "outside grant differs from its actual original registry File");
-        Ok(())
-    }
-    fn debit_original_steps(&self, steps: u64) -> Result<()> {
-        let post_ack = self.post_ack.upgrade().context("actual original outside producer absent")?;
-        post_ack.ready.admission.debit_original(steps)
-    }
-}
-
-/// Unused bound inputs of one destination packet. Field order is drop order,
-/// the bound inputs' own: the root, then the inspection lease and SQL work.
-struct OriginalOutsideBoundResources {
-    root: Option<Arc<lillux::PinnedDirectory>>,
-    name: lillux_sqlite::OriginalNativeOutsideBoundCoordinate,
-    mode: lillux_sqlite::OriginalNativeBoundMode,
-    domain: lillux_sqlite::OriginalNativeDomain,
-    inspection: Option<(lillux_sqlite::SqliteCopyLease, Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>,
-    registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
-}
-/// One native packet's progress toward outside custody. Each stage takes the
-/// previous stage's owner and restores it on refusal. Field order is drop
-/// order: the native packet and its parts end before the destination authority
-/// and custody, and the unused bound roots last.
-struct OriginalDestinationPacketProgress {
-    raw: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
-    parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
-    refusal: Option<lillux_sqlite::OriginalDestinationCustodyFailure>,
-    authority: Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>,
-    destination: Option<lillux_sqlite::OriginalDestinationOutsideCustody>,
-    bound: Option<OriginalOutsideBoundResources>,
-    normalized: bool,
-    requires_destination: bool,
-}
-impl OriginalDestinationPacketProgress {
-    fn from_original(raw: lillux_sqlite::OriginalNativeOutsideConnectionCustody) -> Self {
-        Self { raw: Some(raw), parts: None, refusal: None, authority: None, destination: None,
-            bound: None, normalized: false, requires_destination: false }
-    }
-    fn normalize_original(&mut self) -> Result<()> {
-        if self.normalized { return Ok(()); }
-        if let Some(raw) = self.raw.take() {
-            match raw.into_original_parts() {
-                Ok(parts) => self.parts = Some(parts),
-                Err(raw) => { self.raw = Some(raw); anyhow::bail!("actual native packet extraction refused"); }
-            }
-        }
-        let parts = self.parts.as_mut().context("actual original native packet parts absent")?;
-        ensure!(parts.bound_inputs.is_none() || parts.transient.is_none(),
-            "actual packet retains conflicting original destination owners");
-        if let Some(bound) = parts.bound_inputs.take() {
-            let bound = match bound.into_original_parts() {
-                Ok(bound) => bound,
-                Err(bound) => { parts.bound_inputs = Some(bound); anyhow::bail!("actual original bound inputs extraction refused"); }
-            };
-            self.authority = Some(bound.authority);
-            self.bound = Some(OriginalOutsideBoundResources {
-                root: Some(bound.root), name: bound.name,
-                mode: bound.mode, domain: bound.domain,
-                inspection: bound.inspection, registration: None,
-            });
-        } else { self.authority = parts.transient.take(); }
-        self.requires_destination = self.authority.is_some();
-        self.normalized = true;
-        Ok(())
-    }
-}
-
-enum OriginalPostAckStateCustody {
-    Original {
-        state: Arc<ryeos_state::state_db::ClosedOriginalState>,
-        acknowledgement: Arc<ryeos_state::state_db::OriginalStateAcknowledgement>,
-    },
-    // Exclusive temporary transfer custody, never disposal/settlement proof.
-    Handoff,
-    Outside(ryeos_state::state_db::OriginalOutsideStateFinalizer),
-    Physical(ryeos_state::state_db::OriginalStatePhysicalCustody),
-    Refused(ryeos_state::state_db::OriginalStateOutsideRetirementFailure),
-}
 impl OriginalPostAckFinalization {
     fn original_state_inputs(&self) -> Result<(
         Arc<ryeos_state::state_db::ClosedOriginalState>,
         Arc<ryeos_state::state_db::OriginalStateAcknowledgement>,
     )> {
         self.ready.factory.require_original_process()?;
-        let custody = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("original post-ACK State custody busy or poisoned"))?;
-        match &*custody {
-            OriginalPostAckStateCustody::Original { state, acknowledgement } =>
-                Ok((state.clone(), acknowledgement.clone())),
-            _ => anyhow::bail!("original State proof has entered consuming outside custody"),
-        }
+        Ok((self.state.clone(), self.acknowledgement.clone()))
     }
     fn require_state_ack(&self) -> Result<()> {
         let (state, acknowledgement) = self.original_state_inputs()?;
@@ -6091,819 +5719,9 @@ impl OriginalPostAckFinalization {
             &state, &self.ready.factory, &self.ready.terminal, &self.operation,
         )
     }
-    /// The caller first removes only its redundant State/ACK aliases after
-    /// retaining this actual producer. Refusal keeps the entire genuine tuple;
-    /// retry takes that tuple, never manufactures a State or acknowledgement.
-    pub(super) fn transfer_state_outside(
-        &self,
-        finalizer: Option<Arc<ryeos_state::state_db::OriginalStateFinalizer>>,
-        guard: &ryeos_state::recovery::CasMutationGuard,
-    ) -> Result<()> {
-        self.ready.factory.require_original_process()?;
-        self.ready.admission.checkpoint_original()?;
-        let mut custody = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("original State handoff custody busy or poisoned"))?;
-        if matches!(&*custody, OriginalPostAckStateCustody::Outside(_) | OriginalPostAckStateCustody::Physical(_)) {
-            ensure!(finalizer.is_none(), "outside State retry supplied another finalizer");
-            return Ok(());
-        }
-        match &*custody {
-            OriginalPostAckStateCustody::Original { .. } =>
-                ensure!(finalizer.is_some(), "actual original State finalizer absent"),
-            OriginalPostAckStateCustody::Refused(_) =>
-                ensure!(finalizer.is_none(), "State refusal already retains its actual finalizer"),
-            _ => anyhow::bail!("original State handoff is already in progress"),
-        }
-        let original = std::mem::replace(&mut *custody, OriginalPostAckStateCustody::Handoff);
-        drop(custody);
-        let (state, acknowledgement, finalizer) = match original {
-            OriginalPostAckStateCustody::Original { state, acknowledgement } =>
-                (state, acknowledgement, finalizer.expect("checked actual State finalizer")),
-            OriginalPostAckStateCustody::Refused(failure) => failure.into_original_inputs(),
-            _ => unreachable!("checked exclusive State handoff"),
-        };
-        // The lower consuming entry authenticates the exact ACK/terminal/CAS
-        // and all ten actual root receipts before calling this prepaid quote.
-        // No State/controller gate spans that callback or native transfer.
-        let prepay = |bytes, steps| retained_original_outside_callback(|| self.debit_finalizer_transfer(bytes, steps));
-        // SAFETY: the actual offline synchronous consumers are quiescent,
-        // the same continuously retained exclusive CAS frame and original
-        // settlement admission/clock select this tuple; redundant aliases were removed by
-        // the caller. Cache success or the whole refusal before late checks.
-        let transferred = unsafe { state.into_outside_finalizer(
-            acknowledgement, &self.ready.terminal, &self.operation,
-            guard, finalizer, &prepay,
-        ) };
-        let (next, refusal) = match transferred {
-            Ok(outside) => (OriginalPostAckStateCustody::Outside(outside), None),
-            Err(failure) => {
-                let message = format!("actual State outside handoff retains its original inputs: {failure}");
-                (OriginalPostAckStateCustody::Refused(failure), Some(message))
-            }
-        };
-        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = next;
-        if let Some(message) = refusal { anyhow::bail!(message); }
-        self.ready.admission.checkpoint_original()
-    }
-    pub(super) fn prepay_outside_continuation(&self, memory_bytes: u64, steps: u64) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "outside continuation belongs to original process");
-        self.ready.admission.checkpoint_original()?;
-        ensure!(steps > 0, "outside continuation requires positive original work; zero-byte scans allocate no storage");
-        self.ready.admission.debit_original(steps)?;
-        let mut used = self.ready.admission.claim.copy_usage.try_lock()
-            .map_err(|_| anyhow::anyhow!("outside continuation memory debit busy or poisoned"))?;
-        let memory = used.buffer_bytes.checked_add(memory_bytes)
-            .context("outside continuation memory quote overflow")?;
-        ensure!(memory.checked_add(used.native_storage_bytes)
-            .and_then(|total| total.checked_add(used.host_region_bytes))
-            .is_some_and(|total| total <= self.ready.admission.claim.record.reserved.max_memory_bytes),
-            "outside continuation exceeds original signed memory envelope");
-        used.buffer_bytes = memory;
-        drop(used);
-        self.ready.admission.checkpoint_original()
-    }
-    pub(super) fn retire_state_metadata_pins(self: &Arc<Self>) -> Result<()> {
-        // Genuine native input grants are used BEFORE sealing/disposal of the
-        // resident graph, then consumed once actual pin receipts are cached.
-        self.ready.factory.require_original_process()?;
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        let count = {
-            let custody = self.state.try_lock()
-                .map_err(|_| anyhow::anyhow!("State metadata quote custody busy or poisoned"))?;
-            let OriginalPostAckStateCustody::Physical(physical) = &*custody else {
-                anyhow::bail!("actual State physical metadata token absent");
-            };
-            u64::try_from(physical.durability_pins().len())?
-        };
-        self.prepay_outside_continuation(
-            count.checked_mul(1024).and_then(|bytes| bytes.checked_add(512))
-                .context("State metadata retirement memory overflow")?,
-            count.checked_mul(4).and_then(|steps| steps.checked_add(4))
-                .context("State metadata retirement work overflow")?,
-        )?;
-        let pins = {
-            let custody = self.state.try_lock()
-                .map_err(|_| anyhow::anyhow!("State metadata inventory busy or poisoned"))?;
-            let OriginalPostAckStateCustody::Physical(physical) = &*custody else {
-                anyhow::bail!("actual State physical token absent after original precharge");
-            };
-            physical.durability_pins().to_vec()
-        };
-        for (index, pin) in pins.into_iter().enumerate() {
-            let retained = self.metadata_retirements.try_lock()
-                .map_err(|_| anyhow::anyhow!("original State metadata registration busy or poisoned"))?
-                .iter().find(|actual| Arc::ptr_eq(&actual.pin, &pin))
-                .map(|actual| (actual.inputs.clone(), actual.receipt.clone()));
-            let (inputs, receipt) = if let Some(retained) = retained { retained } else {
-                let authority: Arc<dyn lillux_sqlite::OriginalMetadataPinRetirementAuthority> =
-                    Arc::new(OriginalOutsideStateMetadataAuthority {
-                        post_ack: Arc::downgrade(self), pin: pin.clone(),
-                    });
-                // SAFETY: genuine actual native terminal and State physical
-                // pin inventory, settlement admission/clock and precharged storage
-                // above. These inputs remain cached until a real close receipt.
-                let inputs = Arc::new(unsafe { lillux_sqlite::OriginalMetadataPinRetirementInputs::issued(
-                    self.ready.factory.clone(), self.ready.terminal.clone(), vec![pin.clone()], authority,
-                ) }?);
-                self.metadata_retirements.lock().unwrap_or_else(|p| p.into_inner())
-                    .push(OriginalOutsideMetadataRetirement { pin: pin.clone(), inputs: Some(inputs.clone()), receipt: None });
-                (Some(inputs), None)
-            };
-            let receipt = if let Some(receipt) = receipt {
-                receipt.require_original(&pin)?;
-                receipt
-            } else {
-                let inputs = inputs.as_ref().context("original State metadata inputs absent without real receipt")?;
-                let receipt = Arc::new(pin.retire_after_backend(&self.ready.factory, &self.ready.terminal, inputs)?);
-                let mut retained = self.metadata_retirements.lock().unwrap_or_else(|p| p.into_inner());
-                let actual = retained.iter_mut().find(|actual| Arc::ptr_eq(&actual.pin, &pin))
-                    .expect("cached exact original State metadata inputs");
-                actual.receipt = Some(receipt.clone());
-                // The genuine receipt is retained before ending only these
-                // completed native input references; never after unmapping.
-                actual.inputs.take();
-                receipt
-            };
-            let mut custody = self.state.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual State metadata receipt cache busy or poisoned"))?;
-            let OriginalPostAckStateCustody::Physical(physical) = &mut *custody else {
-                anyhow::bail!("actual State physical token absent while caching metadata receipt");
-            };
-            physical.retain_metadata_retirement(index, receipt)?;
-        }
-        Ok(())
-    }
-    /// Actual consuming authority transfers, not a count-derived closure.
-    /// Caller must first deliver all State/Runtime/Operational original packets.
-    pub(super) fn advance_state_destination_join(&self) -> Result<()> {
-        self.ready.factory.require_original_process()?;
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        {
-            let packets = self.destination_packets.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual destination census gate busy or poisoned"))?;
-            let packets = packets.as_ref().context("actual destination packet transfer not entered")?;
-            ensure!(!packets.is_empty() && packets.iter().all(|packet| packet.normalized
-                && packet.raw.is_none() && packet.authority.is_none() && packet.refusal.is_none()
-                && (!packet.requires_destination || packet.destination.is_some())),
-                "actual destination packet transfers remain unresolved");
-        }
-        ensure!(self.sql_custody.try_lock().map_err(|_| anyhow::anyhow!("actual SQL source census gate busy or poisoned"))?.is_empty(),
-            "additional genuine SQL packet sources remain retained");
-        let original = {
-            let mut custody = self.state.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual State destination advance checkout busy or poisoned"))?;
-            ensure!(matches!(&*custody, OriginalPostAckStateCustody::Physical(_)), "actual State physical receiver absent");
-            std::mem::replace(&mut *custody, OriginalPostAckStateCustody::Handoff)
-        };
-        let OriginalPostAckStateCustody::Physical(mut physical) = original else { unreachable!() };
-        let result = {
-            let actual = std::cell::RefCell::new(&mut physical);
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                // SAFETY: actual source packets transferred from the original
-                // closed State/Runtime/Operational receiver and same aggregate.
-                // This gate establishes no count-derived physical proof.
-                unsafe { actual.borrow_mut().advance_destination_join(&self.ready.factory,
-                    &self.ready.terminal, &|bytes, steps| self.prepay_outside_continuation(bytes, steps)) }
-            })
-        };
-        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = OriginalPostAckStateCustody::Physical(physical);
-        result
-    }
-    /// Move the actual sealed original controller/settlement inventories to
-    /// the canonical copy-group receiver. No callback spans bookkeeping gates.
-    pub(super) fn retain_original_inspection_group(&self,
-        controller: &super::InspectionControllerCustody) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original inspection group transfer");
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        lillux_sqlite::SqliteInspectionCopyWork::require_original_outside_master(
-            self.ready.admission.original.as_ref(), &self.ready.factory, &self.ready.terminal)?;
-        let settlement = controller.settlement.try_lock()
-            .map_err(|_| anyhow::anyhow!("original copy group settlement lookup busy or poisoned"))?
-            .clone().context("original copy group settlement absent")?;
-        ensure!(Arc::ptr_eq(&settlement.admission, &self.ready.admission)
-            && Arc::ptr_eq(&settlement.seal, &self.ready.seal),
-            "copy group selects another actual original settlement");
-        let initialized = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("inspection group quote gate busy or poisoned"))?.is_some();
-        if !initialized {
-            self.prepay_outside_continuation(
-                u64::try_from(std::mem::size_of::<OriginalControllerInspectionGroup>())?, 16)?;
-            let mut group = self.inspection_group.try_lock()
-                .map_err(|_| anyhow::anyhow!("inspection group registration busy or poisoned"))?;
-            if group.is_none() {
-                *group = Some(OriginalControllerInspectionGroup { failures: None, closed: None,
-                    acquisition: None, runtime: None, cleanup: None, controller_disposals: None,
-                    settlement_disposals: None, groups: None });
-            }
-        }
-        // Each prefix is stored in the supervisor before another gate can
-        // refuse. Moving Vec storage does not grow or reallocate it.
-        macro_rules! move_inventory {
-            ($source:expr, $field:ident) => {{
-                let mut original = $source.try_lock()
-                    .map_err(|_| anyhow::anyhow!("actual inspection inventory busy or poisoned"))?;
-                let mut receiver = self.inspection_group.try_lock()
-                    .map_err(|_| anyhow::anyhow!("actual inspection receiver busy or poisoned"))?;
-                let receiver = receiver.as_mut().expect("prepaid actual inspection receiver");
-                if receiver.$field.is_none() {
-                    receiver.$field = Some(std::mem::take(&mut *original));
-                } else {
-                    ensure!(original.is_empty(), "original inspection inventory grew after sealed transfer");
-                }
-            }};
-        }
-        move_inventory!(controller.closed, closed);
-        move_inventory!(controller.acquisition_released, acquisition);
-        move_inventory!(controller.runtime_released, runtime);
-        move_inventory!(controller.cleanup, cleanup);
-        move_inventory!(controller.completed_disposals, controller_disposals);
-        move_inventory!(controller.cleanup_failures, failures);
-        let mut original = settlement._disposals.try_lock()
-            .map_err(|_| anyhow::anyhow!("original settlement disposal transfer busy or poisoned"))?;
-        let mut receiver = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual settlement disposal receiver busy or poisoned"))?;
-        let receiver = receiver.as_mut().expect("actual inspection receiver");
-        if receiver.settlement_disposals.is_none() {
-            receiver.settlement_disposals = Some(original.take()
-                .context("actual original settlement disposal inventory absent")?);
-        } else {
-            ensure!(original.is_none(), "original settlement disposal inventory replaced");
-        }
-        Ok(())
-    }
-
-    pub(super) fn coalesce_original_inspection_group(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original inspection alias census");
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        let quote = {
-            let original = self.inspection_group.try_lock()
-                .map_err(|_| anyhow::anyhow!("original inspection alias quote busy or poisoned"))?;
-            let group = original.as_ref().context("actual original copy group not transferred")?;
-            let canonical = group.settlement_disposals.as_ref().context("actual canonical disposals absent")?;
-            let mut count = canonical.len();
-            macro_rules! count { ($field:ident) => {
-                count = count.checked_add(group.$field.as_ref()
-                    .context("actual inspection inventory not transferred")?.len())
-                    .context("original inspection alias census overflow")?;
-            }; }
-            count!(closed); count!(acquisition); count!(runtime); count!(cleanup);
-            count!(controller_disposals); count!(failures);
-            (count, canonical.len())
-        };
-        let steps = u64::try_from(quote.0)?.checked_mul(u64::try_from(quote.1)?.checked_add(1)
-            .context("inspection canonical census overflow")?)
-            .and_then(|n| n.checked_add(16)).context("inspection alias scan quote overflow")?;
-        self.prepay_outside_continuation(0, steps)?;
-        let mut original = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("original inspection alias receiver busy or poisoned"))?;
-        let group = original.as_mut().context("actual inspection receiver absent")?;
-        let canonical = group.settlement_disposals.as_ref().context("actual canonical disposals absent")?;
-        ensure!(canonical.len() == quote.1, "inspection canonical inventory changed after precharge");
-        let actual_count = canonical.len()
-            .checked_add(group.closed.as_ref().context("closed inventory absent")?.len())
-            .and_then(|n| n.checked_add(group.acquisition.as_ref().map_or(0, |v| v.len())))
-            .and_then(|n| n.checked_add(group.runtime.as_ref().map_or(0, |v| v.len())))
-            .and_then(|n| n.checked_add(group.cleanup.as_ref().map_or(0, |v| v.len())))
-            .and_then(|n| n.checked_add(group.controller_disposals.as_ref().map_or(0, |v| v.len())))
-            .and_then(|n| n.checked_add(group.failures.as_ref().map_or(0, |v| v.len())))
-            .context("actual inspection alias inventory overflow")?;
-        ensure!(actual_count == quote.0, "inspection alias inventory changed after original precharge");
-        // Exact retained canonical parents prove these are redundant aliases.
-        // No descriptor-bearing last reference is dropped by these filters.
-        group.controller_disposals.as_mut().context("controller disposal inventory absent")?
-            .retain(|alias| !canonical.iter().any(|owner| Arc::ptr_eq(owner, alias)));
-        group.cleanup.as_mut().context("cleanup inventory absent")?
-            .retain(|alias| !canonical.iter().any(|owner| owner.retains_cleanup_alias(alias)));
-        group.closed.as_mut().context("closed inventory absent")?
-            .retain(|alias| !canonical.iter().any(|owner| owner.retains_closed_alias(alias)));
-        group.acquisition.as_mut().context("acquisition inventory absent")?
-            .retain(|alias| !canonical.iter().any(|owner| owner.retains_acquisition_alias(alias)));
-        group.runtime.as_mut().context("runtime inventory absent")?
-            .retain(|alias| !canonical.iter().any(|owner| owner.retains_runtime_alias(alias)));
-        // Unknown failure owners and unmatched originals stay retained. Neither
-        // empty filtered inventories nor alias counts establish physical close.
-        ensure!(group.controller_disposals.as_ref().unwrap().is_empty()
-            && group.cleanup.as_ref().unwrap().is_empty() && group.closed.as_ref().unwrap().is_empty()
-            && group.acquisition.as_ref().unwrap().is_empty() && group.runtime.as_ref().unwrap().is_empty(),
-            "inspection controller retains unmatched original resource owners");
-        Ok(())
-    }
-
-    pub(super) fn advance_original_inspection_group(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original copy group consumer");
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        let pending = {
-            let original = self.inspection_group.try_lock()
-                .map_err(|_| anyhow::anyhow!("copy group consumer quote busy or poisoned"))?;
-            let group = original.as_ref().context("actual original copy group absent")?;
-            if group.groups.is_none() {
-                Some(group.settlement_disposals.as_ref().context("canonical disposal inventory absent")?.len())
-            } else { None }
-        };
-        if let Some(count) = pending {
-            let bytes = count.checked_mul(std::mem::size_of::<crate::runtime_db::OriginalInspectionCopyGroup>())
-                .context("canonical copy group receiver quote overflow")?;
-            self.prepay_outside_continuation(u64::try_from(bytes)?,
-                u64::try_from(count)?.checked_add(8).context("copy group quote work overflow")?)?;
-            let mut original = self.inspection_group.try_lock()
-                .map_err(|_| anyhow::anyhow!("copy group receiver allocation busy or poisoned"))?;
-            let group = original.as_mut().context("actual original copy group absent")?;
-            if group.groups.is_none() {
-                ensure!(group.settlement_disposals.as_ref().context("canonical disposal inventory absent")?.len() == count,
-                    "original copy group grew after precharge");
-                group.groups = Some(Vec::with_capacity(count));
-            }
-        }
-        let mut group = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("canonical copy group checkout busy or poisoned"))?
-            .take().context("actual original copy group already in transfer")?;
-        let result = {
-            let actual = std::cell::RefCell::new(&mut group);
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                let mut group = actual.borrow_mut();
-                loop {
-                    let original = group.settlement_disposals.as_mut()
-                        .context("actual canonical disposal inventory absent")?.pop();
-                    let Some(original) = original else { break; };
-                    let transferred = original.into_outside_group(&self.ready.factory, &self.ready.terminal,
-                        &|bytes, steps| self.prepay_outside_continuation(bytes, steps));
-                    match transferred {
-                        Ok(transferred) => group.groups.as_mut().expect("prepaid canonical group vector").push(transferred),
-                        Err((original, error)) => {
-                            // Restore the same original into retained capacity
-                            // before exposing alias/clock/callback refusal.
-                            group.settlement_disposals.as_mut().unwrap().push(original);
-                            return Err(error);
-                        }
-                    }
-                }
-                for original in group.groups.as_mut().expect("actual canonical group vector").iter_mut() {
-                    original.consume_completed_cleanup()?;
-                    original.consume_completed_body()?;
-                    original.consume_terminal_wrapper()?;
-                }
-                Ok(())
-            })
-        };
-        *self.inspection_group.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(group);
-        result
-    }
-
-    pub(super) fn join_original_inspection_contexts(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original inspection context join");
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        let group_count = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("original inspection context quote busy or poisoned"))?
-            .as_ref().context("actual original inspection group absent")?
-            .groups.as_ref().context("actual canonical copy groups absent")?.len();
-        let packet_count = self.destination_packets.try_lock()
-            .map_err(|_| anyhow::anyhow!("original primitive context quote busy or poisoned"))?
-            .as_ref().context("actual destination packets absent")?.len();
-        let steps = u64::try_from(group_count)?.checked_mul(u64::try_from(packet_count)?)
-            .and_then(|n| n.checked_mul(8)).and_then(|n| n.checked_add(16))
-            .context("inspection context join quote overflow")?;
-        self.prepay_outside_continuation(0, steps)?;
-        let mut group = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual inspection context checkout busy or poisoned"))?
-            .take().context("actual canonical inspection context already in transfer")?;
-        let checkout = (|| {
-            self.destination_packets.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual destination context checkout busy or poisoned"))?
-                .take().context("actual destination contexts already in transfer")
-        })();
-        let mut packets = match checkout {
-            Ok(packets) => packets,
-            Err(error) => {
-                *self.inspection_group.lock().unwrap_or_else(|p| p.into_inner()) = Some(group);
-                return Err(error);
-            }
-        };
-        let result = {
-            let group = std::cell::RefCell::new(&mut group);
-            let packets = std::cell::RefCell::new(&mut packets);
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                let mut group = group.borrow_mut();
-                let mut packets = packets.borrow_mut();
-                let groups = group.groups.as_mut().context("actual canonical inspection groups absent")?;
-                ensure!(groups.len() == group_count && packets.len() == packet_count,
-                    "inspection context inventory changed after precharge");
-                for packet in packets.iter_mut() {
-                    let parts = packet.parts.as_mut().context("actual destination primitive parts absent")?;
-                    parts.leaf_evidence.require_original(&self.ready.factory, &self.ready.terminal)?;
-                    for original in groups.iter_mut() {
-                        let bound = packet.bound.as_mut().map(|bound| &mut bound.inspection);
-                        original.coalesce_native_packet_context(parts, bound)?;
-                    }
-                    if parts.domain == Some(lillux_sqlite::OriginalNativeDomain::RuntimeInspection) {
-                        let destination = packet.destination.as_mut().context("actual inspection destination custody absent")?;
-                        let mut joined = false;
-                        for original in groups.iter() {
-                            if original.join_destination_context(destination, &self.ready.factory,
-                                &self.ready.terminal, &parts.leaf_evidence)? { joined = true; break; }
-                        }
-                        ensure!(joined, "actual inspection destination has no canonical original copy group");
-                    }
-                }
-                for original in groups.iter_mut() {
-                    original.consume_primitive_context()?;
-                    original.consume_copy_context()?;
-                    original.consume_copy_lease(&self.ready.factory, &self.ready.terminal,
-                        &|bytes, steps| self.prepay_outside_continuation(bytes, steps))?;
-                    original.retire_original_source_pins(&self.ready.factory, &self.ready.terminal,
-                        &|bytes, steps| self.prepay_outside_continuation(bytes, steps))?;
-                }
-                Ok(())
-            })
-        };
-        *self.destination_packets.lock().unwrap_or_else(|p| p.into_inner()) = Some(packets);
-        *self.inspection_group.lock().unwrap_or_else(|p| p.into_inner()) = Some(group);
-        result
-    }
-
-    pub(super) fn transfer_original_destination_packets(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(), "foreign destination packet supervisor");
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        let initialized = self.destination_packets.try_lock()
-            .map_err(|_| anyhow::anyhow!("destination packet inventory busy or poisoned"))?.is_some();
-        if !initialized {
-            let count = self.sql_custody.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual SQL packet quote busy or poisoned"))?.len();
-            ensure!(count > 0, "original destination packet inventory absent; no closure inferred");
-            let bytes = u64::try_from(count)?.checked_mul(u64::try_from(std::mem::size_of::<OriginalDestinationPacketProgress>())?)
-                .context("original destination packet storage overflow")?;
-            let steps = u64::try_from(count)?.checked_mul(8).and_then(|steps| steps.checked_add(8))
-                .context("original destination packet work overflow")?;
-            self.prepay_outside_continuation(bytes, steps)?;
-            let mut destination = self.destination_packets.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual destination packet initialization busy or poisoned"))?;
-            let mut source = self.sql_custody.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual SQL packet initialization busy or poisoned"))?;
-            ensure!(destination.is_none() && source.len() == count, "actual destination packet inventory changed after quote");
-            let mut actual = Vec::with_capacity(count);
-            actual.extend(source.drain(..).map(OriginalDestinationPacketProgress::from_original));
-            *destination = Some(actual);
-        }
-        let mut actual = self.destination_packets.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual destination packet checkout busy or poisoned"))?
-            .take().context("actual destination packet inventory absent")?;
-        let result = {
-            let packets = std::cell::RefCell::new(&mut actual);
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                for packet in &mut **packets.borrow_mut() {
-                    packet.normalize_original()?;
-                    if packet.destination.is_some() { continue; }
-                    if let Some(refusal) = packet.refusal.take() {
-                        match refusal.into_original_inputs() {
-                            Ok((factory, authority, error)) => {
-                                if !Arc::ptr_eq(&factory, &self.ready.factory) {
-                                    packet.refusal = Some(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory, authority, error));
-                                    anyhow::bail!("retained packet refusal selected another original factory");
-                                }
-                                packet.authority = Some(authority);
-                                let parts = packet.parts.as_mut().expect("normalized original packet");
-                                parts.original_error = Some(match parts.original_error.take() {
-                                    Some(previous) => error.context(previous),
-                                    None => error,
-                                });
-                            }
-                            Err(refusal) => { packet.refusal = Some(refusal); anyhow::bail!("actual destination refusal extraction refused"); }
-                        }
-                    }
-                    let Some(authority) = packet.authority.take() else { continue; };
-                    let leaf = &packet.parts.as_ref().expect("normalized genuine packet").leaf_evidence;
-                    match authority.into_outside_custody(&self.ready.factory, &self.ready.terminal, leaf,
-                        &|bytes, steps| self.prepay_outside_continuation(bytes, steps)) {
-                        Ok(destination) => packet.destination = Some(destination),
-                        Err(refusal) => {
-                            packet.refusal = Some(refusal);
-                            anyhow::bail!("actual destination authority transfer refused; whole packet retained");
-                        }
-                    }
-                }
-                Ok(())
-            })
-        };
-        *self.destination_packets.lock().unwrap_or_else(|p| p.into_inner()) = Some(actual);
-        result
-    }
-    pub(super) fn retain_original_sql_custody(
-        &self,
-        packets: Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
-    ) -> Result<()> {
-        // PID refusal must return/retain the actual packets, not destroy their
-        // owners. Packets themselves preserve all parts on Drop; this method
-        // is private to the same prechecked original supervisor callers.
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "original SQL payload supervisor belongs to another process");
-        self.sql_custody.lock().unwrap_or_else(|p| p.into_inner()).extend(packets);
-        Ok(())
-    }
-    pub(super) fn with_original_physical_registry(
-        &self,
-        apply: &mut dyn FnMut(
-            &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-            &dyn Fn(u64, u64) -> Result<()>,
-        ) -> Result<()>,
-    ) -> Result<()> {
-        self.initialize_physical_registry()?;
-        let mut registry = self.take_physical_registry()?;
-        let prepay = |bytes, steps| retained_original_outside_callback(|| self.prepay_outside_continuation(bytes, steps));
-        let result = {
-            let registry_ref = std::cell::RefCell::new(&mut registry);
-            let apply_ref = std::cell::RefCell::new(apply);
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                (apply_ref.borrow_mut())(&mut **registry_ref.borrow_mut(), &prepay)
-            })
-        };
-        self.restore_physical_registry(registry);
-        result
-    }
-    fn initialize_physical_registry(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original physical inventory issuance");
-        let mut custody = self.physical_registry.try_lock()
-            .map_err(|_| anyhow::anyhow!("original physical inventory issuance busy or poisoned"))?;
-        match &*custody {
-            OriginalOutsideRegistryCustody::Original(_) => return Ok(()),
-            OriginalOutsideRegistryCustody::InFlight => anyhow::bail!("original physical inventory is transferring"),
-            OriginalOutsideRegistryCustody::Unissued => {}
-        }
-        *custody = OriginalOutsideRegistryCustody::InFlight;
-        drop(custody);
-        let result = (|| -> Result<_> {
-            // Finite original inventory: fixed host/controller roots plus up
-            // to eight root/namespace holders per admitted SQL/lease resource.
-            // The original signed counters still bound the entire allocation.
-            let maximum = usize::try_from(self.ready.seal.claim.record.reserved.max_native_connections)?
-                .checked_mul(8).and_then(|count| count.checked_add(64))
-                .context("original physical inventory capacity overflow")?;
-            let prepay = |bytes, steps| retained_original_outside_callback(|| self.prepay_outside_continuation(bytes, steps));
-            // SAFETY: the post-ACK settlement admission and charged finite
-            // signed envelope, no renewed clock/budget or external grant.
-            unsafe { lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::issued(maximum, &prepay) }
-        })();
-        let (next, error) = match result {
-            Ok(registry) => (OriginalOutsideRegistryCustody::Original(registry), None),
-            Err(error) => (OriginalOutsideRegistryCustody::Unissued, Some(error)),
-        };
-        *self.physical_registry.lock().unwrap_or_else(|p| p.into_inner()) = next;
-        if let Some(error) = error { return Err(error); }
-        Ok(())
-    }
-    fn take_physical_registry(&self) -> Result<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original physical registry transfer");
-        let mut custody = self.physical_registry.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual original physical registry busy or poisoned"))?;
-        ensure!(matches!(&*custody, OriginalOutsideRegistryCustody::Original(_)),
-            "actual original physical registry absent or transferring");
-        let actual = std::mem::replace(&mut *custody, OriginalOutsideRegistryCustody::InFlight);
-        let OriginalOutsideRegistryCustody::Original(registry) = actual else { unreachable!() };
-        Ok(registry)
-    }
-    fn restore_physical_registry(&self, registry: lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry) {
-        *self.physical_registry.lock().unwrap_or_else(|p| p.into_inner()) = OriginalOutsideRegistryCustody::Original(registry);
-    }
-    pub(super) fn register_original_destination_and_inspection_roots(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign original destination physical controller");
-        self.ready.terminal.require_original(&self.ready.factory)?;
-        let mut group = self.inspection_group.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual inspection physical checkout busy or poisoned"))?
-            .take().context("actual inspection group already transferring")?;
-        let checkout = (|| {
-            self.destination_packets.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual destination physical checkout busy or poisoned"))?
-                .take().context("actual destination physical sources already transferring")
-        })();
-        let mut packets = match checkout {
-            Ok(packets) => packets,
-            Err(error) => {
-                *self.inspection_group.lock().unwrap_or_else(|p| p.into_inner()) = Some(group);
-                return Err(error);
-            }
-        };
-        let result = self.with_original_physical_registry(&mut |registry, prepay| {
-            for packet in packets.iter_mut() {
-                if let Some(bound) = packet.bound.as_mut() {
-                    if let Some(binding) = &bound.registration {
-                        registry.require_membership(binding)?;
-                    } else {
-                        let original = bound.root.take().context("actual bound root absent without registration")?;
-                        // SAFETY: actual original normalized packet source;
-                        // exact original shared registry and prepaid transfer.
-                        match unsafe { registry.register_directory(original, prepay) } {
-                            Ok(binding) => bound.registration = Some(binding),
-                            Err((original, error)) => { bound.root = Some(original); return Err(error); }
-                        }
-                    }
-                }
-                if let Some(destination) = packet.destination.as_mut() {
-                    destination.retire_native_references(&self.ready.factory, &self.ready.terminal, prepay)?;
-                    unsafe { destination.register_shared_roots(registry, prepay) }?;
-                }
-            }
-            for original in group.groups.as_mut().context("actual original copy groups absent")?.iter_mut() {
-                unsafe { original.register_original_shared_roots(&self.ready.factory,
-                    &self.ready.terminal, registry, prepay) }?;
-            }
-            Ok(())
-        });
-        // Registry callback catches unwind while the complete original packet
-        // and group owners remain borrowed here; restore BOTH before refusal.
-        *self.destination_packets.lock().unwrap_or_else(|p| p.into_inner()) = Some(packets);
-        *self.inspection_group.lock().unwrap_or_else(|p| p.into_inner()) = Some(group);
-        result
-    }
-
-    pub(super) fn require_state_shared_roots_registered(&self,
-        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-        prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign State registration census");
-        let state = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual State registration census busy or poisoned"))?;
-        let OriginalPostAckStateCustody::Physical(physical) = &*state else {
-            anyhow::bail!("actual State physical continuation absent");
-        };
-        physical.require_shared_roots_registered(registry, prepay)
-    }
-    pub(super) fn register_state_shared_roots(&self) -> Result<()> {
-        self.initialize_physical_registry()?;
-        let mut custody = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual State physical registration busy or poisoned"))?;
-        ensure!(matches!(&*custody, OriginalPostAckStateCustody::Physical(_)),
-            "actual State physical token absent");
-        let mut registry = self.take_physical_registry()?;
-        let actual = std::mem::replace(&mut *custody, OriginalPostAckStateCustody::Handoff);
-        drop(custody);
-        let OriginalPostAckStateCustody::Physical(mut physical) = actual else { unreachable!() };
-        let prepay = |bytes, steps| retained_original_outside_callback(|| self.prepay_outside_continuation(bytes, steps));
-        // SAFETY: actual State and registry owners moved outside their gates;
-        // register exact retained roots/locks on the same original envelope.
-        let result = unsafe { physical.register_shared_roots(&mut registry, &prepay) };
-        // Cache BOTH partial original owners before a late refusal is exposed.
-        self.restore_physical_registry(registry);
-        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = OriginalPostAckStateCustody::Physical(physical);
-        result
-    }
-    /// # Safety
-    /// The caller has registered every physical owner of this reset: the
-    /// State shared roots, the Runtime shared roots, the inspection and
-    /// mutation Operational shared roots, and the original destination
-    /// packet and inspection group roots; nothing registers after this call.
-    /// Descriptor receipts remain separate from metadata retirement and
-    /// region exclusion.
-    pub(super) unsafe fn retire_non_account_physical_descriptors(self: &Arc<Self>) -> Result<()> {
-        let mut registry = self.take_physical_registry()?;
-        let prepay = |bytes, steps| retained_original_outside_callback(|| self.prepay_outside_continuation(bytes, steps));
-        let prepared = (|| -> Result<()> {
-            // SAFETY: complete actual inventory and original admission closure
-            // are the caller's retained contract; no numeric census grants it.
-            unsafe { registry.seal_inventory()?; registry.prepare_descriptor_owners(&prepay) }
-        })();
-        self.restore_physical_registry(registry);
-        prepared?;
-        let count = {
-            let custody = self.physical_registry.try_lock()
-                .map_err(|_| anyhow::anyhow!("original physical receipt census busy or poisoned"))?;
-            let OriginalOutsideRegistryCustody::Original(registry) = &*custody else {
-                anyhow::bail!("actual original physical registry absent");
-            };
-            registry.registrations()?.count()
-        };
-        self.prepay_outside_continuation(
-            u64::try_from(count)?.checked_mul(1024).and_then(|bytes| bytes.checked_add(512))
-                .context("shared descriptor input storage overflow")?,
-            u64::try_from(count)?.checked_mul(4).and_then(|steps| steps.checked_add(4))
-                .context("shared descriptor input work overflow")?,
-        )?;
-        for index in 0..count {
-            let registration = {
-                let custody = self.physical_registry.try_lock()
-                    .map_err(|_| anyhow::anyhow!("original physical membership snapshot busy or poisoned"))?;
-                let OriginalOutsideRegistryCustody::Original(registry) = &*custody else {
-                    anyhow::bail!("actual original physical registry absent");
-                };
-                registry.registrations()?.nth(index).context("actual original descriptor membership absent")?
-            };
-            if registration.is_operator_lock()? { continue; }
-            let owner = registration.owner()?;
-            let retained = self.descriptor_retirements.try_lock()
-                .map_err(|_| anyhow::anyhow!("original shared descriptor registration busy or poisoned"))?
-                .iter().find(|actual| Arc::ptr_eq(&actual.owner, &owner))
-                .map(|actual| (actual.inputs.clone(), actual.receipt.clone()));
-            let (inputs, receipt) = if let Some(retained) = retained { retained } else {
-                let authority: Arc<dyn lillux_sqlite::OriginalOutsideFinalizerFileRetirementAuthority> =
-                    Arc::new(OriginalOutsideSharedDescriptorAuthority {
-                        post_ack: Arc::downgrade(self), registration: registration.clone(), owner: owner.clone(),
-                    });
-                // SAFETY: actual original registry membership/settlement admission/clock,
-                // exact real FD and input storage irreversibly prepaid above.
-                let inputs = Arc::new(unsafe { lillux_sqlite::OriginalOutsideFinalizerFileRetirementInputs::issued(owner.clone(), authority) }?);
-                self.descriptor_retirements.lock().unwrap_or_else(|p| p.into_inner())
-                    .push(OriginalOutsideDescriptorRetirement { owner: owner.clone(), inputs: inputs.clone(), receipt: None });
-                (inputs, None)
-            };
-            let receipt = if let Some(receipt) = receipt { receipt } else {
-                let receipt = Arc::new(owner.retire_after_outside_handoff(&inputs)?);
-                self.descriptor_retirements.lock().unwrap_or_else(|p| p.into_inner())
-                    .iter_mut().find(|actual| Arc::ptr_eq(&actual.owner, &owner))
-                    .expect("cached exact original shared descriptor").receipt = Some(receipt.clone());
-                receipt
-            };
-            receipt.require_original(&owner)?;
-            let mut custody = self.physical_registry.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual shared descriptor receipt registration busy or poisoned"))?;
-            let OriginalOutsideRegistryCustody::Original(registry) = &mut *custody else {
-                anyhow::bail!("actual original physical registry absent while caching receipt");
-            };
-            registry.retain_retirement(&registration, receipt)?;
-        }
-        let custody = self.physical_registry.try_lock()
-            .map_err(|_| anyhow::anyhow!("original shared physical completion busy or poisoned"))?;
-        let OriginalOutsideRegistryCustody::Original(registry) = &*custody else {
-            anyhow::bail!("actual original physical registry absent");
-        };
-        ensure!(registry.non_account_descriptors_retired(), "actual non-account original descriptors remain pending; operator remains held for durable account work");
-        Ok(())
-    }
-    pub(super) fn prepare_state_physical_custody(&self) -> Result<()> {
-        ensure!(self.ready.seal.claim.process == std::process::id(),
-            "foreign outside State physical handoff");
-        let mut custody = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("outside State physical handoff busy or poisoned"))?;
-        if matches!(&*custody, OriginalPostAckStateCustody::Physical(_)) { return Ok(()); }
-        ensure!(matches!(&*custody, OriginalPostAckStateCustody::Outside(_)),
-            "actual outside State continuation absent");
-        let original = std::mem::replace(&mut *custody, OriginalPostAckStateCustody::Handoff);
-        drop(custody);
-        let OriginalPostAckStateCustody::Outside(mut outside) = original else { unreachable!() };
-        // SAFETY: cache these exact original SQL payloads in this retained
-        // outside supervisor before the State physical transfer or any effect.
-        let packets = match unsafe { outside.take_original_sql_custody() } {
-            Ok(packets) => packets,
-            Err(error) => {
-                *self.state.lock().unwrap_or_else(|p| p.into_inner()) = OriginalPostAckStateCustody::Outside(outside);
-                return Err(error);
-            }
-        };
-        self.sql_custody.lock().unwrap_or_else(|p| p.into_inner()).extend(packets);
-        let prepay = |bytes, steps| retained_original_outside_callback(|| self.prepay_outside_continuation(bytes, steps));
-        // SAFETY: the actual native receipts and their resource payloads were
-        // transferred and cached above; the same original outside clock and
-        // envelope prepay the concrete physical custody before owner movement.
-        let result = unsafe { outside.into_physical_custody(&prepay) };
-        let (next, error) = match result {
-            Ok(physical) => (OriginalPostAckStateCustody::Physical(physical), None),
-            Err((outside, error)) => (OriginalPostAckStateCustody::Outside(outside), Some(error)),
-        };
-        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = next;
-        if let Some(error) = error { return Err(error); }
-        // Register shared physical aliases with the outside supervisor before
-        // attempting uniqueness or physical closure of any subsystem token.
-        self.ready.admission.checkpoint_original()
-    }
-    pub(super) fn retire_outside_state_native_references(&self,
-        retire_aliases: &dyn Fn(&lillux_sqlite::OriginalNativeConnectionTerminal) -> Result<()>,
-    ) -> Result<()> {
-        self.ready.factory.require_original_process()?;
-        self.ready.admission.checkpoint_original()?;
-        let mut custody = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("outside State custody busy or poisoned"))?;
-        ensure!(matches!(&*custody, OriginalPostAckStateCustody::Outside(_)),
-            "actual State outside continuation absent");
-        let original = std::mem::replace(&mut *custody, OriginalPostAckStateCustody::Handoff);
-        drop(custody);
-        let OriginalPostAckStateCustody::Outside(mut outside) = original else { unreachable!() };
-        let result = {
-            let actual = std::cell::RefCell::new(&mut outside);
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                let mut actual = actual.borrow_mut();
-                actual.prepare_destination_join(&self.ready.factory, &self.ready.terminal,
-                    &|bytes, steps| self.prepay_outside_continuation(bytes, steps))?;
-                actual.retire_native_references(&self.ready.factory, &self.ready.terminal, retire_aliases)
-            })
-        };
-        // Restore the exact partially transferred continuation on every refusal.
-        *self.state.lock().unwrap_or_else(|p| p.into_inner()) =
-            OriginalPostAckStateCustody::Outside(outside);
-        result
-    }
 }
 
 impl OriginalPostAckFinalization {
-    /// Prepay one actual bounded consuming Runtime/finalizer handoff. This
-    /// changes no completion phase and does not reread retired source pins.
-    pub(super) fn prepay_finalizer_transfer(&self, memory_bytes: u64, steps: u64) -> Result<()> {
-        self.require_state_ack()?;
-        self.debit_finalizer_transfer(memory_bytes, steps)
-    }
     /// Check and charge one bounded in-process step after the State
     /// acknowledgement against the same settlement admission and its cleanup
     /// window. It renews no deadline and grants no new allowance.
@@ -6911,42 +5729,6 @@ impl OriginalPostAckFinalization {
         self.require_state_ack()?;
         self.ready.require_custody()?;
         self.ready.admission.debit_original(steps)
-    }
-    fn debit_finalizer_transfer(&self, memory_bytes: u64, steps: u64) -> Result<()> {
-        // The authentic State producer quotes its actual SQL aliases, custody
-        // packets and generation holders. Charge that complete quote against
-        // the same original signed envelope; a lease-only helper ceiling
-        // cannot bound the SQL owner graph. These are irreversible cumulative
-        // debits below, never a new allocation or cleanup grant.
-        ensure!(
-            memory_bytes > 0 && steps > 0,
-            "original finalizer transfer requires a positive concrete quote"
-        );
-        self.ready.require_custody()?;
-        self.ready.admission.debit_original(steps)?;
-        let mut used = self
-            .ready
-            .admission
-            .claim
-            .copy_usage
-            .try_lock()
-            .map_err(|_| {
-                anyhow::anyhow!("original finalizer transfer memory debit busy or poisoned")
-            })?;
-        let memory = used
-            .buffer_bytes
-            .checked_add(memory_bytes)
-            .context("original finalizer transfer memory overflow")?;
-        ensure!(
-            memory.checked_add(used.native_storage_bytes)
-                    .and_then(|bytes| bytes.checked_add(used.host_region_bytes)).is_some_and(
-                |total| total <= self.ready.admission.claim.record.reserved.max_memory_bytes
-            ),
-            "original finalizer transfer exceeds shared memory envelope"
-        );
-        used.buffer_bytes = memory;
-        drop(used);
-        self.ready.require_custody()
     }
     pub(super) fn require_original(
         &self,
@@ -7029,16 +5811,8 @@ impl OriginalInspectionSettlement {
                 self.admission.checkpoint_original()?;
                 let owner = Arc::new(OriginalPostAckFinalization {
                     ready: ready.clone(),
-                    state: Mutex::new(OriginalPostAckStateCustody::Original {
-                        state: state.clone(),
-                        acknowledgement: acknowledgement.clone(),
-                    }),
-                    sql_custody: Mutex::new(Vec::new()),
-                    destination_packets: Mutex::new(None),
-                    inspection_group: Mutex::new(None),
-                    physical_registry: Mutex::new(OriginalOutsideRegistryCustody::Unissued),
-                    descriptor_retirements: Mutex::new(Vec::new()),
-                    metadata_retirements: Mutex::new(Vec::new()),
+                    state: state.clone(),
+                    acknowledgement: acknowledgement.clone(),
                     operation: operation.clone(),
                 });
                 let mut progress = self
@@ -7064,157 +5838,3 @@ impl OriginalInspectionSettlement {
     }
 }
 
-struct OriginalRuntimeFinalizerAdmission {
-    post_ack: Arc<OriginalPostAckFinalization>,
-    producer: Arc<crate::runtime_db::OriginalRuntimeFinalizer>,
-    owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-}
-impl lillux_sqlite::OriginalFinalizerFileRetirementAuthority for OriginalRuntimeFinalizerAdmission {
-    fn require_original(
-        &self,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        terminal: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-        owner: &Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-    ) -> Result<()> {
-        ensure!(
-            Arc::ptr_eq(factory, &self.post_ack.ready.factory)
-                && Arc::ptr_eq(terminal, &self.post_ack.ready.terminal)
-                && Arc::ptr_eq(owner, &self.owner),
-            "Runtime retirement selects foreign post-ACK/native/descriptor owner"
-        );
-        // This producer checks its actual RuntimeMutation close and exact
-        // private transferred directory/namespace slot; never a caller list.
-        self.producer.require_original_file(factory, owner)?;
-        self.post_ack.require_state_ack()?;
-        self.post_ack.ready.require_custody()
-    }
-    fn debit_original_steps(&self, steps: u64) -> Result<()> {
-        self.post_ack.ready.admission.debit_original(steps)
-    }
-}
-impl OriginalPostAckFinalization {
-    pub(super) fn issue_runtime_retirement_inputs(
-        self: &Arc<Self>,
-        producer: &Arc<crate::runtime_db::OriginalRuntimeFinalizer>,
-        owner: &Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-    ) -> Result<lillux_sqlite::OriginalFinalizerFileRetirementInputs> {
-        producer.require_original_file(&self.ready.factory, owner)?;
-        // Original grant/authority storage is irreversibly paid before
-        // allocation. No producer/booking guard spans any later native close.
-        self.prepay_finalizer_transfer(1024, 4)?;
-        let authority: Arc<dyn lillux_sqlite::OriginalFinalizerFileRetirementAuthority> =
-            Arc::new(OriginalRuntimeFinalizerAdmission {
-                post_ack: self.clone(),
-                producer: producer.clone(),
-                owner: owner.clone(),
-            });
-        // Safety: exact actual private Runtime producer membership above,
-        // retained genuine State ACK/native terminal and original funded
-        // clock/cleanup custody; future uses revalidate that same join.
-        unsafe {
-            lillux_sqlite::OriginalFinalizerFileRetirementInputs::issued(
-                self.ready.factory.clone(),
-                self.ready.terminal.clone(),
-                owner.clone(),
-                authority,
-            )
-        }
-    }
-}
-
-struct OriginalStateFinalizerAdmission {
-    post_ack: Arc<OriginalPostAckFinalization>,
-    producer: Arc<ryeos_state::state_db::OriginalStateFinalizer>,
-    owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-}
-impl lillux_sqlite::OriginalFinalizerFileRetirementAuthority for OriginalStateFinalizerAdmission {
-    fn require_original(
-        &self,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        terminal: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-        owner: &Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-    ) -> Result<()> {
-        ensure!(
-            Arc::ptr_eq(factory, &self.post_ack.ready.factory)
-                && Arc::ptr_eq(terminal, &self.post_ack.ready.terminal)
-                && Arc::ptr_eq(owner, &self.owner),
-            "State retirement selects foreign post-ACK/native/descriptor owner"
-        );
-        // Pure pointer/body join: this exact ACKed State cached this producer.
-        let (state, _) = self.post_ack.original_state_inputs()?;
-        state.require_original_finalizer(&self.producer)?;
-        drop(state);
-        self.producer.require_original_file(factory, owner)?;
-        self.post_ack.require_state_ack()?;
-        self.post_ack.ready.require_custody()
-    }
-    fn debit_original_steps(&self, steps: u64) -> Result<()> {
-        self.post_ack.ready.admission.debit_original(steps)
-    }
-}
-impl OriginalPostAckFinalization {
-    pub(super) fn issue_state_retirement_inputs(
-        self: &Arc<Self>,
-        producer: &Arc<ryeos_state::state_db::OriginalStateFinalizer>,
-        owner: &Arc<lillux_sqlite::RetainedOriginalFinalizerFile>,
-    ) -> Result<lillux_sqlite::OriginalFinalizerFileRetirementInputs> {
-        let (state, _) = self.original_state_inputs()?;
-        state.require_original_finalizer(producer)?;
-        drop(state);
-        producer.require_original_file(&self.ready.factory, owner)?;
-        self.prepay_finalizer_transfer(1024, 4)?;
-        let authority: Arc<dyn lillux_sqlite::OriginalFinalizerFileRetirementAuthority> =
-            Arc::new(OriginalStateFinalizerAdmission {
-                post_ack: self.clone(),
-                producer: producer.clone(),
-                owner: owner.clone(),
-            });
-        // Safety: this actual ACKed State retains this exact producer, whose
-        // private slot owns this transferred original File; native terminal,
-        // State ACK and original charged clock/work/storage remain genuine.
-        unsafe {
-            lillux_sqlite::OriginalFinalizerFileRetirementInputs::issued(
-                self.ready.factory.clone(),
-                self.ready.terminal.clone(),
-                owner.clone(),
-                authority,
-            )
-        }
-    }
-}
-
-impl OriginalPostAckFinalization {
-    /// Begin outside custody after the State acknowledgement. Service and the
-    /// copy work's own custody end here; the copy work's outside callbacks
-    /// are checked and funded by this settlement's admission from now on.
-    pub(super) fn enter_outside_custody(&self) -> Result<()> {
-        self.ready.require_custody()?;
-        ensure!(
-            self.ready.terminal.arena_disposition()?
-                == lillux_sqlite::OriginalNativeArenaDisposition::Released,
-            "outside custody requires the native arena released"
-        );
-        let admission = &self.ready.admission;
-        {
-            let mut registered = admission
-                .original
-                .outside_admission
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("copy outside admission registration busy or poisoned"))?;
-            if let Some(previous) = registered.as_ref() {
-                ensure!(
-                    previous.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, admission)),
-                    "copy outside admission cannot be replaced"
-                );
-            } else {
-                *registered = Some(Arc::downgrade(admission));
-            }
-        }
-        self.ready
-            .seal
-            .claim
-            .outside_custody_entered
-            .store(true, Ordering::Release);
-        admission.checkpoint_original()
-    }
-}

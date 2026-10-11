@@ -349,6 +349,10 @@ pub struct SchedulerResetRetirement<'a, 'locks> {
     state_authority: &'a ryeos_state::PinnedStateAuthority,
     identity: &'a ryeos_node_runtime::identity::NodeIdentity,
     operation: &'a OriginalOperation,
+    /// The reset's native factory. Guarded reads made under this permit run
+    /// in its scope, since the rebuilt projection's generation lease is
+    /// listed while the scheduler retires.
+    native_factory: Option<&'a Arc<lillux_sqlite::OriginalNativeFactory>>,
 }
 impl SchedulerResetRetirement<'_, '_> {
     pub fn runtime_directory(&self) -> Result<&lillux::PinnedDirectory> {
@@ -366,9 +370,20 @@ impl SchedulerResetRetirement<'_, '_> {
             "scheduler retirement State authority selects a different runtime generation"
         );
         self.state_authority.ensure_guard(self.cas_guard)?;
-        self.operation
-            .require_active(self.state_authority, self.cas_guard)?;
+        self.operation.require_active_in(
+            self.native_factory.map(Arc::as_ref),
+            self.state_authority,
+            self.cas_guard,
+        )?;
         Ok(self.authority.runtime_directory)
+    }
+
+    /// The native factory whose scope the participant's guarded reads use,
+    /// once this permit's phase and exclusion are revalidated. Absent only
+    /// for a permit issued without a native host.
+    pub fn native_factory(&self) -> Result<Option<&Arc<lillux_sqlite::OriginalNativeFactory>>> {
+        self.runtime_directory()?;
+        Ok(self.native_factory)
     }
 
     /// The selected node identity is the only signer admitted for retirement
@@ -738,7 +753,6 @@ struct OfflineRuntimeSlot {
     issued: bool,
     retained: Option<RuntimeDb>,
     closed: Option<Arc<crate::runtime_db::OriginalRuntimeClosed>>,
-    finalizer: Option<Arc<crate::runtime_db::OriginalRuntimeFinalizer>>,
     close_failure: Option<crate::runtime_db::OriginalRuntimeCloseFailure>,
     /// Closed mutation schema reference whose main inputs were refused
     /// before any open; its terminal belongs to the census.
@@ -872,11 +886,9 @@ struct InspectionControllerCustody {
     native_backend: std::sync::Mutex<native_backend::OriginalBackendSlot>,
     operational_inspection: std::sync::Mutex<operational_owner::OfflineOperationalSlot>,
     operational_mutation: std::sync::Mutex<operational_owner::OfflineOperationalSlot>,
-    operational_outside: std::sync::Mutex<[operational_owner::OfflineOperationalOutsideSlot; 2]>,
     state_projection: std::sync::Mutex<OfflineStateProjectionSlot>,
     runtime_mutation: std::sync::Mutex<OfflineRuntimeSlot>,
     runtime_inspection_reference: std::sync::Mutex<OfflineRuntimeInspectionReferenceSlot>,
-    runtime_outside: std::sync::Mutex<Option<crate::runtime_db::OriginalOutsideRuntimeFinalizer>>,
     native_census: std::sync::Mutex<OriginalNativeCensusSlot>,
     closed: std::sync::Mutex<Vec<Arc<SqliteInspectionClosed>>>,
     cleanup: std::sync::Mutex<Vec<Arc<InspectionCopyCleanup>>>,
@@ -887,234 +899,6 @@ struct InspectionControllerCustody {
     acquisition_released: std::sync::Mutex<Vec<Arc<SqliteInspectionAcquisitionReleased>>>,
 }
 impl InspectionControllerCustody {
-    fn retire_redundant_census_aliases(
-        &self,
-        post_ack: &original_quota_claim::OriginalPostAckFinalization,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-        canonical: &lillux_sqlite::OriginalNativeConnectionTerminal,
-    ) -> Result<()> {
-        factory.require_original_process()?;
-        aggregate.require_original(factory)?;
-        canonical.require_original(factory)?;
-        let same = |original: &lillux_sqlite::OriginalNativeConnectionTerminal| match (original, canonical) {
-            (lillux_sqlite::OriginalNativeConnectionTerminal::Closed(a),
-             lillux_sqlite::OriginalNativeConnectionTerminal::Closed(b)) => Arc::ptr_eq(a, b),
-            (lillux_sqlite::OriginalNativeConnectionTerminal::Released(a),
-             lillux_sqlite::OriginalNativeConnectionTerminal::Released(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        };
-        let census_count = self.native_census.try_lock()
-            .map_err(|_| anyhow!("actual native census alias quote busy or poisoned"))?
-            .terminals.as_ref().map_or(0, Vec::len);
-        let closed_count = self.closed.try_lock().map_err(|_| anyhow!("inspection alias quote busy or poisoned"))?.len();
-        let acquired_count = self.acquisition_released.try_lock().map_err(|_| anyhow!("acquisition alias quote busy or poisoned"))?.len();
-        let runtime_count = self.runtime_released.try_lock().map_err(|_| anyhow!("Runtime inspection alias quote busy or poisoned"))?.len();
-        let wrappers = closed_count.checked_add(acquired_count).and_then(|count| count.checked_add(runtime_count))
-            .context("original inspection alias census overflow")?;
-        // Quote both census partition vectors, all three wrapper snapshots,
-        // and their actual scans before any clone or retirement. The checks
-        // below hold all inventory gates until the bounded snapshots exist.
-        let bytes = u64::try_from(census_count)?.checked_mul(64)
-            .and_then(|bytes| bytes.checked_add(u64::try_from(wrappers).ok()?.checked_mul(32)?))
-            .and_then(|bytes| bytes.checked_add(1024))
-            .context("original census alias storage overflow")?;
-        let steps = u64::try_from(census_count)?.checked_mul(4)
-            .and_then(|steps| steps.checked_add(u64::try_from(wrappers).ok()?.checked_mul(8)?))
-            .and_then(|steps| steps.checked_add(8))
-            .context("original census alias work overflow")?;
-        post_ack.prepay_outside_continuation(bytes, steps)?;
-        let census_guard = self.native_census.try_lock().map_err(|_| anyhow!("native alias snapshot busy or poisoned"))?;
-        let closed_guard = self.closed.try_lock().map_err(|_| anyhow!("inspection alias snapshot busy or poisoned"))?;
-        let acquired_guard = self.acquisition_released.try_lock().map_err(|_| anyhow!("acquisition alias snapshot busy or poisoned"))?;
-        let runtime_guard = self.runtime_released.try_lock().map_err(|_| anyhow!("Runtime inspection alias snapshot busy or poisoned"))?;
-        ensure!(census_guard.terminals.as_ref().map_or(0, Vec::len) == census_count
-            && closed_guard.len() == closed_count && acquired_guard.len() == acquired_count
-            && runtime_guard.len() == runtime_count,
-            "actual alias census changed after its original precharge");
-        let closed = closed_guard.clone();
-        let acquired = acquired_guard.clone();
-        let runtime = runtime_guard.clone();
-        drop(runtime_guard);
-        drop(acquired_guard);
-        drop(closed_guard);
-        drop(census_guard);
-        for owner in closed {
-            let actual = owner.original_native_terminal()?;
-            if actual.as_ref().is_some_and(same) { owner.retire_redundant_native_alias(factory, aggregate, canonical)?; }
-        }
-        for owner in acquired {
-            let actual = owner.original_native_terminal()?;
-            if actual.as_ref().is_some_and(same) { owner.retire_redundant_native_alias(factory, aggregate, canonical)?; }
-        }
-        for owner in runtime {
-            match owner.as_ref() {
-                RuntimeInspectionRelease::Closed(owner) => {
-                    let actual = owner.original_native_terminal()?;
-                    if actual.as_ref().is_some_and(same) { owner.retire_redundant_native_alias(factory, aggregate, canonical)?; }
-                }
-                RuntimeInspectionRelease::Acquisition(owner) => {
-                    let actual = owner.original_native_terminal()?;
-                    if actual.as_ref().is_some_and(same) { owner.retire_redundant_native_alias(factory, aggregate, canonical)?; }
-                }
-            }
-        }
-        let mut census = self.native_census.try_lock()
-            .map_err(|_| anyhow!("actual native alias partition busy or poisoned"))?;
-        ensure!(census.terminals.as_ref().map_or(0, Vec::len) <= census_count,
-            "actual native census grew beyond original alias quote");
-        let original = census.terminals.take().context("actual original native terminal census absent")?;
-        let mut retained = Vec::with_capacity(original.len());
-        let mut redundant = Vec::with_capacity(original.len());
-        for original in original {
-            if same(&original) { redundant.push(original); } else { retained.push(original); }
-        }
-        census.terminals = Some(retained);
-        let cleanup_alias = if census.cleanup_inputs.as_ref().is_some_and(|inputs| same(inputs.terminal())) {
-            census.cleanup_inputs.take()
-        } else { None };
-        drop(census);
-        // The actual canonical terminal still owns every body/resource. Only
-        // matching redundant aliases end here, outside bookkeeping gates.
-        drop(cleanup_alias);
-        drop(redundant);
-        Ok(())
-    }
-    fn retire_runtime_native_references(
-        &self,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-        retire_aliases: &dyn Fn(&lillux_sqlite::OriginalNativeConnectionTerminal) -> Result<()>,
-    ) -> Result<()> {
-        factory.require_original_process()?;
-        let mut outside = self.runtime_outside.try_lock()
-            .map_err(|_| anyhow!("actual outside Runtime checkout busy or poisoned"))?
-            .take().context("actual outside Runtime token absent")?;
-        let result = outside.retire_native_references(factory, aggregate, retire_aliases);
-        *self.runtime_outside.lock().unwrap_or_else(|p| p.into_inner()) = Some(outside);
-        result
-    }
-    fn require_runtime_and_operational_roots_registered(
-        &self, post_ack: &original_quota_claim::OriginalPostAckFinalization,
-    ) -> Result<()> {
-        post_ack.with_original_physical_registry(&mut |registry, prepay| {
-            post_ack.require_state_shared_roots_registered(registry, prepay)?;
-            let runtime = self.runtime_outside.try_lock()
-                .map_err(|_| anyhow!("Runtime registration census busy or poisoned"))?;
-            runtime.as_ref().context("actual Runtime outside continuation absent")?
-                .require_shared_roots_registered(registry, prepay)?;
-            let operational = self.operational_outside.try_lock()
-                .map_err(|_| anyhow!("Operational registration census busy or poisoned"))?;
-            for index in [0usize, 1usize] {
-                operational[index].owner.as_ref().context("actual Operational phase continuation absent")?
-                    .require_shared_roots_registered(registry, prepay)?;
-            }
-            Ok(())
-        })
-    }
-    fn register_runtime_shared_roots(
-        &self,
-        post_ack: &original_quota_claim::OriginalPostAckFinalization,
-    ) -> Result<()> {
-        let mut actual = self.runtime_outside.try_lock()
-            .map_err(|_| anyhow!("actual Runtime physical registration busy or poisoned"))?
-            .take().context("actual outside Runtime token absent")?;
-        let result = (|| -> Result<()> {
-            // SAFETY: the same retained original supervisor caches the whole
-            // original resource packet before any namespace registration.
-            let packets = unsafe { actual.take_original_sql_custody() }?;
-            post_ack.retain_original_sql_custody(packets)?;
-            post_ack.with_original_physical_registry(&mut |registry, prepay| {
-                // SAFETY: same actual original account/clock and finite
-                // registry, with both owners outside their bookkeeping gates.
-                unsafe { actual.register_shared_roots(registry, prepay) }
-            })
-        })();
-        *self.runtime_outside.lock().unwrap_or_else(|p| p.into_inner()) = Some(actual);
-        result
-    }
-    fn transfer_runtime_outside(
-        &self,
-        finalizer: Arc<crate::runtime_db::OriginalRuntimeFinalizer>,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        terminal: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-    ) -> Result<()> {
-        factory.require_original_process()?;
-        terminal.require_original(factory)?;
-        let mut destination = self.runtime_outside.try_lock()
-            .map_err(|_| anyhow!("outside Runtime registration busy or poisoned"))?;
-        ensure!(destination.is_none(), "actual outside Runtime already registered");
-        let mut slot = self.runtime_mutation.try_lock()
-            .map_err(|_| anyhow!("original Runtime handoff custody busy or poisoned"))?;
-        ensure!(slot.retained.is_none() && slot.closed.is_none() && slot.close_failure.is_none(),
-            "Runtime still has actual live/refused/closed consumer custody");
-        ensure!(slot.finalizer.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, &finalizer)),
-            "Runtime handoff selects another actual finalizer");
-        let alias = slot.finalizer.take();
-        drop(slot);
-        drop(destination);
-        drop(alias);
-        // SAFETY: the same original post-ACK envelope prepaid this consuming
-        // owner, Runtime is synchronously quiescent, its real directory receipt
-        // is retained, and only the redundant controller alias was removed.
-        match unsafe { finalizer.into_outside_finalizer(terminal) } {
-            Ok(outside) => {
-                *self.runtime_outside.lock().unwrap_or_else(|p| p.into_inner()) = Some(outside);
-                Ok(())
-            }
-            Err((actual, error)) => {
-                self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner()).finalizer = Some(actual);
-                Err(error)
-            }
-        }
-    }
-    fn retire_redundant_closed_state_alias(
-        &self,
-        state: &Arc<ryeos_state::state_db::ClosedOriginalState>,
-        finalizer: &Arc<ryeos_state::state_db::OriginalStateFinalizer>,
-    ) -> Result<()> {
-        state.require_original_finalizer(finalizer)?;
-        let mut slot = self.state_projection.try_lock()
-            .map_err(|_| anyhow!("original State controller alias custody busy or poisoned"))?;
-        ensure!(slot.retained.is_none() && slot.close_failure.is_none(),
-            "State controller still owns a live or refused consumer");
-        ensure!(slot.closed.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, state)),
-            "State outside handoff selects another controller owner");
-        // The genuine post-ACK producer already retains this exact State and
-        // ACK. Removing this redundant Arc closes no descriptor or resource.
-        let original_alias = slot.closed.take();
-        drop(slot);
-        drop(original_alias);
-        Ok(())
-    }
-    // Called only after actual State ACK has been cached and this producer's
-    // finite storage/transfer work prepaid on the original post-ACK envelope.
-    fn begin_runtime_finalizer(self: &Arc<Self>) -> Result<Arc<crate::runtime_db::OriginalRuntimeFinalizer>> {
-        let closed = {
-            let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(finalizer) = &slot.finalizer { return Ok(finalizer.clone()); }
-            slot.closed.take().context("actual closed Runtime finalizer owner absent")?
-        };
-        // This obtains an actual consuming owner; uniqueness is NOT a close
-        // receipt. Refusal restores the SAME closed owner without effects.
-        let closed = match Arc::try_unwrap(closed) {
-            Ok(closed) => closed,
-            Err(closed) => {
-                self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner()).closed = Some(closed);
-                return Err(self.retain_failure(anyhow!("actual closed Runtime still has other owners")));
-            }
-        };
-        match closed.into_finalizer() {
-            Ok(finalizer) => {
-                self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner()).finalizer = Some(finalizer.clone());
-                Ok(finalizer)
-            }
-            Err((closed, error)) => {
-                self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner()).closed = Some(Arc::new(closed));
-                Err(self.retain_failure(error))
-            }
-        }
-    }
     fn retain_native_census(&self, mut terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>) -> Result<()> {
         self.append_operational_terminals(&mut terminals)?;
         self.append_runtime_reference_terminals(&mut terminals)?;
@@ -1137,8 +921,8 @@ impl InspectionControllerCustody {
         // The host's own census is the exhaustive one its backend finishes
         // against. Its handover skips terminals already entered, so after a
         // partial refusal this whole call can be retried; the controller's
-        // copy, kept for the cleanup inputs and the post-ACK alias
-        // retirement, is filled only once the host holds every terminal.
+        // copy, kept for the cleanup inputs, is filled only once the host
+        // holds every terminal.
         self.retain_host_terminals(&terminals)?;
         let mut slot = self.native_census.lock().unwrap_or_else(|p| p.into_inner());
         ensure!(slot.terminals.is_none(), "original native census already retained");
@@ -2163,7 +1947,7 @@ fn run_execution_history_reset_owned(
                 // their sync acknowledgement failed. Keep the same State/CAS,
                 // runtime and source owners; no preview/signing/new ID here.
                 if operation
-                    .require_active(&state_authority, &cas_guard)
+                    .require_active_in(Some(native_factory.as_ref()), &state_authority, &cas_guard)
                     .is_err()
                 {
                     return Err(error)
@@ -2187,7 +1971,7 @@ fn run_execution_history_reset_owned(
     let operational_db = {
         let verify_operational_mutation = || -> Result<()> {
             operation.require_quota_claim(&quota_claim)?;
-            operation.require_active(&state_authority, &cas_guard)?;
+            operation.require_active_in(Some(native_factory.as_ref()), &state_authority, &cas_guard)?;
             reset_authority.authorize_mutation(&runtime_db)
         };
         // SAFETY: this borrowed verifier retains the authenticated staged
@@ -2305,6 +2089,7 @@ fn run_execution_history_reset_owned(
         state_authority: &state_authority,
         identity: &identity,
         operation: &operation,
+        native_factory: Some(&native_factory),
     };
     let mut scheduler_retirement_attempt = None;
     let mut scheduler_retirement = match participant {
@@ -2405,8 +2190,8 @@ fn run_execution_history_reset_owned(
         .context("finish the offline native host backend after mutating cleanup scope")?;
     inspection_settlement.retain_native_facts(inspection_custody.native_facts()?)?;
     // Post-backend work joins the host's finished factory: the State final
-    // ACK, retirements after the backend and outside custody. The admitting
-    // alias ends here, so only the post-backend one remains to quiesce.
+    // ACK and the retirements after the backend. The admitting alias ends
+    // here, so only the post-backend one remains to quiesce.
     drop(native_factory);
     let native_factory = inspection_custody.post_backend_factory()
         .context("offline native host post-backend factory")?;
@@ -3536,6 +3321,7 @@ mod tests {
             state_authority: &pinned,
             identity: &identity,
             operation: &operation,
+            native_factory: None,
         };
         assert!(permit.runtime_directory().is_err());
         let other = open_mutating_runtime_db(&config, &directory, &namespace).unwrap();
@@ -3636,6 +3422,7 @@ mod tests {
             state_authority: &pinned,
             identity: &identity,
             operation: &operation,
+            native_factory: None,
         };
         assert!(permit.runtime_directory().is_ok());
         let other_state_root = TempDir::new().unwrap();
@@ -3652,6 +3439,7 @@ mod tests {
             state_authority: &other_state_authority,
             identity: &identity,
             operation: &operation,
+            native_factory: None,
         };
         assert!(wrong_state_owner.runtime_directory().is_err());
         let activation_error = operation
@@ -3709,6 +3497,7 @@ mod tests {
             state_authority: &pinned,
             identity: &identity,
             operation: &operation,
+            native_factory: None,
         };
         assert!(wrong_incarnation.runtime_directory().is_err());
         assert!(StateLock::acquire(&default_lock_path(tmp.path())).is_err());

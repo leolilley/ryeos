@@ -2755,9 +2755,50 @@ fn read_optional_signed_bytes(
     read_optional_signed_bytes_in(None, runtime, name)
 }
 
+thread_local! {
+    /// The reset's native factory while this thread runs a scheduler
+    /// retirement call under its permit. Weak, so it is never a factory
+    /// alias the native host's release would count.
+    static RESET_NATIVE_SCOPE: std::cell::RefCell<Option<std::sync::Weak<lillux_sqlite::OriginalNativeFactory>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs one scheduler retirement call with its guarded reads in the reset
+/// permit's native factory scope. The previous selection is restored when
+/// this ends. It is not `Send`: the selection belongs to this thread.
+pub(crate) struct ResetNativeReadScope {
+    previous: Option<std::sync::Weak<lillux_sqlite::OriginalNativeFactory>>,
+    _thread: std::marker::PhantomData<*const ()>,
+}
+impl ResetNativeReadScope {
+    pub(crate) fn enter(factory: Option<&std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>) -> Self {
+        let previous = RESET_NATIVE_SCOPE.with(|scope| scope.replace(factory.map(std::sync::Arc::downgrade)));
+        Self { previous, _thread: std::marker::PhantomData }
+    }
+}
+impl Drop for ResetNativeReadScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        RESET_NATIVE_SCOPE.with(|scope| scope.replace(previous));
+    }
+}
+
+/// The factory selected by the innermost [`ResetNativeReadScope`]. A
+/// selected factory that has already ended refuses.
+pub(crate) fn reset_native_scope() -> Result<Option<std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>> {
+    RESET_NATIVE_SCOPE.with(|scope| match scope.borrow().as_ref() {
+        Some(weak) => weak
+            .upgrade()
+            .map(Some)
+            .context("reset native factory ended during scheduler retirement"),
+        None => Ok(None),
+    })
+}
+
 /// With the owning native factory the guarded read runs in that factory's
-/// scope, so its own held projection leases answer for their owner; without
-/// one the read refuses whenever any lease is listed.
+/// scope, so its own held projection leases answer for their owner. Without
+/// one it uses the factory of the enclosing [`ResetNativeReadScope`]; with
+/// neither the read refuses whenever any lease is listed.
 fn read_optional_signed_bytes_in(
     factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     runtime: &lillux::PinnedDirectory,
@@ -2767,7 +2808,11 @@ fn read_optional_signed_bytes_in(
     // an observer File here: closing a hardlink alias could drop SQLite locks
     // before signature validation gets a chance to refuse the evidence.
     let maximum = ryeos_scheduler_contract::SCHEDULER_RETIREMENT_RECORD_MAX_BYTES;
-    let bytes = match factory {
+    let scoped = match factory {
+        Some(_) => None,
+        None => reset_native_scope()?,
+    };
+    let bytes = match factory.or(scoped.as_deref()) {
         Some(factory) => factory.read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum),
         None => lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(name), maximum),
     }

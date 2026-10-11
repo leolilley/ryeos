@@ -66,9 +66,6 @@ pub(crate) struct OriginalRuntimeAcquisitionReleased {
     pub(super) _unused_inputs: Option<OriginalNativeBoundInputs>,
 }
 impl OriginalRuntimeAcquisitionReleased {
-    pub(crate) fn original_error(&self) -> &anyhow::Error {
-        &self.error
-    }
     pub(crate) fn native_terminals(&self, factory: &Arc<OriginalNativeFactory>)
         -> Result<Vec<OriginalNativeConnectionTerminal>> {
         self.require_native_custody(factory)?;

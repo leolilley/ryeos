@@ -12,12 +12,8 @@ use serde_json::Value;
 
 pub mod external_execution;
 mod inspection_cleanup;
-pub(crate) use inspection_cleanup::{InspectionCopyCleanup, InspectionCopyDisposal, OriginalInspectionCopyGroup};
+pub(crate) use inspection_cleanup::{InspectionCopyCleanup, InspectionCopyDisposal};
 pub use inspection_cleanup::MAX_INSPECTION_COPY_GROUP_PHYSICAL_REGISTRATIONS;
-#[doc(hidden)]
-pub use inspection_cleanup::{
-    quote_inspection_copy_group, quote_inspection_source_pin_retirements,
-};
 mod original_deadline;
 mod original_native;
 pub(crate) use original_native::{OriginalRuntimeAcquisitionFailure, OriginalRuntimeAcquisitionReleased};
@@ -26,15 +22,15 @@ mod live_native;
 mod original_inspection;
 #[doc(hidden)]
 pub use original_inspection::{
-    quote_inspection_copy_lease_parts, quote_inspection_outside_continuation,
+    quote_inspection_outside_continuation,
 };
 mod original_close;
-pub(crate) use original_close::{OriginalRuntimeAcquisitionOutsideCustody, OriginalLiveRuntimeOutsideCustody, OriginalOutsideRuntimeFinalizer, OriginalRuntimeClosed, OriginalRuntimeCloseFailure, OriginalRuntimeFinalizer};
+pub(crate) use original_close::{OriginalRuntimeAcquisitionOutsideCustody, OriginalLiveRuntimeOutsideCustody, OriginalRuntimeClosed, OriginalRuntimeCloseFailure};
 pub use original_close::MAX_LIVE_RUNTIME_NATIVE_PACKET_SOURCES;
 #[doc(hidden)]
 pub use original_close::{
     quote_runtime_acquisition_outside_frame, quote_runtime_directory_transfer,
-    quote_runtime_host_context, quote_runtime_membership, quote_runtime_namespace_owner,
+    quote_runtime_host_context, quote_runtime_membership,
     quote_runtime_outside_frame, quote_runtime_packet_sources,
     quote_unused_runtime_bound_parts,
 };
@@ -8088,13 +8084,6 @@ impl SqliteInspectionClosed {
     pub(crate) fn original_native_terminal(&self) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         original_inspection::terminal_snapshot(self.process, &self.native)
     }
-    pub(crate) fn retire_redundant_native_alias(&self,
-        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        canonical: &lillux_sqlite::OriginalNativeConnectionTerminal,
-    ) -> Result<()> {
-        original_inspection::retire_terminal_alias(self.process, &self.native, factory, aggregate, canonical)
-    }
     /// Release only the original production interval of this ACTUAL native
     /// terminal proof. It is not successful accounting or namespace disposal.
     pub(crate) fn acknowledge_producer_terminal(&self) -> Result<()> {
@@ -8204,13 +8193,6 @@ impl SqliteInspectionAcquisitionReleased {
 
     pub(crate) fn original_native_terminal(&self) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         original_inspection::terminal_snapshot(self.process, &self.native)
-    }
-    pub(crate) fn retire_redundant_native_alias(&self,
-        factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        canonical: &lillux_sqlite::OriginalNativeConnectionTerminal,
-    ) -> Result<()> {
-        original_inspection::retire_terminal_alias(self.process, &self.native, factory, aggregate, canonical)
     }
     /// Release only the original production interval of this ACTUAL native
     /// terminal proof. It is not successful accounting or namespace disposal.

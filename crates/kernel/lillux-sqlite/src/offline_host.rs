@@ -127,12 +127,15 @@ pub struct OfflineNativeFacts {
 pub struct OfflineNativeReleased {
     pub facts: Option<OfflineNativeFacts>,
     pub region: Option<HostStorageRegionReleaseFact>,
+    /// Durability pins of census terminals that the release closed.
+    pub durability_pins_retired: usize,
 }
 impl std::fmt::Debug for OfflineNativeReleased {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OfflineNativeReleased")
             .field("facts", &self.facts)
             .field("region_released", &self.region.is_some())
+            .field("durability_pins_retired", &self.durability_pins_retired)
             .finish()
     }
 }
@@ -180,6 +183,8 @@ pub struct OfflineNativeHost {
     facts: Option<OfflineNativeFacts>,
     /// Funded storage of `raw`, reported identically on every finish path.
     storage_bytes: u64,
+    /// Durability pins closed by release so far, kept across a retry.
+    durability_pins_retired: usize,
 }
 
 /// A refused issuance with the partially built host retained. Release it
@@ -264,6 +269,7 @@ impl OfflineNativeHost {
             backend: None,
             facts: None,
             storage_bytes: 0,
+            durability_pins_retired: 0,
         }
     }
 
@@ -517,6 +523,7 @@ impl OfflineNativeHost {
             "offline native release refused: the backend has not finished"
         );
         drop(self.drained.take());
+        self.retire_terminal_durability_pins()?;
         self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.ticketless.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.leases.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -551,7 +558,41 @@ impl OfflineNativeHost {
             Some(facts) => Some(self.region.region_release_fact(facts.generation, facts.region_bytes)?),
             None => None,
         };
-        Ok(OfflineNativeReleased { facts: self.facts.clone(), region })
+        Ok(OfflineNativeReleased {
+            facts: self.facts.clone(),
+            region,
+            durability_pins_retired: self.durability_pins_retired,
+        })
+    }
+
+    /// Close the durability pins of every census terminal before the census
+    /// ends; their Drop would only keep each descriptor open until process
+    /// exit. Each close first rechecks the caller's cleanup window. A closed
+    /// connection holds at most a main and a WAL pin, and closed connections
+    /// are ticketed, so the count is bounded by twice the ticket limit.
+    ///
+    /// Other descriptors a terminal can reach are not retired here. Its
+    /// destination inputs carry the caller's destination authority, whose
+    /// owners (directories, destination roles, finalizer files) belong to the
+    /// caller's types and end with them; this host has no typed close for
+    /// them. Inspection bodies own no descriptor: their destination roles are
+    /// held and retired by the caller's copy work and disposal owners.
+    fn retire_terminal_durability_pins(&mut self) -> Result<()> {
+        let authority = self.authority.clone();
+        let recheck = || authority.checkpoint(true);
+        for slot in [&self.terminals, &self.ticketless] {
+            let terminals = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            for terminal in terminals {
+                if let OriginalNativeConnectionTerminal::Closed(closed) = terminal {
+                    let retired = closed.retire_durability_pins(&recheck)
+                        .context("offline native release refused: a census durability pin did not retire")?;
+                    self.durability_pins_retired = self.durability_pins_retired
+                        .checked_add(retired)
+                        .context("offline native retired pin count overflow")?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::finish_backend`] then [`Self::release`]; a partial host

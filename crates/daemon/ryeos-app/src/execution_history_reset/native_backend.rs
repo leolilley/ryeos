@@ -17,9 +17,10 @@ pub(super) struct OriginalBackendSlot {
     /// handover never enters the same owner twice.
     handed_terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
     handed_leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
-    /// The released host's plain facts and region release fact. Once the
-    /// host is released, its facts are answered from here.
-    released: Option<(OfflineNativeFacts, HostStorageRegionReleaseFact)>,
+    /// The released host's plain facts, region release fact and the count
+    /// of census durability pins its release closed. Once the host is
+    /// released, its facts are answered from here.
+    released: Option<(OfflineNativeFacts, HostStorageRegionReleaseFact, usize)>,
     /// Names of the controller and settlement owners the alias quiesce has
     /// ended, so a release refusal can say which known holders are gone.
     quiesced: Vec<&'static str>,
@@ -112,8 +113,7 @@ impl InspectionControllerCustody {
     }
 
     /// The same factory after the backend finished, for the post-backend
-    /// steps: final acknowledgement, retirements after the backend and
-    /// outside custody.
+    /// steps: final acknowledgement and retirements after the backend.
     pub(super) fn post_backend_factory(&self) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
         let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
         Ok(slot.host.as_ref().context("offline native host absent")?.post_backend_factory()?.clone())
@@ -125,7 +125,7 @@ impl InspectionControllerCustody {
         let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
         match (&slot.host, &slot.released) {
             (Some(host), _) => host.facts(),
-            (None, Some((facts, _))) => Ok(facts.clone()),
+            (None, Some((facts, _, _))) => Ok(facts.clone()),
             (None, None) => anyhow::bail!("offline native host absent"),
         }
     }
@@ -141,37 +141,24 @@ impl InspectionControllerCustody {
     pub(super) fn quiesce_native_aliases(&self) -> Result<()> {
         self.native_facts().context("quiesce before the host's backend facts")?;
         let mut ended: Vec<&'static str> = Vec::new();
-        let settlement = self.settlement.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        if let Some(settlement) = &settlement {
-            ended.extend(settlement.quiesce_native_owners()?);
-        }
-        drop(settlement);
-        // Post-acknowledgement outside custody joined the census owners, so
-        // it ends first.
-        let runtime_outside = self.runtime_outside.lock().unwrap_or_else(|p| p.into_inner()).take();
-        if runtime_outside.is_some() {
-            ended.push("Runtime outside finalizer");
-        }
-        drop(runtime_outside);
-        let operational_outside = {
-            let mut outside = self.operational_outside.lock().unwrap_or_else(|p| p.into_inner());
-            [outside[0].owner.take(), outside[1].owner.take()]
-        };
-        if operational_outside.iter().any(Option::is_some) {
-            ended.push("Operational outside custody");
-        }
-        drop(operational_outside);
-        for (phase, name) in [
-            (&self.operational_inspection, "Operational inspection"),
-            (&self.operational_mutation, "Operational mutation"),
-        ] {
-            if phase.lock().unwrap_or_else(|p| p.into_inner()).quiesce()? {
-                ended.push(name);
+        let result = self.quiesce_native_aliases_into(&mut ended);
+        // Owners already ended stay recorded whether or not a later step
+        // refused, so a release refusal can still name them.
+        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+        for name in ended {
+            if !slot.quiesced.contains(&name) {
+                slot.quiesced.push(name);
             }
         }
+        result
+    }
+
+    fn quiesce_native_aliases_into(&self, ended: &mut Vec<&'static str>) -> Result<()> {
+        // Every slot refusal is decided first, under slot locks held until
+        // that slot's owners end, so a refusal here ends nothing.
+        let mut state = self.state_projection.lock().unwrap_or_else(|p| p.into_inner());
         {
-            let mut slot = self.state_projection.lock().unwrap_or_else(|p| p.into_inner());
-            let OfflineStateProjectionSlot { issued: _, factory, retained, closed, close_failure } = &mut *slot;
+            let OfflineStateProjectionSlot { issued: _, factory: _, retained, closed, close_failure } = &*state;
             ensure!(
                 retained.is_none() && close_failure.is_none(),
                 "State projection still holds a live or refused owner; quiesce refused"
@@ -186,38 +173,66 @@ impl InspectionControllerCustody {
                     "State projection holds {unretired} unretired generation lease(s), each a factory alias; quiesce refused"
                 );
             }
-            let ended_state = (closed.take(), factory.take());
-            if ended_state.0.is_some() || ended_state.1.is_some() {
-                ended.push("State projection");
-            }
-            drop(slot);
-            drop(ended_state);
         }
+        let mut runtime = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
         {
-            let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
             let OfflineRuntimeSlot {
                 issued: _,
                 retained,
-                closed,
-                finalizer,
+                closed: _,
                 close_failure,
-                reference,
-                released_reference,
+                reference: _,
+                released_reference: _,
                 refused_reference,
-            } = &mut *slot;
+            } = &*runtime;
             ensure!(
                 retained.is_none() && close_failure.is_none() && refused_reference.is_none(),
                 "Runtime still holds a live or refused owner; quiesce refused"
             );
-            let ended_runtime = (closed.take(), finalizer.take(), reference.take(), released_reference.take());
-            if ended_runtime.0.is_some()
-                || ended_runtime.1.is_some()
-                || ended_runtime.2.is_some()
-                || ended_runtime.3.is_some()
-            {
+        }
+        let mut operational_inspection = self.operational_inspection.lock().unwrap_or_else(|p| p.into_inner());
+        let mut operational_mutation = self.operational_mutation.lock().unwrap_or_else(|p| p.into_inner());
+        operational_inspection.require_quiescent()?;
+        operational_mutation.require_quiescent()?;
+        let settlement = self.settlement.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(settlement) = &settlement {
+            ended.extend(settlement.quiesce_native_owners()?);
+        }
+        drop(settlement);
+        for (phase, name) in [
+            (&mut operational_inspection, "Operational inspection"),
+            (&mut operational_mutation, "Operational mutation"),
+        ] {
+            if phase.quiesce()? {
+                ended.push(name);
+            }
+        }
+        drop(operational_mutation);
+        drop(operational_inspection);
+        {
+            let OfflineStateProjectionSlot { issued: _, factory, retained: _, closed, close_failure: _ } = &mut *state;
+            let ended_state = (closed.take(), factory.take());
+            if ended_state.0.is_some() || ended_state.1.is_some() {
+                ended.push("State projection");
+            }
+            drop(state);
+            drop(ended_state);
+        }
+        {
+            let OfflineRuntimeSlot {
+                issued: _,
+                retained: _,
+                closed,
+                close_failure: _,
+                reference,
+                released_reference,
+                refused_reference: _,
+            } = &mut *runtime;
+            let ended_runtime = (closed.take(), reference.take(), released_reference.take());
+            if ended_runtime.0.is_some() || ended_runtime.1.is_some() || ended_runtime.2.is_some() {
                 ended.push("Runtime mutation");
             }
-            drop(slot);
+            drop(runtime);
             drop(ended_runtime);
         }
         let references = std::mem::take(
@@ -278,12 +293,6 @@ impl InspectionControllerCustody {
             ended.push("handed host terminals and leases");
         }
         drop(handed);
-        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        for name in ended {
-            if !slot.quiesced.contains(&name) {
-                slot.quiesced.push(name);
-            }
-        }
         Ok(())
     }
 
@@ -298,17 +307,18 @@ impl InspectionControllerCustody {
             match slot.host.take() {
                 Some(host) => host,
                 None => {
-                    let (_, region) = slot.released.as_ref().context("offline native host absent; nothing to release")?;
+                    let (_, region, _) = slot.released.as_ref().context("offline native host absent; nothing to release")?;
                     return Ok(*region);
                 }
             }
         };
         match host.release() {
             Ok(released) => {
-                let lillux_sqlite::offline_host::OfflineNativeReleased { facts, region } = released;
+                let lillux_sqlite::offline_host::OfflineNativeReleased { facts, region, durability_pins_retired } = released;
                 let facts = facts.context("released offline native host lacks its backend facts")?;
                 let region = region.context("released offline native host lacks its region release fact")?;
-                self.native_backend.lock().unwrap_or_else(|p| p.into_inner()).released = Some((facts, region));
+                self.native_backend.lock().unwrap_or_else(|p| p.into_inner()).released =
+                    Some((facts, region, durability_pins_retired));
                 Ok(region)
             }
             Err(OfflineNativeRetained { host, error }) => {

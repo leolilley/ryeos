@@ -758,12 +758,17 @@ static int ryeosProjectionLeasesEmpty(void){
   empty=ryeosProjectionLeases==0;
   pthread_mutex_unlock(&ryeosGateMutex);return empty;
 }
-static int ryeosLeaseBlocksIdentity(dev_t dev,ino_t ino){
+/* Lease census of one identity. A listed lease is answered only inside a
+   scope of the installed arena. `charge` prepays the bounded scan from that
+   arena's budget; an uncharged census runs the same identity checks under
+   the same RYEOS_NATIVE_TICKETS bound and refuses exactly as the charged one. */
+static int ryeosLeaseBlocksIdentityCharged(dev_t dev,ino_t ino,int charge){
   if(!ryeos_native_process_matches())return 1;
   RyeosProjectionLease *l;struct stat st;unsigned n=0;
   if(ryeosProjectionLeases){
     RyeosNativeArena *a=atomic_load(&ryeosNativeOwner);
-    if(!ryeosNativeContext(a) || !ryeosNativeCharge(a,RYEOS_NATIVE_TICKETS,ryeosNativeCleanup))return 1;
+    if(!ryeosNativeContext(a))return 1;
+    if(charge && !ryeosNativeCharge(a,RYEOS_NATIVE_TICKETS,ryeosNativeCleanup))return 1;
   }
   for(l=ryeosProjectionLeases;l;l=l->next){
     if(++n>RYEOS_NATIVE_TICKETS)return 1;
@@ -775,10 +780,16 @@ static int ryeosLeaseBlocksIdentity(dev_t dev,ino_t ino){
   }
   return 0;
 }
-static int ryeosLeaseBlocksFd(int fd){
+static int ryeosLeaseBlocksIdentity(dev_t dev,ino_t ino){
+  return ryeosLeaseBlocksIdentityCharged(dev,ino,1);
+}
+static int ryeosLeaseBlocksFdCharged(int fd,int charge){
   if(!ryeos_native_process_matches())return 1;
   struct stat st;
-  return osFstat(fd,&st)!=0 || ryeosLeaseBlocksIdentity(st.st_dev,st.st_ino);
+  return osFstat(fd,&st)!=0 || ryeosLeaseBlocksIdentityCharged(st.st_dev,st.st_ino,charge);
+}
+static int ryeosLeaseBlocksFd(int fd){
+  return ryeosLeaseBlocksFdCharged(fd,1);
 }
 static RyeosBinding *ryeosRetiring = 0;
 /* All effect-bearing open/reuse admissions are serialized by gate; Unix
@@ -1149,7 +1160,7 @@ SQLITE_API int ryeos_projection_lease_close(void *handle,int *pinConsumed,int *f
    physical retirement claims, BEFORE opening a data descriptor. Holding gate
    until that descriptor is closed prevents a new SQLite adoption in between.
    Never take Unix global, run SQL/signature code, or return an FD here. */
-SQLITE_API int ryeos_sqlite_read_unbound_regular(int pin,unsigned char *buffer,int capacity,int *written){
+static int ryeosReadUnboundRegular(int pin,unsigned char *buffer,int capacity,int *written,int charge){
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
   struct stat expected,actual; RyeosGateFd *node;
   int fd=-1,rc=SQLITE_IOERR_READ,flags,total=0; char exact[64];
@@ -1164,7 +1175,7 @@ SQLITE_API int ryeos_sqlite_read_unbound_regular(int pin,unsigned char *buffer,i
     if(osFstat(node->fd,&actual)!=0) goto done;
     if(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino){ rc=SQLITE_BUSY; goto done; }
   }
-  if(ryeosLeaseBlocksFd(pin) || ryeosGateAdmissionClaim(pin)){ rc=SQLITE_BUSY; goto done; }
+  if(ryeosLeaseBlocksFdCharged(pin,charge) || ryeosGateAdmissionClaim(pin)){ rc=SQLITE_BUSY; goto done; }
   if(snprintf(exact,sizeof(exact),"/proc/self/fd/%d",pin)>=(int)sizeof(exact)) goto done;
   fd=ryeosGateRawOpen(exact,O_RDONLY|O_CLOEXEC|O_NONBLOCK,0);
   if(fd<0) goto done;
@@ -1185,6 +1196,16 @@ done:
   /* Linux consumes the descriptor even on late close/EINTR: never retry. */
   pthread_mutex_unlock(&ryeosGateMutex);
   return rc;
+}
+SQLITE_API int ryeos_sqlite_read_unbound_regular(int pin,unsigned char *buffer,int capacity,int *written){
+  return ryeosReadUnboundRegular(pin,buffer,capacity,written,1);
+}
+/* Revalidation read of a retained original witness. The lease census is the
+   same identity check as the charged read, without the arena charge: the
+   reread runs from inside the owner's own checkpoints, whose count no
+   cleanup reservation can bound. */
+SQLITE_API int ryeos_sqlite_read_unbound_witness(int pin,unsigned char *buffer,int capacity,int *written){
+  return ryeosReadUnboundRegular(pin,buffer,capacity,written,0);
 }
 
 /* Bounded copy chunk from the SAME retained O_PATH pin. Expected length is
@@ -2216,6 +2237,7 @@ SQLITE_API int ryeos_sqlite_close_original_output(int fd,sqlite3_uint64 dev,sqli
   return SQLITE_NOTFOUND;
 }
 SQLITE_API int ryeos_sqlite_read_unbound_regular(int p,unsigned char *b,int n,int *w){ (void)p;(void)b;(void)n;if(w)*w=0;return SQLITE_NOTFOUND; }
+SQLITE_API int ryeos_sqlite_read_unbound_witness(int p,unsigned char *b,int n,int *w){ (void)p;(void)b;(void)n;if(w)*w=0;return SQLITE_NOTFOUND; }
 SQLITE_API int ryeos_sqlite_read_unbound_regular_chunk(int p,sqlite3_uint64 o,sqlite3_uint64 l,unsigned char *b,int n,int *w){ (void)p;(void)o;(void)l;(void)b;(void)n;if(w)*w=0;return SQLITE_NOTFOUND; }
 
 SQLITE_API int ryeos_sqlite_retirement_capture(void *h,const char *g){ (void)h;(void)g;return SQLITE_NOTFOUND; }

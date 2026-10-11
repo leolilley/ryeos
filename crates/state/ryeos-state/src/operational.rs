@@ -34,7 +34,7 @@ pub use original::{
     quote_operational_live_metadata_retirement, quote_maximum_operational_live_metadata_retirement,
     quote_operational_membership, quote_operational_metadata, quote_operational_retired_shared_roots,
     quote_operational_marker_owner, quote_operational_marker_receipt,
-    quote_operational_offline_context, quote_operational_packet_sources,
+    quote_operational_packet_sources,
     quote_operational_root_transfer, quote_operational_schema_sources,
 };
 pub use original_mutation::OriginalOperationalMutationAuthority;

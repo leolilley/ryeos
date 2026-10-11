@@ -17,6 +17,7 @@ use ryeos_scheduler_contract::{
 
 use crate::retirement_attempt::RetirementAttempt;
 use crate::retirement_journal::{
+    ResetNativeReadScope, reset_native_scope,
     AuthenticatedInterruptedGeneration, RetirementJournal, authorized_role_sources,
 };
 
@@ -160,6 +161,7 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
         &self,
         permit: &'a SchedulerResetRetirement<'_, '_>,
     ) -> Result<Box<dyn SchedulerHistoryRetirementAttempt + 'a>> {
+        let _scope = ResetNativeReadScope::enter(permit.native_factory()?);
         let authority_runtime = permit.runtime_directory()?;
         let interrupted = RetirementJournal::scan_interrupted_evidence(
             authority_runtime,
@@ -252,6 +254,7 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
         permit: &SchedulerResetRetirement<'_, '_>,
         retirement: &SchedulerHistoryRetirement,
     ) -> Result<usize> {
+        let _scope = ResetNativeReadScope::enter(permit.native_factory()?);
         let runtime = permit.runtime_directory()?;
         let Some(generation) = retirement.generation else {
             ensure!(
@@ -261,16 +264,16 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
                     .all(|source| source.current.is_none()),
                 "scheduler completion omitted generation for a present original source"
             );
-            return Ok(retry_while_held("validate scheduler retirement completion", || {
+            return retry_while_held("validate scheduler retirement completion", || {
                 permit.runtime_directory()?;
                 RetirementJournal::validate_admission(runtime, permit.node_identity())
-            }));
+            });
         };
-        Ok(retry_while_held("publish scheduler retirement terminal completion", || {
+        retry_while_held("publish scheduler retirement terminal completion", || {
             permit.runtime_directory()?;
             RetirementJournal::complete_generation(permit, generation)
                 .context("verify scheduler role cleanup and publish terminal completion")
-        }))
+        })
     }
 }
 
@@ -287,11 +290,19 @@ fn verify_source_identity(
     });
     // The original caller must separately admit aggregate verification work.
     // Neither this signed extent nor a source receipt supplies that grant.
-    lillux_sqlite::verify_regular_without_sqlite_alias(
-        runtime,
-        std::ffi::OsStr::new(name),
-        native.as_ref(),
-    )
+    // Under a reset permit the verification runs in its native factory scope.
+    match reset_native_scope()? {
+        Some(factory) => factory.verify_regular_without_sqlite_alias(
+            runtime,
+            std::ffi::OsStr::new(name),
+            native.as_ref(),
+        ),
+        None => lillux_sqlite::verify_regular_without_sqlite_alias(
+            runtime,
+            std::ffi::OsStr::new(name),
+            native.as_ref(),
+        ),
+    }
 }
 
 fn validate_original_canonical_sources(permit: &SchedulerResetRetirement<'_, '_>) -> Result<()> {
@@ -716,7 +727,7 @@ fn begin_original_stopped<'a>(
             "original stopped scheduler runtime changed"
         );
         Ok(runtime)
-    });
+    })?;
     let native_plan = native_stopped_plan(&runtime, &plan)?; // all data validation before ownership acquisition
     let journal = retry_while_held("publish original stopped scheduler intake", || {
         permit.runtime_directory()?;
@@ -724,21 +735,21 @@ fn begin_original_stopped<'a>(
             Some(evidence) => RetirementJournal::resume_original_stopped(permit, evidence),
             None => RetirementJournal::begin(permit, plan.clone()),
         }
-    });
+    })?;
     let db =
         match SchedulerDb::capture_stopped_projection(Arc::clone(&runtime), native_plan.clone()) {
             Ok(db) => db,
-            Err(failure) => retry_stopped_intake(failure, &native_plan, permit),
+            Err(failure) => retry_stopped_intake(failure, &native_plan, permit)?,
         };
     let drained = retry_while_held("acknowledge original stopped scheduler intake", || {
         permit.runtime_directory()?;
         db.retry_stopped_projection(&native_plan)
             .map_err(anyhow::Error::new)
-    });
+    })?;
     retry_while_held("sync original stopped scheduler intake", || {
         permit.runtime_directory()?;
         runtime.sync()
-    });
+    })?;
     Ok(Box::new(ServiceRetirementAttempt {
         attempt: RetirementAttempt::new_stopped(db, journal, generation, drained),
         prior_artifacts,
@@ -773,11 +784,11 @@ fn begin_stopped_recovery<'a>(
             "scheduler runtime directory changed while acquiring native owner"
         );
         Ok(runtime)
-    });
+    })?;
 
     let runtime_identity = retry_while_held("bind scheduler recovery to runtime identity", || {
         permit.runtime_identity()
-    });
+    })?;
     let mut generations = parent
         .known_generations
         .iter()
@@ -819,17 +830,17 @@ fn begin_stopped_recovery<'a>(
     let mut journal = retry_while_held("publish immutable scheduler recovery intent", || {
         permit.runtime_directory()?;
         RetirementJournal::begin_recovery(permit, &parent, contract_plan.clone())
-    });
+    })?;
     let native_plan = native_stopped_plan(&runtime, &contract_plan)?;
     let db =
         match SchedulerDb::capture_stopped_projection(Arc::clone(&runtime), native_plan.clone()) {
             Ok(db) => db,
-            Err(failure) => retry_stopped_intake(failure, &native_plan, permit),
+            Err(failure) => retry_stopped_intake(failure, &native_plan, permit)?,
         };
     let drained = retry_while_held("acknowledge stopped scheduler recovery intake", || {
         db.retry_stopped_projection(&native_plan)
             .map_err(anyhow::Error::new)
-    });
+    })?;
 
     // The signed parent authorizes any absent remaining role. The fresh native
     // owner has checked all fixed aliases; sync its retained directory before
@@ -837,7 +848,7 @@ fn begin_stopped_recovery<'a>(
     retry_while_held("sync authenticated stopped scheduler namespace", || {
         permit.runtime_directory()?;
         runtime.sync()
-    });
+    })?;
 
     // Rebuild only the already-authenticated, pre-effect prefix under the
     // child intent. The digest-free capture facts are derived from the exact
@@ -850,7 +861,7 @@ fn begin_stopped_recovery<'a>(
             retry_while_held("publish recovered scheduler capture phase", || {
                 permit.runtime_directory()?;
                 journal.append(role, SchedulerRetirementPhase::Captured, identity.clone())
-            });
+            })?;
         }
         phase_index += 1;
     }
@@ -864,7 +875,7 @@ fn begin_stopped_recovery<'a>(
                     SchedulerRetirementPhase::SqlDrainAuthorized,
                     identity.clone(),
                 )
-            });
+            })?;
         }
         phase_index += 1;
     }
@@ -874,7 +885,7 @@ fn begin_stopped_recovery<'a>(
             retry_while_held("publish recovered scheduler drain acknowledgement", || {
                 permit.runtime_directory()?;
                 journal.append(role, SchedulerRetirementPhase::SqlDrained, identity.clone())
-            });
+            })?;
         }
         phase_index += 1;
     }
@@ -884,12 +895,14 @@ fn begin_stopped_recovery<'a>(
     }))
 }
 
+/// Retry the exact stopped intake on its retained failure owner. After
+/// [`HELD_RETRY_ATTEMPTS`] the refusal carries that same owner.
 fn retry_stopped_intake(
     mut failure: SchedulerDbOpenFailure,
     plan: &lillux_sqlite::StoppedSqliteProjectionPlan,
     permit: &SchedulerResetRetirement<'_, '_>,
-) -> SchedulerDb {
-    loop {
+) -> Result<SchedulerDb> {
+    for _ in 0..HELD_RETRY_ATTEMPTS {
         if let Err(error) = permit.runtime_directory() {
             retry_notice(
                 "revalidate stopped scheduler intake authority while retaining owner",
@@ -898,7 +911,7 @@ fn retry_stopped_intake(
             continue;
         }
         match failure.retry_stopped_projection(plan) {
-            Ok(db) => return db,
+            Ok(db) => return Ok(db),
             Err(next) => {
                 retry_notice(
                     "retry the exact stopped scheduler intake",
@@ -908,6 +921,9 @@ fn retry_stopped_intake(
             }
         }
     }
+    Err(anyhow::Error::new(failure).context(format!(
+        "scheduler history reset refused the stopped intake after {HELD_RETRY_ATTEMPTS} attempts; its owner is retained"
+    )))
 }
 
 fn validate_reset_admission(
@@ -1054,6 +1070,7 @@ impl SchedulerHistoryRetirementAttempt for ServiceRetirementAttempt<'_> {
         &mut self,
         permit: &SchedulerResetRetirement<'_, '_>,
     ) -> Result<Option<SchedulerHistoryRetirement>> {
+        let _scope = ResetNativeReadScope::enter(permit.native_factory()?);
         Ok(self
             .attempt
             .advance(permit)?
@@ -1075,11 +1092,27 @@ impl SchedulerHistoryRetirementAttempt for CompletedRetirementAttempt {
     }
 }
 
-fn retry_while_held<T>(stage: &str, mut operation: impl FnMut() -> Result<T>) -> T {
+/// Attempts of one held stage before it refuses: about one minute at the
+/// retry interval. A refusal that outlasts this is not a transient one.
+const HELD_RETRY_ATTEMPTS: u32 = 240;
+
+/// Retry one stage while the caller keeps its original locks and owners. A
+/// stage still refused after [`HELD_RETRY_ATTEMPTS`] returns its last
+/// refusal, so a persistent refusal ends the call instead of spinning.
+fn retry_while_held<T>(stage: &str, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut attempts = 0u32;
     loop {
         match operation() {
-            Ok(value) => return value,
-            Err(error) => retry_notice(stage, &error),
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                attempts += 1;
+                if attempts >= HELD_RETRY_ATTEMPTS {
+                    return Err(error.context(format!(
+                        "scheduler history reset refused to {stage} after {attempts} attempts"
+                    )));
+                }
+                retry_notice(stage, &error);
+            }
         }
     }
 }

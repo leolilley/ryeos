@@ -268,14 +268,6 @@ impl OriginalProjectionStateOwner {
     }
 }
 impl OriginalStateDestinationJoin {
-    pub(crate) fn original_factory(&self) -> anyhow::Result<std::sync::Arc<OriginalNativeFactory>> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign original State join");
-        let factory = self.factory.upgrade()
-            .context("original State join lost its factory during retirement")?;
-        factory.require_original_process()?;
-        Ok(factory)
-    }
-
     pub(crate) fn require_original(
         &self,
         factory: &Arc<OriginalNativeFactory>,
@@ -435,67 +427,6 @@ impl OriginalStateDestinationJoin {
             }
         }
         Ok(())
-    }
-    /// # Safety
-    /// The actual offline supervisor has transferred EVERY original SQL packet,
-    /// destination and inspection source, excluded further parent/leaf creation,
-    /// and retained the actual State physical token with its consumed preparation.
-    /// This closes only source intake; it supplies no physical/account receipt.
-    pub(super) unsafe fn advance_offline_parent(
-        &self,
-        factory: &Arc<OriginalNativeFactory>,
-        aggregate: &OriginalNativeTerminal,
-        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        self.require_original(factory, aggregate)?;
-        self.advance_leaf_sources(factory, aggregate, prepay)?;
-        let mut state = self
-            .state
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("original State parent retirement busy or poisoned"))?;
-        anyhow::ensure!(
-            state.leaves.iter().all(|leaf| leaf.source.is_none()),
-            "actual State leaf source aliases remain"
-        );
-        let Some(parent) = state.parent.as_ref() else {
-            anyhow::ensure!(
-                state.census_closed,
-                "State parent absent without actual source census closure"
-            );
-            return Ok(());
-        };
-        let OriginalProjectionStateOwner::Offline(parent) = parent else {
-            anyhow::bail!("offline State census cannot consume live State/Store parent");
-        };
-        // This is the SAME original empty preparation, transferred by the
-        // consuming State finalizer; None alone outside that token is no proof.
-        {
-            let preparation = parent.preparation.try_lock().map_err(|_| {
-                anyhow::anyhow!("original State preparation retirement busy or poisoned")
-            })?;
-            anyhow::ensure!(
-                preparation.is_none(),
-                "actual State preparation roots have not transferred"
-            );
-        }
-        state.census_closed = true;
-        let OriginalProjectionStateOwner::Offline(parent) =
-            state.parent.take().expect("checked canonical State parent")
-        else {
-            unreachable!()
-        };
-        match Arc::try_unwrap(parent) {
-            Ok(parent) => {
-                // No roots or resident payload remain in this actual ordinary
-                // host wrapper. Its genuine weak backedges retire only now.
-                drop(parent);
-                Ok(())
-            }
-            Err(parent) => {
-                *state.parent = Some(OriginalProjectionStateOwner::Offline(parent));
-                anyhow::bail!("actual offline State parent still has an external alias")
-            }
-        }
     }
     /// # Safety
     /// The real closed/failed Store supervisor closed the complete State source

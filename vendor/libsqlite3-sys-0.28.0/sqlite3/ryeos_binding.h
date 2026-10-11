@@ -18,6 +18,7 @@ static int ryeosBoundShmAdopt(unixFile*,unixShmNode*);
 
 /* Bounded read-only evidence intake; no data descriptor escapes the gate. */
 SQLITE_API int ryeos_sqlite_read_unbound_regular(int,unsigned char*,int,int*);
+SQLITE_API int ryeos_sqlite_read_unbound_witness(int,unsigned char*,int,int*);
 SQLITE_API int ryeos_sqlite_read_unbound_regular_chunk(int,sqlite3_uint64,sqlite3_uint64,unsigned char*,int,int*);
 
 /* Private no-SQL stopped-intake entry points; same context/release ownership. */

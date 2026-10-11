@@ -19,29 +19,6 @@ pub fn quote_inspection_outside_continuation()
     })
 }
 
-pub fn quote_inspection_copy_lease_parts(source_pin_count: usize)
-    -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
-    anyhow::ensure!(source_pin_count <= 4,
-        "inspection source metadata pins exceed their four fixed roles");
-    let bytes = std::mem::size_of::<OriginalInspectionCopyLeaseParts>()
-        .checked_add(source_pin_count.checked_mul(
-            std::mem::size_of::<lillux_sqlite::RetainedOriginalMetadataPin>()
-                .checked_add(4 * std::mem::size_of::<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>())
-                .context("source metadata pin quote overflow")?,
-        ).context("source metadata pin quote overflow")?)
-        .context("copy lease transfer quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: u64::try_from(bytes)?, steps: 24,
-    })
-}
-
-pub(super) fn same_terminal_owner(a: &OriginalNativeConnectionTerminal, b: &OriginalNativeConnectionTerminal) -> bool {
-    match (a, b) {
-        (OriginalNativeConnectionTerminal::Closed(a), OriginalNativeConnectionTerminal::Closed(b)) => Arc::ptr_eq(a, b),
-        (OriginalNativeConnectionTerminal::Released(a), OriginalNativeConnectionTerminal::Released(b)) => Arc::ptr_eq(a, b),
-        _ => false,
-    }
-}
 pub(super) fn terminal_snapshot(
     process: u32,
     native: &std::sync::Mutex<Option<(Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal)>>,
@@ -49,32 +26,6 @@ pub(super) fn terminal_snapshot(
     ensure!(process == std::process::id(), "inspection terminal belongs to original process");
     let native = native.try_lock().map_err(|_| anyhow!("original inspection native custody busy or poisoned"))?;
     Ok(native.as_ref().map(|(_, terminal)| terminal.clone()))
-}
-/// Remove only a redundant native receipt/factory alias after the original
-/// outside supervisor retained this exact canonical receipt. Physical copy,
-/// namespace, proof and work owners remain in their original wrapper.
-pub(super) fn retire_terminal_alias(
-    process: u32,
-    native: &std::sync::Mutex<Option<(Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal)>>,
-    factory: &Arc<OriginalNativeFactory>,
-    aggregate: &lillux_sqlite::OriginalNativeTerminal,
-    canonical: &OriginalNativeConnectionTerminal,
-) -> Result<()> {
-    ensure!(process == std::process::id(), "inspection native alias belongs to original process");
-    factory.require_original_process()?;
-    aggregate.require_original(factory)?;
-    canonical.require_original(factory)?;
-    let mut native = native.try_lock().map_err(|_| anyhow!("original inspection alias retirement busy or poisoned"))?;
-    if let Some((original_factory, original)) = &*native {
-        ensure!(Arc::ptr_eq(original_factory, factory) && same_terminal_owner(original, canonical),
-            "inspection alias retirement selects a different actual receipt/factory");
-    } else { return Ok(()); }
-    let redundant = native.take();
-    drop(native);
-    // The canonical caller receipt and factory remain retained throughout;
-    // this cannot be the last body/resource reference or native disposal.
-    drop(redundant);
-    Ok(())
 }
 
 struct InspectionDestination {
@@ -123,8 +74,8 @@ impl OriginalNativeDestinationAuthority for InspectionDestination {
         };
         let Self { factory: _, runtime, root, source, namespace, copy, sql, work } = original;
         let continuation = Box::new(InspectionOutsideContinuation {
-            process: std::process::id(), leaf: leaf.clone(), joined_leaf: None,
-            copy: Some(copy), sql: Some(sql), work: Some(work),
+            process: std::process::id(), leaf: leaf.clone(),
+            _copy: copy, _sql: sql, work,
         });
         let sources = vec![
             lillux_sqlite::OriginalDestinationPhysicalSource::Directory(runtime),
@@ -295,43 +246,22 @@ pub(super) fn issue_inspection_reference_inputs(
     }
 }
 
-/// Actual inspection group receiver. Opaque copy/SQL/work interfaces still
-/// retain source pins, guard, cleanup and account owners. The consuming group
-/// join takes each alias once the receiver holds the same owner; until then
-/// these are plain aliases of owners the destination authority already held,
-/// dropped in the authority's own order (copy, SQL, work).
+/// Outside continuation of an inspection destination. Opaque copy/SQL/work
+/// interfaces still retain source pins, guard, cleanup and account owners;
+/// these are plain aliases of owners the destination authority already
+/// held, dropped in the authority's own order (copy, SQL, work). No outside
+/// receiver consumes them, so this continuation never reports its physical
+/// holders retired; inspection copies are disposed in process instead.
 struct InspectionOutsideContinuation {
     process: u32,
     leaf: lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-    joined_leaf: Option<lillux_sqlite::OriginalNativeOutsideLeafEvidence>,
-    copy: Option<Arc<SqliteInspectionCopyLease>>,
-    sql: Option<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
-    work: Option<Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>>,
+    _copy: Arc<SqliteInspectionCopyLease>,
+    _sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
+    work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
 }
 // SAFETY: all actual resources remain owned, including on unwind/refusal.
 // Incomplete group consumption explicitly blocks physical retirement.
 unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for InspectionOutsideContinuation {
-    fn join_original_inspection_aliases(&mut self,
-        factory: &Arc<OriginalNativeFactory>, aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        receiver: &dyn lillux_sqlite::OriginalOutsideInspectionAliasReceiver) -> Result<bool> {
-        self.require_original_process()?;
-        self.leaf.require_original(factory, aggregate)?;
-        if let Some(original) = &self.joined_leaf {
-            ensure!(original.same_original_leaf(&self.leaf)? && self.copy.is_none()
-                && self.sql.is_none() && self.work.is_none(), "original inspection join memo has unresolved aliases");
-            return Ok(true);
-        }
-        let copy: lillux_sqlite::SqliteCopyLease = self.copy.as_ref()
-            .context("actual original inspection copy absent during join")?.clone();
-        receiver.require_original_context(factory, aggregate, &self.leaf, &copy,
-            self.sql.as_ref().context("actual original inspection SQL owner absent during join")?,
-            self.work.as_ref().context("actual original inspection work absent during join")?)?;
-        // Receiver holds each SAME real owner before these redundant aliases
-        // end. Neither this operation nor an empty field proves FD retirement.
-        self.joined_leaf = Some(self.leaf.clone());
-        self.copy.take(); self.sql.take(); self.work.take();
-        Ok(true)
-    }
     fn require_original_process(&self) -> Result<()> {
         ensure!(self.process == std::process::id(), "foreign inspection outside continuation");
         Ok(())
@@ -341,134 +271,25 @@ unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for Inspection
         _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
         self.require_original_process()?;
         self.leaf.require_original(factory, aggregate)?;
-        if self.joined_leaf.as_ref().is_some_and(|original| original.same_original_leaf(&self.leaf).unwrap_or(false))
-            && self.copy.is_none() && self.sql.is_none() && self.work.is_none() { return Ok(()); }
-        self.work.as_ref().context("original inspection work absent without completed join")?
-            .require_original_outside_master(factory, aggregate)?;
-        // Copy work still owns the original account/native controls. This is
-        // not a completed retirement until the canonical copy group consumes it.
-        anyhow::bail!("inspection copy group native/account holders await consuming join")
+        self.work.require_original_outside_master(factory, aggregate)?;
+        // Copy work still owns the original account/native controls; with no
+        // outside receiver this is never a completed retirement.
+        anyhow::bail!("inspection copy native/account holders have no outside retirement")
     }
     unsafe fn register_shared_roots(&mut self,
         _registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
         self.require_original_process()?;
-        ensure!(self.joined_leaf.is_some() && self.copy.is_none() && self.sql.is_none() && self.work.is_none(),
-            "inspection source pins, scratch guard and cleanup proof await consuming copy group");
-        Ok(())
+        anyhow::bail!("inspection source pins, scratch guard and cleanup proof have no outside retirement")
     }
     fn physical_holders_retired(&self) -> Result<bool> {
         self.require_original_process()?;
-        Ok(self.joined_leaf.is_some() && self.copy.is_none() && self.sql.is_none() && self.work.is_none())
+        Ok(false)
     }
     fn physical_holders_retirement_quote(&self) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
         self.require_original_process()?;
         Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 8 })
     }
-}
-
-/// The consumed copy lease's owners. Field order is drop order and is the
-/// lease's own: cleanup back-reference, source pins, receipts, scratch guard,
-/// source lock, then copy work.
-pub(super) struct OriginalInspectionCopyLeaseParts {
-    pub(super) process: u32,
-    _cleanup: Option<Weak<super::inspection_cleanup::InspectionCopyCleanup>>,
-    pub(super) source_pins: Vec<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>,
-    _receipts: Option<Vec<(OsString, Option<lillux_sqlite::SqliteInspectionCopyReceipt>)>>,
-    pub(super) guard: Option<crate::temp_dir_guard::TempDirGuard>,
-    pub(super) source_lock: Option<lillux::PinnedDirectoryLock>,
-    pub(super) work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
-}
-pub(super) fn consume_copy_lease(original: Arc<SqliteInspectionCopyLease>,
-    factory: &Arc<OriginalNativeFactory>, aggregate: &lillux_sqlite::OriginalNativeTerminal,
-    leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-    prepay: &dyn Fn(u64, u64) -> Result<()>)
-    -> std::result::Result<OriginalInspectionCopyLeaseParts, (Arc<SqliteInspectionCopyLease>, anyhow::Error)> {
-    let process = std::process::id();
-    let checked = lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-        factory.require_original_process()?;
-        leaf.require_original(factory, aggregate)?;
-        original._copy_work.require_original_outside_master(factory, aggregate)?;
-        { let _original = original.cleanup.try_lock().map_err(|_| anyhow!("original copy cleanup custody busy or poisoned"))?; }
-        ensure!(original._source_pins.len() <= 4, "original source pin inventory exceeds fixed roles");
-        let quote = quote_inspection_copy_lease_parts(original._source_pins.len())?;
-        prepay(quote.bytes, quote.steps)?;
-        factory.require_original_process()
-    });
-    if let Err(error) = checked { return Err((original, error)); }
-    let original = match Arc::try_unwrap(original) {
-        Ok(original) => original,
-        Err(original) => return Err((original, anyhow!("original copy lease still has aliases"))),
-    };
-    let SqliteInspectionCopyLease { cleanup, _source_pins, source_receipts, _guard, _source_lock, _copy_work } = original;
-    let mut files = _source_pins;
-    let mut pins = Vec::with_capacity(files.len());
-    while let Some(file) = files.pop() {
-        // SAFETY: same original O_PATH source pin, moved once after its native
-        // context completed; concrete owner/control storage prepaid above.
-        pins.push(unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(file) });
-    }
-    drop(files);
-    Ok(OriginalInspectionCopyLeaseParts {
-        process,
-        _cleanup: cleanup.into_inner().unwrap_or_else(|p| p.into_inner()),
-        source_pins: pins,
-        _receipts: source_receipts.into_inner(),
-        guard: Some(_guard),
-        source_lock: Some(_source_lock),
-        work: _copy_work,
-    })
-}
-
-pub(super) enum OriginalInspectionPrimitiveProof {
-    Closed(Arc<lillux_sqlite::ClosedSqliteInspection>),
-    Released(Arc<lillux_sqlite::ReleasedSqliteInspection>),
-}
-/// The consumed terminal wrapper's owners. Field order is drop order and is
-/// the wrapper's own: primitive proof, copy lease, SQL work, then namespace.
-pub(super) struct OriginalInspectionWrapperParts {
-    pub(super) process: u32,
-    pub(super) proof: Option<OriginalInspectionPrimitiveProof>,
-    pub(super) lease: Arc<SqliteInspectionCopyLease>,
-    pub(super) sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
-    pub(super) database_name: OsString,
-    pub(super) namespace: Option<lillux::PinnedDirectoryLock>,
-}
-pub(super) fn require_wrapper_transfer(process: u32,
-    native: &std::sync::Mutex<Option<(Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal)>>) -> Result<()> {
-    ensure!(process == std::process::id(), "foreign original inspection wrapper");
-    ensure!(native.try_lock().map_err(|_| anyhow!("original wrapper native custody busy or poisoned"))?.is_none(),
-        "inspection wrapper native receipt has not transferred to its real canonical receiver");
-    Ok(())
-}
-pub(super) fn consume_closed_wrapper(original: Arc<SqliteInspectionClosed>)
-    -> std::result::Result<OriginalInspectionWrapperParts, (Arc<SqliteInspectionClosed>, anyhow::Error)> {
-    if let Err(error) = require_wrapper_transfer(original.process, &original.native) {
-        return Err((original, error));
-    }
-    let original = match Arc::try_unwrap(original) {
-        Ok(original) => original,
-        Err(original) => return Err((original, anyhow!("original closed inspection wrapper still has aliases"))),
-    };
-    let SqliteInspectionClosed { process, proof, native: _, lease, sql, database_name, _namespace } = original;
-    Ok(OriginalInspectionWrapperParts { process, proof: Some(OriginalInspectionPrimitiveProof::Closed(proof)),
-        lease, sql, database_name, namespace: _namespace })
-}
-pub(super) fn consume_acquisition_wrapper(original: Arc<SqliteInspectionAcquisitionReleased>)
-    -> std::result::Result<OriginalInspectionWrapperParts, (Arc<SqliteInspectionAcquisitionReleased>, anyhow::Error)> {
-    if let Err(error) = require_wrapper_transfer(original.process, &original.native) {
-        return Err((original, error));
-    }
-    let original = match Arc::try_unwrap(original) {
-        Ok(original) => original,
-        Err(original) => return Err((original, anyhow!("original released inspection wrapper still has aliases"))),
-    };
-    Ok(acquisition_wrapper_parts(original))
-}
-pub(super) fn acquisition_wrapper_parts(original: SqliteInspectionAcquisitionReleased) -> OriginalInspectionWrapperParts {
-    let SqliteInspectionAcquisitionReleased { process, proof, native: _, lease, sql, database_name, _namespace } = original;
-    OriginalInspectionWrapperParts { process, proof: Some(OriginalInspectionPrimitiveProof::Released(proof)),
-        lease, sql, database_name, namespace: _namespace }
 }
 
 enum NativeBody {
@@ -922,19 +743,12 @@ mod outside_quote_tests {
     use std::mem::size_of;
 
     #[test]
-    fn inspection_outside_quotes_cover_continuation_and_bounded_pin_parts() {
+    fn inspection_outside_quote_covers_its_continuation() {
         let continuation = quote_inspection_outside_continuation().unwrap();
         let continuation_bytes = size_of::<InspectionOutsideContinuation>()
             + size_of::<lillux_sqlite::OriginalDestinationOutsideCustody>()
             + 4 * size_of::<lillux_sqlite::OriginalDestinationPhysicalSource>();
         assert_eq!(continuation, OutsideWork { bytes: continuation_bytes as u64, steps: 24 });
-
-        let pins = quote_inspection_copy_lease_parts(3).unwrap();
-        let pins_bytes = size_of::<OriginalInspectionCopyLeaseParts>()
-            + 3 * (size_of::<lillux_sqlite::RetainedOriginalMetadataPin>()
-                + 4 * size_of::<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>());
-        assert_eq!(pins, OutsideWork { bytes: pins_bytes as u64, steps: 24 });
-        assert!(quote_inspection_copy_lease_parts(5).is_err());
     }
 }
 
@@ -1027,79 +841,5 @@ mod reference_destination_tests {
         host.retain_terminal(terminal);
         drop(reference);
         assert_eq!(host.ticket_census(), (1, 1));
-    }
-
-    fn namespace_held(root: &lillux::PinnedDirectory) -> bool {
-        root.try_lock_exclusive().unwrap().is_none()
-    }
-
-    fn inert_lease(source: &lillux::PinnedDirectory, scratch_root: &std::path::Path,
-        lock: lillux::PinnedDirectoryLock) -> Arc<SqliteInspectionCopyLease> {
-        std::fs::create_dir(scratch_root.join("scratch")).unwrap();
-        let scratch = Arc::new(lillux::PinnedDirectory::open(&scratch_root.join("scratch")).unwrap().unwrap());
-        Arc::new(SqliteInspectionCopyLease {
-            cleanup: std::sync::Mutex::new(None),
-            _source_pins: Vec::new(),
-            source_receipts: std::sync::OnceLock::new(),
-            _guard: crate::temp_dir_guard::TempDirGuard::new_pinned(
-                source.try_clone().unwrap(), OsString::from("scratch"), scratch),
-            _source_lock: lock,
-            _copy_work: Arc::new(InertWork),
-        })
-    }
-
-    #[test]
-    fn dropped_copy_lease_parts_end_their_lock_and_work_instead_of_leaking() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
-        let locked = tempfile::tempdir().unwrap();
-        let locked = lillux::PinnedDirectory::open(locked.path()).unwrap().unwrap();
-        std::fs::create_dir(dir.path().join("scratch")).unwrap();
-        let scratch = Arc::new(lillux::PinnedDirectory::open(&dir.path().join("scratch")).unwrap().unwrap());
-        let work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork> = Arc::new(InertWork);
-        let parts = OriginalInspectionCopyLeaseParts {
-            process: std::process::id(),
-            _cleanup: None,
-            source_pins: Vec::new(),
-            _receipts: None,
-            guard: Some(crate::temp_dir_guard::TempDirGuard::new_pinned(
-                source.try_clone().unwrap(), OsString::from("scratch"), scratch)),
-            source_lock: Some(locked.lock_exclusive().unwrap()),
-            work: Arc::clone(&work),
-        };
-        assert_eq!(Arc::strong_count(&work), 2);
-        assert!(namespace_held(&locked));
-        drop(parts);
-        assert_eq!(Arc::strong_count(&work), 1, "the parts ended their work alias");
-        assert!(!namespace_held(&locked), "the parts ended their source lock");
-    }
-
-    #[test]
-    fn dropped_wrapper_parts_end_their_lease_and_namespace_instead_of_leaking() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
-        let locked = tempfile::tempdir().unwrap();
-        let locked = lillux::PinnedDirectory::open(locked.path()).unwrap().unwrap();
-        let lease_lock = tempfile::tempdir().unwrap();
-        let lease_lock = lillux::PinnedDirectory::open(lease_lock.path()).unwrap().unwrap();
-        let lease = inert_lease(&source, dir.path(), lease_lock.lock_exclusive().unwrap());
-        let sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork> = Arc::new(InertWork);
-        let parts = OriginalInspectionWrapperParts {
-            process: std::process::id(),
-            proof: None,
-            lease: Arc::clone(&lease),
-            sql: Arc::clone(&sql),
-            database_name: OsString::from("runtime.sqlite3"),
-            namespace: Some(locked.lock_exclusive().unwrap()),
-        };
-        assert_eq!(Arc::strong_count(&lease), 2);
-        drop(parts);
-        assert_eq!(Arc::strong_count(&lease), 1, "the parts ended their lease alias");
-        assert_eq!(Arc::strong_count(&sql), 1, "the parts ended their SQL alias");
-        assert!(!namespace_held(&locked), "the parts ended their namespace lock");
-        // The last lease owner still ends the lease's own source lock.
-        assert!(namespace_held(&lease_lock));
-        drop(lease);
-        assert!(!namespace_held(&lease_lock));
     }
 }

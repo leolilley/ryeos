@@ -783,26 +783,7 @@ pub enum OriginalDestinationPhysicalSource {
 /// Every method must use the SAME original owner/process/account/clock, retain
 /// partial effects before refusal, and preserve every real owner on unwind.
 /// Returned booleans are observations; actual zero-loan sealing remains mandatory.
-/// Trusted domain receiver of one complete original inspection context. This
-/// declaration performs no graph discovery or disposal; the App owns census.
-/// # Safety
-/// On success retain the SAME actual lease/SQL/copy-work owners in canonical
-/// custody, bind the genuine factory/aggregate/leaf and copied original PID.
-/// Success permits only surrender of exact redundant aliases, never physical
-/// release, native zero-loan sealing or durable account completion.
-pub unsafe trait OriginalOutsideInspectionAliasReceiver: Send + Sync {
-    fn require_original_context(&self,
-        factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal,
-        leaf: &OriginalNativeOutsideLeafEvidence,
-        lease: &SqliteCopyLease, sql: &Arc<dyn SqliteInspectionSqlWork>,
-        work: &Arc<dyn crate::SqliteInspectionCopyWork>) -> Result<()>;
-}
 pub unsafe trait OriginalOutsideDestinationContinuation: Send + Sync {
-    /// False means this continuation did not join an inspection context. It
-    /// grants no completion and lets the actual supervisor retain/refuse it.
-    fn join_original_inspection_aliases(&mut self,
-        _factory: &Arc<OriginalNativeFactory>, _aggregate: &OriginalNativeTerminal,
-        _receiver: &dyn OriginalOutsideInspectionAliasReceiver) -> Result<bool> { Ok(false) }
     fn require_original_process(&self) -> Result<()>;
     fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
         aggregate: &OriginalNativeTerminal, prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()>;
@@ -852,19 +833,6 @@ impl OriginalDestinationOutsideCustody {
     fn require_process(&self) -> Result<()> {
         ensure!(self.process == std::process::id(), "foreign original destination outside custody");
         self.continuation.require_original_process()
-    }
-    pub fn join_original_inspection_aliases(&mut self,
-        factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal,
-        receiver: &dyn OriginalOutsideInspectionAliasReceiver) -> Result<bool> {
-        self.require_process()?;
-        aggregate.require_original(factory)?;
-        let joined = std::cell::Cell::new(false);
-        let continuation = std::cell::RefCell::new(&mut **self.continuation);
-        crate::original_physical_custody::retain_callback_refusal(&|| {
-            joined.set(continuation.borrow_mut().join_original_inspection_aliases(factory, aggregate, receiver)?);
-            Ok(())
-        })?;
-        Ok(joined.get())
     }
     pub fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
         aggregate: &OriginalNativeTerminal, prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
@@ -1835,6 +1803,27 @@ impl OriginalNativeFactory {
             (Ok(value), Ok(())) => Ok(value),
         }
     }
+    /// Guarded source verification run inside this factory's native scope,
+    /// with the same census answer as the scoped evidence read above.
+    pub fn verify_regular_without_sqlite_alias(
+        &self,
+        source: &PinnedDirectory,
+        name: &std::ffi::OsStr,
+        expected: Option<&crate::SqliteRoleIdentity>,
+    ) -> Result<()> {
+        self.require_original(false)?;
+        let result = {
+            let _scope = self.arena()?.scope(false, 0)?;
+            crate::verify_regular_without_sqlite_alias(source, name, expected)
+        };
+        let post = self.require_original(false);
+        match (result, post) {
+            (Err(original), Err(post)) => Err(original.context(post)),
+            (Err(original), _) => Err(original),
+            (Ok(()), Err(post)) => Err(post),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
     /// Read a retained original witness inside this factory's native scope,
     /// with the same census answer as the scoped evidence read above: a lease
     /// this factory holds on another inode no longer refuses, a lease on the
@@ -1844,7 +1833,10 @@ impl OriginalNativeFactory {
     /// entered (the arena is absent or released, or this thread already runs
     /// in a scope of the other window), the read runs unchanged: inside an
     /// enclosing scope of this arena it already answers for this owner, and
-    /// outside every scope it refuses while any lease is listed.
+    /// outside every scope it refuses while any lease is listed. The lease
+    /// census of this read is not charged to the arena budget: the owner
+    /// rereads its witness from its own checkpoints, so a cleanup reservation
+    /// sized by the arena layout could not bound the reread count.
     pub fn read_original_witness(
         &self,
         witness: &crate::RetainedOriginalWitnessFile,
@@ -3276,6 +3268,25 @@ impl ClosedOriginalNativeConnection {
             None => [None, None],
         };
         Ok((leaf, pins))
+    }
+    /// Close this connection's durability pins at the end of its host, after
+    /// the backend finished. `recheck` runs before each close. Returns how
+    /// many pins this call closed; pins already retired are skipped, so a
+    /// retry after a refusal closes only the rest. A refused close keeps its
+    /// descriptor in the pin and stops here.
+    pub(crate) fn retire_durability_pins(&self, recheck: &dyn Fn() -> Result<()>) -> Result<usize> {
+        require_current_native_process()?;
+        let Some(body) = self.durable_body.get() else {
+            return Ok(0);
+        };
+        let mut closed = 0usize;
+        for pin in std::iter::once(&body.main).chain(body.wal.iter()) {
+            recheck()?;
+            if pin.close_original_descriptor()? {
+                closed += 1;
+            }
+        }
+        Ok(closed)
     }
 }
 // Durable facts are recorded immediately after actual file fsync. There is
@@ -4879,14 +4890,25 @@ impl RetainedOriginalMetadataPin {
         inputs.authority.debit_original_steps(ORIGINAL_METADATA_PIN_RETIREMENT_STEPS)?;
         terminal.require_original(factory)?;
         inputs.require_original(factory, terminal, self)?;
+        self.close_original_descriptor()?;
+        // Retain success before any late clock/funding check.
+        inputs.require_original(factory, terminal, self)?;
+        Ok(RetiredOriginalMetadataPin {
+            owner: self.clone(),
+        })
+    }
+    /// The identity-checked close of this pin's descriptor, shared by every
+    /// retirement path. Returns whether this call closed it; an already
+    /// retired pin returns `false`. A consumed refusal is kept and refuses
+    /// every later call; a refusal before the close keeps the descriptor.
+    pub(crate) fn close_original_descriptor(&self) -> Result<bool> {
+        require_current_native_process()?;
         let mut state = self
             .state
             .try_lock()
             .map_err(|_| anyhow::anyhow!("original metadata retirement owner busy or poisoned"))?;
         if matches!(*state, OriginalMetadataPinState::Retired) {
-            return Ok(RetiredOriginalMetadataPin {
-                owner: self.clone(),
-            });
+            return Ok(false);
         }
         if let OriginalMetadataPinState::ConsumedError { code, errno } = &*state {
             anyhow::bail!("original metadata close consumed with retained refusal ({code}/{errno})")
@@ -4943,12 +4965,8 @@ impl RetainedOriginalMetadataPin {
                 result.observed_errno,
                 result.consumed
             );
-            // Retain success before any late clock/funding check.
             drop(state);
-            inputs.require_original(factory, terminal, self)?;
-            Ok(RetiredOriginalMetadataPin {
-                owner: self.clone(),
-            })
+            Ok(true)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -5045,66 +5063,6 @@ pub enum OriginalFinalizerFileKind {
     /// data lock, so it closes through the metadata-pin path, which refuses
     /// any data descriptor; the data-descriptor path refuses this one.
     MetadataPin = 4,
-}
-pub trait OriginalFinalizerFileRetirementAuthority: Send + Sync {
-    fn require_original(
-        &self,
-        factory: &Arc<OriginalNativeFactory>,
-        terminal: &Arc<OriginalNativeTerminal>,
-        owner: &Arc<RetainedOriginalFinalizerFile>,
-    ) -> Result<()>;
-    fn debit_original_steps(&self, steps: u64) -> Result<()>;
-}
-/// Trusted original post-ACK join for ONE actual transferred finalizer owner.
-pub struct OriginalFinalizerFileRetirementInputs {
-    factory: Arc<OriginalNativeFactory>,
-    terminal: Arc<OriginalNativeTerminal>,
-    owner: Arc<RetainedOriginalFinalizerFile>,
-    authority: Arc<dyn OriginalFinalizerFileRetirementAuthority>,
-}
-impl OriginalFinalizerFileRetirementInputs {
-    /// # Safety
-    /// Retain genuine original State ACK, exact transferred finalizer custody,
-    /// original charged clock/budget and actual native terminal. Prepay this
-    /// input storage and verify retirement ordering: required namespace/ledger
-    /// locks and evidence publishers must survive through their actual final
-    /// effects. This owner must be the original File, never a duplicate used to
-    /// stand in for retirement. Control records must have authenticated exact
-    /// original input/account identity and no SQLite/data-lock aliases. Directory/State lock authority
-    /// includes ALL actual fork/lock ownership; this input grants no registry
-    /// unregister, explicit unlock, alias disposal or aggregate-zero proof.
-    pub unsafe fn issued(
-        factory: Arc<OriginalNativeFactory>,
-        terminal: Arc<OriginalNativeTerminal>,
-        owner: Arc<RetainedOriginalFinalizerFile>,
-        authority: Arc<dyn OriginalFinalizerFileRetirementAuthority>,
-    ) -> Result<Self> {
-        require_current_native_process()?;
-        terminal.require_original(&factory)?;
-        authority.require_original(&factory, &terminal, &owner)?;
-        Ok(Self {
-            factory,
-            terminal,
-            owner,
-            authority,
-        })
-    }
-    fn require_original(
-        &self,
-        factory: &Arc<OriginalNativeFactory>,
-        terminal: &Arc<OriginalNativeTerminal>,
-        owner: &Arc<RetainedOriginalFinalizerFile>,
-    ) -> Result<()> {
-        require_current_native_process()?;
-        ensure!(
-            Arc::ptr_eq(factory, &self.factory)
-                && Arc::ptr_eq(terminal, &self.terminal)
-                && Arc::ptr_eq(owner, &self.owner),
-            "foreign original finalizer retirement inputs"
-        );
-        terminal.require_original(factory)?;
-        self.authority.require_original(factory, terminal, owner)
-    }
 }
 /// Original outside descriptor-retirement authority, independent of mapped
 /// SQLite state. The actual host supervisor retains its original account,
@@ -5252,37 +5210,6 @@ impl RetainedOriginalFinalizerFile {
             "original finalizer pin identity changed"
         );
         Ok(current)
-    }
-    pub fn retire_after_backend(
-        self: &Arc<Self>,
-        factory: &Arc<OriginalNativeFactory>,
-        terminal: &Arc<OriginalNativeTerminal>,
-        inputs: &OriginalFinalizerFileRetirementInputs,
-    ) -> Result<RetiredOriginalFinalizerFile> {
-        require_current_native_process()?;
-        let result = self.retire_after_backend_owned(factory, terminal, inputs);
-        result.map_err(|error| {
-            anyhow::Error::new(OriginalFinalizerFileRetirementFailure {
-                error,
-                owner: self.clone(),
-            })
-        })
-    }
-    fn retire_after_backend_owned(
-        self: &Arc<Self>,
-        factory: &Arc<OriginalNativeFactory>,
-        terminal: &Arc<OriginalNativeTerminal>,
-        inputs: &OriginalFinalizerFileRetirementInputs,
-    ) -> Result<RetiredOriginalFinalizerFile> {
-        require_current_native_process()?;
-        terminal.require_original(factory)?;
-        inputs.require_original(factory, terminal, self)?;
-        // Flags, identity and one actual close have a fixed finite charge.
-        // Host booking guards are released before descriptor-owner/native work.
-        inputs.authority.debit_original_steps(6)?;
-        terminal.require_original(factory)?;
-        inputs.require_original(factory, terminal, self)?;
-        self.retire_original_descriptor(&|| inputs.require_original(factory, terminal, self))
     }
     fn retire_original_descriptor(
         self: &Arc<Self>,
@@ -5439,33 +5366,6 @@ impl std::fmt::Display for OriginalOutsideFinalizerFileRetirementFailure {
 }
 impl std::error::Error for OriginalOutsideFinalizerFileRetirementFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
-}
-
-pub struct OriginalFinalizerFileRetirementFailure {
-    error: anyhow::Error,
-    owner: Arc<RetainedOriginalFinalizerFile>,
-}
-impl OriginalFinalizerFileRetirementFailure {
-    pub fn owner(&self) -> &Arc<RetainedOriginalFinalizerFile> {
-        &self.owner
-    }
-}
-impl std::fmt::Debug for OriginalFinalizerFileRetirementFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalFinalizerFileRetirementFailure")
-            .field("error", &self.error)
-            .finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for OriginalFinalizerFileRetirementFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.error, f)
-    }
-}
-impl std::error::Error for OriginalFinalizerFileRetirementFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.error.as_ref())
-    }
 }
 
 /// Actual sole counter reference. This ordinary facade and its Arc control

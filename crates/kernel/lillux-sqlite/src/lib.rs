@@ -326,11 +326,6 @@ pub trait SqliteInspectionCopyWork: Send + Sync {
     /// copy claim. Equal paths, receipts or numeric budgets cannot establish it.
     fn require_original_native_factory(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()>;
 
-    fn debit_original_outside_steps(&self,
-        _factory: &Arc<OriginalNativeFactory>, _aggregate: &OriginalNativeTerminal,
-        _steps: u64) -> Result<()> {
-        anyhow::bail!("copy work has no original outside cleanup debit")
-    }
 
     fn begin_copy_production(
         &self,
@@ -734,7 +729,6 @@ fn ensure_role_cleanup_names(original: &OsStr, source: &OsStr, target: &OsStr) -
     Ok(())
 }
 pub struct SqliteInspectionBodyAuthority {
-    process: u32,
     root: Arc<PinnedDirectory>,
     database_name: std::ffi::OsString,
     lease: SqliteCopyLease,
@@ -760,84 +754,8 @@ impl SqliteInspectionBodyAuthority {
     }
 }
 pub struct SqliteInspectionDisposalAuthority {
-    process: u32,
     body: Arc<SqliteInspectionBodyAuthority>,
     _removed: Arc<lillux::secure_fs::RemovedEmptyChild>,
-}
-
-/// Whole actual disposal/body custody during alias refusal. No Drop releases
-/// directories, copy leases or work. Copied identity fields confer no grant.
-pub struct OriginalOutsideSqliteDisposalParts {
-    process: u32,
-    body: std::mem::ManuallyDrop<Arc<SqliteInspectionBodyAuthority>>,
-    removed: std::mem::ManuallyDrop<Arc<lillux::secure_fs::RemovedEmptyChild>>,
-}
-pub struct OriginalOutsideSqliteBodyParts {
-    pub process: u32,
-    pub root: std::mem::ManuallyDrop<Arc<PinnedDirectory>>,
-    pub database_name: std::ffi::OsString,
-    pub lease: std::mem::ManuallyDrop<SqliteCopyLease>,
-    pub sql: std::mem::ManuallyDrop<Arc<dyn SqliteInspectionSqlWork>>,
-    pub copy_work: std::mem::ManuallyDrop<Arc<dyn SqliteInspectionCopyWork>>,
-    pub roles: std::mem::ManuallyDrop<[Option<Arc<RetainedSqliteDestinationRole>>; 4]>,
-    pub removed: std::mem::ManuallyDrop<Arc<lillux::secure_fs::RemovedEmptyChild>>,
-    pub deadline: lillux::time::MonotonicDeadline,
-}
-impl SqliteInspectionDisposalAuthority {
-    pub fn into_outside_parts(self: Arc<Self>)
-        -> std::result::Result<OriginalOutsideSqliteDisposalParts, (Arc<Self>, anyhow::Error)> {
-        if self.process != std::process::id() {
-            return Err((self, anyhow::anyhow!("foreign original inspection disposal")));
-        }
-        match Arc::try_unwrap(self) {
-            Ok(Self { process, body, _removed }) => Ok(OriginalOutsideSqliteDisposalParts {
-                process, body: std::mem::ManuallyDrop::new(body),
-                removed: std::mem::ManuallyDrop::new(_removed),
-            }),
-            Err(original) => Err((original, anyhow::anyhow!("original inspection disposal still has aliases"))),
-        }
-    }
-}
-impl OriginalOutsideSqliteDisposalParts {
-    pub fn require_body_alias(&self, body: &Arc<SqliteInspectionBodyAuthority>) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original inspection disposal parts");
-        ensure!(Arc::ptr_eq(&self.body, body), "different original inspection body alias");
-        Ok(())
-    }
-    /// Consume only the body bound by this actual disposal authority. Every
-    /// present original role must really be retired; no current path check or
-    /// old service checkpoint runs after original finalizer entry.
-    pub fn into_body_parts(mut self)
-        -> std::result::Result<OriginalOutsideSqliteBodyParts, (Self, anyhow::Error)> {
-        let checked = (|| -> Result<()> {
-            ensure!(self.process == std::process::id() && self.body.process == self.process,
-                "foreign original inspection body custody");
-            ensure!(!self.body.deadline.has_elapsed(), "original body cleanup deadline elapsed");
-            for role in self.body.roles.iter().flatten() {
-                ensure!(matches!(*role.state()?, DestinationRoleState::Retired),
-                    "original inspection role descriptor still retained");
-            }
-            Ok(())
-        })();
-        if let Err(error) = checked { return Err((self, error)); }
-        // SAFETY: ownership is moved exactly once; on alias refusal restored
-        // into the SAME whole parts owner before returning.
-        let body = unsafe { std::mem::ManuallyDrop::take(&mut self.body) };
-        let body = match Arc::try_unwrap(body) {
-            Ok(body) => body,
-            Err(body) => {
-                self.body = std::mem::ManuallyDrop::new(body);
-                return Err((self, anyhow::anyhow!("original inspection body still has aliases")));
-            }
-        };
-        let SqliteInspectionBodyAuthority { process, root, database_name, lease, sql,
-            copy_work, roles, deadline } = body;
-        let removed = unsafe { std::mem::ManuallyDrop::take(&mut self.removed) };
-        Ok(OriginalOutsideSqliteBodyParts { process, database_name, deadline,
-            root: std::mem::ManuallyDrop::new(root), lease: std::mem::ManuallyDrop::new(lease),
-            sql: std::mem::ManuallyDrop::new(sql), copy_work: std::mem::ManuallyDrop::new(copy_work),
-            roles: std::mem::ManuallyDrop::new(roles), removed: std::mem::ManuallyDrop::new(removed) })
-    }
 }
 
 /// Distinct original ordinary-witness work; never copied-role disposal authority.
@@ -930,7 +848,7 @@ impl RetainedOriginalWitnessFile {
             // takes a path-only pin of the same inode and reopens it itself.
             self.original.with_file(|file| {
                 let pin = lillux::path_pin_open_regular_file(file)?;
-                binding::read_unbound_regular(&pin, maximum)
+                binding::read_unbound_witness(&pin, maximum)
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -1739,7 +1657,6 @@ fn ensure_copy_source_unchanged(
 pub type SqliteCopyLease = Arc<dyn Send + Sync>;
 /// Original inspection context. Strong owners stay outside the original claim.
 struct SqliteInspectionContext {
-    process: u32,
     root: Arc<PinnedDirectory>,
     database_name: std::ffi::OsString,
     lease: SqliteCopyLease,
@@ -1802,7 +1719,6 @@ impl SqliteInspectionContext {
             }
         }
         Ok(Arc::new(SqliteInspectionBodyAuthority {
-            process: self.process,
             root: self.root.clone(),
             database_name: self.database_name.clone(),
             lease: lease.clone(),
@@ -1843,60 +1759,16 @@ impl SqliteInspectionContext {
         );
         body.copy_work.cleanup_checkpoint()?;
         Ok(Arc::new(SqliteInspectionDisposalAuthority {
-            process: self.process,
             body: body.clone(),
             _removed: removed,
         }))
     }
 }
 
-/// Minted only by explicit successful SQL AND native keeper/context close.
-/// Neither this proof nor its Drop authorizes physical disposal or settlement.
-/// Actual original primitive context resources, moved from the unique true
-/// Closed/Released owner. No Drop closes these descriptors or settles work.
-pub struct OriginalOutsideSqliteInspectionParts {
-    pub process: u32,
-    pub root: std::mem::ManuallyDrop<Arc<PinnedDirectory>>,
-    pub database_name: std::ffi::OsString,
-    pub lease: std::mem::ManuallyDrop<SqliteCopyLease>,
-    pub work: std::mem::ManuallyDrop<Arc<dyn SqliteInspectionSqlWork>>,
-}
-impl SqliteInspectionContext {
-    fn require_outside_context_transfer(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original inspection context transfer");
-        if let Some(production) = &self.production {
-            ensure!(production.completed.load(std::sync::atomic::Ordering::Acquire),
-                "actual primitive inspection producer has not acknowledged its terminal");
-            if let ProductionControlOwner::Region { core, .. } = &production.control {
-                ensure!(core.observation()?.phase == 2, "actual inspection region producer unresolved");
-            }
-        }
-        Ok(())
-    }
-    fn into_outside_parts(self) -> OriginalOutsideSqliteInspectionParts {
-        let Self { process, root, database_name, lease, work, production } = self;
-        // Prechecked actual completed interval. Reference retirement only;
-        // actual root/lease/work remain in this outside parts owner.
-        drop(production);
-        OriginalOutsideSqliteInspectionParts { process, root: std::mem::ManuallyDrop::new(root),
-            database_name, lease: std::mem::ManuallyDrop::new(lease), work: std::mem::ManuallyDrop::new(work) }
-    }
-}
 pub struct ClosedSqliteInspection {
     context: SqliteInspectionContext,
 }
 impl ClosedSqliteInspection {
-    /// Actual consuming handoff. Alias or unresolved producer refusal returns
-    /// the SAME primitive owner; no native close or cleanup grant is inferred.
-    pub fn into_outside_parts(self: Arc<Self>)
-        -> std::result::Result<OriginalOutsideSqliteInspectionParts, (Arc<Self>, anyhow::Error)> {
-        if let Err(error) = self.context.require_outside_context_transfer() { return Err((self, error)); }
-        match Arc::try_unwrap(self) {
-            Ok(Self { context }) => Ok(context.into_outside_parts()),
-            Err(original) => Err((original, anyhow::anyhow!("actual primitive inspection receipt still has aliases"))),
-        }
-    }
-
     pub fn acknowledge_producer_terminal(&self) -> Result<()> {
         if let Some(production) = &self.context.production {
             production.acknowledge_native_terminal()?;
@@ -1945,17 +1817,6 @@ pub struct ReleasedSqliteInspection {
     context: SqliteInspectionContext,
 }
 impl ReleasedSqliteInspection {
-    /// Actual consuming handoff. Alias or unresolved producer refusal returns
-    /// the SAME primitive owner; no native close or cleanup grant is inferred.
-    pub fn into_outside_parts(self: Arc<Self>)
-        -> std::result::Result<OriginalOutsideSqliteInspectionParts, (Arc<Self>, anyhow::Error)> {
-        if let Err(error) = self.context.require_outside_context_transfer() { return Err((self, error)); }
-        match Arc::try_unwrap(self) {
-            Ok(Self { context }) => Ok(context.into_outside_parts()),
-            Err(original) => Err((original, anyhow::anyhow!("actual primitive inspection receipt still has aliases"))),
-        }
-    }
-
     pub fn acknowledge_producer_terminal(&self) -> Result<()> {
         if let Some(production) = &self.context.production {
             production.acknowledge_native_terminal()?;
@@ -2086,7 +1947,6 @@ impl ReadonlySqliteCopy {
         work: Arc<dyn SqliteInspectionSqlWork>,
     ) -> std::result::Result<Self, ReadonlySqliteOpenFailure> {
         let mut context = SqliteInspectionContext {
-            process: std::process::id(),
             root: runtime.clone(),
             database_name: database_name.to_os_string(),
             lease: lease.clone(),

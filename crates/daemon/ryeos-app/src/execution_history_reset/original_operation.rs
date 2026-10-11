@@ -578,17 +578,27 @@ impl OriginalOperation {
     }
 
     pub(super) fn require_staged(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
+        self.require_staged_in(None, runtime)
+    }
+
+    /// With the reset's native factory the guarded read runs in that
+    /// factory's scope, so projection leases the factory holds answer for
+    /// their owner; without one it refuses whenever any lease is listed.
+    fn require_staged_in(
+        &self,
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+        runtime: &lillux::PinnedDirectory,
+    ) -> Result<()> {
         self.require_app_root()?;
         ensure!(
             self.runtime.is_same_directory(runtime)?,
             "original operation staged read requires its retained runtime"
         );
         let name = format!("{PREFIX}{}", self.reference.operation_id);
-        let current = lillux_sqlite::read_regular_without_sqlite_alias(
-            runtime,
-            OsStr::new(&name),
-            MAX_BYTES,
-        )?
+        let current = match factory {
+            Some(factory) => factory.read_regular_without_sqlite_alias(runtime, OsStr::new(&name), MAX_BYTES),
+            None => lillux_sqlite::read_regular_without_sqlite_alias(runtime, OsStr::new(&name), MAX_BYTES),
+        }?
         .context("original staged operation is missing")?;
         ensure!(
             current == self.signed,
@@ -649,6 +659,16 @@ impl OriginalOperation {
         state: &PinnedStateAuthority,
         guard: &CasMutationGuard,
     ) -> Result<()> {
+        self.require_active_in(None, state, guard)
+    }
+
+    /// [`Self::require_active`] with its staged read in `factory`'s scope.
+    pub(super) fn require_active_in(
+        &self,
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+        state: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+    ) -> Result<()> {
         state.ensure_guard(guard)?;
         self.require_app_root()?;
         ensure!(
@@ -665,7 +685,7 @@ impl OriginalOperation {
                 == Some(&self.reference),
             "original reset operation is not activated by its exact State marker"
         );
-        self.require_staged(state.runtime_directory())?;
+        self.require_staged_in(factory, state.runtime_directory())?;
         Ok(())
     }
 }

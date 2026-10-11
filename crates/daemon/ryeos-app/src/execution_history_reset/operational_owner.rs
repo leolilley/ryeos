@@ -42,6 +42,15 @@ impl std::fmt::Debug for OfflineOperationalSlot {
     }
 }
 impl OfflineOperationalSlot {
+    /// Refuse, ending nothing, while this phase holds a live or refused
+    /// owner. The same check `quiesce` applies before it ends anything.
+    pub(super) fn require_quiescent(&self) -> Result<()> {
+        ensure!(
+            self.retained.is_none() && self.failure.is_none(),
+            "Operational phase still holds a live or refused owner; quiesce refused"
+        );
+        Ok(())
+    }
     /// End this phase's closed owner and reference aliases once the host's
     /// census holds their terminals. A live or refused owner refuses: it has
     /// not finished and is kept. Returns whether any alias was ended.
@@ -72,15 +81,6 @@ enum OwnedOperational {
         db: OperationalDb,
         report: ryeos_state::operational::ReplayIndexResetReport,
     },
-}
-#[derive(Default)]
-pub(super) struct OfflineOperationalOutsideSlot {
-    pub(super) owner: Option<ryeos_state::operational::OutsideOriginalOperationalCustody>,
-}
-impl std::fmt::Debug for OfflineOperationalOutsideSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OfflineOperationalOutsideSlot").field("retained", &self.owner.is_some()).finish()
-    }
 }
 
 /// A phase refusal raised before any native owner existed: input issuance
@@ -243,81 +243,6 @@ impl Drop for OfflineOperationalLoan {
     }
 }
 impl InspectionControllerCustody {
-    pub(super) fn transfer_operational_outside(
-        &self,
-        phase: OperationalOwnerPhase,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-        prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> Result<()> {
-        factory.require_original_process()?;
-        aggregate.require_original(factory)?;
-        let index = match phase { OperationalOwnerPhase::Inspection => 0, OperationalOwnerPhase::Mutation => 1 };
-        ensure!(self.operational_outside.try_lock().map_err(|_| anyhow!("outside Operational destination busy or poisoned"))?[index].owner.is_none(),
-            "actual Operational outside destination already occupied");
-        let mut slot = self.operational_slot(phase).try_lock()
-            .map_err(|_| anyhow!("actual Operational handoff custody busy or poisoned"))?;
-        ensure!(slot.retained.is_none() && slot.failure.is_none(),
-            "Operational still retains actual live/refused consumers");
-        let closed = slot.closed.take().context("actual closed Operational outside owner absent")?;
-        drop(slot);
-        // SAFETY: genuine original backend terminal and synchronous quiescence,
-        // actual sole closed owner, same original outside master/clock/storage.
-        // The lower entry retains the whole original on any refusal.
-        match unsafe { closed.into_outside_custody(aggregate, prepay) } {
-            Ok(outside) => {
-                self.operational_outside.lock().unwrap_or_else(|p| p.into_inner())[index].owner = Some(outside);
-                // The actual outside terminal retains every original native
-                // body/resource; remove only the controller's redundant facade.
-                let alias = self.operational_slot(phase).lock().unwrap_or_else(|p| p.into_inner()).factory.take();
-                drop(alias);
-                Ok(())
-            }
-            Err((actual, error)) => {
-                self.operational_slot(phase).lock().unwrap_or_else(|p| p.into_inner()).closed = Some(actual);
-                Err(error)
-            }
-        }
-    }
-    pub(super) fn retire_operational_native_references(
-        &self,
-        phase: OperationalOwnerPhase,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &Arc<lillux_sqlite::OriginalNativeTerminal>,
-        retire_aliases: &dyn Fn(&lillux_sqlite::OriginalNativeConnectionTerminal) -> Result<()>,
-    ) -> Result<()> {
-        factory.require_original_process()?;
-        let index = match phase { OperationalOwnerPhase::Inspection => 0, OperationalOwnerPhase::Mutation => 1 };
-        let mut actual = self.operational_outside.try_lock()
-            .map_err(|_| anyhow!("actual outside Operational checkout busy or poisoned"))?[index]
-            .owner.take().context("actual outside Operational owner absent")?;
-        let result = actual.retire_native_references(factory, aggregate, retire_aliases);
-        self.operational_outside.lock().unwrap_or_else(|p| p.into_inner())[index].owner = Some(actual);
-        result
-    }
-    pub(super) fn register_operational_shared_roots(
-        &self,
-        phase: OperationalOwnerPhase,
-        post_ack: &original_quota_claim::OriginalPostAckFinalization,
-    ) -> Result<()> {
-        let index = match phase { OperationalOwnerPhase::Inspection => 0, OperationalOwnerPhase::Mutation => 1 };
-        let mut actual = self.operational_outside.try_lock()
-            .map_err(|_| anyhow!("actual outside Operational registration busy or poisoned"))?[index]
-            .owner.take().context("actual Operational outside physical token absent")?;
-        let result = (|| -> Result<()> {
-            // SAFETY: the retained supervisor caches exact original SQL
-            // packets before any physical/root handoff or further effect.
-            let packets = unsafe { actual.take_original_sql_custody() }?;
-            post_ack.retain_original_sql_custody(packets)?;
-            post_ack.with_original_physical_registry(&mut |registry, prepay| {
-                // SAFETY: same actual original registry/master/envelope,
-                // outside every retention gate. Whole originals persist on Err.
-                unsafe { actual.register_shared_roots(registry, prepay) }
-            })
-        })();
-        self.operational_outside.lock().unwrap_or_else(|p| p.into_inner())[index].owner = Some(actual);
-        result
-    }
     /// A single production cleanup retry consumes the actual retained failure.
     /// No custody mutex spans native effects; the original operation always
     /// returns its refusal, even when cleanup reaches a genuine terminal.

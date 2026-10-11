@@ -68,13 +68,7 @@ pub use destination_join::{
     quote_state_source_coalescing,
 };
 pub(crate) use destination_join::OriginalStateDestinationJoin;
-pub use original_close::{STATE_ACK_EFFECT_PREPAY, STATE_ACK_REPLAY_PREPAY, OriginalStatePhysicalCustody, OriginalOutsideStateFinalizer, OriginalStateOutsideRetirementFailure, ClosedOriginalState, OriginalStateFinalizer, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority, OriginalStateRetirementFailure, ReleasedOriginalStateRetirement};
-#[doc(hidden)]
-pub use original_close::{
-    quote_state_finalizer_frame, quote_state_outside_continuation,
-    quote_state_outside_handoff, quote_state_physical_transfer,
-    quote_state_root_transfer,
-};
+pub use original_close::{STATE_ACK_EFFECT_PREPAY, STATE_ACK_REPLAY_PREPAY, ClosedOriginalState, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority, OriginalStateRetirementFailure, ReleasedOriginalStateRetirement};
 
 /// State of the rebuildable projection after an authoritative CAS write.
 #[derive(Debug, Clone, PartialEq, Eq)]

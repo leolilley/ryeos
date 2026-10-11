@@ -704,6 +704,13 @@ mod tests {
             Err(failure) => panic!("test lease close retained: {failure}"),
         }
         synced.unwrap();
+        // The synced connection's durability pins end typed in the release.
+        let released = host.release();
+        assert!(
+            released.durability_pins_retired >= 1,
+            "release closed {} census durability pins",
+            released.durability_pins_retired
+        );
     }
     /// A guarded evidence read under a held projection lease succeeds only
     /// inside the owning factory's native scope. Unscoped, the lease census
