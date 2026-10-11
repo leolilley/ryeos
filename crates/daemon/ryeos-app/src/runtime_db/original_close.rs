@@ -1317,10 +1317,14 @@ fn advance_close(
         CloseCustody::Runtime(mut db) => {
             let checked = (|| -> Result<()> {
                 match &db.conn {
-                    RuntimeConnection::OriginalMutation(owner) => {
+                    RuntimeConnection::OriginalMutation { owner, schema_reference } => {
                         ensure!(db.open_mode == RuntimeDbOpenMode::ExplicitHistoryReset
                             && owner.domain() == OriginalNativeDomain::RuntimeMutation,
                             "offline Runtime close changed its original mutation purpose");
+                        schema_reference.require_original_closed(
+                            &factory,
+                            OriginalNativeDomain::NodeRuntimeSchemaReference,
+                        )?;
                     }
                     RuntimeConnection::Live(live) => {
                         ensure!(db.open_mode == RuntimeDbOpenMode::Current
@@ -1364,7 +1368,7 @@ fn advance_close(
                 target: db.reset_target.take().expect("checked target"),
                 incarnation: db.incarnation,
                 domain: match &db.conn {
-                    RuntimeConnection::OriginalMutation(owner) => owner.domain(),
+                    RuntimeConnection::OriginalMutation { owner, schema_reference: _ } => owner.domain(),
                     RuntimeConnection::Live(live) => live.owner().domain(),
                     _ => unreachable!("checked native Runtime owner"),
                 },
@@ -1372,7 +1376,10 @@ fn advance_close(
             };
             let mut context = context;
             let owner = match db.conn {
-                RuntimeConnection::OriginalMutation(owner) => owner,
+                RuntimeConnection::OriginalMutation { owner, schema_reference } => {
+                    context._schema_reference = Some(schema_reference);
+                    owner
+                }
                 RuntimeConnection::Live(live) => {
                     let (owner, reference) = live.into_close_parts();
                     context._schema_reference = Some(reference);

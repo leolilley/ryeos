@@ -92,7 +92,7 @@ impl RuntimeDb {
             };
             return live.with_deadline(deadline, |_| operation(self));
         }
-        if let RuntimeConnection::OriginalMutation(owner) = &self.conn {
+        if let RuntimeConnection::OriginalMutation { owner, schema_reference: _ } = &self.conn {
             owner.require_original_process()?;
             self.original_deadline_active.set(true);
             let _notification = NativeDeadlineNotification {

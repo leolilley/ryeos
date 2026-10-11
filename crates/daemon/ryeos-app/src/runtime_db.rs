@@ -21,6 +21,7 @@ pub use inspection_cleanup::{
 mod original_deadline;
 mod original_native;
 pub(crate) use original_native::{OriginalRuntimeAcquisitionFailure, OriginalRuntimeAcquisitionReleased};
+pub(crate) use original_inspection::RuntimeInspectionReferenceRelease;
 mod live_native;
 mod original_inspection;
 #[doc(hidden)]
@@ -7333,11 +7334,15 @@ pub(crate) struct RuntimeDbIncarnation(std::sync::Arc<PrivateRuntimeDbIncarnatio
 enum RuntimeConnection {
     Plain(Connection),
     Inspection(lillux_sqlite::ReadonlySqliteCopy),
-    OriginalMutation(lillux_sqlite::OriginalNativeConnection),
+    OriginalMutation {
+        owner: lillux_sqlite::OriginalNativeConnection,
+        schema_reference: sqlite_schema::ClosedNativeSchemaSqlReference,
+    },
     Live(live_native::LiveRuntimeConnection),
     OriginalInspection {
         owner: lillux_sqlite::OriginalNativeConnection,
         factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        schema_reference: sqlite_schema::ClosedNativeSchemaSqlReference,
     },
 }
 impl RuntimeConnection {
@@ -7351,18 +7356,22 @@ impl RuntimeConnection {
         match self {
             Self::Plain(connection) => operation(connection),
             Self::Inspection(owner) => operation(owner.connection()),
-            Self::OriginalMutation(owner) | Self::OriginalInspection { owner, .. } => owner.with_sql(operation),
+            Self::OriginalMutation { owner, schema_reference: _ }
+            | Self::OriginalInspection { owner, factory: _, schema_reference: _ } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
         }
     }
 
-    /// Only the live owner retains a prepared native reference; plain and
-    /// inspection owners use the stock build, original owners carry none.
+    /// Every native owner retains the closed native reference it was matched
+    /// against. Only the non-native plain and copy owners use the stock build.
     fn schema_reference(&self) -> Option<&sqlite_schema::SchemaSqlDefinition> {
         match self {
             Self::Live(owner) => Some(owner.schema_reference()),
-            Self::Plain(_) | Self::Inspection(_) | Self::OriginalMutation(_) => None,
-            Self::OriginalInspection { owner: _, factory: _ } => None,
+            Self::OriginalMutation { owner: _, schema_reference }
+            | Self::OriginalInspection { owner: _, factory: _, schema_reference } => {
+                Some(schema_reference.definition())
+            }
+            Self::Plain(_) | Self::Inspection(_) => None,
         }
     }
 
@@ -7372,7 +7381,7 @@ impl RuntimeConnection {
     ) -> Result<T> {
         match self {
             Self::Plain(connection) => operation(connection),
-            Self::OriginalMutation(owner) => owner.with_sql(operation),
+            Self::OriginalMutation { owner, schema_reference: _ } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
             Self::Inspection(_) | Self::OriginalInspection { .. } => Err(rusqlite::Error::InvalidQuery.into()),
         }
@@ -8114,6 +8123,7 @@ impl SqliteInspectionClosed {
 struct SqliteInspectionClosedFailure {
     error: anyhow::Error,
     _closed: std::sync::Arc<SqliteInspectionClosed>,
+    _schema_reference: Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
 }
 impl std::fmt::Debug for SqliteInspectionClosedFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -8140,6 +8150,20 @@ impl SqliteInspectionClosed {
         anyhow::Error::new(SqliteInspectionClosedFailure {
             error,
             _closed: self.clone(),
+            _schema_reference: None,
+        })
+    }
+    /// The same refusal for a native inspection; its closed schema reference
+    /// stays with the proof it was matched against.
+    pub(crate) fn retain_failure_with_reference(
+        self: &std::sync::Arc<Self>,
+        error: anyhow::Error,
+        schema_reference: sqlite_schema::ClosedNativeSchemaSqlReference,
+    ) -> anyhow::Error {
+        anyhow::Error::new(SqliteInspectionClosedFailure {
+            error,
+            _closed: self.clone(),
+            _schema_reference: Some(schema_reference),
         })
     }
 }
@@ -8250,7 +8274,11 @@ impl std::error::Error for RuntimeInspectionNativeFailure {
 impl RuntimeInspectionNativeFailure {
     /// Transfer one actual terminal native disposition. Pending owners stay
     /// in this same mutex; failed verification must retain returned custody.
-    pub(crate) fn take_release(&self) -> Result<RuntimeInspectionRelease> {
+    /// A native inspection also hands over its schema reference; a phase that
+    /// never opened its main owner releases its reference alone.
+    pub(crate) fn take_release(
+        &self,
+    ) -> Result<(Option<RuntimeInspectionRelease>, Option<RuntimeInspectionReferenceRelease>)> {
         let mut retained = self
             .custody
             .lock()
@@ -8258,15 +8286,15 @@ impl RuntimeInspectionNativeFailure {
         match retained.take() {
             Some(RuntimeInspectionNativeCustody::Original(owner)) => {
                 match owner.into_release(self._copy.clone(), self._sql.clone(), self._namespace.clone(), self.database_name.clone()) {
-                    Ok(release) => Ok(release),
+                    Ok((release, reference)) => Ok((release, Some(reference))),
                     Err(owner) => {
                         *retained = Some(RuntimeInspectionNativeCustody::Original(owner));
-                        anyhow::bail!("original Runtime inspection terminal still pending")
+                        anyhow::bail!("original Runtime inspection main owner or schema reference still pending close")
                     }
                 }
             }
             Some(RuntimeInspectionNativeCustody::Closed(proof)) => {
-                Ok(RuntimeInspectionRelease::Closed(std::sync::Arc::new(
+                Ok((Some(RuntimeInspectionRelease::Closed(std::sync::Arc::new(
                     SqliteInspectionClosed::retain(
                         proof,
                         self._copy.clone(),
@@ -8274,10 +8302,10 @@ impl RuntimeInspectionNativeFailure {
                         self.database_name.clone(),
                         Some(self._namespace.clone()),
                     ),
-                )))
+                ))), None))
             }
-            Some(RuntimeInspectionNativeCustody::Released(proof)) => Ok(
-                RuntimeInspectionRelease::Acquisition(SqliteInspectionAcquisitionReleased {
+            Some(RuntimeInspectionNativeCustody::Released(proof)) => Ok((
+                Some(RuntimeInspectionRelease::Acquisition(SqliteInspectionAcquisitionReleased {
                     process: std::process::id(),
                     proof: std::sync::Arc::new(proof),
                     native: std::sync::Mutex::new(None),
@@ -8285,8 +8313,9 @@ impl RuntimeInspectionNativeFailure {
                     sql: self._sql.clone(),
                     database_name: self.database_name.clone(),
                     _namespace: Some(self._namespace.clone()),
-                }),
-            ),
+                })),
+                None,
+            )),
             Some(pending) => {
                 *retained = Some(pending);
                 anyhow::bail!("runtime native release still has original pending owner")
@@ -9122,7 +9151,7 @@ impl RuntimeDb {
             || self._directory.is_none()
             || self._directory_lock.is_none()
             || (self._database_file.is_none()
-                && !matches!(&self.conn, RuntimeConnection::OriginalMutation(_)))
+                && !matches!(&self.conn, RuntimeConnection::OriginalMutation { owner: _, schema_reference: _ }))
         {
             bail!("offline reset requires the exact pinned reset database owner");
         }
@@ -9148,7 +9177,7 @@ impl RuntimeDb {
             ._directory_lock
             .as_ref()
             .context("offline database namespace lock absent")?;
-        if let RuntimeConnection::OriginalMutation(owner) = &self.conn {
+        if let RuntimeConnection::OriginalMutation { owner, schema_reference: _ } = &self.conn {
             namespace.ensure_protects(directory)?;
             ensure_runtime_directory_binding(directory)?;
             let name = path.file_name().context("offline database target has no file name")?;
@@ -17204,7 +17233,13 @@ impl RuntimeDb {
 
     /// Successful close proves native SQL/keeper retirement, not file disposal
     /// or quota settlement. Failure retains the same native owner and copy.
-    pub(crate) fn close_owned_inspection(self) -> Result<std::sync::Arc<SqliteInspectionClosed>> {
+    /// A native inspection also returns its closed schema reference.
+    pub(crate) fn close_owned_inspection(
+        self,
+    ) -> Result<(
+        std::sync::Arc<SqliteInspectionClosed>,
+        Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
+    )> {
         // This private API is for the constructor's mandatory native variant.
         let copy = self
             ._inspection_copy
@@ -17225,8 +17260,11 @@ impl RuntimeDb {
             .context("runtime inspection lost original basename")?
             .to_os_string();
         let connection = match self.conn {
-            RuntimeConnection::OriginalInspection { owner, factory } => {
-                return original_inspection::close_inspection(owner, factory, copy, sql, namespace, database_name);
+            RuntimeConnection::OriginalInspection { owner, factory, schema_reference } => {
+                return original_inspection::close_inspection(
+                    owner, factory, schema_reference, copy, sql, namespace, database_name,
+                )
+                .map(|(closed, reference)| (closed, Some(reference)));
             }
             connection => connection,
         };
@@ -17245,7 +17283,7 @@ impl RuntimeDb {
                 closed
                     .require_original()
                     .map_err(|error| closed.retain_failure(error))?;
-                Ok(closed)
+                Ok((closed, None))
             }
             Err(failure) => Err(anyhow::Error::new(RuntimeInspectionNativeFailure {
                 error: anyhow::anyhow!("runtime native inspection close: {:?}", failure.error()),
@@ -23550,7 +23588,8 @@ mod tests {
             )?))
             .unwrap();
         assert_eq!(forbidden, 0);
-        let closed = inspected.close_owned_inspection().unwrap();
+        let (closed, reference) = inspected.close_owned_inspection().unwrap();
+        assert!(reference.is_none(), "a stock inspection carries no native reference");
         assert!(std::sync::Arc::ptr_eq(closed.lease(), &lease));
         closed.require_original().unwrap();
         drop(closed);

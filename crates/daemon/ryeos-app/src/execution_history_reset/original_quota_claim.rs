@@ -3058,17 +3058,17 @@ impl OriginalQuotaClaim {
         &self.record.operation_id
     }
 
-    /// Genuine once-claim destination inputs only; opening/ticket admission
-    /// remains with the actual factory and original producer phase.
-    pub(super) fn issue_runtime_mutation_inputs(
+    /// Same genuine source checks as the bound Runtime mutation; returns the
+    /// destination authority both the bound role and its schema reference use.
+    fn runtime_mutation_authority(
         self: &Arc<Self>,
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        root: Arc<lillux::PinnedDirectory>,
+        root: &Arc<lillux::PinnedDirectory>,
         namespace: &lillux::PinnedDirectoryLock,
         target: &std::path::Path,
-    ) -> Result<lillux_sqlite::OriginalNativeBoundInputs> {
+    ) -> Result<(Arc<OriginalRuntimeMutationAuthority>, std::ffi::OsString)> {
         self.require_service_window()?;
-        namespace.ensure_protects(&root)?;
+        namespace.ensure_protects(root)?;
         root.ensure_path_binding()?;
         ensure!(
             target.parent() == Some(root.path())
@@ -3077,7 +3077,7 @@ impl OriginalQuotaClaim {
             "Runtime mutation target/source differs from reserved Config target"
         );
         self.require_runtime_inspection_target(target)?;
-        self.record.sources[0].require_current(&root)?;
+        self.record.sources[0].require_current(root)?;
         ensure!(
             self.record.sources[0].roles[0].is_some(),
             "Existing Runtime source main was absent; no create fallback"
@@ -3103,6 +3103,40 @@ impl OriginalQuotaClaim {
             authority.as_ref(),
             factory,
         )?;
+        Ok((authority, name))
+    }
+
+    /// One paid ticket for the current Runtime schema reference that the
+    /// original Runtime mutation owner matches against.
+    pub(super) fn issue_runtime_reference_inputs(
+        self: &Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        root: Arc<lillux::PinnedDirectory>,
+        namespace: &lillux::PinnedDirectoryLock,
+        target: &std::path::Path,
+    ) -> Result<lillux_sqlite::OriginalNativeTransientInputs> {
+        let (authority, _name) = self.runtime_mutation_authority(factory, &root, namespace, target)?;
+        // SAFETY: same genuine signed source, retained main pin, root,
+        // namespace and funding as the bound Runtime mutation; the fixed
+        // reference purpose is chosen here and builds only declared schema.
+        unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+                authority,
+            )
+        }
+    }
+
+    /// Genuine once-claim destination inputs only; opening/ticket admission
+    /// remains with the actual factory and original producer phase.
+    pub(super) fn issue_runtime_mutation_inputs(
+        self: &Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        root: Arc<lillux::PinnedDirectory>,
+        namespace: &lillux::PinnedDirectoryLock,
+        target: &std::path::Path,
+    ) -> Result<lillux_sqlite::OriginalNativeBoundInputs> {
+        let (authority, name) = self.runtime_mutation_authority(factory, &root, namespace, target)?;
         // Safety: exact signed claim source[0]/Config target, actual original
         // main pin, root/namespace and SAME real issued factory retained above.
         unsafe {

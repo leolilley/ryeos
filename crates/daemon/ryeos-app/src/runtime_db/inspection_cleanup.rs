@@ -1352,7 +1352,8 @@ mod controls {
                 work.clone(),
             )
             .unwrap();
-            let closed = db.close_owned_inspection().unwrap();
+            let (closed, reference) = db.close_owned_inspection().unwrap();
+            assert!(reference.is_none(), "a stock inspection carries no native reference");
             let root = closed.lease.directory().unwrap();
             let main = work
                 .retained_destination_role(root, std::ffi::OsStr::new("runtime.sqlite3"))

@@ -731,11 +731,72 @@ struct OfflineRuntimeSlot {
     closed: Option<Arc<crate::runtime_db::OriginalRuntimeClosed>>,
     finalizer: Option<Arc<crate::runtime_db::OriginalRuntimeFinalizer>>,
     close_failure: Option<crate::runtime_db::OriginalRuntimeCloseFailure>,
+    /// Closed mutation schema reference whose main inputs were refused
+    /// before any open; its terminal belongs to the census.
+    reference: Option<ryeos_state::sqlite_schema::ClosedNativeSchemaSqlReference>,
+    /// A refused mutation schema reference after its same-owner close, with
+    /// the factory its terminal is checked against.
+    released_reference: Option<(
+        Arc<lillux_sqlite::OriginalNativeFactory>,
+        ryeos_state::sqlite_schema::ReleasedNativeSchemaSqlReference,
+    )>,
+    /// A refused mutation schema reference whose same-owner close refused.
+    refused_reference: Option<ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure>,
 }
 impl std::fmt::Debug for OfflineRuntimeSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OfflineRuntimeSlot").field("issued", &self.issued)
-            .field("retained", &self.retained.is_some()).finish()
+            .field("retained", &self.retained.is_some())
+            .field("reference", &self.reference.is_some())
+            .field("released_reference", &self.released_reference.is_some())
+            .field("refused_reference", &self.refused_reference.is_some())
+            .finish()
+    }
+}
+/// A Runtime schema reference the controller could not slot: it stays with
+/// the refusal that reports it, never dropped.
+enum RuntimeReferenceOwner {
+    Closed { _reference: ryeos_state::sqlite_schema::ClosedNativeSchemaSqlReference },
+    Released {
+        _factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        _released: ryeos_state::sqlite_schema::ReleasedNativeSchemaSqlReference,
+    },
+    Refused { _refused: ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure },
+}
+struct RetainedRuntimeReference {
+    error: anyhow::Error,
+    _owner: RuntimeReferenceOwner,
+}
+impl RetainedRuntimeReference {
+    fn error(original: anyhow::Error, owner: RuntimeReferenceOwner) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            error: original.context("Runtime schema reference slot already occupied; owner retained"),
+            _owner: owner,
+        })
+    }
+}
+impl std::fmt::Debug for RetainedRuntimeReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetainedRuntimeReference").field("error", &self.error).finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for RetainedRuntimeReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+impl std::error::Error for RetainedRuntimeReference {}
+/// The closed schema reference of the Runtime inspection phase, held for
+/// the census after its inspection connection closed.
+#[derive(Default)]
+struct OfflineRuntimeInspectionReferenceSlot {
+    references: Vec<crate::runtime_db::RuntimeInspectionReferenceRelease>,
+}
+impl std::fmt::Debug for OfflineRuntimeInspectionReferenceSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfflineRuntimeInspectionReferenceSlot")
+            .field("references", &self.references.len())
+            .finish()
     }
 }
 struct OfflineRuntimePermit { custody: Arc<InspectionControllerCustody> }
@@ -805,6 +866,7 @@ struct InspectionControllerCustody {
     operational_outside: std::sync::Mutex<[operational_owner::OfflineOperationalOutsideSlot; 2]>,
     state_projection: std::sync::Mutex<OfflineStateProjectionSlot>,
     runtime_mutation: std::sync::Mutex<OfflineRuntimeSlot>,
+    runtime_inspection_reference: std::sync::Mutex<OfflineRuntimeInspectionReferenceSlot>,
     runtime_outside: std::sync::Mutex<Option<crate::runtime_db::OriginalOutsideRuntimeFinalizer>>,
     native_census: std::sync::Mutex<OriginalNativeCensusSlot>,
     closed: std::sync::Mutex<Vec<Arc<SqliteInspectionClosed>>>,
@@ -1047,6 +1109,7 @@ impl InspectionControllerCustody {
     }
     fn retain_native_census(&self, mut terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>) -> Result<()> {
         self.append_operational_terminals(&mut terminals)?;
+        self.append_runtime_reference_terminals(&mut terminals)?;
         let closed = self.closed.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for owner in closed { if let Some(terminal) = owner.original_native_terminal()? { terminals.push(terminal); } }
         let acquired = self.acquisition_released.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -1065,6 +1128,85 @@ impl InspectionControllerCustody {
         // a backend terminal, physical disposal or original settlement.
         slot.terminals = Some(terminals);
         Ok(())
+    }
+    /// Each Runtime phase paid its own schema-reference ticket. The closed
+    /// mutation reference rides its closed Runtime; the others join here.
+    fn append_runtime_reference_terminals(
+        &self,
+        terminals: &mut Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    ) -> Result<()> {
+        for reference in &self.runtime_inspection_reference.lock()
+            .unwrap_or_else(|p| p.into_inner()).references
+        {
+            terminals.extend(reference.census_terminal()?);
+        }
+        let slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
+        ensure!(slot.refused_reference.is_none(),
+            "Runtime schema reference still retained; terminal census incomplete");
+        if let Some(reference) = &slot.reference {
+            terminals.push(reference.terminal().clone());
+        }
+        if let Some((factory, released)) = &slot.released_reference {
+            // A reference refused before any ticket has no census entry.
+            if let Some(terminal) = released.terminal(factory)? {
+                if terminal.ticket().is_some() {
+                    terminals.push(terminal.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn retain_runtime_inspection_reference(
+        &self,
+        reference: crate::runtime_db::RuntimeInspectionReferenceRelease,
+    ) {
+        // Bookkeeping only; the census validates every retained terminal.
+        self.runtime_inspection_reference.lock()
+            .unwrap_or_else(|p| p.into_inner()).references.push(reference);
+    }
+    /// Same-owner close of a refused Runtime mutation schema reference. A
+    /// released reference joins the census; a still-refused one stays here.
+    /// An occupied slot refuses and the incoming owner rides the error.
+    fn retain_runtime_reference_refusal(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        refused: ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure,
+    ) -> anyhow::Error {
+        let original = anyhow!("original Runtime mutation schema reference refused: {refused:#}");
+        match refused.close_retained() {
+            Ok(released) => {
+                let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
+                if slot.released_reference.is_some() {
+                    return RetainedRuntimeReference::error(original,
+                        RuntimeReferenceOwner::Released { _factory: Arc::clone(factory), _released: released });
+                }
+                slot.released_reference = Some((Arc::clone(factory), released));
+                original
+            }
+            Err(refused) => {
+                let original = original.context("same-owner Runtime schema reference cleanup remains retained");
+                let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
+                if slot.refused_reference.is_some() {
+                    return RetainedRuntimeReference::error(original, RuntimeReferenceOwner::Refused { _refused: refused });
+                }
+                slot.refused_reference = Some(refused);
+                original
+            }
+        }
+    }
+    /// A closed mutation reference whose main inputs were refused before open.
+    /// An occupied slot refuses and the incoming owner rides the error.
+    fn retain_unused_runtime_reference(
+        &self,
+        reference: ryeos_state::sqlite_schema::ClosedNativeSchemaSqlReference,
+        original: anyhow::Error,
+    ) -> anyhow::Error {
+        let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.reference.is_some() {
+            return RetainedRuntimeReference::error(original, RuntimeReferenceOwner::Closed { _reference: reference });
+        }
+        slot.reference = Some(reference);
+        original
     }
     fn begin_runtime_mutation(self: &Arc<Self>) -> Result<OfflineRuntimePermit> {
         let mut slot = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
@@ -1112,7 +1254,18 @@ impl InspectionControllerCustody {
                 failure
                     .retry_close()
                     .and_then(|()| failure.take_release())
-                    .and_then(|release| self.retain_runtime_release(release))
+                    .and_then(|(release, reference)| {
+                        // Retain the reference before validating the release;
+                        // a refused join keeps both actual owners. A phase that
+                        // never opened its main owner releases its reference only.
+                        if let Some(reference) = reference {
+                            self.retain_runtime_inspection_reference(reference);
+                        }
+                        match release {
+                            Some(release) => self.retain_runtime_release(release),
+                            None => Ok(()),
+                        }
+                    })
             });
         match recovery {
             Some(Err(retry)) => {
@@ -1647,7 +1800,13 @@ fn run_execution_history_reset_owned(
             Ok((epoch, reset_required, accounting))
         })();
         match db.close_owned_inspection() {
-            Ok(closed) => inspection_custody.retain(closed),
+            Ok((closed, reference)) => {
+                inspection_custody.retain(closed);
+                if let Some(reference) = reference {
+                    inspection_custody.retain_runtime_inspection_reference(
+                        crate::runtime_db::RuntimeInspectionReferenceRelease::Closed(reference));
+                }
+            }
             Err(close) => {
                 let close = inspection_custody.retry_runtime_failure(close);
                 return Err(quota_claim.retain_failure(
@@ -1666,7 +1825,7 @@ fn run_execution_history_reset_owned(
         let permit = inspection_custody.begin_runtime_mutation()
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
         let db = open_original_runtime_db(&config, &runtime_directory, &runtime_directory_lock,
-            &quota_claim, Arc::clone(&native_factory))
+            &quota_claim, Arc::clone(&native_factory), &inspection_custody)
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Acquisition))?;
         // Adopt before the first caller query: later errors transfer the SAME
         // live native Runtime into the report/error controller, never Drop SQL.
@@ -1830,10 +1989,11 @@ fn run_execution_history_reset_owned(
         .collect::<Result<Vec<_>>>()?;
 
     if options.dry_run || schema_cut_already_current {
-        let runtime_terminal = if let Some(runtime) = runtime_db.take() {
-            Some(runtime.close(Arc::clone(&native_factory))
-                .context("close original Runtime for already-current schema cut")?.terminal())
-        } else { None };
+        let runtime_terminals = if let Some(runtime) = runtime_db.take() {
+            runtime.close(Arc::clone(&native_factory))
+                .context("close original Runtime for already-current schema cut")?
+                .native_terminals()?
+        } else { Vec::new() };
         let closed_state = state_db.close(Arc::clone(&native_factory), &cas_guard,
             active_operation.as_ref().map(|operation| operation.reference()))
             .context("close original State for preview/already-current report")?;
@@ -1844,7 +2004,7 @@ fn run_execution_history_reset_owned(
         let leases = unsafe { closed_state.close_generation_leases_after_consumers(&cas_guard) }?;
         inspection_custody.retain_native_leases(&native_factory, leases)?;
         let mut native_terminals = closed_state.native_terminals()?;
-        if let Some(terminal) = runtime_terminal { native_terminals.push(terminal); }
+        native_terminals.extend(runtime_terminals);
         inspection_custody.retain_native_census(native_terminals)?;
         let settlement = inspection_custody
             .prepare_inspection_settlement(&quota_claim, &copy_work, &native_factory)
@@ -2198,7 +2358,7 @@ fn run_execution_history_reset_owned(
     let leases = unsafe { closed_state.close_generation_leases_after_consumers(&cas_guard) }?;
     inspection_custody.retain_native_leases(&native_factory, leases)?;
     let mut native_terminals = closed_state.native_terminals()?;
-    native_terminals.push(closed_runtime.terminal());
+    native_terminals.extend(closed_runtime.native_terminals()?);
     inspection_custody.retain_native_census(native_terminals)?;
 
     // Copied-role cleanup must finish under original custody BEFORE removing
@@ -2466,6 +2626,7 @@ fn open_original_runtime_db(
     runtime_directory_lock: &lillux::PinnedDirectoryLock,
     claim: &Arc<OriginalQuotaClaim>,
     factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+    custody: &Arc<InspectionControllerCustody>,
 ) -> Result<RuntimeDb> {
     let parent_path = config.db_path.parent().unwrap_or_else(|| Path::new("."));
     let root = Arc::new(lillux::PinnedDirectory::open(parent_path)?
@@ -2476,9 +2637,25 @@ fn open_original_runtime_db(
         root.lock_exclusive_with_timeout(claim.require_service_window()?
             .min(std::time::Duration::from_secs(1)))?
     };
-    let inputs = claim.issue_runtime_mutation_inputs(&factory, Arc::clone(&root),
+    // The mutation phase pays its own reference ticket before the main open.
+    let reference_inputs = claim.issue_runtime_reference_inputs(&factory, Arc::clone(&root),
         &namespace, &config.db_path)?;
-    RuntimeDb::open_original_history_reset_mutation(&config.db_path, root, namespace, factory, inputs)
+    let schema_reference = match ryeos_state::sqlite_schema::prepare_native_schema_sql_reference(
+        Arc::clone(&factory),
+        reference_inputs,
+        lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+        &crate::runtime_db::runtime_schema_sql(),
+    ) {
+        Ok(reference) => reference,
+        Err(refused) => return Err(custody.retain_runtime_reference_refusal(&factory, refused)),
+    };
+    let inputs = match claim.issue_runtime_mutation_inputs(&factory, Arc::clone(&root),
+        &namespace, &config.db_path) {
+        Ok(inputs) => inputs,
+        Err(error) => return Err(custody.retain_unused_runtime_reference(schema_reference, error)),
+    };
+    RuntimeDb::open_original_history_reset_mutation(&config.db_path, root, namespace, factory,
+        inputs, schema_reference)
         .map_err(anyhow::Error::new)
         .with_context(|| format!("open original Runtime database {}", config.db_path.display()))
 }
@@ -2659,6 +2836,56 @@ mod tests {
         TransportCoordinate,
     };
     use tempfile::TempDir;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_phase_references_join_the_native_census() {
+        use lillux_sqlite::test_host::TestNativeHost;
+        let host = TestNativeHost::acquire();
+        let reference = || {
+            // SAFETY: test-only issuance under this host's own funded factory.
+            let inputs = unsafe {
+                lillux_sqlite::OriginalNativeTransientInputs::issued(
+                    lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+                    host.destination(),
+                )
+            }
+            .expect("Runtime reference inputs");
+            match ryeos_state::sqlite_schema::prepare_native_schema_sql_reference(
+                Arc::clone(host.factory()),
+                inputs,
+                lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+                &crate::runtime_db::runtime_schema_sql(),
+            ) {
+                Ok(reference) => reference,
+                Err(failure) => panic!("Runtime schema reference refused under the gate: {failure}"),
+            }
+        };
+        let custody = InspectionControllerCustody::default();
+        // The inspection phase reference after its connection closed, and a
+        // mutation reference whose main inputs were refused before open.
+        custody.retain_runtime_inspection_reference(
+            crate::runtime_db::RuntimeInspectionReferenceRelease::Closed(reference()));
+        let slotted = custody.retain_unused_runtime_reference(reference(), anyhow!("main inputs refused"));
+        assert_eq!(format!("{slotted}"), "main inputs refused", "an empty slot takes the owner");
+        // An occupied slot refuses and hands the incoming owner back.
+        let refused = custody.retain_unused_runtime_reference(reference(), anyhow!("second phase"));
+        let kept = match refused.downcast::<RetainedRuntimeReference>() {
+            Ok(RetainedRuntimeReference { error: _, _owner: RuntimeReferenceOwner::Closed { _reference: kept } }) => kept,
+            Ok(_) | Err(_) => panic!("occupied slot must return the incoming owner"),
+        };
+        host.retain_terminal(kept.terminal().clone());
+        drop(kept);
+        let mut terminals = Vec::new();
+        custody.append_runtime_reference_terminals(&mut terminals).unwrap();
+        assert_eq!(terminals.len(), 2, "each Runtime phase reference is one census ticket");
+        assert!(terminals.iter().all(|terminal| terminal.ticket().is_some()));
+        for terminal in terminals {
+            host.retain_terminal(terminal);
+        }
+        drop(custody);
+        assert_eq!(host.ticket_census(), (3, 3));
+    }
 
     fn local_coordinate() -> RequestCoordinate {
         RequestCoordinate::build(

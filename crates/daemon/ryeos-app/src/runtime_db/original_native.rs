@@ -205,16 +205,23 @@ impl RuntimeDb {
     /// Inputs must come from the private original issuer retaining the actual
     /// source reservation and namespace. Existing only: no create, fallback,
     /// new claim, ordinary SQLite connection or schema mutation at acquisition.
+    /// The closed schema reference is this phase's own native reference; it
+    /// stays with the owner through close or with the acquisition refusal.
     pub(crate) fn open_original_history_reset_mutation(
         path: &Path,
         root: Arc<lillux::PinnedDirectory>,
         namespace: lillux::PinnedDirectoryLock,
         factory: Arc<OriginalNativeFactory>,
         inputs: OriginalNativeBoundInputs,
+        schema_reference: sqlite_schema::ClosedNativeSchemaSqlReference,
     ) -> std::result::Result<Self, OriginalRuntimeAcquisitionFailure> {
         let mut custody = AcquisitionCustody::BeforeOpen(Some(inputs));
         let opened = (|| -> Result<(lillux::PinnedDirectory, bool)> {
             factory.require_original_process()?;
+            schema_reference.require_original_closed(
+                &factory,
+                lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+            )?;
             ensure!(
                 path.parent() == Some(root.path()),
                 "original Runtime target namespace mismatch"
@@ -249,7 +256,11 @@ impl RuntimeDb {
                 ensure_scope_lifetime_resettable(connection, epoch)?;
                 let reset_required = epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH;
                 if !reset_required {
-                    validate_current_runtime_store(connection, path, None)?;
+                    validate_current_runtime_store(
+                        connection,
+                        path,
+                        Some(schema_reference.definition()),
+                    )?;
                 }
                 let integrity: String =
                     connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -272,7 +283,7 @@ impl RuntimeDb {
             Ok(value) => value,
             Err(error) => {
                 return Err(OriginalRuntimeAcquisitionFailure::retained(
-                    error, factory, root, namespace, custody, None,
+                    error, factory, root, namespace, custody, Some(schema_reference),
                 ));
             }
         };
@@ -280,7 +291,7 @@ impl RuntimeDb {
             unreachable!()
         };
         Ok(Self {
-            conn: RuntimeConnection::OriginalMutation(owner),
+            conn: RuntimeConnection::OriginalMutation { owner, schema_reference },
             incarnation: RuntimeDbIncarnation(Arc::new(PrivateRuntimeDbIncarnation)),
             reset_target: Some(path.to_path_buf()),
             original_deadline_active: std::cell::Cell::new(false),
@@ -295,5 +306,152 @@ impl RuntimeDb {
             _inspection_copy: None,
             _inspection_sql: None,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_reference_tests {
+    use super::*;
+    use lillux_sqlite::test_host::TestNativeHost;
+    use lillux_sqlite::{OriginalNativeBoundMode, OriginalNativeDomain, OriginalNativeTransientInputs};
+
+    const NAME: &str = "runtime.sqlite3";
+
+    fn runtime_reference(host: &TestNativeHost) -> sqlite_schema::ClosedNativeSchemaSqlReference {
+        // SAFETY: test-only issuance under this host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::NodeRuntimeSchemaReference,
+                host.destination(),
+            )
+        }
+        .expect("Runtime reference inputs");
+        match sqlite_schema::prepare_native_schema_sql_reference(
+            Arc::clone(host.factory()),
+            inputs,
+            OriginalNativeDomain::NodeRuntimeSchemaReference,
+            &runtime_schema_sql(),
+        ) {
+            Ok(reference) => reference,
+            Err(failure) => panic!("Runtime schema reference refused under the gate: {failure}"),
+        }
+    }
+
+    fn bound(
+        host: &TestNativeHost,
+        root: &Arc<lillux::PinnedDirectory>,
+        mode: OriginalNativeBoundMode,
+        domain: OriginalNativeDomain,
+    ) -> OriginalNativeBoundInputs {
+        // SAFETY: test-only issuance under this host's own funded factory.
+        unsafe {
+            OriginalNativeBoundInputs::issued(
+                Arc::clone(root),
+                std::ffi::OsStr::new(NAME),
+                mode,
+                domain,
+                host.destination(),
+                None,
+            )
+        }
+        .expect("Runtime bound inputs")
+    }
+
+    /// Hand every closed terminal to the host census; returns the domains.
+    fn retire(host: &TestNativeHost, db: RuntimeDb) -> Vec<OriginalNativeDomain> {
+        let closed = match db.close_original_runtime(Arc::clone(host.factory())) {
+            Ok(closed) => closed,
+            Err(failure) => panic!("Runtime close refused: {failure}"),
+        };
+        let terminals = closed.native_terminals().expect("closed Runtime census");
+        let domains = terminals
+            .iter()
+            .map(|terminal| match terminal {
+                OriginalNativeConnectionTerminal::Closed(owner) => owner.domain(),
+                OriginalNativeConnectionTerminal::Released(_) => panic!("closed Runtime yields closed terminals"),
+            })
+            .collect();
+        for terminal in terminals {
+            host.retain_terminal(terminal);
+        }
+        drop(closed);
+        domains
+    }
+
+    fn open_mutation(
+        host: &TestNativeHost,
+        root: &Arc<lillux::PinnedDirectory>,
+        namespace: &lillux::PinnedDirectoryLock,
+        path: &Path,
+    ) -> RuntimeDb {
+        match RuntimeDb::open_original_history_reset_mutation(
+            path,
+            Arc::clone(root),
+            namespace.clone(),
+            Arc::clone(host.factory()),
+            bound(host, root, OriginalNativeBoundMode::Existing, OriginalNativeDomain::RuntimeMutation),
+            runtime_reference(host),
+        ) {
+            Ok(db) => db,
+            Err(failure) => panic!("original Runtime mutation refused under the gate: {failure:#}"),
+        }
+    }
+
+    #[test]
+    fn original_mutation_validates_and_resets_with_its_native_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let namespace = root.lock_exclusive().unwrap();
+        let path = dir.path().join(NAME);
+        let host = TestNativeHost::acquire();
+
+        // A current Runtime store, created by the live native owner.
+        let live = match RuntimeDb::open_live_with_namespace_authority(
+            &path,
+            Arc::clone(&root),
+            namespace.clone(),
+            Arc::clone(host.factory()),
+            bound(&host, &root, OriginalNativeBoundMode::OpenOrCreate, OriginalNativeDomain::NodeRuntime),
+            lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
+            runtime_reference(&host),
+        ) {
+            Ok(db) => db,
+            Err(failure) => panic!("live Runtime refused under the gate: {failure:#}"),
+        };
+        retire(&host, live);
+
+        // Current epoch: validation matches the native reference, not a
+        // stock in-memory build that the gate refuses.
+        let current = open_mutation(&host, &root, &namespace, &path);
+        assert!(!current.requires_explicit_history_reset());
+        assert!(current.conn.schema_reference().is_some(), "mutation carries its reference");
+        current
+            .conn
+            .with_mutable_sql(|connection| {
+                connection.pragma_update(
+                    None,
+                    "application_id",
+                    RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            retire(&host, current),
+            vec![OriginalNativeDomain::RuntimeMutation, OriginalNativeDomain::NodeRuntimeSchemaReference],
+            "the closed mutation hands its reference terminal to the census"
+        );
+
+        // Predecessor epoch: the explicit reset rebuilds and validates the
+        // current schema against the same native reference.
+        let mut predecessor = open_mutation(&host, &root, &namespace, &path);
+        assert!(predecessor.requires_explicit_history_reset());
+        predecessor.fixture_apply_explicit_history_reset(&path).unwrap();
+        assert_eq!(predecessor.operator_schema_epoch().unwrap(), RUNTIME_OPERATOR_SCHEMA_EPOCH);
+        assert_eq!(retire(&host, predecessor).len(), 2);
+
+        // Live, current and predecessor phases each paid one main and one
+        // reference ticket, and every ticket reached the census.
+        assert_eq!(host.ticket_census(), (6, 6));
     }
 }
