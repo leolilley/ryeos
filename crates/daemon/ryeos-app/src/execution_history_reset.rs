@@ -893,7 +893,6 @@ impl InspectionControllerCustody {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         canonical.require_original(factory)?;
-        post_ack.retire_preparation_terminal_alias(factory, aggregate, canonical)?;
         let same = |original: &lillux_sqlite::OriginalNativeConnectionTerminal| match (original, canonical) {
             (lillux_sqlite::OriginalNativeConnectionTerminal::Closed(a),
              lillux_sqlite::OriginalNativeConnectionTerminal::Closed(b)) => Arc::ptr_eq(a, b),
@@ -1127,6 +1126,16 @@ impl InspectionControllerCustody {
             };
             if let Some(terminal) = terminal { terminals.push(terminal); }
         }
+        ensure!(
+            self.native_census.lock().unwrap_or_else(|p| p.into_inner()).terminals.is_none(),
+            "original native census already retained"
+        );
+        // The host's own census is the exhaustive one its backend finishes
+        // against. Its handover skips terminals already entered, so after a
+        // partial refusal this whole call can be retried; the controller's
+        // copy, kept for the cleanup inputs and the post-ACK alias
+        // retirement, is filled only once the host holds every terminal.
+        self.retain_host_terminals(&terminals)?;
         let mut slot = self.native_census.lock().unwrap_or_else(|p| p.into_inner());
         ensure!(slot.terminals.is_none(), "original native census already retained");
         // Store genuine role terminals only; this is not cardinality approval,
@@ -1394,22 +1403,9 @@ impl InspectionControllerCustody {
             inputs
         } else {
             self.acknowledge_producer_terminals()?;
-            let preparations = claim.close_native_admission_and_retire_preparations(factory)?;
-            {
-                let mut census = self.native_census.lock().unwrap_or_else(|p| p.into_inner());
-                let terminals = census.terminals.as_mut()
-                    .context("actual original terminal census absent before producer drain")?;
-                for preparation in preparations {
-                    let present = terminals.iter().any(|original| match (original, &preparation) {
-                        (lillux_sqlite::OriginalNativeConnectionTerminal::Closed(a),
-                         lillux_sqlite::OriginalNativeConnectionTerminal::Closed(b)) => Arc::ptr_eq(a, b),
-                        (lillux_sqlite::OriginalNativeConnectionTerminal::Released(a),
-                         lillux_sqlite::OriginalNativeConnectionTerminal::Released(b)) => Arc::ptr_eq(a, b),
-                        _ => false,
-                    });
-                    if !present { terminals.push(preparation); }
-                }
-            }
+            // Debited but unpublished host tickets are released into the
+            // host's own census when its backend finishes; sealing the claim's
+            // producers here also closes the host to new service tickets.
             let seal = claim.seal_production(work)?;
             let terminal = self.native_census.lock().unwrap_or_else(|p| p.into_inner())
                 .terminals.as_ref().and_then(|terminals| terminals.first()).cloned()
@@ -1738,21 +1734,20 @@ fn run_execution_history_reset_owned(
     quota_claim
         .require_service_window()
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
-    // Only the private authentic issuer can initialize the original native
-    // owner. Its exact claim, generation, clock and aggregate budget are shared
-    // by State, Runtime and scheduler; no second envelope/default is issued.
+    // The published claim funds one offline native host; the controller
+    // keeps it across every refusal. Its factory, budget and windows are
+    // shared by State, Runtime and scheduler; no second envelope is issued.
     let state_projection_permit = inspection_custody.begin_state_projection()
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
-    let native_factory = quota_claim
-        .issue_native_factory(&offline_policy, &identity)
-        .map_err(|error| inspection_custody.retry_native_initialization_refusal(
-            quota_claim.retain_failure(error, QuotaFailurePhase::Admission)))?;
+    let native_factory = inspection_custody
+        .adopt_native_host(quota_claim.issue_native_host(&offline_policy, &identity))
+        .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
     let state_projection_permit = state_projection_permit
         .retain_factory(Arc::clone(&native_factory));
     let offline_lease_authority = quota_claim.native_projection_lease_authority(&native_factory)
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
-    // SAFETY: the genuine distinct offline claim/admission retains its actual
-    // signed debit, state/namespace/policy, sole resident budget and original
+    // SAFETY: the claim's host authority retains its actual signed debit,
+    // State lease, namespace lock and policy, the host's sole budget and the original
     // service/cleanup endpoints. This exact authority selects the same factory;
     // State owns actual generation consumers and the continuously held CAS guard.
     let state_db = unsafe { prepared_state.open_projection(
@@ -2014,8 +2009,9 @@ fn run_execution_history_reset_owned(
         let settlement = inspection_custody
             .prepare_inspection_settlement(&quota_claim, &copy_work, &native_factory)
             .context("prepare original two-store inspection settlement")?;
-        inspection_custody.finish_native_backend(&native_factory)
-            .context("finish actual original backend after preview cleanup scope")?;
+        drop(inspection_custody.finish_native_backend()
+            .context("finish the offline native host backend after preview cleanup scope")?);
+        settlement.retain_native_facts(inspection_custody.native_facts()?)?;
         settlement
             .require_completed()
             .context("original inspection settlement is not complete")?;
@@ -2373,8 +2369,13 @@ fn run_execution_history_reset_owned(
         .context(
             "prepare original two-store inspection settlement before final reset acknowledgement",
         )?;
-    let native_terminal = inspection_custody.finish_native_backend(&native_factory)
-        .context("finish actual original backend after mutating cleanup scope")?;
+    let native_terminal = inspection_custody.finish_native_backend()
+        .context("finish the offline native host backend after mutating cleanup scope")?;
+    inspection_settlement.retain_native_facts(inspection_custody.native_facts()?)?;
+    // Post-backend work joins the host's finished factory: the State final
+    // ACK, retirements after the backend and outside custody.
+    let native_factory = inspection_custody.post_backend_factory()
+        .context("offline native host post-backend factory")?;
     let ready_for_final_ack = inspection_settlement
         .prepare_final_ack(&native_factory, &native_terminal)
         .context("prepare actual source retirement and retained funded final-ACK lifelines")?;
@@ -2482,8 +2483,8 @@ fn run_execution_history_reset_owned(
     // namespace ownership remain in the State producer. These five real close
     // receipts cannot stand in for those other owners or financial settlement.
 
-    // Retain the same native admission's actual State lease, namespace and
-    // policy in post-ACK custody. Its old service/native callbacks now refuse
+    // Retain the native host authority's actual State lease, namespace and
+    // policy in post-ACK custody. Its host checkpoints now refuse
     // access; ownership transfer alone is not physical closure or settlement.
     let native_admission_lifelines = post_ack_finalization.transfer_native_admission_lifelines()?;
     native_admission_lifelines.require_original(&post_ack_finalization)?;

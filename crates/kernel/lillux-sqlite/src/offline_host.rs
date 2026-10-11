@@ -45,6 +45,15 @@ pub trait OfflineNativeAuthority: Send + Sync {
     /// `cleanup == false` is the operation window; `true` is the cleanup
     /// window, which must remain open after the operation window closes.
     fn checkpoint(&self, cleanup: bool) -> Result<()>;
+    /// Refuse a runtime directory other than the one this authority holds
+    /// exclusively. The host asks before any factory runtime binding.
+    fn require_runtime(&self, runtime: &PinnedDirectory) -> Result<()>;
+    /// Charge `steps` SQL VM steps to the caller's own SQL quota before the
+    /// host debits its budget. The host calls this from the progress handler
+    /// of every connection it admits, once per opcode, so it must stay cheap:
+    /// in-memory counters and deadlines only, no IO and no durable check. A
+    /// refusal stops the running statement.
+    fn charge_sql_vm_steps(&self, steps: u64) -> Result<()>;
 }
 
 /// Exact cleanup steps a raw budget must reserve for `storage` bytes and
@@ -649,12 +658,14 @@ impl OriginalNativeAdmissionAuthority for OfflineAdmission {
     }
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {
         self.require_original(false)?;
+        self.authority.require_runtime(runtime)?;
         runtime.ensure_path_binding()
     }
     fn budget(&self) -> Arc<OriginalNativeBudgetOwner> {
         self.budget.clone()
     }
     fn debit_sql_vm_steps(&self, steps: u64) -> Result<()> {
+        self.authority.charge_sql_vm_steps(steps)?;
         self.budget.debit_steps(steps, false)
     }
     fn begin_connection(&self) -> Result<OriginalNativeConnectionAdmission> {

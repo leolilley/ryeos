@@ -26,8 +26,10 @@ use super::offline_policy::OfflineResetPolicyOwner;
 use super::original_operation::OriginalOperation;
 use ryeos_node_runtime::identity::NodeIdentity;
 
-use lillux_sqlite::original_host_owner::region::NativeHostRegion;
-pub(super) const HOST_RELEASE_ATTEMPTS: u64 = 8;
+use lillux_sqlite::offline_host::{
+    OfflineNativeAuthority, OfflineNativeFacts, OfflineNativeHost, OfflineNativeHostFailure,
+    offline_native_required_cleanup_steps,
+};
 
 const PREFIX: &str = "reserved.";
 const MAX_RECORD_BYTES: usize = 8192;
@@ -185,6 +187,8 @@ pub(super) struct OriginalQuotaClaim {
     clock: lillux::time::RetainedOccupancyClock,
     native_service_deadline: lillux::time::MonotonicDeadline,
     native_cleanup_deadline: lillux::time::MonotonicDeadline,
+    /// The one signed SQL VM ceiling, shared by copy and native SQL.
+    sql_steps: SqlVmCeiling,
     signer: NodeIdentity,
     signed: Vec<u8>,
     app_root: lillux::PinnedDirectory,
@@ -199,9 +203,9 @@ pub(super) struct OriginalQuotaClaim {
     copy_usage: Mutex<CopyUsage>,
     production: Mutex<OriginalProductionState>,
     copy_issuer: Mutex<Option<std::sync::Weak<OriginalCopyWork>>>,
-    native_factory: Mutex<Option<std::sync::Weak<lillux_sqlite::OriginalNativeFactory>>>,
-    native_admission: Mutex<Option<std::sync::Weak<OriginalNativeQuotaAdmission>>>,
-    resident: Mutex<NativeHostRegion>,
+    /// The authority of this claim's one offline native host; the host owns
+    /// the factory, region, budget and admission.
+    native_authority: std::sync::OnceLock<std::sync::Weak<ResetNativeAuthority>>,
     _prior_operation: Option<Arc<OriginalOperation>>,
     _source_roots: [lillux::PinnedDirectory; 2],
     _source_pins: Vec<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>,
@@ -234,19 +238,6 @@ impl QuotaCustodyFailure {
     #[cfg(test)]
     pub(super) fn retains(&self, claim: &Arc<OriginalQuotaClaim>) -> bool {
         Arc::ptr_eq(&self.claim, claim)
-    }
-}
-impl QuotaCustodyFailure {
-    pub(super) fn retry_native_preparation(&mut self) -> Result<bool> {
-        if let Some(preparation) = self.error.downcast_mut::<OriginalNativeQuotaPreparationFailure>() {
-            preparation.retry_resident_release()?;
-            return Ok(true);
-        }
-        if let Some(admission) = self.error.downcast_ref::<OriginalNativeQuotaAdmissionFailure>() {
-            admission.retry_preinstallation_retirement()?;
-            return Ok(true);
-        }
-        Ok(false)
     }
 }
 impl std::fmt::Debug for QuotaCustodyFailure {
@@ -661,6 +652,11 @@ struct OriginalSettlementProgress {
     disposition: OriginalRecordPublication,
     terminal: OriginalRecordPublication,
     witnesses: [OriginalWitnessDisposition; 2],
+    /// Plain facts of the offline native host, captured once its backend
+    /// finished; no factory, terminal or region owner is kept here.
+    native: Option<OfflineNativeFacts>,
+    /// The host's region release fact, captured when the host is released.
+    native_region: Option<lillux_sqlite::original_host_owner::backing::HostStorageRegionReleaseFact>,
 }
 /// Complete two-slot ORIGINAL resource custody. This is not successful accounting.
 pub(super) struct OriginalInspectionSettlement {
@@ -982,6 +978,8 @@ impl OriginalQuotaClaim {
                     witnesses: witnesses
                         .try_into()
                         .map_err(|_| anyhow::anyhow!("original witness cardinality changed"))?,
+                    native: None,
+                    native_region: None,
                 }),
             }))
         })();
@@ -1144,6 +1142,27 @@ impl OriginalInspectionSettlement {
             })();
         result.map_err(|error| self.retain_error(error))
     }
+    /// Capture the offline native host's plain facts once its backend
+    /// finished. A retry must present the same facts.
+    pub(super) fn retain_native_facts(self: &Arc<Self>, facts: OfflineNativeFacts) -> Result<()> {
+        let result = (|| -> Result<()> {
+            ensure!(
+                facts.process == std::process::id()
+                    && facts.arena == lillux_sqlite::OriginalNativeArenaDisposition::Released,
+                "offline native host facts lack this process's released arena"
+            );
+            let mut progress = self
+                .progress
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("original settlement progress busy or poisoned"))?;
+            match &progress.native {
+                Some(captured) => ensure!(*captured == facts, "offline native host facts changed after capture"),
+                None => progress.native = Some(facts),
+            }
+            Ok(())
+        })();
+        result.map_err(|error| self.retain_error(error))
+    }
     pub(super) fn require_completed(self: &Arc<Self>) -> Result<()> {
         let result = (|| -> Result<()> {
             self.admission.checkpoint_original()?;
@@ -1167,8 +1186,23 @@ impl OriginalInspectionSettlement {
                     self.require_witness_absence(evidence)?;
                 }
             }
-            self.seal.claim.resident.try_lock()
-                .map_err(|_| anyhow::anyhow!("actual offline resident disposition busy"))?.require_released()?;
+            let native = progress
+                .native
+                .as_ref()
+                .context("offline native host backend facts not captured")?;
+            ensure!(
+                native.arena == lillux_sqlite::OriginalNativeArenaDisposition::Released,
+                "offline native host arena not released"
+            );
+            let region = progress
+                .native_region
+                .as_ref()
+                .context("offline native host region release pending; the host has not been released")?;
+            ensure!(
+                region.generation().map_err(anyhow::Error::msg)? == native.generation
+                    && u64::try_from(region.bytes().map_err(anyhow::Error::msg)?)? == native.region_bytes,
+                "offline native host region release fact differs from the finished host"
+            );
             // Actual held objects are reflected in the authenticated record.
             // No unrelated process/account financial receipt applies to this CLI.
             ensure!(
@@ -1195,9 +1229,6 @@ enum OriginalProductionPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OriginalProducerKind {
     Issuer,
-    NativeQuotaIssuer,
-    NativeConnection(u32),
-    NativeLease(u32),
     Namespace(usize),
     Copy(usize),
     SqlIssue(usize),
@@ -1209,7 +1240,6 @@ struct OriginalProductionState {
     active: std::collections::BTreeMap<u64, OriginalProducerKind>,
     pending: std::collections::BTreeMap<u64, OriginalProducerKind>,
     issuer_entered: bool,
-    native_quota_entered: bool,
     namespace_entered: [bool; 2],
     copy_entered: [bool; 8],
     native_entered: [bool; 2],
@@ -1224,7 +1254,6 @@ impl Default for OriginalProductionState {
             active: Default::default(),
             pending: Default::default(),
             issuer_entered: false,
-            native_quota_entered: false,
             namespace_entered: [false; 2],
             copy_entered: [false; 8],
             native_entered: [false; 2],
@@ -1379,210 +1408,42 @@ struct OriginalNativeAdmissionLifelines {
     namespace: lillux::PinnedDirectoryLock,
     policy: ryeos_node_runtime::node_policy::NodePolicySnapshot,
 }
-pub(super) struct OriginalNativeQuotaAdmission {
+/// The reset's authority for its offline native host. It owns the native
+/// lifelines (a StateLock lease, the runtime namespace lock and the signed
+/// policy) until the post-ACK finalizer takes them, and on every host
+/// boundary revalidates the published reservation, the bindings, the clock
+/// and the claim's service or cleanup window. Once the lifelines are taken,
+/// or the finalizer master is entered, every checkpoint refuses.
+pub(super) struct ResetNativeAuthority {
     claim: Arc<OriginalQuotaClaim>,
     lifelines: Mutex<Option<OriginalNativeAdmissionLifelines>>,
-    _production: Mutex<Option<Arc<OriginalProductionControl>>>,
-    region: Mutex<Option<lillux_sqlite::original_host_owner::OriginalNativeRegionHandle>>,
-    issuer_index: Mutex<Option<lillux_sqlite::OriginalNativeProducerCellIndex>>,
-    issuer_publication_failure: Mutex<Option<lillux_sqlite::SqliteInspectionProductionPublicationFailure>>,
-    preparations: Mutex<Vec<OfflineProducerPreparation>>,
-    budget: Arc<lillux_sqlite::OriginalNativeBudgetOwner>,
+    /// The host's factory, bound once right after the host is issued.
+    factory: std::sync::OnceLock<std::sync::Weak<lillux_sqlite::OriginalNativeFactory>>,
 }
-struct OfflineProducerPreparation {
-    core: Option<lillux_sqlite::OriginalNativeProducerControl>,
-    ticket: Option<u32>,
-    publication: Option<lillux_sqlite::SqliteInspectionProductionPublicationFailure>,
-    callback: Option<Arc<dyn lillux_sqlite::SqliteInspectionProductionControl>>,
-    terminal: Option<Arc<lillux_sqlite::ReleasedOriginalNativeAcquisition>>,
+impl std::fmt::Debug for ResetNativeAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResetNativeAuthority")
+            .field("operation", &self.claim.record.operation_id)
+            .finish_non_exhaustive()
+    }
 }
-impl OriginalNativeQuotaAdmission {
-    fn with_region<T>(&self,
-        apply: impl FnOnce(&lillux_sqlite::original_host_owner::OriginalNativeRegionHandle) -> Result<T>) -> Result<T> {
-        ensure!(self.claim.record.resident_process == std::process::id(), "foreign actual offline native admission");
-        let original = self.region.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual offline native region custody busy or poisoned"))?;
-        apply(original.as_ref().context("actual offline native admission handle consumed")?)
-        // Only fixed local handle/control operations run here, never C effects
-        // or authority callbacks. The outside gate retains the actual handle.
-    }
-    pub(super) fn retire_preparation_terminal_alias(
-        &self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        canonical: &lillux_sqlite::OriginalNativeConnectionTerminal,
-        prepay: &dyn Fn(u64, u64) -> Result<()>,
-    ) -> Result<()> {
-        ensure!(self.claim.record.resident_process == std::process::id(), "foreign actual offline preparation aliases");
-        aggregate.require_original(factory)?;
-        canonical.require_original(factory)?;
-        let count = self.preparations.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual offline preparation quote busy or poisoned"))?.len();
-        let steps = u64::try_from(count)?.checked_mul(4).and_then(|steps| steps.checked_add(4))
-            .context("actual offline preparation alias work overflow")?;
-        lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| prepay(0, steps))?;
-        let mut preparations = self.preparations.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual offline preparation aliases busy or poisoned"))?;
-        ensure!(preparations.len() == count, "actual preparation inventory changed after original quote");
-        for preparation in &mut *preparations {
-            let matches = preparation.terminal.as_ref().is_some_and(|original| {
-                matches!(canonical, lillux_sqlite::OriginalNativeConnectionTerminal::Released(canonical)
-                    if Arc::ptr_eq(original, canonical))
-            });
-            if matches {
-                let core = preparation.core.as_ref().context("actual completed preparation core absent")?;
-                let observation = core.observation()?;
-                ensure!(observation.phase == 2 && observation.reference_retired,
-                    "actual preparation producer remains unresolved");
-                // Canonical actual receipt/resources remain retained by caller;
-                // this drops only a redundant same-Arc terminal alias.
-                preparation.terminal.take();
-            }
-        }
-        Ok(())
-    }
-    pub(super) fn retire_native_region_handles(self: &Arc<Self>,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-    ) -> Result<lillux_sqlite::OriginalNativeBudgetSnapshot> {
-        self.claim.require_destination_outside_transfer(factory, aggregate)?;
-        let issued = self.claim.native_admission.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual native admission retirement lookup busy or poisoned"))?
-            .as_ref().and_then(std::sync::Weak::upgrade)
-            .context("actual registered original native admission absent")?;
-        ensure!(Arc::ptr_eq(self, &issued), "native handle retirement selects foreign actual admission");
-        ensure!(self._production.try_lock().map_err(|_| anyhow::anyhow!("actual issuer custody busy"))?.is_none()
-            && self.issuer_publication_failure.try_lock().map_err(|_| anyhow::anyhow!("actual issuer refusal custody busy"))?.is_none(),
-            "actual original issuer interval still retained");
-        let mut preparations = self.preparations.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual native preparation retirement busy or poisoned"))?;
-        for preparation in &*preparations {
-            ensure!(preparation.publication.is_none() && preparation.terminal.is_none(),
-                "actual preparation publication/terminal aliases not transferred");
-            let observation = preparation.core.as_ref().context("actual original preparation core absent")?.observation()?;
-            ensure!(observation.phase == 2 && observation.reference_retired,
-                "actual preparation producer has not ended");
-        }
-        let completed = std::mem::take(&mut *preparations);
-        drop(preparations);
-        drop(completed); // Completed control references only; no physical/account disposal.
-        let snapshot = self.budget.retire_original_handle(factory, aggregate)?;
-        let mut region = self.region.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual admission region retirement busy or poisoned"))?;
-        let original = region.take();
-        drop(region);
-        drop(original);
-        Ok(snapshot)
-    }
-    pub(super) fn retire_preparations(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>)
-        -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
-        self.checkpoint(true)?;
-        let tickets = u64::from(factory.maximum_resource_tickets()?);
-        let bytes = tickets.checked_mul(
-            u64::try_from(std::mem::size_of::<lillux_sqlite::OriginalNativeConnectionTerminal>())?
-        ).context("offline preparation census storage overflow")?;
-        {
-            let mut used = self.claim.copy_usage.try_lock()
-                .map_err(|_| anyhow::anyhow!("offline preparation census debit busy or poisoned"))?;
-            let buffers = used.buffer_bytes.checked_add(bytes)
-                .context("offline preparation census memory overflow")?;
-            ensure!(buffers.checked_add(used.native_storage_bytes)
-                .and_then(|total| total.checked_add(used.resident_storage_bytes))
-                .is_some_and(|total| total <= self.claim.record.reserved.max_memory_bytes),
-                "offline preparation census exceeds original memory envelope");
-            used.buffer_bytes = buffers;
-        }
-        let mut retained = std::mem::take(&mut *self.preparations.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline preparation drain busy or poisoned"))?);
-        // No preparation/controller mutex spans C effects or callback ACK.
-        let result = (|| -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
-            let mut terminals = Vec::with_capacity(usize::try_from(tickets)?);
-            for preparation in &mut retained {
-                if let Some(failure) = preparation.publication.take() {
-                    match failure.into_parts() {
-                        Ok((_, callback, core)) => { preparation.callback = Some(callback); preparation.core = Some(core); }
-                        Err(failure) => { preparation.publication = Some(failure); anyhow::bail!("offline publication custody extraction refused"); }
-                    }
-                }
-                let core = preparation.core.as_ref().context("actual offline preparation core absent")?;
-                if let Some(ticket) = preparation.ticket {
-                    if core.observation()?.ticket == 0 { core.bind_ticket(ticket)?; }
-                    if preparation.terminal.is_none() {
-                        // Cache real native success before fallible outside ACK.
-                        preparation.terminal = Some(factory.retire_unpublished_ticket(core)?);
-                    }
-                    if let Some(callback) = &preparation.callback { callback.complete()?; }
-                    terminals.push(lillux_sqlite::OriginalNativeConnectionTerminal::Released(
-                        preparation.terminal.as_ref().context("actual preparation release receipt absent")?.clone()));
-                } else {
-                    if core.observation()?.phase != 2 { core.retire_unbound_preparation()?; }
-                }
-            }
-            Ok(terminals)
-        })();
-        // Preserve all actual cores/callbacks/receipts, including completed
-        // prefixes, before returning a late error. Final consuming retirement
-        // clears these only after the full backend receipt has been joined.
-        self.preparations.lock().unwrap_or_else(|p| p.into_inner()).extend(retained);
-        result
-    }
-    fn begin_resident_native_producer(&self, lease: bool) -> Result<(u32, lillux_sqlite::SqliteInspectionProductionPermit)> {
-        self.checkpoint(false)?;
-        // Retain failure custody before claiming a cell or debiting a ticket.
-        let mut preparations = self.preparations.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline preparation custody busy or poisoned"))?;
-        let mut state = self.claim.production.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline native producer issuer busy or poisoned"))?;
-        ensure!(state.phase == OriginalProductionPhase::Producing, "offline native issuer draining/sealed");
-        let producer_ticket = state.next.checked_add(1).context("offline producer ticket overflow")?;
-        let native_kind = if lease { lillux_sqlite::SqliteInspectionProductionKind::ProjectionLease }
-            else { lillux_sqlite::SqliteInspectionProductionKind::Native };
-        let core = self.with_region(|region| Ok(region.claim_producer_control(native_kind)?))?;
-        let ticket = match self.budget.debit_connection_ticket() {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                if core.retire_unbound_preparation().is_err() {
-                    preparations.push(OfflineProducerPreparation { core: Some(core), ticket: None, publication: None, callback: None, terminal: None });
-                }
-                return Err(error);
-            }
-        };
-        if let Err(error) = core.bind_ticket(ticket) {
-            preparations.push(OfflineProducerPreparation { core: Some(core), ticket: Some(ticket), publication: None, callback: None, terminal: None });
-            return Err(anyhow::Error::new(error));
-        }
-        let kind = if lease { OriginalProducerKind::NativeLease(ticket) } else { OriginalProducerKind::NativeConnection(ticket) };
-        state.next = producer_ticket; state.active.insert(producer_ticket, kind);
-        drop(state);
-        let callback: Arc<dyn lillux_sqlite::SqliteInspectionProductionControl> = Arc::new(OriginalProductionControl {
-            claim: self.claim.clone(), copy: None, ticket: producer_ticket, kind, completed: AtomicBool::new(false),
-        });
-        // SAFETY: this actual offline original claim issued the same fixed
-        // cell and irreversibly debited its exact sole resident counter ticket.
-        let producer = match unsafe { lillux_sqlite::SqliteInspectionProductionPermit::issued_from_region(native_kind, callback, core) } {
-            Ok(producer) => producer,
-            Err(publication) => {
-                preparations.push(OfflineProducerPreparation { core: None, ticket: Some(ticket), publication: Some(publication), callback: None, terminal: None });
-                anyhow::bail!("offline native producer publication refused; original custody retained");
-            }
-        };
-        Ok((ticket, producer))
-    }
+impl ResetNativeAuthority {
     fn require_custody(&self) -> Result<()> {
         ensure!(self.claim.record.resident_process == std::process::id(),
-            "inherited offline native admission refused before custody traversal");
+            "inherited offline native authority refused before custody traversal");
         ensure!(
             !self.claim.finalizer_master_entered.load(Ordering::Acquire),
-            "original finalizer master entered; native admission callbacks refused"
+            "original finalizer master entered; native host checkpoints refused"
         );
-        // Actual lifeline ownership guard, not producer/counter bookkeeping.
-        // Transferred admission callbacks refuse; no copied lease substitutes.
+        // Actual lifeline ownership, not producer or counter bookkeeping.
+        // Once the post-ACK finalizer takes the lifelines, every check refuses.
         let custody = self
             .lifelines
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("native admission lifeline owner busy or poisoned"))?;
+            .map_err(|_| anyhow::anyhow!("native host lifeline owner busy or poisoned"))?;
         let lifelines = custody
             .as_ref()
-            .context("native admission lifelines transferred; callbacks refused")?;
+            .context("native host lifelines transferred; checkpoints refused")?;
         lifelines
             .state_lifetime
             .ensure_protects_app_root(self.claim.app_root.path())?;
@@ -1597,11 +1458,11 @@ impl OriginalNativeQuotaAdmission {
                     .offline_reset
                     .as_ref()
                     == Some(&self.claim.record.reserved),
-            "native quota admission changed signed original policy"
+            "native host authority changed signed original policy"
         );
         ensure!(
             self.claim.publication_acknowledged.load(Ordering::Acquire),
-            "native quota admission lacks actual original publication ACK"
+            "native host authority lacks actual original publication ACK"
         );
         self.claim.ledger.ensure_path_binding()?;
         let publication = self
@@ -1628,6 +1489,51 @@ impl OriginalNativeQuotaAdmission {
         );
         Ok(())
     }
+    /// The host's factory, once bound.
+    fn issued_factory(&self) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
+        self.factory
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .context("original offline native host factory absent")
+    }
+    fn require_factory(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
+        ensure!(
+            Arc::ptr_eq(&self.issued_factory()?, factory),
+            "offline native authority selects a foreign factory"
+        );
+        Ok(())
+    }
+}
+/// The claim's signed SQL VM ceiling. Copy SQL and native SQL charge the same
+/// counter. A charge runs once per opcode, so it is one atomic update and an
+/// in-memory check of the precomputed service-window edge: no lock, no IO and
+/// no durable check. Steps are never refunded.
+struct SqlVmCeiling {
+    used: std::sync::atomic::AtomicU64,
+    limit: u64,
+    service: lillux::time::MonotonicDeadline,
+}
+impl SqlVmCeiling {
+    fn new(limit: u64, service: lillux::time::MonotonicDeadline) -> Self {
+        Self { used: std::sync::atomic::AtomicU64::new(0), limit, service }
+    }
+    fn charge(&self, steps: u64) -> Result<()> {
+        ensure!(steps > 0, "empty original SQL VM debit");
+        ensure!(!self.service.has_elapsed(), "original SQL service window elapsed; statement stopped");
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(steps).filter(|total| *total <= self.limit)
+            })
+            .map(|_| ())
+            .map_err(|_| anyhow::anyhow!("original shared SQL VM ceiling exhausted"))
+    }
+    #[cfg(test)]
+    fn used(&self) -> u64 {
+        self.used.load(Ordering::Acquire)
+    }
+}
+
+impl OfflineNativeAuthority for ResetNativeAuthority {
     fn checkpoint(&self, cleanup: bool) -> Result<()> {
         self.require_custody()?;
         if cleanup {
@@ -1647,47 +1553,35 @@ impl OriginalNativeQuotaAdmission {
             )?;
         } else {
             self.claim.require_service_window()?;
+            // Service work, including every new native ticket, ends when the
+            // claim's producers drain or seal; only cleanup continues.
+            let state = self
+                .claim
+                .production
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("original native service gate busy or poisoned"))?;
+            ensure!(
+                state.phase == OriginalProductionPhase::Producing,
+                "original producers draining or sealed; native service refused"
+            );
         }
         Ok(())
     }
-    /// Checked precharge before a future native allocation/scan effect. This
-    /// is NOT a callback API: custody/clock validation runs outside native locks.
-    pub(super) fn debit_allocator_steps(&self, steps: u64) -> Result<()> {
-        self.checkpoint(false)?;
-        self.budget.debit_steps(steps, false)
-    }
-    pub(super) fn debit_allocator_cleanup_steps(&self, steps: u64) -> Result<()> {
-        self.checkpoint(true)?;
-        self.budget.debit_steps(steps, true)
-    }
-    pub(super) fn debit_connection_ticket(
-        self: &Arc<Self>,
-    ) -> Result<OriginalNativeConnectionQuotaTicket> {
-        self.checkpoint(false)?;
-        let state = self
-            .claim
-            .production
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("original native ticket issuer busy"))?;
+    fn require_runtime(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
         ensure!(
-            state.phase == OriginalProductionPhase::Producing,
-            "native producer draining/sealed; new ticket refused"
+            self.claim.runtime.is_same_directory(runtime)?,
+            "native factory selects foreign original runtime"
         );
-        let ticket = self.budget.debit_connection_ticket()?;
-        Ok(OriginalNativeConnectionQuotaTicket {
-            _admission: self.clone(),
-            _ticket: ticket,
-        })
+        Ok(())
+    }
+    fn charge_sql_vm_steps(&self, steps: u64) -> Result<()> {
+        self.claim.sql_steps.charge(steps)
     }
 }
-impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for OriginalNativeQuotaAdmission {
+impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for ResetNativeAuthority {
     fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, cleanup: bool) -> Result<()> {
         self.checkpoint(cleanup)?;
-        let original = self.claim.native_factory.try_lock()
-            .map_err(|_| anyhow::anyhow!("original offline lease factory binding busy"))?
-            .as_ref().and_then(std::sync::Weak::upgrade).context("actual offline lease factory absent")?;
-        ensure!(Arc::ptr_eq(&original, factory), "offline lease selects foreign actual factory");
-        Ok(())
+        self.require_factory(factory)
     }
     fn fork_deadline(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, cleanup: bool)
         -> Result<lillux::time::MonotonicDeadline> {
@@ -1698,419 +1592,135 @@ impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for OriginalNativeQuo
     }
 }
 impl OriginalQuotaClaim {
+    /// Fund and issue the reset's offline native host from the published
+    /// claim's native sub-cap. Memory for the host region and the arena is
+    /// charged to the claim first; the raw budget is minted once, here, and
+    /// moves into the host. A refusal before minting carries no host; a
+    /// refusal after it carries the partial host for its release.
+    pub(super) fn issue_native_host(
+        self: &Arc<Self>,
+        owner: &OfflineResetPolicyOwner<'_>,
+        identity: &NodeIdentity,
+    ) -> std::result::Result<OfflineNativeHost, OfflineNativeHostFailure> {
+        let funded = (|| -> Result<(Arc<ResetNativeAuthority>, lillux_sqlite::OriginalNativeBudget)> {
+            // Authentic publication and the original Operational source and
+            // marker are verified before any memory or native funding.
+            self.require_published(owner, identity)?;
+            self.record
+                .operational_source
+                .require_current(&self.runtime, &self.operational_source_pins)?;
+            self.require_operational_marker()?;
+            self.require_service_window()?;
+            let quota = &self.record.reserved;
+            let storage = quota.max_native_storage_bytes;
+            let cleanup = offline_native_required_cleanup_steps(storage, quota.max_native_connections)?;
+            ensure!(
+                storage > 0 && cleanup < quota.max_native_allocator_steps,
+                "offline native storage or cleanup quote outside signed dimensions"
+            );
+            let host_bytes = u64::try_from(
+                lillux_sqlite::original_host_owner::backing::HostStorage::quote_native_region()
+                    .map_err(anyhow::Error::msg)?
+                    .bytes(),
+            )?;
+            ensure!(
+                host_bytes == self.record.resident_bytes,
+                "offline native host region quote differs from the signed memory debit"
+            );
+            {
+                let mut used = self
+                    .copy_usage
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("original native memory debit busy or poisoned"))?;
+                ensure!(
+                    used.native_storage_bytes == 0 && used.resident_storage_bytes == 0,
+                    "original native host memory already charged"
+                );
+                ensure!(
+                    used.buffer_bytes
+                        .checked_add(storage)
+                        .and_then(|bytes| bytes.checked_add(host_bytes))
+                        .is_some_and(|bytes| bytes <= quota.max_memory_bytes),
+                    "native arena, host region and buffers exceed signed offline memory"
+                );
+                used.native_storage_bytes = storage;
+                used.resident_storage_bytes = host_bytes;
+            }
+            let (state_lifetime, namespace, policy) = owner.retain_copy_inputs()?;
+            let authority = Arc::new(ResetNativeAuthority {
+                claim: self.clone(),
+                lifelines: Mutex::new(Some(OriginalNativeAdmissionLifelines {
+                    state_lifetime: OriginalAccountStateLock::new(state_lifetime),
+                    namespace,
+                    policy,
+                })),
+                factory: std::sync::OnceLock::new(),
+            });
+            self.native_authority
+                .set(Arc::downgrade(&authority))
+                .map_err(|_| anyhow::anyhow!("original offline native host already issued"))?;
+            OfflineNativeAuthority::checkpoint(authority.as_ref(), false)?;
+            // SAFETY: this envelope is the signed claim's native sub-cap,
+            // durably reserved once by its publication under the exclusive
+            // StateLock and runtime namespace lock; it is minted once, here,
+            // and moves into the one host issued below.
+            let raw = unsafe {
+                lillux_sqlite::OriginalNativeBudget::prepaid_by_original_issuer(
+                    storage,
+                    quota.max_native_allocator_steps,
+                    quota.max_native_connections,
+                    cleanup,
+                )
+            }
+            .map_err(|refusal| anyhow::anyhow!("offline native funding refused: {refusal}"))?;
+            Ok((authority, raw))
+        })();
+        let (authority, raw) = funded.map_err(|error| OfflineNativeHostFailure { host: None, error })?;
+        let host_authority: Arc<dyn OfflineNativeAuthority> = authority.clone();
+        // SAFETY: `issue`'s contract holds: the authority's lifelines keep the
+        // StateLock and runtime namespace lock for the host's life, `raw` was
+        // minted above once for this host, and every checkpoint revalidates
+        // both locks, the published reservation and the claim's windows.
+        let host = unsafe { OfflineNativeHost::issue(raw, host_authority) }?;
+        let bound = host.factory().and_then(|factory| {
+            authority
+                .factory
+                .set(Arc::downgrade(factory))
+                .map_err(|_| anyhow::anyhow!("offline native host factory already bound"))
+        });
+        match bound {
+            Ok(()) => Ok(host),
+            Err(error) => Err(OfflineNativeHostFailure { host: Some(host), error }),
+        }
+    }
+    fn native_authority(&self) -> Result<Arc<ResetNativeAuthority>> {
+        let authority = self
+            .native_authority
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .context("original offline native host not issued")?;
+        ensure!(
+            std::ptr::eq(Arc::as_ptr(&authority.claim), self),
+            "offline native authority selects a foreign claim"
+        );
+        Ok(authority)
+    }
+    /// The factory of this claim's own issued host.
+    fn issued_native_factory(&self) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
+        self.native_authority()?.issued_factory()
+    }
     pub(super) fn native_projection_lease_authority(self: &Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>)
         -> Result<Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>> {
         ensure!(self.record.resident_process == std::process::id(), "foreign offline lease issuance");
-        let admission = self.native_admission.try_lock().map_err(|_| anyhow::anyhow!("offline lease admission lookup busy"))?
-            .as_ref().and_then(std::sync::Weak::upgrade).context("actual original offline admission absent")?;
-        ensure!(Arc::ptr_eq(&admission.claim, self), "offline lease authority selects foreign claim");
-        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(admission.as_ref(), factory, false)?;
-        Ok(admission)
-    }
-}
-impl lillux_sqlite::OriginalNativeAdmissionAuthority for OriginalNativeQuotaAdmission {
-    fn require_original(&self, cleanup: bool) -> Result<()> {
-        self.checkpoint(cleanup)
-    }
-    fn require_runtime_binding(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
-        self.checkpoint(false)?;
-        ensure!(
-            self.claim.runtime.is_same_directory(runtime)?,
-            "native factory selects foreign original runtime"
-        );
-        runtime.ensure_path_binding()
-    }
-    fn budget(&self) -> Arc<lillux_sqlite::OriginalNativeBudgetOwner> {
-        self.budget.clone()
-    }
-    fn debit_sql_vm_steps(&self, steps: u64) -> Result<()> {
-        self.checkpoint(false)?;
-        ensure!(steps > 0, "empty original SQL debit");
-        let mut used = self
-            .claim
-            .copy_usage
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("original SQL/native counter busy or poisoned"))?;
-        let total = used
-            .sql_steps
-            .checked_add(steps)
-            .context("original native SQL debit overflow")?;
-        ensure!(
-            total <= self.claim.record.reserved.max_sql_vm_steps,
-            "original shared SQL quota exhausted"
-        );
-        used.sql_steps = total;
-        Ok(())
-    }
-    fn begin_projection_lease(&self) -> Result<lillux_sqlite::OriginalNativeProjectionLeaseAdmission> {
-        let (ticket, producer) = self.begin_resident_native_producer(true)?;
-        // SAFETY: distinct real lease producer/ticket debited from this exact
-        // authentic offline resident budget, retained before any lease effect.
-        unsafe { lillux_sqlite::OriginalNativeProjectionLeaseAdmission::issued(self.budget.clone(), ticket, producer) }.map_err(anyhow::Error::new)
-    }
-    fn begin_connection(&self) -> Result<lillux_sqlite::OriginalNativeConnectionAdmission> {
-        let (ticket, producer) = self.begin_resident_native_producer(false)?;
-        // SAFETY: genuine offline producing gate, sole resident counter and
-        // exact native producer interval; no service/live grant is substituted.
-        unsafe { lillux_sqlite::OriginalNativeConnectionAdmission::issued(self.budget.clone(), ticket, producer) }.map_err(anyhow::Error::new)
-    }
-}
-
-// Failed issuance retains authentic custody and its irreversible issuer
-// interval even before the shared native budget has been constructed.
-struct OriginalNativeQuotaPreparationFailure {
-    error: anyhow::Error,
-    _claim: std::mem::ManuallyDrop<Arc<OriginalQuotaClaim>>,
-    _state_lifetime: std::mem::ManuallyDrop<ryeos_node_runtime::state_lock::StateLockLease>,
-    _namespace: std::mem::ManuallyDrop<lillux::PinnedDirectoryLock>,
-    _policy: std::mem::ManuallyDrop<ryeos_node_runtime::node_policy::NodePolicySnapshot>,
-    _production: std::mem::ManuallyDrop<Arc<OriginalProductionControl>>,
-    raw_budget: Mutex<Option<lillux_sqlite::OriginalNativeBudget>>,
-}
-impl OriginalNativeQuotaPreparationFailure {
-    fn retry_resident_release(&mut self) -> Result<()> {
-        ensure!(self._claim.record.resident_process == std::process::id(), "foreign offline preparation custody");
-        self._state_lifetime.ensure_protects_app_root(self._claim.app_root.path())?;
-        self._namespace.ensure_protects(&self._claim.runtime)?;
-        ensure!(self._policy.generation_digest() == self._claim.record.policy_digest,
-            "offline preparation recovery selects foreign policy");
-        self._claim.require_resident_cleanup()?;
-        self._claim.resident.try_lock().map_err(|_| anyhow::anyhow!("offline resident recovery owner busy"))?
-            .release(|| self._claim.require_resident_cleanup())?;
-        // Native issuance never occurred. End this actual retained original
-        // upper interval after genuine physical absence, without backend ACK.
-        lillux_sqlite::SqliteInspectionProductionControl::complete(self._production.as_ref())?;
-        // The raw budget, if retained before controller transfer, has no C
-        // borrowers or backing. This local counter is never reused/reissued.
-        drop(self.raw_budget.get_mut().map_err(|_| anyhow::anyhow!("offline raw preparation custody poisoned"))?.take());
-        Ok(())
-    }
-}
-impl std::fmt::Debug for OriginalNativeQuotaPreparationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalNativeQuotaPreparationFailure")
-            .field("error", &self.error)
-            .finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for OriginalNativeQuotaPreparationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.error, f)
-    }
-}
-impl std::error::Error for OriginalNativeQuotaPreparationFailure {}
-#[derive(Debug)]
-struct OriginalNativeQuotaAdmissionFailure {
-    error: anyhow::Error,
-    _admission: Arc<OriginalNativeQuotaAdmission>,
-}
-impl OriginalNativeQuotaAdmissionFailure {
-    fn retry_preinstallation_retirement(&self) -> Result<()> {
-        self._admission.require_custody()?;
-        self._admission.claim.require_resident_cleanup()?;
-        {
-            let mut state = self._admission.claim.production.try_lock()
-                .map_err(|_| anyhow::anyhow!("offline admission close gate busy"))?;
-            state.phase = OriginalProductionPhase::Draining;
-        }
-        self._admission.claim.resident.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline region close custody busy"))?.begin_close()?;
-        let failure = self._admission.issuer_publication_failure.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline issuer publication failure busy"))?;
-        if let Some(failure) = failure.as_ref() { failure.retire_uninstalled_factory_issuer()?; }
-        let index = *self._admission.issuer_index.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline actual issuer index busy"))?;
-        if let Some(index) = index { self._admission.with_region(|region| Ok(region.retire_uninstalled_factory_issuer(index)?))?; }
-        if let Some(control) = self._admission._production.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline retained issuer interval busy"))?.as_ref() {
-            lillux_sqlite::SqliteInspectionProductionControl::complete(control.as_ref())?;
-        }
-        Ok(())
-    }
-}
-impl std::fmt::Debug for OriginalNativeQuotaAdmission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalNativeQuotaAdmission")
-            .finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for OriginalNativeQuotaAdmissionFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.error, f)
-    }
-}
-impl std::error::Error for OriginalNativeQuotaAdmissionFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.error.as_ref())
-    }
-}
-struct OriginalNativeFactoryIssuerFailure {
-    error: anyhow::Error,
-    _factory: Arc<lillux_sqlite::OriginalNativeFactory>,
-}
-impl std::fmt::Debug for OriginalNativeFactoryIssuerFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalNativeFactoryIssuerFailure")
-            .field("error", &self.error)
-            .finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for OriginalNativeFactoryIssuerFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.error, f)
-    }
-}
-impl std::error::Error for OriginalNativeFactoryIssuerFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.error.as_ref())
-    }
-}
-/// Retains the SAME original subreservation; no clone/terminal/ID constructor.
-pub(super) struct OriginalNativeConnectionQuotaTicket {
-    _admission: Arc<OriginalNativeQuotaAdmission>,
-    _ticket: u32,
-}
-impl OriginalQuotaClaim {
-    pub(super) fn issue_native_quota_admission(
-        self: &Arc<Self>,
-        owner: &OfflineResetPolicyOwner<'_>,
-        identity: &NodeIdentity,
-        storage_bytes: u64,
-        cleanup_allocator_steps: u64,
-    ) -> Result<Arc<OriginalNativeQuotaAdmission>> {
-        self.require_published(owner, identity)?;
-        self.require_service_window()?;
-        ensure!(
-            storage_bytes > 0
-                && storage_bytes <= self.record.reserved.max_native_storage_bytes
-                && cleanup_allocator_steps > 0
-                && cleanup_allocator_steps < self.record.reserved.max_native_allocator_steps,
-            "native original storage/cleanup request outside signed dimensions"
-        );
-        let (state_lifetime, namespace, policy) = owner.retain_copy_inputs()?;
-        let production = self.enter_native_quota_interval()?;
-        let charged = (|| -> Result<()> {
-            let mut used = self
-                .copy_usage
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original native subreservation busy"))?;
-            ensure!(
-                used.native_storage_bytes == 0 && used.native_budget.is_none(),
-                "original native storage already reserved"
-            );
-            ensure!(
-                used.buffer_bytes
-                    .checked_add(storage_bytes)
-                    .is_some_and(|total| total <= self.record.reserved.max_memory_bytes),
-                "native storage and actual buffers exceed SAME original memory envelope"
-            );
-            let resident_bytes = self.record.resident_bytes;
-            ensure!(used.resident_storage_bytes == 0
-                && used.buffer_bytes.checked_add(storage_bytes)
-                    .and_then(|bytes| bytes.checked_add(resident_bytes))
-                    .is_some_and(|bytes| bytes <= self.record.reserved.max_memory_bytes),
-                "native arena, resident graph and buffers exceed signed offline memory");
-            used.native_storage_bytes = storage_bytes;
-            used.resident_storage_bytes = resident_bytes;
-            Ok(())
-        })();
-        if let Err(error) = charged {
-            return Err(anyhow::Error::new(OriginalNativeQuotaPreparationFailure {
-                error,
-                _claim: std::mem::ManuallyDrop::new(self.clone()),
-                _state_lifetime: std::mem::ManuallyDrop::new(state_lifetime),
-                _namespace: std::mem::ManuallyDrop::new(namespace),
-                _policy: std::mem::ManuallyDrop::new(policy),
-                _production: std::mem::ManuallyDrop::new(production), raw_budget: Mutex::new(None),
-            }));
-        }
-        // Safety: storage charged once above from real signed original quota;
-        // no native effect occurs until caller transfers this genuine owner.
-        let budget = match unsafe {
-            lillux_sqlite::OriginalNativeBudget::prepaid_by_original_issuer(
-                storage_bytes,
-                self.record.reserved.max_native_allocator_steps,
-                self.record.reserved.max_native_connections,
-                cleanup_allocator_steps,
-            )
-        } {
-            Ok(budget) => budget,
-            Err(error) => {
-                return Err(anyhow::Error::new(OriginalNativeQuotaPreparationFailure {
-                    error: anyhow::Error::new(error),
-                    _claim: std::mem::ManuallyDrop::new(self.clone()),
-                    _state_lifetime: std::mem::ManuallyDrop::new(state_lifetime),
-                    _namespace: std::mem::ManuallyDrop::new(namespace),
-                    _policy: std::mem::ManuallyDrop::new(policy),
-                    _production: std::mem::ManuallyDrop::new(production), raw_budget: Mutex::new(None),
-                }));
-            }
-        };
-        let mut resident = match self.resident.try_lock() {
-            Ok(resident) => resident,
-            Err(_) => return Err(anyhow::Error::new(OriginalNativeQuotaPreparationFailure {
-                error: anyhow::anyhow!("offline resident controller busy or poisoned"),
-                _claim: std::mem::ManuallyDrop::new(self.clone()), _state_lifetime: std::mem::ManuallyDrop::new(state_lifetime), _namespace: std::mem::ManuallyDrop::new(namespace),
-                _policy: std::mem::ManuallyDrop::new(policy), _production: std::mem::ManuallyDrop::new(production), raw_budget: Mutex::new(Some(budget)),
-            })),
-        };
-        let initialized = (|| -> Result<Arc<lillux_sqlite::OriginalNativeBudgetOwner>> {
-            let mut checkpoint = || self.require_published(owner, identity);
-            resident.enter(budget, HOST_RELEASE_ATTEMPTS, &mut checkpoint)?;
-            resident.map_resident(&mut checkpoint)?;
-            // SAFETY: the signed offline reservation durably debited this
-            // exact resident extent within its memory cap; its generation was
-            // bound at claim creation from a nonrecycled process counter.
-            unsafe { resident.initialize(self.record.resident_generation) }
-        })();
-        let budget = match initialized {
-            Ok(budget) => budget,
-            Err(error) => return Err(anyhow::Error::new(OriginalNativeQuotaPreparationFailure {
-                error, _claim: std::mem::ManuallyDrop::new(self.clone()), _state_lifetime: std::mem::ManuallyDrop::new(state_lifetime),
-                _namespace: std::mem::ManuallyDrop::new(namespace), _policy: std::mem::ManuallyDrop::new(policy), _production: std::mem::ManuallyDrop::new(production), raw_budget: Mutex::new(None),
-            })),
-        };
-        let region = match resident.handle() {
-            Ok(region) => region,
-            Err(error) => return Err(anyhow::Error::new(OriginalNativeQuotaPreparationFailure {
-                error, _claim: std::mem::ManuallyDrop::new(self.clone()), _state_lifetime: std::mem::ManuallyDrop::new(state_lifetime),
-                _namespace: std::mem::ManuallyDrop::new(namespace), _policy: std::mem::ManuallyDrop::new(policy), _production: std::mem::ManuallyDrop::new(production), raw_budget: Mutex::new(None),
-            })),
-        };
-        drop(resident);
-        let admission = Arc::new(OriginalNativeQuotaAdmission {
-            claim: self.clone(),
-            lifelines: Mutex::new(Some(OriginalNativeAdmissionLifelines {
-                state_lifetime: OriginalAccountStateLock::new(state_lifetime),
-                namespace,
-                policy,
-            })),
-            _production: Mutex::new(Some(production)),
-            region: Mutex::new(Some(region)),
-            issuer_index: Mutex::new(None), issuer_publication_failure: Mutex::new(None),
-            preparations: Mutex::new(Vec::new()),
-            budget: budget.clone(),
-        });
-        let registered = (|| -> Result<()> {
-            let mut used = self
-                .copy_usage
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original native budget registration busy"))?;
-            ensure!(
-                used.native_budget.is_none(),
-                "original native budget registration conflict"
-            );
-            used.native_budget = Some(budget);
-            drop(used);
-            let mut issued = self.native_admission.try_lock().map_err(|_| {
-                anyhow::anyhow!("actual native admission registration busy or poisoned")
-            })?;
-            ensure!(
-                issued.is_none(),
-                "original native admission already registered"
-            );
-            *issued = Some(Arc::downgrade(&admission));
-            Ok(())
-        })();
-        registered.map_err(|error| {
-            anyhow::Error::new(OriginalNativeQuotaAdmissionFailure {
-                error,
-                _admission: admission.clone(),
-            })
-        })?;
-        Ok(admission)
-    }
-    pub(super) fn issue_native_factory(
-        self: &Arc<Self>,
-        owner: &OfflineResetPolicyOwner<'_>,
-        identity: &NodeIdentity,
-    ) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
-        // Authentic publication/funding and original metadata/content before
-        // arena acquisition. Reading charges the SAME shared owner counters.
-        self.require_published(owner, identity)?;
-        self.record
-            .operational_source
-            .require_current(&self.runtime, &self.operational_source_pins)?;
-        self.require_operational_marker()?;
-        let quota = owner.quota()?;
-        let cleanup = lillux_sqlite::OriginalNativeFactory::required_cleanup_steps(
-            quota.max_native_storage_bytes,
-            quota.max_native_connections,
-        )?.checked_add(HOST_RELEASE_ATTEMPTS)
-            .context("offline native/physical cleanup quote overflow")?;
-        let admission = self.issue_native_quota_admission(
-            owner,
-            identity,
-            quota.max_native_storage_bytes,
-            cleanup,
-        )?;
-        let transfer = (|| -> Result<(lillux_sqlite::original_host_owner::OriginalNativeRegionHandle,
-            lillux_sqlite::SqliteInspectionProductionPermit)> {
-            let region = admission.with_region(|region| Ok(region.try_clone()?))?;
-            let mut issuer_index = admission.issuer_index.try_lock()
-                .map_err(|_| anyhow::anyhow!("offline issuer index busy"))?;
-            let control = admission._production.try_lock()
-                .map_err(|_| anyhow::anyhow!("offline issuer interval busy"))?
-                .as_ref().context("offline issuer interval already transferred")?.clone();
-            let core = admission.with_region(|region| Ok(region.claim_producer_control(lillux_sqlite::SqliteInspectionProductionKind::FactoryIssuer)?))?;
-            *issuer_index = Some(core.index());
-            drop(issuer_index);
-            let callback: Arc<dyn lillux_sqlite::SqliteInspectionProductionControl> = control;
-            // SAFETY: the same genuine signed offline claim owns the prepaid
-            // resident graph and this actual nonrecycled issuer interval.
-            let producer = match unsafe { lillux_sqlite::SqliteInspectionProductionPermit::issued_from_region(
-                lillux_sqlite::SqliteInspectionProductionKind::FactoryIssuer, callback, core) } {
-                Ok(producer) => producer,
-                Err(failure) => {
-                    *admission.issuer_publication_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(failure);
-                    anyhow::bail!("original offline issuer publication refused; custody retained");
-                }
-            };
-            admission._production.lock().unwrap_or_else(|p| p.into_inner()).take();
-            Ok((region, producer))
-        })();
-        let (region, producer) = transfer.map_err(|error| anyhow::Error::new(OriginalNativeQuotaAdmissionFailure {
-            error, _admission: admission.clone(),
-        }))?;
-        let authority: Arc<dyn lillux_sqlite::OriginalNativeAdmissionAuthority> = admission.clone();
-        // SAFETY: exact genuine offline claim/namespace/clock and resident
-        // budget/issuer are retained above, before actual native installation.
-        let factory = unsafe {
-            lillux_sqlite::OriginalNativeFactory::install_from_original_issuer(region, authority, producer)
-        }.map_err(anyhow::Error::new)?;
-        let registered = (|| -> Result<()> {
-            let mut issued = self
-                .native_factory
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original native factory registration busy"))?;
-            ensure!(
-                issued.is_none(),
-                "original native factory already registered"
-            );
-            *issued = Some(Arc::downgrade(&factory));
-            Ok(())
-        })();
-        registered.map_err(|error| {
-            anyhow::Error::new(OriginalNativeFactoryIssuerFailure {
-                error,
-                _factory: factory.clone(),
-            })
-        })?;
-        // Real Ready handoff occurs only after actual arena/bootstrap ownership.
-        factory
-            .initialize_original_backend()
-            .map_err(anyhow::Error::new)?;
-        Ok(factory)
+        let authority = self.native_authority()?;
+        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(authority.as_ref(), factory, false)?;
+        Ok(authority)
     }
     fn native_quota_evidence(
         &self,
     ) -> Result<super::creation_evidence::OriginalNativeQuotaEvidence> {
-        let used = self
-            .copy_usage
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("native quota evidence busy or poisoned"))?;
-        let evidence = if let Some(budget) = &used.native_budget {
-            let snapshot = budget.snapshot()?;
+        let evidence = if self.native_authority.get().is_some() {
+            let snapshot = self.issued_native_factory()?.budget_snapshot()?;
             super::creation_evidence::OriginalNativeQuotaEvidence {
                 admitted: true,
                 storage_bytes: snapshot.storage_bytes,
@@ -2120,9 +1730,13 @@ impl OriginalQuotaClaim {
                 connections_issued: snapshot.connections_issued,
             }
         } else {
+            let used = self
+                .copy_usage
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("native quota evidence busy or poisoned"))?;
             ensure!(
                 used.native_storage_bytes == 0,
-                "native storage charged with unresolved original budget registration"
+                "native storage charged without an issued offline native host"
             );
             super::creation_evidence::OriginalNativeQuotaEvidence::unissued()
         };
@@ -2199,10 +1813,7 @@ impl OriginalQuotaClaim {
         ensure!(self.record.resident_process == std::process::id(), "foreign offline destination account");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let issued = self.native_factory.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual destination factory lookup busy or poisoned"))?
-            .as_ref().and_then(std::sync::Weak::upgrade)
-            .context("actual original destination factory absent")?;
+        let issued = self.issued_native_factory()?;
         ensure!(Arc::ptr_eq(&issued, factory), "destination transfer selects another genuine factory");
         ensure!(self.finalizer_master_entered.load(Ordering::Acquire),
             "canonical original outside account handoff not entered");
@@ -2272,18 +1883,7 @@ impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalOperationalAu
             expected.same_original(factory),
             "Operational selects a foreign factory"
         );
-        let issued = {
-            self.claim
-                .native_factory
-                .try_lock()
-                .map_err(|_| {
-                    anyhow::anyhow!("original Operational factory lookup busy or poisoned")
-                })?
-                .as_ref()
-                .context("Operational original native factory not issued")?
-                .upgrade()
-                .context("Operational original native factory custody absent")?
-        };
+        let issued = self.claim.issued_native_factory()?;
         ensure!(
             issued.same_original(factory),
             "Operational factory differs from authentic claim issuer"
@@ -2496,16 +2096,7 @@ impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalRuntimeMutati
             original.same_original(factory),
             "Runtime mutation selects a foreign factory"
         );
-        let issued = {
-            self.claim
-                .native_factory
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original Runtime issuer lookup busy or poisoned"))?
-                .as_ref()
-                .context("Runtime mutation factory was not issued")?
-                .upgrade()
-                .context("original Runtime factory custody absent")?
-        };
+        let issued = self.claim.issued_native_factory()?;
         ensure!(
             issued.same_original(factory),
             "Runtime mutation factory differs from genuine claim issuer"
@@ -2571,17 +2162,7 @@ impl lillux_sqlite::OriginalNativeCleanupAuthority for OriginalNativeCleanupAdmi
         self.seal
             .require_original(&self.seal.claim, &self.seal.work)?;
         self.seal.work.cleanup_checkpoint()?;
-        let issued = {
-            self.seal
-                .claim
-                .native_factory
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original cleanup issuer lookup busy or poisoned"))?
-                .as_ref()
-                .context("original native factory was not issued")?
-                .upgrade()
-                .context("original issued native factory custody absent")?
-        };
+        let issued = self.seal.claim.issued_native_factory()?;
         ensure!(
             issued.same_original(factory),
             "cleanup factory differs from actual claim issuer"
@@ -2652,18 +2233,6 @@ impl std::fmt::Debug for OriginalProductionSeal {
     }
 }
 impl OriginalQuotaClaim {
-    fn enter_native_quota_interval(self: &Arc<Self>) -> Result<Arc<OriginalProductionControl>> {
-        self.require_service_window()?;
-        let mut state = self.production.try_lock()
-            .map_err(|_| anyhow::anyhow!("original offline quota issuer busy or poisoned"))?;
-        ensure!(state.phase == OriginalProductionPhase::Producing && !state.native_quota_entered,
-            "original offline native quota interval already entered/draining");
-        let ticket = state.next.checked_add(1).context("offline issuer ticket overflow")?;
-        state.next = ticket; state.native_quota_entered = true;
-        state.active.insert(ticket, OriginalProducerKind::NativeQuotaIssuer);
-        Ok(Arc::new(OriginalProductionControl { claim: self.clone(), copy: None,
-            ticket, kind: OriginalProducerKind::NativeQuotaIssuer, completed: AtomicBool::new(false) }))
-    }
     fn enter_production(
         self: &Arc<Self>,
         kind: OriginalProducerKind,
@@ -2685,16 +2254,6 @@ impl OriginalQuotaClaim {
                     "original copy issuer already entered"
                 );
                 state.issuer_entered = true;
-            }
-            OriginalProducerKind::NativeQuotaIssuer => {
-                ensure!(
-                    !state.native_quota_entered,
-                    "original native quota issuer already entered"
-                );
-                state.native_quota_entered = true;
-            }
-            OriginalProducerKind::NativeConnection(_) | OriginalProducerKind::NativeLease(_) => {
-                anyhow::bail!("native connection requires its actual signed ticket issuer")
             }
             OriginalProducerKind::Namespace(index) => {
                 ensure!(
@@ -2733,15 +2292,11 @@ impl OriginalQuotaClaim {
         state.active.insert(ticket, kind);
         drop(state);
         let native_kind = match kind {
-            OriginalProducerKind::NativeQuotaIssuer => {
-                lillux_sqlite::SqliteInspectionProductionKind::FactoryIssuer
-            }
-            OriginalProducerKind::Native(_) | OriginalProducerKind::NativeConnection(_) => {
-                lillux_sqlite::SqliteInspectionProductionKind::Native
-            }
-            OriginalProducerKind::NativeLease(_) => lillux_sqlite::SqliteInspectionProductionKind::ProjectionLease,
+            OriginalProducerKind::Native(_) => lillux_sqlite::SqliteInspectionProductionKind::Native,
             OriginalProducerKind::Copy(_) => lillux_sqlite::SqliteInspectionProductionKind::Copy,
-            _ => lillux_sqlite::SqliteInspectionProductionKind::Namespace,
+            OriginalProducerKind::Issuer
+            | OriginalProducerKind::Namespace(_)
+            | OriginalProducerKind::SqlIssue(_) => lillux_sqlite::SqliteInspectionProductionKind::Namespace,
         };
         Ok(lillux_sqlite::SqliteInspectionProductionPermit::issued(
             native_kind,
@@ -2761,33 +2316,6 @@ impl OriginalQuotaClaim {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .context("original copy issuer absent; no replacement issue")
-    }
-    pub(super) fn close_native_admission_and_retire_preparations(
-        self: &Arc<Self>,
-        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-    ) -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
-        ensure!(self.record.resident_process == std::process::id(), "foreign offline producer drain");
-        factory.require_original_process()?;
-        let original_factory = self.native_factory.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline drain factory lookup busy or poisoned"))?
-            .as_ref().and_then(std::sync::Weak::upgrade)
-            .context("actual issued offline factory absent")?;
-        ensure!(Arc::ptr_eq(&original_factory, factory), "offline drain selects another original factory");
-        let admission = self.native_admission.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline drain admission lookup busy or poisoned"))?
-            .as_ref().and_then(std::sync::Weak::upgrade)
-            .context("actual original offline admission absent")?;
-        ensure!(Arc::ptr_eq(&admission.claim, self), "offline drain selects another claim");
-        {
-            let mut production = self.production.try_lock()
-                .map_err(|_| anyhow::anyhow!("offline permanent admission close busy or poisoned"))?;
-            if production.phase == OriginalProductionPhase::Producing {
-                production.phase = OriginalProductionPhase::Draining;
-            }
-        }
-        // Permanently close this same original admission BEFORE taking any
-        // preparation. No producer/controller gate spans real C effects or ACK.
-        admission.retire_preparations(factory)
     }
     pub(super) fn inspection_plan(&self) -> &OriginalInspectionPlan {
         &self.record.inspection
@@ -2930,7 +2458,9 @@ impl OriginalQuotaClaim {
         let destinations = destination_plans(&operation_id);
         let resident_layout = lillux_sqlite::original_host_owner::backing::HostStorage::quote_native_region()
             .map_err(anyhow::Error::msg)?;
-        // One process-wide counter shared with every other resident issuer.
+        // The signed record still carries a resident incarnation. It is drawn
+        // from the process-wide counter, so it is never reused; the offline
+        // native host draws its own region generation from the same counter.
         let resident_generation = lillux_sqlite::original_host_owner::region::next_resident_generation()?;
         let record = ClaimRecord {
             schema: 9,
@@ -2966,10 +2496,12 @@ impl OriginalQuotaClaim {
             signed.len() <= MAX_RECORD_BYTES,
             "offline quota claim exceeds record bound"
         );
+        let sql_steps = SqlVmCeiling::new(record.reserved.max_sql_vm_steps, native_service_deadline);
         Ok(Arc::new(Self {
             record,
             clock,
             native_service_deadline, native_cleanup_deadline,
+            sql_steps,
             signer: identity.clone(),
             signed,
             app_root: app_root.try_clone()?,
@@ -2984,9 +2516,7 @@ impl OriginalQuotaClaim {
             copy_usage: Mutex::new(CopyUsage::default()),
             production: Mutex::new(OriginalProductionState::default()),
             copy_issuer: Mutex::new(None),
-            native_factory: Mutex::new(None),
-            native_admission: Mutex::new(None),
-            resident: Mutex::new(NativeHostRegion::new(resident_layout)),
+            native_authority: std::sync::OnceLock::new(),
             _prior_operation: prior.cloned(),
             _source_roots: source_roots,
             // Safety: actual ordered O_PATH metadata owners captured under
@@ -3019,21 +2549,6 @@ impl OriginalQuotaClaim {
         Ok(&self.record.operation_id)
     }
 
-    fn require_resident_cleanup(&self) -> Result<()> {
-        ensure!(self.record.resident_process == std::process::id(), "inherited offline physical cleanup refused");
-        self.record.validate()?;
-        ensure!(self.record.clock_binding == self.clock.binding_digest(), "offline resident cleanup changes original clock");
-        self.ledger.ensure_path_binding()?;
-        let publication = self.reservation_publication.try_lock()
-            .map_err(|_| anyhow::anyhow!("offline resident reservation custody busy"))?
-            .as_ref().context("original offline resident debit not published")?.clone();
-        publication.require_original(&self.ledger, OsStr::new(&format!("{PREFIX}{}", self.record.operation_id)))?;
-        ensure!(publication.read_original(MAX_RECORD_BYTES)? == self.signed, "offline resident durable debit changed");
-        let allowance = std::time::Duration::from_millis(self.record.reserved.max_cleanup_millis);
-        original_cleanup_remaining(self.clock.window(&self.record.occupancy, allowance)
-            .map_err(anyhow::Error::msg)?, allowance)?;
-        Ok(())
-    }
     pub(super) fn require_service_window(&self) -> Result<std::time::Duration> {
         ensure!(
             !self.finalizer_master_entered.load(Ordering::Acquire),
@@ -3861,7 +3376,6 @@ struct CopyUsage {
     admitted: [bool; 8],
     destinations: [bool; 2],
     sql_admitted: [bool; 2],
-    sql_steps: u64,
     cleanup_steps: u64,
     destination_roots: [Option<Arc<lillux::PinnedDirectory>>; 2],
     // Original outputs are retained before any metadata/body operation. Files
@@ -3875,7 +3389,6 @@ struct CopyUsage {
     buffer_bytes: u64,
     native_storage_bytes: u64,
     resident_storage_bytes: u64,
-    native_budget: Option<Arc<lillux_sqlite::OriginalNativeBudgetOwner>>,
 }
 
 /// Failed output registration preserves the actual File even before a fixed
@@ -4091,22 +3604,7 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
             ),
             "original SQL service window expired; charge retained"
         );
-        let mut used = self
-            .copy
-            .claim
-            .copy_usage
-            .lock()
-            .map_err(|_| anyhow::anyhow!("original SQL VM work poisoned"))?;
-        let total = used
-            .sql_steps
-            .checked_add(steps)
-            .context("SQL VM debit overflow")?;
-        ensure!(
-            total <= self.copy.claim.record.reserved.max_sql_vm_steps,
-            "original aggregate SQL VM limit exhausted"
-        );
-        used.sql_steps = total;
-        Ok(())
+        self.copy.claim.sql_steps.charge(steps)
     }
 }
 
@@ -4398,18 +3896,7 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
             std::ptr::eq(original.as_ref(), self),
             "native inspection selects a foreign original copy issuer"
         );
-        let issued = {
-            self.claim
-                .native_factory
-                .try_lock()
-                .map_err(|_| {
-                    anyhow::anyhow!("original inspection native issuer lookup busy or poisoned")
-                })?
-                .as_ref()
-                .context("original inspection native factory was not issued")?
-                .upgrade()
-                .context("original inspection native factory custody absent")?
-        };
+        let issued = self.claim.issued_native_factory()?;
         ensure!(
             issued.same_original(factory),
             "inspection work and native factory have different original claims"
@@ -5442,79 +4929,43 @@ mod clock_controls {
     }
 
     #[test]
-    fn genuine_native_subreservation_shares_original_counters_and_retains_pending_owner() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        let namespace = source.lock_exclusive().unwrap();
-        let (state, claim, work) = crate::execution_history_reset::fixture_inspection_claim(
-            &source,
-            &namespace,
-            &tmp.path().join("runtime.sqlite3"),
-        );
-        let mut config =
-            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-                app_root: Some(tmp.path().to_path_buf()),
-                ..Default::default()
-            })
-            .unwrap();
-        config.db_path = tmp.path().join("runtime.sqlite3");
-        let identity = NodeIdentity::load(&config.node_signing_key_path).unwrap();
-        let policy =
-            OfflineResetPolicyOwner::load(&config, &identity, &state, &source, &namespace).unwrap();
-        let limits = claim.record.reserved.clone();
-        assert!(
-            claim
-                .issue_native_quota_admission(&policy, &identity, 0, 8)
-                .is_err()
-        );
-        let admission = claim
-            .issue_native_quota_admission(&policy, &identity, limits.max_native_storage_bytes, 8 + HOST_RELEASE_ATTEMPTS)
-            .unwrap();
-        assert!(
-            claim
-                .issue_native_quota_admission(
-                    &policy,
-                    &identity,
-                    limits.max_native_storage_bytes,
-                    8 + HOST_RELEASE_ATTEMPTS
-                )
-                .is_err()
-        );
-        {
-            let issuer = admission._production.lock().unwrap();
-            let issuer = issuer.as_ref().unwrap();
-            assert_eq!(issuer.kind, OriginalProducerKind::NativeQuotaIssuer);
-            assert!(!issuer.completed.load(Ordering::Acquire));
+    fn native_sql_is_refused_at_the_shared_signed_ceiling() {
+        let ceiling = SqlVmCeiling::new(1_000, lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(3600)));
+        for _ in 0..1_000 {
+            ceiling.charge(1).unwrap();
         }
-        let cleanup_reserved = 8 + HOST_RELEASE_ATTEMPTS;
-        let remaining_service = limits.max_native_allocator_steps - cleanup_reserved;
-        let preparation_steps = admission.budget.snapshot().unwrap().allocator_steps;
-        admission.debit_allocator_steps(remaining_service - preparation_steps).unwrap();
-        assert!(admission.debit_allocator_steps(1).is_err());
-        admission.debit_allocator_cleanup_steps(8).unwrap();
-        assert!(admission.debit_allocator_cleanup_steps(1).is_err());
-        for _ in 0..limits.max_native_connections {
-            let ticket = admission.debit_connection_ticket().unwrap();
-            drop(ticket);
-        }
-        assert!(admission.debit_connection_ticket().is_err());
-        let evidence = claim.native_quota_evidence().unwrap();
-        assert_eq!(evidence.storage_bytes, limits.max_native_storage_bytes);
-        assert_eq!(evidence.connections_issued, limits.max_native_connections);
-        assert_eq!(evidence.allocator_steps, remaining_service);
-        assert_eq!(evidence.cleanup_steps, cleanup_reserved);
-        assert!(
-            claim.seal_production(&work).is_err(),
-            "quota owner has no genuine native terminal yet"
-        );
-        let aliased = admission.clone();
-        drop(admission);
-        drop(aliased);
-        assert_eq!(claim.native_quota_evidence().unwrap(), evidence);
-        assert!(
-            claim.seal_production(&work).is_err(),
-            "Drop preserves unresolved producer obligation"
-        );
+        let error = ceiling.charge(1).unwrap_err();
+        assert!(format!("{error:#}").contains("ceiling exhausted"), "{error:#}");
+        assert_eq!(ceiling.used(), 1_000, "a refused charge is not recorded");
+    }
+
+    #[test]
+    fn copy_and_native_sql_together_cannot_exceed_the_ceiling() {
+        let ceiling = std::sync::Arc::new(SqlVmCeiling::new(
+            40_000,
+            lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(3600)),
+        ));
+        // Copy SQL and native SQL charge the same claim counter from
+        // different threads; their total never passes the signed ceiling.
+        let charge = |ceiling: std::sync::Arc<SqlVmCeiling>| {
+            std::thread::spawn(move || (0..30_000).filter(|_| ceiling.charge(1).is_ok()).count())
+        };
+        let copy = charge(ceiling.clone());
+        let native = charge(ceiling.clone());
+        let admitted = copy.join().unwrap() + native.join().unwrap();
+        assert_eq!(admitted, 40_000);
+        assert_eq!(ceiling.used(), 40_000);
+        assert!(ceiling.charge(1).is_err());
+    }
+
+    #[test]
+    fn sql_is_stopped_once_the_service_window_edge_passes() {
+        let ceiling = SqlVmCeiling::new(u64::MAX, lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(50)));
+        ceiling.charge(1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let error = ceiling.charge(1).unwrap_err();
+        assert!(format!("{error:#}").contains("service window elapsed"), "{error:#}");
+        assert_eq!(ceiling.used(), 1);
     }
 
     #[test]
@@ -6567,18 +6018,6 @@ impl OriginalPostAckFinalization {
             physical.retain_metadata_retirement(index, receipt)?;
         }
         Ok(())
-    }
-    pub(super) fn retire_preparation_terminal_alias(
-        &self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal,
-        canonical: &lillux_sqlite::OriginalNativeConnectionTerminal,
-    ) -> Result<()> {
-        ensure!(self.ready.seal.claim.record.resident_process == std::process::id(), "foreign preparation supervisor");
-        let actual = self.native_lifelines.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual transferred native admission lookup busy or poisoned"))?
-            .as_ref().context("actual transferred native admission absent")?.clone();
-        actual.admission.retire_preparation_terminal_alias(factory, aggregate, canonical,
-            &|bytes, steps| self.prepay_outside_continuation(bytes, steps))
     }
     /// Actual consuming authority transfers, not a count-derived closure.
     /// Caller must first deliver all State/Runtime/Operational original packets.
@@ -7762,7 +7201,7 @@ impl OriginalPostAckFinalization {
 /// Actual native admission lifelines moved into original post-ACK custody.
 /// Ownership transfer is not namespace/State-lock disposal or completion.
 pub(super) struct OriginalTransferredNativeAdmission {
-    admission: Arc<OriginalNativeQuotaAdmission>,
+    admission: Arc<ResetNativeAuthority>,
     lifelines: Mutex<Option<OriginalNativeAdmissionLifelines>>,
 }
 impl OriginalTransferredNativeAdmission {
@@ -7914,7 +7353,7 @@ impl OriginalPostAckFinalization {
         ensure!(
             self.ready.terminal.arena_disposition()?
                 == lillux_sqlite::OriginalNativeArenaDisposition::Released,
-            "native admission transfer requires released original backend"
+            "native lifeline transfer requires released original backend"
         );
         let cached = self
             .native_lifelines
@@ -7925,41 +7364,14 @@ impl OriginalPostAckFinalization {
             owner
         } else {
             self.prepay_finalizer_transfer(4096, 32)?;
-            let admission = {
-                self.ready
-                    .seal
-                    .claim
-                    .native_admission
-                    .try_lock()
-                    .map_err(|_| {
-                        anyhow::anyhow!("original native admission lookup busy or poisoned")
-                    })?
-                    .as_ref()
-                    .context("actual original native admission not registered")?
-                    .upgrade()
-                    .context("actual original native admission custody absent")?
-            };
+            let admission = self.ready.seal.claim.native_authority()?;
             ensure!(
                 Arc::ptr_eq(&admission.claim, &self.ready.seal.claim),
                 "native lifeline lookup selects foreign original claim"
             );
-            let factory = {
-                self.ready
-                    .seal
-                    .claim
-                    .native_factory
-                    .try_lock()
-                    .map_err(|_| {
-                        anyhow::anyhow!("original native factory lookup busy or poisoned")
-                    })?
-                    .as_ref()
-                    .context("actual native factory not issued")?
-                    .upgrade()
-                    .context("actual native factory custody absent")?
-            };
             ensure!(
-                Arc::ptr_eq(&factory, &self.ready.factory),
-                "native admission handoff selects foreign issued factory"
+                Arc::ptr_eq(&admission.issued_factory()?, &self.ready.factory),
+                "native lifeline handoff selects a factory other than the claim's host"
             );
             let owner = Arc::new(OriginalTransferredNativeAdmission {
                 admission,
@@ -7980,33 +7392,6 @@ impl OriginalPostAckFinalization {
         owner.transfer_actual()?;
         owner.require_original(self)?;
         Ok(owner)
-    }
-}
-
-impl Drop for OriginalNativeQuotaAdmission {
-    fn drop(&mut self) {
-        let custody = self
-            .lifelines
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(actual) = custody.take() {
-            // Backend release is not host lifeline retirement. Preserve the
-            // actual charged claim/leases, never unlock/close them via Drop.
-            std::mem::forget(self.claim.clone());
-            std::mem::forget(actual);
-        }
-    }
-}
-impl Drop for OriginalTransferredNativeAdmission {
-    fn drop(&mut self) {
-        let custody = self
-            .lifelines
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(actual) = custody.take() {
-            std::mem::forget(self.admission.claim.clone());
-            std::mem::forget(actual);
-        }
     }
 }
 

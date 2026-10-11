@@ -4377,6 +4377,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn guarded_evidence_read_is_bounded_and_refuses_nonregular_children() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let runtime = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         std::fs::write(tmp.path().join("record"), b"exact").unwrap();
@@ -4416,6 +4417,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn guarded_evidence_read_rejects_live_sqlite_role_aliases() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         seed_wal(tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -4444,6 +4446,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn guarded_evidence_read_uses_pin_after_path_is_replaced_by_sqlite_alias() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         seed_wal(tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -4773,6 +4776,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn retirement_reader_probe_child() {
+        let _serial = crate::test_host::serial_guard();
         let Some(path) = std::env::var_os("LILLUX_SQLITE_RETIREMENT_READER") else {
             return;
         };
@@ -4791,6 +4795,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn external_reader_holds_drain_without_role_effect_then_same_owner_retries() {
+        let _serial = crate::test_host::serial_guard();
         struct Supervised(std::process::Child);
         impl Drop for Supervised {
             fn drop(&mut self) {
@@ -4861,6 +4866,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn preexisting_stock_peer_refuses_capture_until_actual_close() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         seed_wal(tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -4890,6 +4896,7 @@ mod tests {
     }
     #[test]
     fn absent_main_refuses_without_creating_database_or_sidecars() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         assert!(
@@ -4899,6 +4906,7 @@ mod tests {
     }
     #[test]
     fn journal_sources_refuse_without_mutation() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"retained source").unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3-journal"), b"recovery").unwrap();
@@ -5442,6 +5450,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_q_u_r_sources_move_to_new_q_without_canonical_sql_open() {
+        let _serial = crate::test_host::serial_guard();
         for source in [
             StoppedSqliteRoleSource::Quarantine {
                 generation: [1; 16],
@@ -5513,6 +5522,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_all_derived_journals_and_temporary_artifacts_refuse_before_intake() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let plan = stopped_plan_fixture(&runtime, tmp.path(), [StoppedSqliteRoleSource::Absent; 3]);
@@ -5552,6 +5562,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_artifact_scan_leaves_other_owners_secure_temporaries() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let plan = stopped_plan_fixture(&runtime, tmp.path(), [StoppedSqliteRoleSource::Absent; 3]);
@@ -5574,6 +5585,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_independent_sidecars_and_all_absent_never_construct_main() {
+        let _serial = crate::test_host::serial_guard();
         for present in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
             let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -5706,6 +5718,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_partial_pin_replacement_refuses_retry_and_cleanup_preserves_foreign() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         seed_wal(tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -5759,6 +5772,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_duplicate_candidates_digest_mismatch_and_generation_exhaustion_hold_unchanged() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         seed_wal(tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -5850,6 +5864,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_relative_temp_and_xaccess_child() {
+        let _serial = crate::test_host::serial_guard();
         if std::env::var_os("RYEOS_STOPPED_RELATIVE_TEMP_PROBE").is_none() {
             return;
         }
@@ -5925,6 +5940,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_relative_temp_configuration_preserves_ordinary_unix_stat_semantics() {
+        let _serial = crate::test_host::serial_guard();
         let cwd = tempfile::tempdir().unwrap();
         std::fs::create_dir(cwd.path().join("relative-temp")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -6004,6 +6020,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn owned_wal_connection_has_all_three_bindings() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         seed_wal(tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -6020,6 +6037,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn replacement_main_refuses_before_foreign_write() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         seed_wal(tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -6047,6 +6065,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn replacement_sidecars_refuse_mutation_and_survive_close() {
+        let _serial = crate::test_host::serial_guard();
         for suffix in ["-wal", "-shm"] {
             let tmp = tempfile::TempDir::new().unwrap();
             seed_wal(tmp.path());
@@ -6071,6 +6090,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn symlink_main_refuses_without_touching_target() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("foreign"), b"foreign").unwrap();
         std::os::unix::fs::symlink("foreign", tmp.path().join("scheduler.sqlite3")).unwrap();
@@ -6135,6 +6155,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn closing_second_owner_preserves_first_owners_process_locks() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         seed_wal(tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -6158,6 +6179,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn hardlinked_shm_refusal_preserves_other_nodes_bytes_and_kernel_locks() {
+        let _serial = crate::test_host::serial_guard();
         use std::os::unix::fs::FileExt;
         fn snapshot(observer: &std::fs::File) -> Vec<u8> {
             let length = observer.metadata().unwrap().len();
@@ -6242,6 +6264,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn hardlinked_main_sidecar_roles_refuse_before_bytes_or_metadata_change() {
+        let _serial = crate::test_host::serial_guard();
         use std::os::unix::fs::MetadataExt;
         for suffix in ["-wal", "-shm"] {
             let tmp = tempfile::TempDir::new().unwrap();
@@ -6287,6 +6310,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn supervised_close_returns_same_busy_owner_and_can_retry() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         seed_wal(tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -6327,6 +6351,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn nonregular_fifo_and_directory_refuse_before_data_open() {
+        let _serial = crate::test_host::serial_guard();
         use std::os::unix::ffi::OsStrExt;
         unsafe extern "C" {
             fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
@@ -6352,6 +6377,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn native_pending_returns_same_retiring_owner_until_actual_release() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         seed_wal(tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -6446,6 +6472,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn named_readonly_copy_reads_its_wal_history_and_refuses_main_mutation() {
+        let _serial = crate::test_host::serial_guard();
         let snapshot = readonly_wal_fixture();
         for suffix in ["", "-wal", "-shm"] {
             std::fs::rename(
@@ -6520,6 +6547,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn readonly_copy_journal_refusal_preserves_source_and_copy() {
+        let _serial = crate::test_host::serial_guard();
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("scheduler.sqlite3"), b"original main").unwrap();
         std::fs::write(
@@ -6556,6 +6584,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn copy_lease_preallocation_failure_remains_rust_owned() {
+        let _serial = crate::test_host::serial_guard();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
         let weak = Arc::downgrade(&snapshot);
         let pin = PinnedDirectory::open(snapshot.path()).unwrap().unwrap();
@@ -6572,6 +6601,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn copy_lease_survives_partial_native_acquisition_failure() {
+        let _serial = crate::test_host::serial_guard();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
         std::fs::write(snapshot.path().join("scheduler.sqlite3"), b"retained main").unwrap();
         std::fs::create_dir(snapshot.path().join("scheduler.sqlite3-wal")).unwrap();
@@ -6610,6 +6640,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn readonly_copy_pending_close_keeps_guard_until_original_retry() {
+        let _serial = crate::test_host::serial_guard();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
         seed_wal(snapshot.path());
         let weak = Arc::downgrade(&snapshot);
@@ -6665,6 +6696,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn readonly_copy_fallback_reaper_keeps_guard_through_peer_release() {
+        let _serial = crate::test_host::serial_guard();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
         seed_wal(snapshot.path());
         let weak = Arc::downgrade(&snapshot);
@@ -6699,6 +6731,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn abandoned_busy_copy_keeps_native_database_and_original_guard() {
+        let _serial = crate::test_host::serial_guard();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
         seed_wal(snapshot.path());
         let weak = Arc::downgrade(&snapshot);
@@ -7099,6 +7132,7 @@ mod guarded_inspection_copy_controls {
     // Actual ordinary witness mechanics; this fixture has no platform authority.
     #[test]
     fn original_witness_removal_proof_and_alias_retirement_preserve_foreign_owner() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let root = pin(tmp.path());
         Connection::open(tmp.path().join("initialize.sqlite3"))
@@ -7161,6 +7195,7 @@ mod guarded_inspection_copy_controls {
     }
     #[test]
     fn native_production_requires_genuine_terminal_acknowledgement() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let name = OsStr::new("runtime.sqlite3");
         let source = Connection::open(tmp.path().join(name)).unwrap();
@@ -7201,6 +7236,7 @@ mod guarded_inspection_copy_controls {
     // Native mechanism controls only. These do not mint disposal authority.
     #[test]
     fn native_output_close_refuses_linked_inode_and_live_stock_alias() {
+        let _serial = crate::test_host::serial_guard();
         use std::os::fd::AsRawFd;
         let tmp = tempfile::tempdir().unwrap();
         let root = pin(tmp.path());
@@ -7252,6 +7288,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn native_output_close_consumes_only_original_unlinked_coordinate() {
+        let _serial = crate::test_host::serial_guard();
         use std::os::fd::{AsRawFd, IntoRawFd};
         let tmp = tempfile::tempdir().unwrap();
         // An unrelated live inode makes a one-check scan insufficient.
@@ -7324,6 +7361,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn actual_copy_sql_fixture_attests_original_copy_work_and_closed_context() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let name = OsStr::new("runtime.sqlite3");
@@ -7367,6 +7405,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn multichunk_copy_receipt_binds_original_and_copied_bytes() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
@@ -7400,6 +7439,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn denied_work_never_creates_destination_and_partial_work_never_refunds() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
@@ -7524,6 +7564,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn cleanup_fixture_preserves_absence_missing_pin_and_original_expiry() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
@@ -7612,6 +7653,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn original_expiry_before_output_hash_retains_created_output_without_receipt() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
@@ -7645,6 +7687,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn native_chunks_refuse_offset_length_and_buffer_changes() {
+        let _serial = crate::test_host::serial_guard();
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("source"), vec![3u8; 65_537]).unwrap();
         let source = pin(directory.path());
@@ -7678,6 +7721,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn copy_refuses_bounds_nonregular_and_incumbent_without_overwrite() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
@@ -7735,6 +7779,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn copy_refuses_live_sqlite_alias_before_destination_creation() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let runtime = Arc::new(pin(source_dir.path()));
         let owner =
@@ -7778,6 +7823,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn copy_refuses_source_mutation_or_source_destination_replacement_between_chunks() {
+        let _serial = crate::test_host::serial_guard();
         for action in ["mutate", "source-replace", "destination-replace"] {
             let source_dir = tempfile::tempdir().unwrap();
             let output_dir = tempfile::tempdir().unwrap();
@@ -7822,6 +7868,7 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn next_chunk_refuses_stock_sqlite_adoption_and_keeps_caller_copy_directory() {
+        let _serial = crate::test_host::serial_guard();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
@@ -7884,6 +7931,7 @@ mod original_source_verification_controls {
 
     #[test]
     fn multi_chunk_verification_refuses_same_inode_same_length_rewrite() {
+        let _serial = crate::test_host::serial_guard();
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join("original");
         let bytes = vec![0x51; 3 * 65_536 + 17];
@@ -7910,6 +7958,7 @@ mod original_source_verification_controls {
 
     #[test]
     fn verification_refuses_in_place_change_between_native_chunks() {
+        let _serial = crate::test_host::serial_guard();
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join("original");
         let bytes = vec![0x33; 2 * 65_536 + 1];
@@ -7940,6 +7989,7 @@ mod original_source_verification_controls {
 
     #[test]
     fn verification_distinguishes_absent_empty_and_replaced_sources() {
+        let _serial = crate::test_host::serial_guard();
         let temp = tempfile::TempDir::new().unwrap();
         let root = PinnedDirectory::open(temp.path()).unwrap().unwrap();
         let name = OsStr::new("original");
@@ -8012,6 +8062,7 @@ mod inspection_sql_controls {
     // Mechanical SQL controls: these bounded fixtures are not issued platform authority.
     #[test]
     fn recursive_and_short_statements_share_irreversible_vm_budget() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let root = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let work = fixture();
@@ -8039,6 +8090,7 @@ mod inspection_sql_controls {
     }
     #[test]
     fn refused_first_opcode_executes_zero_vm_steps() {
+        let _serial = crate::test_host::serial_guard();
         let conn = Connection::open_in_memory().unwrap();
         // Prepare BEFORE installing refusal, to distinguish prospective opcode
         // admission from prepare-time or retrospective loop/end callbacks.
@@ -8050,6 +8102,7 @@ mod inspection_sql_controls {
 
     #[test]
     fn original_expiry_interrupts_installed_connection_without_renewal() {
+        let _serial = crate::test_host::serial_guard();
         let tmp = tempfile::tempdir().unwrap();
         let root = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let work = fixture();

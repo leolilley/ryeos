@@ -47,6 +47,11 @@ pub struct CarriedOwners {
 }
 impl CarriedOwners {
     /// Carry `owner` with `error`, merging any owners `error` already carries.
+    ///
+    /// Only a carrier at the top of `error` is merged (see [`Self::split`]).
+    /// A carrier wrapped under a context is left nested inside `error`, still
+    /// alive but not listed by [`Self::owner_names`]; keep carriers at the top
+    /// by adding context through the carrier, never around it.
     pub fn carry<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
         let (error, mut owners) = Self::split(error);
         owners.push((std::any::type_name::<T>(), std::sync::Mutex::new(Box::new(owner))));
@@ -67,7 +72,16 @@ impl CarriedOwners {
         self.owners.iter().map(|(name, _)| *name).collect()
     }
     /// Split `error` into its refusal and the owners it carries, if any.
+    ///
+    /// Only a top-level carrier is split. A by-value downcast through a
+    /// context chain would drop every context layer above the carrier, and a
+    /// context may itself own something, so a carrier under a context is
+    /// returned untouched with `error` instead.
     fn split(error: anyhow::Error) -> (anyhow::Error, Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>) {
+        let top_level = error.chain().next().is_some_and(|top| top.is::<CarriedOwners>());
+        if !top_level {
+            return (error, Vec::new());
+        }
         match error.downcast::<CarriedOwners>() {
             Ok(carried) => (carried.error, carried.owners),
             Err(error) => (error, Vec::new()),
@@ -91,10 +105,6 @@ impl std::fmt::Display for CarriedOwners {
     }
 }
 impl std::error::Error for CarriedOwners {}
-
-fn carry<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
-    CarriedOwners::carry(error, owner)
-}
 
 /// Merge the owners carried by `carried` into `error`. What remains of
 /// `carried` after its owners are taken may still hold typed owners, so it is
@@ -164,12 +174,12 @@ pub unsafe fn activate_replay_indexes_offline(
     let (_definition, terminal) = reference.into_original_parts();
     match (result, retain(terminal)) {
         (Ok(report), Ok(())) => Ok(report),
-        (Ok(report), Err((terminal, refusal))) => Err(carry(
+        (Ok(report), Err((terminal, refusal))) => Err(CarriedOwners::carry(
             refusal.context(format!("{}; schema reference terminal not retained", committed(&report))),
             terminal,
         )),
         (Err(error), Ok(())) => Err(error),
-        (Err(error), Err((terminal, refusal))) => Err(carry(
+        (Err(error), Err((terminal, refusal))) => Err(CarriedOwners::carry(
             contextualize(error, format!("schema reference terminal not retained: {refusal:#}")),
             terminal,
         )),
@@ -283,7 +293,7 @@ fn retain_closed_terminals(
 ) -> Result<ClosedOriginalOperational> {
     let terminals = match closed.native_terminals() {
         Ok(terminals) => terminals,
-        Err(error) => return Err(carry(error.context("closed Operational terminals refused"), closed)),
+        Err(error) => return Err(CarriedOwners::carry(error.context("closed Operational terminals refused"), closed)),
     };
     let mut refused = Vec::new();
     for terminal in terminals {
@@ -296,7 +306,7 @@ fn retain_closed_terminals(
     }
     let reasons = refused.iter().map(|(_, error)| format!("{error:#}")).collect::<Vec<_>>().join("; ");
     let terminals = refused.into_iter().map(|(terminal, _)| terminal).collect::<Vec<_>>();
-    Err(carry(anyhow::anyhow!("Operational terminal not retained: {reasons}"), (closed, terminals)))
+    Err(CarriedOwners::carry(anyhow::anyhow!("Operational terminal not retained: {reasons}"), (closed, terminals)))
 }
 
 /// Retry the same failed owner's close once. A closed owner's terminals reach
@@ -332,7 +342,7 @@ fn release_reference_failure(
                         drop(released);
                         original
                     }
-                    Err((terminal, refusal)) => carry(
+                    Err((terminal, refusal)) => CarriedOwners::carry(
                         original.context(format!("schema reference terminal not retained: {refusal:#}")),
                         (released, terminal),
                     ),
@@ -349,13 +359,13 @@ fn release_reference_failure(
                             drop(prior);
                             original
                         }
-                        Err((released, refusal)) => carry(
+                        Err((released, refusal)) => CarriedOwners::carry(
                             original.context(format!("unused schema reference inputs not released: {refusal:#}")),
                             released,
                         ),
                     }
                 }
-                Err(refusal) => carry(
+                Err(refusal) => CarriedOwners::carry(
                     original.context(format!("released schema reference refused: {refusal:#}")),
                     released,
                 ),
@@ -371,8 +381,8 @@ mod carried_tests {
 
     #[test]
     fn carriers_flatten_instead_of_nesting() {
-        let inner = carry(anyhow::anyhow!("first refusal"), 1u8);
-        let outer = carry(contextualize(inner, "outer context"), 2u16);
+        let inner = CarriedOwners::carry(anyhow::anyhow!("first refusal"), 1u8);
+        let outer = CarriedOwners::carry(contextualize(inner, "outer context"), 2u16);
         let merged = carry_error(anyhow::anyhow!("close refused"), outer);
         let carried = merged.downcast::<CarriedOwners>().expect("one flat carrier");
         assert_eq!(
@@ -387,6 +397,18 @@ mod carried_tests {
             .find_map(|owner| owner.downcast::<anyhow::Error>().ok())
             .expect("residual refusal carried");
         assert_eq!(format!("{residual:#}"), "outer context: first refusal");
+    }
+
+    #[test]
+    fn a_carrier_under_a_context_stays_nested_with_its_context() {
+        let inner = CarriedOwners::carry(anyhow::anyhow!("first refusal"), 1u8);
+        let wrapped = inner.context("owning context");
+        let outer = CarriedOwners::carry(wrapped, 2u16);
+        let carried = outer.downcast::<CarriedOwners>().expect("top-level carrier");
+        assert_eq!(carried.owner_names(), vec!["u16"], "the nested carrier is not split out of its context");
+        let (error, _owners) = carried.into_parts();
+        assert_eq!(format!("{error}"), "owning context", "the context layer above the nested carrier survives");
+        assert!(error.downcast_ref::<CarriedOwners>().is_some(), "the nested carrier is still alive");
     }
 }
 

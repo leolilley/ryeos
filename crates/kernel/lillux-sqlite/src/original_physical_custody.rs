@@ -1171,6 +1171,7 @@ mod tests {
 
     #[test]
     fn control_record_owner_joins_before_and_after_descriptor_preparation() {
+        let _serial = crate::test_host::serial_guard();
         let issued = || unsafe {
             RetainedOriginalFinalizerFile::issued(
                 tempfile::tempfile().unwrap(),
@@ -1198,6 +1199,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn metadata_pin_retires_only_through_the_metadata_close_path() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         std::fs::write(temporary.path().join("marker"), b"m").unwrap();
         let directory = lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap();
@@ -1243,6 +1245,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn operator_alias_requires_the_exact_registered_lock_allocation() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         let registered = Arc::new(lillux::ExactExclusiveFileLock::acquire(
             &temporary.path().join("operator.lock"),
@@ -1261,6 +1264,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn original_control_record_closes_before_operator_target_and_parent() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path().join("operator.lock");
         let lock = Arc::new(lillux::ExactExclusiveFileLock::acquire(&target).unwrap());
@@ -1387,6 +1391,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn non_operator_close_caches_physical_receipt_before_late_authority_refusal() {
+        let _serial = crate::test_host::serial_guard();
         let record = unsafe { RetainedOriginalFinalizerFile::issued(
             tempfile::tempfile().unwrap(), OriginalFinalizerFileKind::ControlRecord) };
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
@@ -1428,6 +1433,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn ordinary_preparation_preserves_account_weak_authority_and_exclusion() {
+        let _serial = crate::test_host::serial_guard();
         use std::os::unix::fs::MetadataExt as _;
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path().join("operator.lock");
@@ -1475,6 +1481,7 @@ mod tests {
     // backing, producer-census or durable-settlement qualification.
     #[test]
     fn directory_source_join_requires_same_allocation_not_matching_inode() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         let original = Arc::new(lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap());
         let independently_opened = Arc::new(lillux::PinnedDirectory::open(temporary.path()).unwrap().unwrap());
@@ -1497,6 +1504,7 @@ mod tests {
 
     #[test]
     fn empty_inventory_cannot_supply_a_retirement_proof() {
+        let _serial = crate::test_host::serial_guard();
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
         assert!(unsafe { registry.seal_inventory() }.is_err());
         assert!(!registry.descriptors_retired());
@@ -1505,6 +1513,7 @@ mod tests {
     }
     #[test]
     fn prepayment_unwind_returns_the_exact_original_root_and_keeps_evidence() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         let original = Arc::new(
             lillux::PinnedDirectory::open(temporary.path())
@@ -1543,6 +1552,7 @@ mod tests {
     }
     #[test]
     fn alias_scan_budget_refusal_returns_original_before_registration() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         let original = Arc::new(
             lillux::PinnedDirectory::open(temporary.path())
@@ -1575,6 +1585,7 @@ mod tests {
 
     #[test]
     fn projected_membership_quote_checks_capacity_without_pricing_a_false_scan() {
+        let _serial = crate::test_host::serial_guard();
         let temporary = tempfile::tempdir().unwrap();
         let original = Arc::new(
             lillux::PinnedDirectory::open(temporary.path())
@@ -1598,6 +1609,7 @@ mod tests {
 
     #[test]
     fn physical_owner_quotes_cover_their_bounded_charges() {
+        let _serial = crate::test_host::serial_guard();
         let inventory = OriginalPhysicalRegistry::storage_quote(2).unwrap();
         assert_eq!(inventory.bytes, (2 * std::mem::size_of::<Slot>()
             + std::mem::size_of::<OriginalPhysicalRegistry>()
@@ -1622,6 +1634,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn operator_observation_quote_covers_scans_and_fixed_results() {
+        let _serial = crate::test_host::serial_guard();
         let quote = OriginalPhysicalRegistry::operator_observation_quote(4, 2).unwrap();
         assert_eq!(quote.bytes,
             2 * std::mem::size_of::<lillux::ExactExclusiveFileLockObservation>() as u64);

@@ -66,6 +66,12 @@ pub(crate) fn load_signed_maintenance_snapshot(
 /// runtime state directory, but only the first start creates the Operational
 /// initialization marker and the CAS mutation lock the offline resets open;
 /// without them the resets would fail deep inside native admission.
+///
+/// This is a presence check only, which production callers make under the
+/// StateLock and the runtime namespace lock. It neither validates the
+/// artefacts' contents nor proves the node healthy. The opens that follow
+/// still verify both files, so a present but damaged artefact is refused
+/// there, with its own error.
 pub(crate) fn require_started_once(runtime: &lillux::PinnedDirectory) -> Result<()> {
     let mut absent = Vec::new();
     let operational = ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME;
@@ -118,6 +124,20 @@ impl OfflineNativeAuthority for SessionAuthority {
             "offline native `{}` {window} window elapsed",
             self.class
         );
+        Ok(())
+    }
+    fn require_runtime(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
+        ensure!(
+            self.runtime.is_same_directory(runtime)?,
+            "offline native `{}` selects a runtime other than its locked namespace",
+            self.class
+        );
+        Ok(())
+    }
+    /// The signed `offline_native` class quota has no SQL dimension: the
+    /// session's SQL is metered by the raw budget the host debits right after
+    /// this call, and the operation window is enforced at every checkpoint.
+    fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
         Ok(())
     }
 }

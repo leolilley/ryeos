@@ -260,6 +260,7 @@ mod release_credit_controls {
 
     #[test]
     fn failed_syscall_attempt_credit_is_not_refunded_or_renewed() {
+        let _serial = crate::test_host::serial_guard();
         // Mechanism-only credit control; no native/account grant is issued.
         let mut credit = unsafe { HostReleaseCredit::prepaid(2) };
         // The charge precedes the syscall, so success and refusal consume the
@@ -272,6 +273,7 @@ mod release_credit_controls {
 
     #[test]
     fn inherited_credit_refuses_before_counter_mutation() {
+        let _serial = crate::test_host::serial_guard();
         let mut credit = HostReleaseCredit { process: std::process::id().wrapping_add(1), remaining: 2 };
         assert_eq!(credit.consume_attempt(), Err("foreign host release credit"));
         assert_eq!(credit.remaining, 2);
@@ -284,6 +286,7 @@ mod controller_lock_ceiling {
 
     #[test]
     fn resident_region_fits_the_supervised_controller_lock_ceiling() {
+        let _serial = crate::test_host::serial_guard();
         // A supervised controller's locked-memory limit is a fixed host
         // constant; the region it locks must stay well inside it.
         let bytes = HostStorage::quote_native_region().unwrap().bytes() as u64;

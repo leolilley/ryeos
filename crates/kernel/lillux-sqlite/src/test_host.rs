@@ -48,6 +48,19 @@ static LEAKED: Mutex<Option<String>> = Mutex::new(None);
 /// Hosts whose teardown refused, kept owned for the life of the process.
 static RETAINED: Mutex<Vec<OfflineNativeHost>> = Mutex::new(Vec::new());
 
+/// The process-wide serial guard alone, for every test of this crate that
+/// does not install a host. Such tests still touch process-wide native state
+/// (raw budgets, regions, the native process marker, the physical lock
+/// registry, stock SQLite connections): a host's install and teardown move
+/// that state through windows where a concurrent test observes a closing
+/// process, and a concurrent stock connection holds a host's arena release
+/// pending. So they serialize with every host. Never hold it while acquiring
+/// a [`TestNativeHost`] on the same thread.
+#[cfg(test)]
+pub(crate) fn serial_guard() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Record a refused teardown and keep its host; returns the refusal text.
 fn retain_leaked(retained: crate::offline_host::OfflineNativeRetained) -> String {
     let census = format!("{:#}", retained.error);
@@ -65,6 +78,14 @@ fn current_holder() -> String {
 struct TestAuthority;
 impl OfflineNativeAuthority for TestAuthority {
     fn checkpoint(&self, _cleanup: bool) -> Result<()> {
+        Ok(())
+    }
+    fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+        Ok(())
+    }
+    /// Test hosts carry no SQL quota of their own; the raw budget the host
+    /// debits after this call is their only SQL meter.
+    fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
         Ok(())
     }
 }
@@ -317,6 +338,13 @@ mod tests {
             ensure!(!self.withdrawn.load(std::sync::atomic::Ordering::Acquire), "test authority withdrawn");
             Ok(())
         }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -348,6 +376,7 @@ mod tests {
 
     #[test]
     fn unarmed_open_is_refused_with_misuse() {
+        let _serial = crate::test_host::serial_guard();
         let refused = rusqlite::Connection::open_in_memory().err().expect("unarmed open refused");
         assert_eq!(refused.sqlite_error_code(), Some(rusqlite::ErrorCode::ApiMisuse), "{refused}");
     }
@@ -680,6 +709,13 @@ mod tests {
                 "operation window closed");
             Ok(())
         }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn serial() -> MutexGuard<'static, ()> {
@@ -716,6 +752,13 @@ mod tests {
             }
             let seen = self.seen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
             ensure!(seen != self.n, "injected refusal at checkpoint {seen}");
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
             Ok(())
         }
     }
@@ -799,6 +842,80 @@ mod tests {
         assert_eq!(facts.tickets_issued as usize, facts.terminals);
     }
 
+    /// Charges SQL VM steps to its own ceiling and stops SQL at its own
+    /// in-memory deadline, as a caller's SQL quota does.
+    struct SqlQuota {
+        used: std::sync::atomic::AtomicU64,
+        limit: u64,
+        deadline: Instant,
+    }
+    impl OfflineNativeAuthority for SqlQuota {
+        fn checkpoint(&self, _cleanup: bool) -> Result<()> {
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        fn charge_sql_vm_steps(&self, steps: u64) -> Result<()> {
+            use std::sync::atomic::Ordering;
+            ensure!(Instant::now() < self.deadline, "test SQL window elapsed");
+            self.used
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    used.checked_add(steps).filter(|total| *total <= self.limit)
+                })
+                .map(|_| ())
+                .map_err(|_| anyhow::anyhow!("test SQL ceiling exhausted"))
+        }
+    }
+
+    const LONG_STATEMENT: &str =
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000000) SELECT count(*) FROM n";
+
+    fn run_until_refused(authority: Arc<SqlQuota>) -> (String, u64) {
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
+        let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
+        let refused = connection
+            .with_sql(|sql| Ok(sql.query_row(LONG_STATEMENT, [], |row| row.get::<_, i64>(0))?))
+            .expect_err("the statement must be stopped by the caller's SQL quota");
+        let closed = connection.close().unwrap_or_else(|failure| panic!("close refused: {failure}"));
+        retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
+        let facts = host.finish().unwrap().facts.expect("ready host facts");
+        assert_eq!(facts.tickets_issued as usize, facts.terminals);
+        (format!("{refused:#}"), authority.used.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    #[test]
+    fn host_sql_is_charged_to_the_caller_ceiling_before_its_budget() {
+        let _serial = serial();
+        let authority = Arc::new(SqlQuota {
+            used: std::sync::atomic::AtomicU64::new(0),
+            limit: 10_000,
+            deadline: Instant::now() + Duration::from_secs(3600),
+        });
+        let (refused, used) = run_until_refused(authority);
+        assert!(used <= 10_000 && used > 0, "charged {used} of a 10000-step ceiling");
+        assert!(refused.to_lowercase().contains("interrupt"), "{refused}");
+    }
+
+    #[test]
+    fn host_sql_stops_when_the_caller_window_elapses_mid_statement() {
+        let _serial = serial();
+        let authority = Arc::new(SqlQuota {
+            used: std::sync::atomic::AtomicU64::new(0),
+            limit: u64::MAX,
+            deadline: Instant::now() + Duration::from_millis(200),
+        });
+        let started = Instant::now();
+        let (refused, used) = run_until_refused(authority);
+        let elapsed = started.elapsed();
+        assert!(used > 0 && elapsed >= Duration::from_millis(200), "the statement ran until the window elapsed");
+        // The raw budget funds 50,000,000 steps; stopping well short of it
+        // shows the window, not the budget, ended the statement.
+        assert!(used < 40_000_000, "charged {used} steps; the budget, not the window, stopped it");
+        assert!(refused.to_lowercase().contains("interrupt"), "{refused}");
+    }
+
     /// Refuses cleanup-window checkpoints while `refuse` is set.
     struct CleanupGate {
         refuse: std::sync::atomic::AtomicBool,
@@ -806,6 +923,13 @@ mod tests {
     impl OfflineNativeAuthority for CleanupGate {
         fn checkpoint(&self, cleanup: bool) -> Result<()> {
             ensure!(!(cleanup && self.refuse.load(std::sync::atomic::Ordering::Acquire)), "cleanup window refused");
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
             Ok(())
         }
     }

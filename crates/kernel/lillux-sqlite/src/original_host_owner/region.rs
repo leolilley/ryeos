@@ -246,6 +246,7 @@ mod tests {
 
     #[test]
     fn checkpoints_bracket_debits_and_residency_and_refusals_keep_custody() {
+        let _serial = crate::test_host::serial_guard();
         let layout = HostStorage::quote_native_region().unwrap();
         // First checkpoint precedes every debit; the raw counter is retained.
         let mut region = NativeHostRegion::new(layout);

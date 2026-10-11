@@ -1836,7 +1836,7 @@ impl CasMutationGuard {
         let recovery = runtime.create_child(recovery_name, 0o700)?;
         let result = (|| -> Result<()> {
             let lock = recovery.open_regular_create(
-                std::ffi::OsStr::new("cas-mutation.lock"),
+                std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME),
                 true,
                 true,
                 0o600,
@@ -1892,7 +1892,7 @@ impl CasMutationGuard {
             .open_child_directory(std::ffi::OsStr::new("recovery"))?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
         let file = recovery
-            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+            .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         #[cfg(unix)]
         {
@@ -1976,7 +1976,7 @@ impl CasMutationGuard {
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
         check_deadline()?;
         let file = recovery
-            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+            .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         check_deadline()?;
         let file = lillux::locks::acquire_existing_shared_file_until(file, deadline)
@@ -2032,7 +2032,7 @@ impl CasMutationGuard {
                 .open_child_directory(recovery_name)?
                 .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?
         };
-        let lock_name = std::ffi::OsStr::new("cas-mutation.lock");
+        let lock_name = std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME);
         let file = if create {
             let file = recovery.open_regular_create(lock_name, true, false, 0o600)?;
             recovery.sync()?;
@@ -2139,7 +2139,7 @@ impl CasMutationGuard {
             .open_child_directory(std::ffi::OsStr::new("recovery"))?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
         let expected = recovery
-            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), false)?
+            .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), false)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         let expected = expected.metadata()?;
         let held = self._file.metadata()?;
@@ -2159,7 +2159,7 @@ impl CasMutationGuard {
     }
 
     fn ensure_protects_runtime_state_dir(&self, runtime_state_dir: &Path) -> Result<()> {
-        let expected_path = runtime_state_dir.join("recovery/cas-mutation.lock");
+        let expected_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
         let expected = secure_open_regular(&expected_path, false)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         let expected = expected
@@ -2233,7 +2233,7 @@ impl CasMutationGuard {
             }
         }
 
-        let lock_path = runtime_state_dir.join("recovery/cas-mutation.lock");
+        let lock_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
         let parent_path = lock_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock has no parent"))?;
@@ -2245,14 +2245,14 @@ impl CasMutationGuard {
         };
         let file = if create_if_missing {
             parent.open_regular_create(
-                std::ffi::OsStr::new("cas-mutation.lock"),
+                std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME),
                 true,
                 false,
                 0o600,
             )?
         } else {
             parent
-                .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+                .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
                 .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?
         };
         #[cfg(unix)]
@@ -2319,7 +2319,7 @@ fn current_guard_file_for(runtime_state_dir: &Path) -> Result<Rc<File>> {
             .cloned()
             .expect("reentrant CAS guard depth without lock file")
     });
-    let expected_path = runtime_state_dir.join("recovery/cas-mutation.lock");
+    let expected_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
     let expected = secure_open_regular(&expected_path, false)?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
     let expected = expected
@@ -2354,7 +2354,7 @@ fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> R
         .open_child_directory(std::ffi::OsStr::new("recovery"))?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
     let expected = recovery
-        .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), false)?
+        .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), false)?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
     let expected = expected
         .metadata()

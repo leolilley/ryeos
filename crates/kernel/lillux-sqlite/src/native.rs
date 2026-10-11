@@ -5825,6 +5825,7 @@ mod original_native_counter_controls {
 
     #[test]
     fn concurrent_step_debits_all_land_and_exhaustion_still_refuses() {
+        let _serial = crate::test_host::serial_guard();
         const THREADS: u64 = 2;
         const DEBITS: u64 = 20_000;
         const CLEANUP: u64 = 64;
