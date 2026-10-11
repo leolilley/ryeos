@@ -8,6 +8,10 @@ use sha2::{Digest, Sha256};
 
 use crate::atomic_fs::atomic_write_with_mode;
 
+/// Owner token carried by every secure temporary the CAS publishes into its
+/// shard directories, whether by single-entry store or batch commit.
+pub const CAS_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("cas");
+
 mod record_canonical;
 pub use record_canonical::{CanonicalRecordStorageQuote, canonical_record_storage_quote, canonical_record_quote_work_bound, canonical_record_bytes};
 
@@ -498,7 +502,7 @@ fn atomic_write_batch_unix(
             first_directory = Some(directory.try_clone()?);
         }
         let prepared_entry = directory
-            .prepare_atomic_create(name, data, 0o644)
+            .prepare_atomic_create(name, data, 0o644, CAS_TEMP_PURPOSE)
             .with_context(|| format!("prepare immutable CAS batch entry {}", target.display()))?;
         match prepared_entry {
             Some(temp) => prepared.push((directory, name.to_os_string(), index, temp)),
@@ -1829,7 +1833,7 @@ fn store_exact_entry(
         return Ok(false);
     }
 
-    let publication = parent.atomic_write_if_same(&name, None, bytes, 0o644);
+    let publication = parent.atomic_write_if_same(&name, None, bytes, 0o644, CAS_TEMP_PURPOSE);
     #[allow(clippy::let_and_return)]
     let outcome = match publication {
         Ok(()) => Ok(true),

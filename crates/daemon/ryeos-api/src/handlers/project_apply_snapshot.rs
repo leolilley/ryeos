@@ -1168,7 +1168,7 @@ fn write_apply_journal(
     }
     if workspace
         .transaction
-        .atomic_create_regular(OsStr::new("journal.json"), &bytes, 0o600)?
+        .atomic_create_regular(OsStr::new("journal.json"), &bytes, 0o600, crate::API_TEMP_PURPOSE)?
         .is_none()
     {
         anyhow::bail!("project apply journal already exists");

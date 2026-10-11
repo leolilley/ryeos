@@ -6,6 +6,7 @@
 
 use super::*;
 
+const PROBE_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("sandbox");
 const FSOPEN_CLOEXEC: libc::c_uint = 1;
 const FSMOUNT_CLOEXEC: libc::c_uint = 1;
 const FSCONFIG_SET_FLAG: libc::c_uint = 0;
@@ -208,7 +209,7 @@ pub(super) fn probe() -> Result<(), String> {
             .create_child(OsStr::new("work"), 0o700)
             .map_err(|error| error.to_string())?;
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600)
+            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600, PROBE_TEMP_PURPOSE)
             .map_err(|error| error.to_string())?;
         let lower = lower
             .inherited_descriptor_authority()
@@ -428,7 +429,13 @@ mod tests {
         state.create_child(OsStr::new("upper"), 0o700).unwrap();
         state.create_child(OsStr::new("work"), 0o700).unwrap();
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600)
+            .atomic_write_if_same(
+                OsStr::new("seed"),
+                None,
+                b"lower",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap();
         let lower = lower.inherited_descriptor_authority().unwrap();
         let state = state.inherited_descriptor_authority().unwrap();
@@ -594,7 +601,13 @@ mod tests {
         state.create_child(OsStr::new("upper"), 0o700).unwrap();
         state.create_child(OsStr::new("work"), 0o700).unwrap();
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600)
+            .atomic_write_if_same(
+                OsStr::new("seed"),
+                None,
+                b"lower",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap();
         let lower_fd = lower.try_clone_descriptor().unwrap();
         let state_fd = state.try_clone_descriptor().unwrap();

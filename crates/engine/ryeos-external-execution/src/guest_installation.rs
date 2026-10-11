@@ -2247,7 +2247,12 @@ impl GuestOccurrenceOwner {
             owner_directory: root.identity()?,
         };
         let bytes = canonical_owner_record(&record)?;
-        root.atomic_create_regular(OsStr::new(OWNER_RECORD_NAME), &bytes, 0o600)?
+        root.atomic_create_regular(
+            OsStr::new(OWNER_RECORD_NAME),
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
             .context("guest occurrence owner record already exists")?;
         Ok(Self {
             occurrence: occurrence.try_clone()?,
@@ -2485,7 +2490,7 @@ fn prepare_guest_base_install_locked<'a>(
     };
     let bytes = canonical_record(&intent)?;
     let record = journal
-        .atomic_create_regular(OsStr::new(RECORD_NAME), &bytes, 0o600)?
+        .atomic_create_regular(OsStr::new(RECORD_NAME), &bytes, 0o600, crate::GUEST_TEMP_PURPOSE)?
         .context("guest installation intent already exists")?;
     let marker = GuestBaseInstallMarker {
         schema: 1,
@@ -2496,7 +2501,12 @@ fn prepare_guest_base_install_locked<'a>(
     let marker_bytes = canonical_marker(&marker)?;
     let marker_file = imported
         .root()
-        .atomic_create_regular(OsStr::new(STAGE_MARKER_NAME), &marker_bytes, 0o600)?
+        .atomic_create_regular(
+            OsStr::new(STAGE_MARKER_NAME),
+            &marker_bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("ticketed guest stage already has an installation owner")?;
     let identity = GuestBaseInstallIntentIdentity {
         schema: 1,
@@ -2629,7 +2639,12 @@ fn create_launch_intent_record(
         "guest supervisor launch intent is not canonical"
     );
     let record = owner_root
-        .atomic_create_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), bytes, 0o600)?
+        .atomic_create_regular(
+            OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME),
+            bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("guest supervisor launch intent already exists")?;
     Ok((
         lillux::pinned_regular_file_identity(&record)?,

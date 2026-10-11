@@ -1117,7 +1117,12 @@ mod source_continuity_controls {
         let data = b"current authenticated canonical bytes";
         assert!(
             runtime
-                .atomic_create_regular(std::ffi::OsStr::new("scheduler.sqlite3"), data, 0o600)?
+                .atomic_create_regular(
+                    std::ffi::OsStr::new("scheduler.sqlite3"),
+                    data,
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some()
         );
         let metadata = std::fs::metadata(directory.path().join("scheduler.sqlite3"))?;
@@ -1161,7 +1166,7 @@ mod source_continuity_controls {
                     .atomic_create_regular(
                         std::ffi::OsStr::new(name),
                         b"foreign fixed candidate",
-                        0o600
+                        0o600, crate::SCHEDULER_TEMP_PURPOSE
                     )?
                     .is_some()
             );
@@ -1182,7 +1187,7 @@ mod source_continuity_controls {
                     .atomic_create_regular(
                         std::ffi::OsStr::new(&name),
                         b"foreign after release",
-                        0o600
+                        0o600, crate::SCHEDULER_TEMP_PURPOSE
                     )?
                     .is_some()
             );
@@ -1206,7 +1211,12 @@ mod source_continuity_controls {
         let bytes = b"original preview bytes";
         assert!(
             runtime
-                .atomic_create_regular(std::ffi::OsStr::new(name), bytes, 0o600)?
+                .atomic_create_regular(
+                    std::ffi::OsStr::new(name),
+                    bytes,
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some()
         );
         let metadata = std::fs::metadata(&path)?;
@@ -1233,7 +1243,12 @@ mod source_continuity_controls {
         std::fs::rename(&path, directory.path().join("held-original"))?;
         assert!(
             runtime
-                .atomic_create_regular(std::ffi::OsStr::new(name), bytes, 0o600)?
+                .atomic_create_regular(
+                    std::ffi::OsStr::new(name),
+                    bytes,
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some()
         );
         assert!(verify_source_identity(&runtime, name, Some(&original)).is_err());

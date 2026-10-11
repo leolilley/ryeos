@@ -671,7 +671,7 @@ impl VerifiedArtifactStore {
             }
             None => match self
                 .root
-                .atomic_create_regular(name.as_ref(), content, 0o500)
+                .atomic_create_regular(name.as_ref(), content, 0o500, crate::ENGINE_TEMP_PURPOSE)
                 .map_err(|error| {
                     refused(format!(
                         "verified artifact {} cannot be written: {error}",
@@ -9447,6 +9447,7 @@ mod tests {
                 std::ffi::OsStr::new("config.toml"),
                 b"model = 'fixture'\n",
                 0o600,
+                crate::ENGINE_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();

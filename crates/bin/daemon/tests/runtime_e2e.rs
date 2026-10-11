@@ -20,6 +20,8 @@
 //!   branching/string-prefix hits — the schema is the only route
 //!   decision-maker.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 mod common;
 
 use std::path::Path;
@@ -476,6 +478,7 @@ fn plant_conflicting_rotated_recovery_source(
             std::ffi::OsStr::new("subject.source"),
             &vec![b'!'; admitted_source_bytes],
             0o600,
+            TEST_PURPOSE,
         )?
         .is_some(),
         "recovery capsule source was materialized before the deliberate conflict"

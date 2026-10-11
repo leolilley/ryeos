@@ -1,5 +1,8 @@
 //! Selected scheduler runtime ownership and App lifecycle adapters.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub const SCHEDULER_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("scheduler");
+
 mod project;
 mod reset;
 mod retention;

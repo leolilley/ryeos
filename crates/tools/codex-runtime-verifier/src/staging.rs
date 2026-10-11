@@ -99,7 +99,12 @@ impl ParentChallenge {
         let expected = format!("{name}\n").into_bytes();
         let file = self
             .directory
-            .atomic_create_pinned_regular(OsStr::new("provider-endpoint"), &expected, 0o600)?
+            .atomic_create_pinned_regular(
+                OsStr::new("provider-endpoint"),
+                &expected,
+                0o600,
+                crate::VERIFIER_TEMP_PURPOSE,
+            )?
             .context("provider endpoint already published")?;
         let result = ParentProviderEndpoint {
             directory: self.directory.try_clone()?,
@@ -653,7 +658,12 @@ pub(crate) fn create_preselected_controller_canary(
         "controller canary identity invalid"
     );
     let file = controller
-        .atomic_create_pinned_regular(OsStr::new("canary"), format!("{value}\n").as_bytes(), 0o600)?
+        .atomic_create_pinned_regular(
+            OsStr::new("canary"),
+            format!("{value}\n").as_bytes(),
+            0o600,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .context("controller canary already exists")?;
     let observation = file.observation()?;
     check_controller_canary(controller, value, &observation)?;
@@ -700,7 +710,13 @@ fn copy_exact_member(
         "selected staged member size or mode changed"
     );
     let (created, copied) = target
-        .atomic_create_pinned_regular_from_reader(target_name, &mut file, maximum_bytes, mode)?
+        .atomic_create_pinned_regular_from_reader(
+            target_name,
+            &mut file,
+            maximum_bytes,
+            mode,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .context("staged member already exists")?;
     ensure!(copied == observed.size(), "staged member length changed");
     let output_observation = created.observation()?;
@@ -987,7 +1003,12 @@ pub fn stage_direct_target_probe(
     let candidate = guest.create_child(OsStr::new("candidate"), 0o700)?;
     let request_sha256 = lillux::sha256_hex(&request);
     guest
-        .atomic_create_pinned_regular(OsStr::new("guest-request.json"), &request, 0o600)?
+        .atomic_create_pinned_regular(
+            OsStr::new("guest-request.json"),
+            &request,
+            0o600,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .context("direct guest request already exists")?;
     copy_exact_member(
         &roots.configurations,
@@ -1017,6 +1038,7 @@ pub fn stage_direct_target_probe(
         OsStr::new("environments.toml"),
         &command_environment,
         0o644,
+        crate::VERIFIER_TEMP_PURPOSE,
     )?
     .context("direct command environment already exists")?;
     let staged = StagedDirectTargetProbe {
@@ -1259,7 +1281,12 @@ fn stage_selected_probe_with_challenge(
     guest.create_child(OsStr::new("candidate"), 0o700)?;
     let request_sha256 = lillux::sha256_hex(&request);
     guest
-        .atomic_create_pinned_regular(OsStr::new("guest-request.json"), &request, 0o600)?
+        .atomic_create_pinned_regular(
+            OsStr::new("guest-request.json"),
+            &request,
+            0o600,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .context("native probe request already exists")?;
     let home = occurrence.create_child(OsStr::new("codex-home"), 0o700)?;
     copy_exact_member(
@@ -1297,6 +1324,7 @@ fn stage_selected_probe_with_challenge(
         OsStr::new("environments.toml"),
         &command_environment,
         0o644,
+        crate::VERIFIER_TEMP_PURPOSE,
     )?
     .context("rendered command environment already exists")?;
     roots.subject.ensure_path_binding()?;
@@ -1393,9 +1421,19 @@ mod tests {
         let root = PinnedDirectory::open(temp.path()).unwrap().unwrap();
         let source = root.create_child(OsStr::new("source"), 0o700).unwrap();
         let bin = source.create_child(OsStr::new("bin"), 0o755).unwrap();
-        bin.atomic_create_pinned_regular(OsStr::new("zsh"), b"signed-shell", 0o755)
+        bin.atomic_create_pinned_regular(
+            OsStr::new("zsh"),
+            b"signed-shell",
+            0o755,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )
             .unwrap();
-        bin.atomic_create_pinned_regular(OsStr::new("rg"), b"signed-search", 0o755)
+        bin.atomic_create_pinned_regular(
+            OsStr::new("rg"),
+            b"signed-search",
+            0o755,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )
             .unwrap();
         let target = root.create_child(OsStr::new("target"), 0o700).unwrap();
         let expected = ryeos_state::external_content_manifest_digest(
@@ -1448,6 +1486,7 @@ mod tests {
                 OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH),
                 crate::scripted_provider::CANDIDATE_CONTENT.as_bytes(),
                 0o644,
+                crate::VERIFIER_TEMP_PURPOSE,
             )
             .unwrap();
         assert_eq!(
@@ -1455,7 +1494,12 @@ mod tests {
             lillux::sha256_hex(crate::scripted_provider::CANDIDATE_CONTENT.as_bytes())
         );
         candidate
-            .atomic_create_pinned_regular(OsStr::new("extra"), b"x", 0o644)
+            .atomic_create_pinned_regular(
+                OsStr::new("extra"),
+                b"x",
+                0o644,
+                crate::VERIFIER_TEMP_PURPOSE,
+            )
             .unwrap();
         assert!(
             check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).is_err()
@@ -1479,6 +1523,7 @@ mod tests {
                     OsStr::new(&fixture.relative_path),
                     fixture.content.as_bytes(),
                     0o644,
+                    crate::VERIFIER_TEMP_PURPOSE,
                 )
                 .unwrap();
             assert_eq!(
@@ -1510,6 +1555,7 @@ mod tests {
                     OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH),
                     content,
                     mode,
+                    crate::VERIFIER_TEMP_PURPOSE,
                 )
                 .unwrap();
             assert!(
@@ -1527,14 +1573,14 @@ mod tests {
         let content = crate::scripted_provider::CANDIDATE_CONTENT.as_bytes();
         let leaf = OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH);
         candidate
-            .atomic_create_pinned_regular(leaf, content, 0o644)
+            .atomic_create_pinned_regular(leaf, content, 0o644, crate::VERIFIER_TEMP_PURPOSE)
             .unwrap();
         check_exact_candidate(&candidate, &crate::CandidateFixture::test_fixture()).unwrap();
 
         std::fs::rename(root.path().join("candidate"), root.path().join("displaced")).unwrap();
         let replacement = root.create_child(OsStr::new("candidate"), 0o700).unwrap();
         replacement
-            .atomic_create_pinned_regular(leaf, content, 0o644)
+            .atomic_create_pinned_regular(leaf, content, 0o644, crate::VERIFIER_TEMP_PURPOSE)
             .unwrap();
         check_exact_candidate(&replacement, &crate::CandidateFixture::test_fixture()).unwrap();
         assert!(

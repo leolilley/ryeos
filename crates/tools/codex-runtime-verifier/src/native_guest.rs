@@ -324,7 +324,12 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         bytes.len() as u64 <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
         "consumer native observation exceeds evidence budget"
     );
-    root.atomic_create_pinned_regular(OsStr::new("guest-observation.json"), &bytes, 0o400)?
+    root.atomic_create_pinned_regular(
+        OsStr::new("guest-observation.json"),
+        &bytes,
+        0o400,
+        crate::VERIFIER_TEMP_PURPOSE,
+    )?
         .context("consumer native observation already exists")?;
     Ok(())
 }
@@ -401,6 +406,7 @@ fn stage(
                 path.file_name().context("member name")?,
                 &bytes,
                 member.mode,
+                crate::VERIFIER_TEMP_PURPOSE,
             )?
             .context("duplicate staged member")?;
     }
@@ -469,6 +475,7 @@ fn run() -> Result<()> {
             OsStr::new("guest-failure.json"),
             &serde_json::to_vec(&diagnostic)?,
             0o600,
+            crate::VERIFIER_TEMP_PURPOSE,
         );
     }
     result
@@ -524,6 +531,7 @@ fn run_in_directory(
         OsStr::new("guest-started"),
         lillux::sha256_hex(&request_bytes).as_bytes(),
         0o600,
+        crate::VERIFIER_TEMP_PURPOSE,
     )?
     .context("verifier guest already attempted")?;
     let (_, scratch) = root.create_unique_child("routed-guest", 0o700)?;
@@ -632,6 +640,7 @@ fn run_in_directory(
         OsStr::new("guest-observation.json"),
         &serde_json::to_vec(&observation)?,
         0o600,
+        crate::VERIFIER_TEMP_PURPOSE,
     )?
     .context("observation already exists")?;
     Ok(())
@@ -881,7 +890,12 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
         assert!(!capture_requested(&root).unwrap());
-        root.atomic_create_pinned_regular(OsStr::new("finish"), b"capture", 0o400)
+        root.atomic_create_pinned_regular(
+            OsStr::new("finish"),
+            b"capture",
+            0o400,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )
             .unwrap()
             .unwrap();
         assert!(capture_requested(&root).unwrap());
@@ -889,7 +903,12 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         let invalid = PinnedDirectory::open(other.path()).unwrap().unwrap();
         invalid
-            .atomic_create_pinned_regular(OsStr::new("finish"), b"done", 0o400)
+            .atomic_create_pinned_regular(
+                OsStr::new("finish"),
+                b"done",
+                0o400,
+                crate::VERIFIER_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap();
         assert!(capture_requested(&invalid).is_err());
@@ -1012,7 +1031,12 @@ mod tests {
         let input = root.create_child(OsStr::new("input"), 0o700).unwrap();
         let output = root.create_child(OsStr::new("output"), 0o700).unwrap();
         let bin = input.create_child(OsStr::new("bin"), 0o755).unwrap();
-        bin.atomic_create_pinned_regular(OsStr::new("fixture"), b"exact", 0o755)
+        bin.atomic_create_pinned_regular(
+            OsStr::new("fixture"),
+            b"exact",
+            0o755,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )
             .unwrap()
             .unwrap();
         let members = BTreeMap::from([(
@@ -1032,7 +1056,12 @@ mod tests {
         assert!(stage(&input, &output, &members).is_err());
         members.get_mut("bin/fixture").unwrap().sha256 = lillux::sha256_hex(b"exact");
         input
-            .atomic_create_pinned_regular(OsStr::new("ambient"), b"x", 0o644)
+            .atomic_create_pinned_regular(
+                OsStr::new("ambient"),
+                b"x",
+                0o644,
+                crate::VERIFIER_TEMP_PURPOSE,
+            )
             .unwrap();
         assert!(stage(&input, &output, &members).is_err());
     }

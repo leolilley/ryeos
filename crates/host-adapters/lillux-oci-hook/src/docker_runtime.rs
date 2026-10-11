@@ -151,6 +151,7 @@ fn install_hooks(bundle: &Path, executable: &Path) -> Result<()> {
         Some(&file),
         &serde_json::to_vec(&spec)?,
         0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
     )?;
     Ok(())
 }

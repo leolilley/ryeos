@@ -8635,6 +8635,7 @@ mod imp {
                                         std::ffi::OsStr::new("host-mutated"),
                                         b"ready",
                                         0o600,
+                                        crate::secure_fs::TEST_TEMP_PURPOSE,
                                     )
                                     .map_err(|error| format!("signal host mutation: {error}"))?
                                     .ok_or("host mutation signal already exists")?;
@@ -9096,6 +9097,7 @@ mod imp {
                                 std::ffi::OsStr::new("alias-error"),
                                 error.as_bytes(),
                                 0o600,
+                                crate::secure_fs::TEST_TEMP_PURPOSE,
                             );
                         }
                     }
@@ -9551,6 +9553,7 @@ mod tests {
                             std::ffi::OsStr::new("member"),
                             b"actual private bytes",
                             0o600,
+                            crate::secure_fs::TEST_TEMP_PURPOSE,
                         )
                         .unwrap()
                         .unwrap();

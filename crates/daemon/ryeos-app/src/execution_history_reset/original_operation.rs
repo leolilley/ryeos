@@ -452,7 +452,12 @@ impl OriginalOperation {
         );
         let name = format!("{PREFIX}{}", self.reference.operation_id);
         if runtime
-            .atomic_create_regular(OsStr::new(&name), &self.signed, 0o600)?
+            .atomic_create_regular(
+                OsStr::new(&name),
+                &self.signed,
+                0o600,
+                crate::execution_history_reset::RESET_TEMP_PURPOSE,
+            )?
             .is_none()
         {
             let existing = lillux_sqlite::read_regular_without_sqlite_alias(

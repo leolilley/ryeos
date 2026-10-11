@@ -2818,7 +2818,12 @@ fn readonly_delivery_grant_refuses_writable_modes_without_mutation() {
         .unwrap()
         .unwrap();
     let file = directory
-        .atomic_create_pinned_regular(std::ffi::OsStr::new("input"), b"exact", 0o400)
+        .atomic_create_pinned_regular(
+            std::ffi::OsStr::new("input"),
+            b"exact",
+            0o400,
+            crate::secure_fs::TEST_TEMP_PURPOSE,
+        )
         .unwrap()
         .unwrap();
     let account = ControllerAccount::unix(65534, 65534);
@@ -2840,7 +2845,12 @@ fn readonly_delivery_grant_preserves_read_and_executable_modes() {
     let account = ControllerAccount::unix(65534, 65534);
     for (name, mode) in [("record", 0o400), ("verifier", 0o500)] {
         let file = directory
-            .atomic_create_pinned_regular(std::ffi::OsStr::new(name), b"exact", mode)
+            .atomic_create_pinned_regular(
+                std::ffi::OsStr::new(name),
+                b"exact",
+                mode,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap();
         account.grant_private_readonly_file(&file, mode).unwrap();

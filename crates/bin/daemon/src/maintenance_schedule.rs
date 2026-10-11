@@ -22,6 +22,9 @@
 //! parameters, and capabilities are all required signed policy fields;
 //! this adapter supplies no behavioral defaults.
 
+/// Owner token carried by the managed maintenance spec publication.
+const MAINTENANCE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("daemon");
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -422,7 +425,13 @@ fn write_maintenance_spec(
 ) -> Result<()> {
     let bytes = node_document::render_signed_item("schedules", &decl.schedule_id, body, identity)?;
     let name = format!("{}.yaml", decl.schedule_id);
-    schedules_dir.atomic_write_pinned_if_same(std::ffi::OsStr::new(&name), expected, &bytes, 0o600)
+    schedules_dir.atomic_write_pinned_if_same(
+        std::ffi::OsStr::new(&name),
+        expected,
+        &bytes,
+        0o600,
+        MAINTENANCE_TEMP_PURPOSE,
+    )
 }
 
 #[cfg(test)]

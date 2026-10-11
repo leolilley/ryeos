@@ -1,6 +1,9 @@
 //! Lillux-owned SQLite host backend. Native acquisition, adoption, locking,
 //! mapping, mutation and close remain below schema/service/recovery policy.
 //! Provisional source: no qualification until independent review and controls.
+/// Owner token carried by the secure temporaries this crate publishes.
+pub const SQLITE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("sqlite");
+
 mod binding;
 mod native;
 pub mod offline_host;
@@ -2782,10 +2785,20 @@ fn scan_stopped_artifacts(
         let name = name
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 stopped namespace entry"))?;
-        ensure!(
-            !name.starts_with(".secure.tmp.") && !name.starts_with("etilqs_"),
-            "stopped namespace temporary artifact"
-        );
+        match lillux::classify_secure_temp_name(OsStr::new(name), crate::SQLITE_TEMP_PURPOSE) {
+            lillux::SecureTempOwnership::NotTemp => {}
+            lillux::SecureTempOwnership::Own => {
+                anyhow::bail!("stopped namespace temporary artifact")
+            }
+            // The stopped namespace is shared; another owner's interrupted
+            // publication is that owner's to settle.
+            lillux::SecureTempOwnership::Foreign => continue,
+            lillux::SecureTempOwnership::Malformed => anyhow::bail!(
+                "stopped namespace holds a secure temporary without an exact owner token: {name}; \
+                 remove that entry while its owner is stopped"
+            ),
+        }
+        ensure!(!name.starts_with("etilqs_"), "stopped namespace temporary artifact");
         if coordinates.iter().any(|(_, coordinate)| coordinate == name) {
             continue;
         }
@@ -5512,6 +5525,8 @@ mod tests {
         assert_eq!(names.len(), 25);
         names.extend([
             ".secure.tmp.interrupted".into(),
+            ".secure.tmp.4242.7".into(),
+            format!(".secure.tmp.{}.4242.8", crate::SQLITE_TEMP_PURPOSE.as_str()),
             "etilqs_interrupted".into(),
             "scheduler-retirement.unknown".into(),
             "scheduler-retirement.role.01010101010101010101010101010101.main.quarantine-wal".into(),
@@ -5532,6 +5547,28 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"preserve");
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
             std::fs::remove_file(path).unwrap();
+        }
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stopped_artifact_scan_leaves_other_owners_secure_temporaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let plan = stopped_plan_fixture(&runtime, tmp.path(), [StoppedSqliteRoleSource::Absent; 3]);
+        scan_stopped_artifacts(&runtime, &plan).unwrap();
+        for name in [".secure.tmp.scheduler.4242.1", ".secure.tmp.reset.4242.2"] {
+            std::fs::write(tmp.path().join(name), b"another owner's debris").unwrap();
+        }
+        scan_stopped_artifacts(&runtime, &plan).unwrap();
+        std::fs::write(tmp.path().join(".secure.tmp.4242.3"), b"unattributed").unwrap();
+        let error = scan_stopped_artifacts(&runtime, &plan).unwrap_err();
+        assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
+        for name in [
+            ".secure.tmp.scheduler.4242.1",
+            ".secure.tmp.reset.4242.2",
+            ".secure.tmp.4242.3",
+        ] {
+            assert!(tmp.path().join(name).is_file(), "{name}");
         }
     }
     #[test]
@@ -7070,7 +7107,12 @@ mod guarded_inspection_copy_controls {
             .unwrap();
         let name = OsStr::new("created.original");
         let owner = Arc::new(RetainedOriginalWitnessFile::created(
-            root.atomic_create_regular(name, b"exact original witness", 0o600)
+            root.atomic_create_regular(
+                name,
+                b"exact original witness",
+                0o600,
+                crate::SQLITE_TEMP_PURPOSE,
+            )
                 .unwrap()
                 .unwrap(),
             root.identity().unwrap(),
@@ -7093,7 +7135,12 @@ mod guarded_inspection_copy_controls {
             original_identity.inode()
         );
         let foreign = Arc::new(RetainedOriginalWitnessFile::created(
-            root.atomic_create_regular(OsStr::new("foreign"), b"foreign witness", 0o600)
+            root.atomic_create_regular(
+                OsStr::new("foreign"),
+                b"foreign witness",
+                0o600,
+                crate::SQLITE_TEMP_PURPOSE,
+            )
                 .unwrap()
                 .unwrap(),
             root.identity().unwrap(),

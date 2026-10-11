@@ -4,6 +4,8 @@
 //! scripts/populate-bundles.sh (its require_static_payload gate), not an
 //! arbitrary host-linked debug binary. Execution retains enforced isolation.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::path::Path;
 
 use anyhow::{Context as _, ensure};
@@ -51,6 +53,7 @@ fn stage_exact_input(
             &mut std::io::Cursor::new(bytes),
             maximum_bytes,
             0o755,
+            TEST_PURPOSE,
         )?
         .context("private Codex input already exists")?;
     ensure!(copied == observed.size(), "private Codex copy size changed");

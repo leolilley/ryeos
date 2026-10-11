@@ -3,6 +3,10 @@
 //! The complete foundation extraction is being assembled. Registry primitives
 //! already have one owner shared by composition readers and App mutations.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const NODE_RUNTIME_TEMP_PURPOSE: lillux::TempPurpose =
+    lillux::TempPurpose::new("node-runtime");
+
 pub mod registry;
 
 pub mod calibration_policy;

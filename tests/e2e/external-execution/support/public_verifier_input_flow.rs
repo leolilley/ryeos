@@ -1,6 +1,8 @@
 //! Trusted local input-admission probe. No confinement, evaluator outcome,
 //! runtime qualification, external placement, or Farm acceptance is asserted.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use crate::common::{DaemonHarness, fast_fixture};
 use crate::{public_launch, retained_runtime_producer};
 use anyhow::{Context as _, Result, ensure};
@@ -175,7 +177,7 @@ async fn public_projectless_bundle_probe_observes_bound_runtime_input() -> Resul
     let products = root.create_child(OsStr::new("products"), 0o755)?;
     let runtime_dir = products.create_child(OsStr::new("external-runtime"), 0o755)?;
     let bin = runtime_dir.create_child(OsStr::new("bin"), 0o755)?;
-    bin.atomic_create_pinned_regular(OsStr::new("program"), &runtime, 0o755)?
+    bin.atomic_create_pinned_regular(OsStr::new("program"), &runtime, 0o755, TEST_PURPOSE)?
         .context("runtime member already present")?;
     let (producer_accepted, producer_detail) = public_launch::completed_launch(&harness, json!({
         "item_ref":retained_runtime_producer::PRODUCER_REF,"launch_id":PRODUCER_LAUNCH,

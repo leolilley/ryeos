@@ -14,6 +14,19 @@ use anyhow::{Context, Result, ensure};
 
 mod descriptor_observation;
 pub use descriptor_observation::RetainedFileDescriptorObservation;
+mod temp_name;
+/// Owner token for the recovery marker Lillux itself publishes around a
+/// conditional byte replacement.
+const CONDITIONAL_RECOVERY_TEMP_PURPOSE: TempPurpose = TempPurpose::new("authoring");
+/// Owner token for empty mount-target reservations.
+const MOUNT_TARGET_TEMP_PURPOSE: TempPurpose = TempPurpose::new("mount-target");
+/// Owner token for publications made by Lillux's own unit tests.
+#[cfg(test)]
+pub(crate) const TEST_TEMP_PURPOSE: TempPurpose = TempPurpose::new("test");
+pub use temp_name::{
+    SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
+    parse_secure_temp_name,
+};
 
 #[cfg(all(test, target_os = "linux"))]
 thread_local! {
@@ -5270,10 +5283,11 @@ impl PinnedDirectory {
         name: &OsStr,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<File>> {
         #[cfg(not(unix))]
         {
-            let _ = (name, bytes, mode);
+            let _ = (name, bytes, mode, purpose);
             anyhow::bail!("secure atomic creation is unavailable on this platform");
         }
         #[cfg(unix)]
@@ -5300,9 +5314,7 @@ impl PinnedDirectory {
                 return Ok(None);
             }
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let target_coordinate = name.to_os_string();
             let temporary_coordinate = OsString::from(temp_name.to_string_lossy().into_owned());
             // Acquire parent custody BEFORE the first file effect.
@@ -5329,6 +5341,7 @@ impl PinnedDirectory {
                 temp.write_all(bytes)?;
                 temp.set_permissions(std::fs::Permissions::from_mode(mode))?;
                 temp.sync_all()?;
+                crate::test_hooks::atomic_create_hook_point(purpose, name)?;
                 phase = AtomicRegularCreationPhase::PublicationAttempted;
                 match publish_temp_without_replacement(
                     &self.directory,
@@ -5387,9 +5400,10 @@ impl PinnedDirectory {
         name: &OsStr,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<PinnedRegularFile>> {
         Ok(self
-            .atomic_create_regular(name, bytes, mode)?
+            .atomic_create_regular(name, bytes, mode, purpose)?
             .map(|file| PinnedRegularFile {
                 path: self.path.join(name),
                 name: name.to_os_string(),
@@ -5406,7 +5420,7 @@ impl PinnedDirectory {
         // Acquire the cleanup owner before publishing anything.
         let parent = self.try_clone()?;
         let target = self
-            .atomic_create_pinned_regular(name, b"", 0o400)?
+            .atomic_create_pinned_regular(name, b"", 0o400, MOUNT_TARGET_TEMP_PURPOSE)?
             .context("mount target reservation destination is already occupied")?;
         Ok(EmptyMountTargetReservation {
             parent,
@@ -5424,10 +5438,11 @@ impl PinnedDirectory {
         reader: &mut R,
         maximum_bytes: u64,
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<(File, u64)>> {
         #[cfg(not(unix))]
         {
-            let _ = (name, reader, maximum_bytes, mode);
+            let _ = (name, reader, maximum_bytes, mode, purpose);
             anyhow::bail!("secure streamed atomic creation is unavailable on this platform");
         }
         #[cfg(unix)]
@@ -5442,9 +5457,7 @@ impl PinnedDirectory {
                 return Ok(None);
             }
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -5475,6 +5488,7 @@ impl PinnedDirectory {
                 }
                 temp.set_permissions(std::fs::Permissions::from_mode(mode))?;
                 temp.sync_all()?;
+                crate::test_hooks::atomic_create_hook_point(purpose, name)?;
                 match publish_temp_without_replacement(
                     &self.directory,
                     &temp_name,
@@ -5525,9 +5539,10 @@ impl PinnedDirectory {
         reader: &mut R,
         maximum_bytes: u64,
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<(PinnedRegularFile, u64)>> {
         let Some((mut file, copied)) =
-            self.atomic_create_regular_from_reader(name, reader, maximum_bytes, mode)?
+            self.atomic_create_regular_from_reader(name, reader, maximum_bytes, mode, purpose)?
         else {
             return Ok(None);
         };
@@ -6258,19 +6273,18 @@ impl PinnedDirectory {
         expected: Option<&File>,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<()> {
         #[cfg(not(unix))]
         {
-            let _ = (name, expected, bytes, mode);
+            let _ = (name, expected, bytes, mode, purpose);
             anyhow::bail!("secure atomic publication is unavailable on this platform");
         }
         #[cfg(unix)]
         {
             validate_child_name(name)?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -6295,6 +6309,7 @@ impl PinnedDirectory {
                 }
                 temp.write_all(bytes)?;
                 temp.sync_all()?;
+                crate::test_hooks::atomic_create_hook_point(purpose, name)?;
                 match expected {
                     None => publish_temp_without_replacement(
                         &self.directory,
@@ -6344,8 +6359,9 @@ impl PinnedDirectory {
         expected: Option<&PinnedRegularFile>,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<()> {
-        self.atomic_write_if_same(name, expected.map(|entry| &entry.file), bytes, mode)
+        self.atomic_write_if_same(name, expected.map(|entry| &entry.file), bytes, mode, purpose)
     }
 
     /// Stage complete replacement bytes inside this exact directory, then
@@ -6705,8 +6721,14 @@ impl PinnedDirectory {
         };
         let recovery_bytes =
             serde_json::to_vec(&recovery).map_err(crate::atomic_fs::AtomicMutationError::before)?;
-        self.atomic_write_if_same(&marker_name, None, &recovery_bytes, 0o600)
-            .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+        self.atomic_write_if_same(
+            &marker_name,
+            None,
+            &recovery_bytes,
+            0o600,
+            CONDITIONAL_RECOVERY_TEMP_PURPOSE,
+        )
+        .map_err(crate::atomic_fs::AtomicMutationError::before)?;
 
         let fail_before =
             |error: anyhow::Error| match self.recover_conditional_byte_replacement(target_name) {
@@ -6779,10 +6801,11 @@ impl PinnedDirectory {
         name: &OsStr,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<PreparedAtomicCreate>> {
         #[cfg(not(unix))]
         {
-            let _ = (name, bytes, mode);
+            let _ = (name, bytes, mode, purpose);
             anyhow::bail!("secure prepared publication is unavailable on this platform");
         }
         #[cfg(unix)]
@@ -6793,9 +6816,7 @@ impl PinnedDirectory {
             }
             let directory = self.try_clone()?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -6819,6 +6840,12 @@ impl PinnedDirectory {
                     libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
                 }
                 return Err(error).context("write secure batch temp");
+            }
+            if let Err(error) = crate::test_hooks::atomic_create_hook_point(purpose, name) {
+                unsafe {
+                    libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
+                }
+                return Err(error);
             }
             Ok(Some(PreparedAtomicCreate {
                 directory,
@@ -9288,7 +9315,13 @@ mod tests {
         })
         .unwrap();
         directory
-            .atomic_write_if_same(&marker_name, None, &bytes, 0o600)
+            .atomic_write_if_same(
+                &marker_name,
+                None,
+                &bytes,
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap();
     }
 
@@ -9867,6 +9900,7 @@ mod tests {
                     Some(&expected),
                     b"desired",
                     0o600,
+                    crate::secure_fs::TEST_TEMP_PURPOSE,
                 )
                 .is_err()
         );
@@ -10097,7 +10131,13 @@ mod tests {
 
         assert!(
             directory
-                .atomic_write_if_same(OsStr::new("cas-entry"), None, b"replacement", 0o600)
+                .atomic_write_if_same(
+                    OsStr::new("cas-entry"),
+                    None,
+                    b"replacement",
+                    0o600,
+                    crate::secure_fs::TEST_TEMP_PURPOSE,
+                )
                 .is_err()
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"existing");
@@ -10116,6 +10156,7 @@ mod tests {
                 &mut payload,
                 64,
                 0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -10554,7 +10595,12 @@ mod tests {
         let parent_identity = parent.identity().unwrap();
         FAIL_ATOMIC_CREATE_PARENT_SYNC.with(|slot| slot.set(true));
         let error = parent
-            .atomic_create_regular(OsStr::new("record"), b"original", 0o600)
+            .atomic_create_regular(
+                OsStr::new("record"),
+                b"original",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap_err();
         let failure = error
             .downcast_ref::<AtomicRegularCreationFailure>()
@@ -10637,7 +10683,12 @@ mod tests {
         check();
         assert!(
             directory
-                .atomic_create_regular(OsStr::new("record"), b"replacement", 0o600)
+                .atomic_create_regular(
+                    OsStr::new("record"),
+                    b"replacement",
+                    0o600,
+                    crate::secure_fs::TEST_TEMP_PURPOSE,
+                )
                 .unwrap()
                 .is_none()
         );
@@ -10659,7 +10710,12 @@ mod tests {
         for name in ["directory", "symlink", "fifo"] {
             assert!(
                 directory
-                    .atomic_create_regular(OsStr::new(name), b"replacement", 0o600)
+                    .atomic_create_regular(
+                        OsStr::new(name),
+                        b"replacement",
+                        0o600,
+                        crate::secure_fs::TEST_TEMP_PURPOSE,
+                    )
                     .is_err()
             );
         }
@@ -10673,7 +10729,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let prepared = directory
-            .prepare_atomic_create(OsStr::new("cas-entry"), b"complete bytes", 0o600)
+            .prepare_atomic_create(
+                OsStr::new("cas-entry"),
+                b"complete bytes",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap();
 

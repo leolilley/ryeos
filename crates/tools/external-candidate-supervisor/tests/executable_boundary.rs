@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
@@ -414,7 +416,13 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     });
     let anchor = lillux::canonical_json(&anchor).unwrap().into_bytes();
     state
-        .atomic_write_if_same(OsStr::new("supervisor-state.json"), None, &anchor, 0o600)
+        .atomic_write_if_same(
+            OsStr::new("supervisor-state.json"),
+            None,
+            &anchor,
+            0o600,
+            TEST_PURPOSE,
+        )
         .unwrap();
 
     let bootstrap_document = lillux::sealed_memfd(

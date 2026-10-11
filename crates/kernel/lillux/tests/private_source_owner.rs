@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 fn sealed_exec_child(name: &str) -> Result<(), String> {
     if !name.starts_with("lillux-private-source-")
         || !name
@@ -418,7 +420,7 @@ fn child(
         .create_child(OsStr::new(name), 0o700)
         .map_err(|error| error.to_string())?;
     child
-        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600)
+        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600, TEST_PURPOSE)
         .map_err(|error| error.to_string())?
         .ok_or("private source payload already exists")?;
     if wrong_source {

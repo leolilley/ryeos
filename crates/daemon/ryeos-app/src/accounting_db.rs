@@ -11690,7 +11690,7 @@ fn load_or_create_credential_binding_key(
     let mut encoded: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
     encoded.push('\n');
     directory
-        .atomic_write_if_same(name, None, encoded.as_bytes(), 0o600)
+        .atomic_write_if_same(name, None, encoded.as_bytes(), 0o600, crate::APP_TEMP_PURPOSE)
         .context("publish accounting credential-binding key")?;
     Ok(key)
 }
@@ -11702,6 +11702,7 @@ fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<File>
             None,
             ACCOUNTING_INITIALIZED_CONTENT,
             0o600,
+            crate::APP_TEMP_PURPOSE,
         )
         .context("publish accounting initialization marker")?;
     inspect_initialized_marker(directory)?.ok_or_else(|| {

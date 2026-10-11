@@ -116,6 +116,7 @@ fn write(state_dir: &Path, marker: &LifecycleMarker) {
             existing.as_ref(),
             &body,
             0o600,
+            crate::NODE_TEMP_PURPOSE,
         )?;
         Ok(())
     })();
@@ -212,6 +213,7 @@ pub fn complete_finalizing_exit(
             Some(&existing),
             &body,
             0o600,
+            crate::NODE_TEMP_PURPOSE,
         )?;
         Ok(())
     })();

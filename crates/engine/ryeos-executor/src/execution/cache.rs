@@ -492,7 +492,7 @@ impl MaterializationCache {
         let bytes = canonical_completion_marker(completion)?.into_bytes();
         let name = OsStr::new(&completion.snapshot_hash);
         if markers
-            .atomic_create_regular(name, &bytes, 0o600)?
+            .atomic_create_regular(name, &bytes, 0o600, crate::EXECUTOR_TEMP_PURPOSE)?
             .is_none()
         {
             let existing = markers

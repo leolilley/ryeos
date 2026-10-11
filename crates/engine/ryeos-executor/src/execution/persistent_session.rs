@@ -3640,7 +3640,13 @@ fn prepare_structured_session_configuration_file(
         .unwrap_or(false);
     if !current_matches {
         state_directory
-            .atomic_write_pinned_if_same(destination_name, incumbent.as_ref(), &bytes, 0o400)
+            .atomic_write_pinned_if_same(
+                destination_name,
+                incumbent.as_ref(),
+                &bytes,
+                0o400,
+                crate::EXECUTOR_TEMP_PURPOSE,
+            )
             .context("publish workload configuration through Lillux")?;
     }
     if !enforced {

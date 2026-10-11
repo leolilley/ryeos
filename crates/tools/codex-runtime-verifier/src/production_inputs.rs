@@ -441,6 +441,7 @@ mod tests {
                         OsStr::new(member),
                         b"fixture-executable",
                         0o755,
+                        crate::VERIFIER_TEMP_PURPOSE,
                     )
                     .unwrap()
                     .unwrap();
@@ -448,7 +449,12 @@ mod tests {
                 let manifest = ryeos_state::observe_external_content_tree_exact(&tree).unwrap();
                 (tree.inherited_descriptor_authority().unwrap(), manifest)
             } else {
-                root.atomic_create_pinned_regular(OsStr::new(id), b"fixture-executable", 0o755)
+                root.atomic_create_pinned_regular(
+                    OsStr::new(id),
+                    b"fixture-executable",
+                    0o755,
+                    crate::VERIFIER_TEMP_PURPOSE,
+                )
                     .unwrap()
                     .unwrap();
                 let source = root
@@ -605,6 +611,7 @@ mod tests {
                 OsStr::new("candidate-strategy.txt"),
                 b"candidate\n",
                 0o644,
+                crate::VERIFIER_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -752,7 +759,12 @@ mod tests {
                 .unwrap()
                 .unwrap();
             tools
-                .atomic_create_pinned_regular(OsStr::new("ambient"), b"undeclared", 0o644)
+                .atomic_create_pinned_regular(
+                    OsStr::new("ambient"),
+                    b"undeclared",
+                    0o644,
+                    crate::VERIFIER_TEMP_PURPOSE,
+                )
                 .unwrap()
                 .unwrap();
             assert!(verify(&f).is_err());

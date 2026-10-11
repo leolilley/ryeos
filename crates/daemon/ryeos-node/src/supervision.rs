@@ -349,6 +349,7 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
                 None,
                 &serde_json::to_vec(&DesiredState::Down)?,
                 0o600,
+                crate::NODE_TEMP_PURPOSE,
             )?;
             let desired = control
                 .open_pinned_regular(OsStr::new(DESIRED), false)?
@@ -358,7 +359,13 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
     }
 
     if !description_is_current {
-        directory.atomic_write_pinned_if_same(OsStr::new(DESCRIPTION), None, &expected, 0o644)?;
+        directory.atomic_write_pinned_if_same(
+            OsStr::new(DESCRIPTION),
+            None,
+            &expected,
+            0o644,
+            crate::NODE_TEMP_PURPOSE,
+        )?;
     }
     Ok(())
 }
@@ -524,6 +531,7 @@ impl InstalledService {
             existing.as_ref(),
             &serde_json::to_vec(&failure)?,
             0o644,
+            crate::NODE_TEMP_PURPOSE,
         )
     }
 
@@ -712,6 +720,7 @@ impl InstalledService {
             Some(&current),
             &serde_json::to_vec(&state)?,
             0o600,
+            crate::NODE_TEMP_PURPOSE,
         )
     }
 
@@ -747,6 +756,7 @@ impl InstalledService {
             existing.as_ref(),
             &serde_json::to_vec(intent)?,
             0o644,
+            crate::NODE_TEMP_PURPOSE,
         )
     }
 

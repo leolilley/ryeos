@@ -1,3 +1,6 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const ENGINE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("engine");
+
 pub mod authority;
 pub mod boot_validation;
 pub mod composers;

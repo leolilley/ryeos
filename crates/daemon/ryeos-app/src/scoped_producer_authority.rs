@@ -977,6 +977,7 @@ mod tests {
                 std::ffi::OsStr::new("config.toml"),
                 b"model = 'fixture'\n",
                 0o600,
+                crate::APP_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -993,6 +994,7 @@ mod tests {
                 std::ffi::OsStr::new("environments.toml"),
                 b"[commands]\n",
                 0o600,
+                crate::APP_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();

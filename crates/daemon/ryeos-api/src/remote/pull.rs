@@ -1259,7 +1259,12 @@ fn write_pull_recovery_journal(
         )));
     }
     if backup
-        .atomic_create_regular(std::ffi::OsStr::new("journal.json"), &bytes, 0o600)?
+        .atomic_create_regular(
+            std::ffi::OsStr::new("journal.json"),
+            &bytes,
+            0o600,
+            crate::API_TEMP_PURPOSE,
+        )?
         .is_none()
     {
         return Err(PullResultsError::Other(anyhow::anyhow!(

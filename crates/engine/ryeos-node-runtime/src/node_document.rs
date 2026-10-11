@@ -112,7 +112,13 @@ pub fn write_signed_item(
     let filename = std::ffi::OsStr::new(&filename);
     let expected = section_directory.open_pinned_regular(filename, false)?;
     section_directory
-        .atomic_write_pinned_if_same(filename, expected.as_ref(), &bytes, 0o600)
+        .atomic_write_pinned_if_same(
+            filename,
+            expected.as_ref(),
+            &bytes,
+            0o600,
+            crate::NODE_RUNTIME_TEMP_PURPOSE,
+        )
         .with_context(|| {
             format!(
                 "write node document {}",

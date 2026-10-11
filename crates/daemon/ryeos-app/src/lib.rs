@@ -1,3 +1,6 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const APP_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("app");
+
 // ryeos-app: shared application state and domain services.
 //
 // Phase B: extraction in progress. Modules are added as files are moved

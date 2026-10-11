@@ -7,6 +7,11 @@
 //! guard are held.
 
 use std::path::{Path, PathBuf};
+
+/// Owner token for the secure temporaries the reset itself publishes: its
+/// ledger, its inspection witnesses and its staged operation record. State,
+/// scheduler and Runtime writes driven by a reset keep their owners' tokens.
+pub(crate) const RESET_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("reset");
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};

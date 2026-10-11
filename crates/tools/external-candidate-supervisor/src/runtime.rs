@@ -507,7 +507,13 @@ impl ProtectedSupervisorState {
             outer_store_identity: journal.store_identity().clone(),
         };
         let anchor_bytes = canonical_anchor(&anchor)?;
-        state_root.atomic_write_if_same(OsStr::new(STATE_ANCHOR), None, &anchor_bytes, 0o600)?;
+        state_root.atomic_write_if_same(
+            OsStr::new(STATE_ANCHOR),
+            None,
+            &anchor_bytes,
+            0o600,
+            crate::SUPERVISOR_TEMP_PURPOSE,
+        )?;
         require_state_entries(&state_root)?;
         Ok(Self {
             _state_root: state_root,

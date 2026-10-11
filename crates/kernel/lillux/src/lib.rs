@@ -20,6 +20,7 @@ pub mod secure_fs;
 pub mod signature;
 pub mod subordinate_process;
 pub mod task;
+pub mod test_hooks;
 pub mod time;
 pub mod vault;
 
@@ -105,6 +106,10 @@ pub use exec::{
     InheritedDescriptorTransferReceiver, InheritedDescriptorTransferSender,
     ReceivedDescriptorAuthority, ReceivedDescriptorTransfer, inherited_descriptor_transfer_pair,
     take_inherited_descriptor_transfer_sender,
+};
+pub use secure_fs::{
+    SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
+    parse_secure_temp_name,
 };
 pub use secure_fs::{
     AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,

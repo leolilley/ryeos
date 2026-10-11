@@ -498,7 +498,13 @@ pub fn publish_policy_update(
             let filename = OsString::from(format!("{section_name}.yaml"));
             let bytes =
                 crate::node_document::render_signed_item(section_name, "policy", body, identity)?;
-            staging.atomic_write_pinned_if_same(&filename, None, &bytes, 0o600)?;
+            staging.atomic_write_pinned_if_same(
+                &filename,
+                None,
+                &bytes,
+                0o600,
+                crate::NODE_RUNTIME_TEMP_PURPOSE,
+            )?;
         }
         staging.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(
             MAX_POLICY_FILES,

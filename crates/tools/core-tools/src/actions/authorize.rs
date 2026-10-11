@@ -488,6 +488,7 @@ pub fn mint_admission_token_with_policy(
             None,
             doc.as_bytes(),
             0o600,
+            crate::TOOLS_TEMP_PURPOSE,
         )
         .with_context(|| format!("failed to install admission token file {}", path.display()))?;
     token_dir.ensure_path_binding()?;

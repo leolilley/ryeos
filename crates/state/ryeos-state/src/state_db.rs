@@ -3403,6 +3403,16 @@ impl StateDb {
                 "offline execution-history reset is incomplete; rerun `ryeos node reset execution-history --confirm` while the daemon is stopped"
             );
         }
+        // Only the exclusive namespace lock proves no State writer is live.
+        if runtime_state_lock.is_some() {
+            let removed = crate::recovery::sweep_interrupted_state_publications(
+                &recovery_parent,
+                &recovery_directory,
+            )?;
+            if removed != 0 {
+                tracing::info!(removed, "removed interrupted State publications");
+            }
+        }
 
         // Operational rows are source-of-truth state and live in a fixed store
         // that is independent of replaceable projection generations.
@@ -6737,6 +6747,7 @@ impl StateDb {
             expected.as_ref(),
             format!("{current}\n").as_bytes(),
             0o600,
+            crate::STATE_TEMP_PURPOSE,
         )?;
         if self.external_content_binding_schema_epoch()? != Some(current) {
             anyhow::bail!("external-content binding epoch publication did not verify");
@@ -8853,6 +8864,64 @@ mod tests {
             .unwrap()
             .expect("startup pending replay must restore the projection cursor");
         assert_eq!(projected.indexed_chain_state_hash, head.target_hash);
+    }
+
+    struct NoLiveRecovery;
+
+    impl RuntimeLivenessInspector for NoLiveRecovery {
+        fn chain_has_live_recovery_state(&self, _chain_root_id: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn locked_open_sweeps_interrupted_state_publications_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let projection = dir.path().join("recovery/thread-projection");
+        std::fs::create_dir_all(projection.join("pending")).unwrap();
+        let own = format!(".secure.tmp.{}.4242.1", crate::STATE_TEMP_PURPOSE.as_str());
+        let owned = [dir.path().join("recovery").join(&own), projection.join("pending").join(&own)];
+        let foreign = projection.join(".secure.tmp.reset.4242.2");
+        for path in owned.iter().chain([&foreign]) {
+            std::fs::write(path, b"interrupted").unwrap();
+        }
+        let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let lock = root.lock_exclusive().unwrap();
+        // The sweep precedes every SQLite open, so its effects are observable
+        // whether or not this host admits the later non-native database opens.
+        let opened =
+            StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
+                dir.path(),
+                root,
+                lock,
+                Arc::new(RecordingRepairSink::default()),
+                test_trust_store(),
+                &NoLiveRecovery,
+            );
+        for path in &owned {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        assert!(foreign.is_file());
+
+        let retired_format = projection.join(".secure.tmp.4242.3");
+        std::fs::write(&retired_format, b"unattributed").unwrap();
+        drop(opened);
+        let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let lock = root.lock_exclusive().unwrap();
+        let error =
+            StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
+                dir.path(),
+                root,
+                lock,
+                Arc::new(RecordingRepairSink::default()),
+                test_trust_store(),
+                &NoLiveRecovery,
+            )
+            .err()
+            .expect("an unattributed secure temporary refuses State startup");
+        assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
+        assert!(retired_format.is_file());
+        assert!(foreign.is_file());
     }
 
     #[derive(Default)]

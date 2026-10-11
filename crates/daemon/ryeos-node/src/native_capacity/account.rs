@@ -422,7 +422,12 @@ pub(crate) fn prepare_initial_capacity_binding(
         directory.require_owner_private_directory()?;
         state.account = Some(
             directory
-                .atomic_create_pinned_regular(OsStr::new("account"), &[0; RECORD_BYTES], 0o600)?
+                .atomic_create_pinned_regular(
+                    OsStr::new("account"),
+                    &[0; RECORD_BYTES],
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )?
                 .context("capacity account creation collided")?,
         );
         let directory = state
@@ -431,7 +436,12 @@ pub(crate) fn prepare_initial_capacity_binding(
             .context("capacity directory not retained")?;
         state.anchor = Some(
             directory
-                .atomic_create_pinned_regular(OsStr::new("anchor"), &[0; redo::ANCHOR_BYTES], 0o600)?
+                .atomic_create_pinned_regular(
+                    OsStr::new("anchor"),
+                    &[0; redo::ANCHOR_BYTES],
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )?
                 .context("capacity anchor creation collided")?,
         );
         let binding = NativeCapacityAccountBinding {
@@ -494,6 +504,7 @@ pub(crate) fn prepare_initial_capacity_binding(
                     OsStr::new("native-capacity-issuance.json"),
                     &document_bytes,
                     0o600,
+                    crate::NODE_TEMP_PURPOSE,
                 )?
                 .context("capacity issuance publication collided")?,
         );

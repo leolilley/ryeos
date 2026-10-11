@@ -457,7 +457,7 @@ pub(crate) fn write_signed_ref_in_directory(
     let canonical = encode_signed_ref(signed_ref, signer)?;
     let expected = directory.open_regular(name, false)?;
     directory
-        .atomic_write_if_same(name, expected.as_ref(), &canonical, 0o666)
+        .atomic_write_if_same(name, expected.as_ref(), &canonical, 0o666, crate::STATE_TEMP_PURPOSE)
         .context("failed to write descriptor-bound signed ref")
 }
 
@@ -470,7 +470,7 @@ fn write_signed_ref_in_directory_if_same(
 ) -> anyhow::Result<()> {
     let canonical = encode_signed_ref(signed_ref, signer)?;
     directory
-        .atomic_write_if_same(name, expected, &canonical, 0o666)
+        .atomic_write_if_same(name, expected, &canonical, 0o666, crate::STATE_TEMP_PURPOSE)
         .context("failed to compare-and-write descriptor-bound signed ref")
 }
 

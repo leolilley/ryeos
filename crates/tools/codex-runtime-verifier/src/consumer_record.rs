@@ -194,6 +194,7 @@ mod control_tests {
                 std::ffi::OsStr::new(CONTROLLER_RECORD_NAME),
                 b"{}",
                 0o400,
+                crate::VERIFIER_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -710,7 +711,12 @@ impl ImportedConsumerInputs {
             "consumer finish delivery deadline expired"
         );
         if control
-            .atomic_create_pinned_regular(std::ffi::OsStr::new("finish"), b"capture", 0o400)?
+            .atomic_create_pinned_regular(
+                std::ffi::OsStr::new("finish"),
+                b"capture",
+                0o400,
+                crate::VERIFIER_TEMP_PURPOSE,
+            )?
             .is_none()
         {
             let existing = control
@@ -915,7 +921,12 @@ impl ImportedConsumerInputs {
             );
             if initialize_home {
                 fresh_home
-                    .atomic_create_pinned_regular(std::ffi::OsStr::new(name), bytes, 0o400)?
+                    .atomic_create_pinned_regular(
+                        std::ffi::OsStr::new(name),
+                        bytes,
+                        0o400,
+                        crate::VERIFIER_TEMP_PURPOSE,
+                    )?
                     .context("consumer Codex configuration already exists")?;
             } else {
                 let file = fresh_home
@@ -1101,6 +1112,7 @@ impl ImportedConsumerInputs {
                 std::ffi::OsStr::new("native-started"),
                 self.record_sha256.as_bytes(),
                 0o400,
+                crate::VERIFIER_TEMP_PURPOSE,
             )?
             .context(
                 "consumer native execution already attempted; live pipes cannot be recreated",
@@ -1210,7 +1222,12 @@ impl RetainedControllerConsumerRecord {
             product_contract,
         )?;
         directory
-            .atomic_create_pinned_regular(name, &record.canonical_bytes()?, 0o400)?
+            .atomic_create_pinned_regular(
+                name,
+                &record.canonical_bytes()?,
+                0o400,
+                crate::VERIFIER_TEMP_PURPOSE,
+            )?
             .context("consumer record preparation raced; no contact permitted")?;
         Self::reopen(directory, protected_inputs, coordinate, product_contract)
     }

@@ -580,7 +580,12 @@ impl OriginalSettlementAdmission {
             publication.attempted = true;
             match self.claim
                 .ledger
-                .atomic_create_regular(OsStr::new(name), signed, 0o600)
+                .atomic_create_regular(
+                    OsStr::new(name),
+                    signed,
+                    0o600,
+                    crate::execution_history_reset::RESET_TEMP_PURPOSE,
+                )
             {
                 Ok(Some(file)) => {
                     publication.owner = Some(Arc::new(
@@ -3778,7 +3783,12 @@ impl OriginalQuotaClaim {
             self.publication_entered.store(true, Ordering::Release);
             let file = self
                 .ledger
-                .atomic_create_regular(OsStr::new(&selected_name), &self.signed, 0o600)?
+                .atomic_create_regular(
+                    OsStr::new(&selected_name),
+                    &self.signed,
+                    0o600,
+                    crate::execution_history_reset::RESET_TEMP_PURPOSE,
+                )?
                 .context("offline quota publication raced another owner")?;
             let publication = Arc::new(lillux_sqlite::RetainedOriginalWitnessFile::created(
                 file,
@@ -4208,7 +4218,12 @@ impl OriginalCopyWork {
         let pin = self
             .claim
             .copy_root
-            .atomic_create_regular(OsStr::new(&name), &signed, 0o600)?
+            .atomic_create_regular(
+                OsStr::new(&name),
+                &signed,
+                0o600,
+                crate::execution_history_reset::RESET_TEMP_PURPOSE,
+            )?
             .context("created evidence publication collided; original custody retained")?;
         // Retain the actual file returned by publication, never a later lookup.
         let evidence = Arc::new(CreatedDirectoryEvidence {

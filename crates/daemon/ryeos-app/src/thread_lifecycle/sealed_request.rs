@@ -330,6 +330,7 @@ impl SealedResolvedItem {
                     source_name,
                     &source_bytes,
                     0o600,
+                    crate::APP_TEMP_PURPOSE,
                 )? {
                     Some(created) => created,
                     None => pinned_capsule_root

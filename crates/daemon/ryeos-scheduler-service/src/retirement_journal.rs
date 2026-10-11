@@ -540,8 +540,18 @@ impl<'a> RetirementJournal<'a> {
                 signed_names.push(display.to_string());
                 continue;
             }
-            if display.starts_with(".secure.tmp.") {
-                anyhow::bail!("unfinished scheduler journal publication requires held recovery");
+            match lillux::classify_secure_temp_name(name, crate::SCHEDULER_TEMP_PURPOSE) {
+                lillux::SecureTempOwnership::NotTemp => {}
+                lillux::SecureTempOwnership::Own => anyhow::bail!(
+                    "unfinished scheduler journal publication requires held recovery"
+                ),
+                // The scheduler directory is shared with other Runtime owners;
+                // their interrupted publications are theirs to settle.
+                lillux::SecureTempOwnership::Foreign => continue,
+                lillux::SecureTempOwnership::Malformed => anyhow::bail!(
+                    "scheduler directory holds a secure temporary without an exact owner token: {display}; \
+                     stop the node and remove that entry before scheduler retirement can continue"
+                ),
             }
             if let Some(generation) = display.strip_prefix(INTENT_PREFIX) {
                 validate_generation(generation)?;
@@ -2671,7 +2681,7 @@ where
     );
     let child = std::ffi::OsStr::new(name);
     if runtime
-        .atomic_create_regular(child, signed, 0o600)?
+        .atomic_create_regular(child, signed, 0o600, crate::SCHEDULER_TEMP_PURPOSE)?
         .is_some()
     {
         return Ok(signed.to_vec());
@@ -3375,6 +3385,49 @@ mod terminal_scanner_controls {
     }
 
     #[test]
+    fn evidence_scan_acts_only_on_scheduler_owned_secure_temporaries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let identity = NodeIdentity::create(&directory.path().join("identity.key"))?;
+        let runtime_path = directory.path().join("runtime");
+        std::fs::create_dir(&runtime_path)?;
+        let runtime =
+            lillux::PinnedDirectory::open(&runtime_path)?.context("test runtime absent")?;
+        completed_recovery_fixture(&runtime, &identity)?;
+        let foreign = [".secure.tmp.reset.4242.1", ".secure.tmp.sqlite.4242.2"];
+        for name in foreign {
+            std::fs::write(runtime_path.join(name), b"another owner's debris")?;
+        }
+        assert_eq!(
+            RetirementJournal::scan_interrupted_evidence(&runtime, &identity)?.len(),
+            1
+        );
+
+        let own = format!(
+            ".secure.tmp.{}.4242.3",
+            crate::SCHEDULER_TEMP_PURPOSE.as_str()
+        );
+        std::fs::write(runtime_path.join(&own), b"interrupted journal record")?;
+        let error = RetirementJournal::scan_interrupted_evidence(&runtime, &identity)
+            .err()
+            .context("own interrupted publication was ignored")?;
+        assert!(error.to_string().contains("requires held recovery"), "{error:#}");
+        std::fs::remove_file(runtime_path.join(&own))?;
+
+        std::fs::write(runtime_path.join(".secure.tmp.4242.4"), b"unattributed")?;
+        let error = RetirementJournal::scan_interrupted_evidence(&runtime, &identity)
+            .err()
+            .context("retired-format temporary was accepted")?;
+        assert!(
+            error.to_string().contains("without an exact owner token"),
+            "{error:#}"
+        );
+        for name in foreign.into_iter().chain([".secure.tmp.4242.4"]) {
+            assert!(runtime_path.join(name).is_file(), "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn completed_child_cannot_suppress_pre_effect_parent_role_artifacts() -> Result<()> {
         for suffix in ["quarantine", "purge", "resolution"] {
             let directory = tempfile::tempdir()?;
@@ -3395,7 +3448,12 @@ mod terminal_scanner_controls {
                 format!("scheduler-retirement.role.{parent}.main.{suffix}")
             };
             assert!(runtime
-                .atomic_create_regular(OsStr::new(&name), b"unexpected parent artifact", 0o600)?
+                .atomic_create_regular(
+                    OsStr::new(&name),
+                    b"unexpected parent artifact",
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some());
             assert!(
                 RetirementJournal::scan_interrupted_evidence(&runtime, &identity).is_err(),
@@ -3417,7 +3475,12 @@ mod terminal_scanner_controls {
         let absent = SchedulerRetirementObservedCoordinate::Absent;
         ensure_resolution_coordinate_matches(&runtime, &name, &absent, None, false)?;
         assert!(runtime
-            .atomic_create_regular(OsStr::new(&name), b"foreign replacement", 0o600)?
+            .atomic_create_regular(
+                OsStr::new(&name),
+                b"foreign replacement",
+                0o600,
+                crate::SCHEDULER_TEMP_PURPOSE,
+            )?
             .is_some());
         // Both a stable occupied coordinate and a replacement after the directory
         // snapshot must refuse the signed absence testimony.
@@ -3462,7 +3525,12 @@ mod terminal_scanner_controls {
                 b"untrusted terminal residue".to_vec()
             };
             assert!(runtime
-                .atomic_create_regular(OsStr::new(&name), &bytes, 0o600)?
+                .atomic_create_regular(
+                    OsStr::new(&name),
+                    &bytes,
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some());
             assert!(
                 RetirementJournal::scan_interrupted_evidence(&runtime, &identity).is_err(),
@@ -3645,11 +3713,21 @@ mod guarded_journal_read_controls {
         let limit = ryeos_scheduler_contract::SCHEDULER_RETIREMENT_RECORD_MAX_BYTES;
         let exact = vec![b'x'; limit];
         assert!(runtime
-            .atomic_create_regular(OsStr::new("exact"), &exact, 0o600)?
+            .atomic_create_regular(
+                OsStr::new("exact"),
+                &exact,
+                0o600,
+                crate::SCHEDULER_TEMP_PURPOSE,
+            )?
             .is_some());
         assert_eq!(read_signed_bytes(&runtime, "exact")?, exact);
         assert!(runtime
-            .atomic_create_regular(OsStr::new("oversized"), &vec![b'x'; limit + 1], 0o600)?
+            .atomic_create_regular(
+                OsStr::new("oversized"),
+                &vec![b'x'; limit + 1],
+                0o600,
+                crate::SCHEDULER_TEMP_PURPOSE,
+            )?
             .is_some());
         assert!(read_optional_signed_bytes(&runtime, "oversized").is_err());
         Ok(())
@@ -3841,7 +3919,12 @@ pub(crate) mod compact_native_projection_controls {
         for index in 1..=4 {
             let name = format!("{INTENT_PREFIX}{index:032x}");
             assert!(runtime
-                .atomic_create_regular(OsStr::new(&name), b"untrusted inventory", 0o600)?
+                .atomic_create_regular(
+                    OsStr::new(&name),
+                    b"untrusted inventory",
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some());
         }
         RetirementJournal::reserve_pre_effect_capacity(&runtime, false)?;
@@ -3852,13 +3935,23 @@ pub(crate) mod compact_native_projection_controls {
         for index in 1..=19 {
             let name = format!("{ORIGINAL_OPERATION_PREFIX}{index:032x}");
             assert!(runtime
-                .atomic_create_regular(OsStr::new(&name), b"untrusted operation inventory", 0o600)?
+                .atomic_create_regular(
+                    OsStr::new(&name),
+                    b"untrusted operation inventory",
+                    0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
+                )?
                 .is_some());
         }
         RetirementJournal::reserve_pre_effect_capacity(&runtime, false)?;
         let name = format!("{ORIGINAL_OPERATION_PREFIX}{:032x}", 20);
         assert!(runtime
-            .atomic_create_regular(OsStr::new(&name), b"untrusted operation inventory", 0o600)?
+            .atomic_create_regular(
+                OsStr::new(&name),
+                b"untrusted operation inventory",
+                0o600,
+                crate::SCHEDULER_TEMP_PURPOSE,
+            )?
             .is_some());
         let before = runtime.entry_names_bounded(MAX_DIRECTORY_ENTRIES)?;
         assert!(RetirementJournal::reserve_pre_effect_capacity(&runtime, false).is_err());

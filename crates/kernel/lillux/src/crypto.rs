@@ -34,6 +34,9 @@ pub fn generate_random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+/// Owner token for the temporary behind a signing-key publication.
+pub const SIGNING_KEY_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("signing-key");
+
 /// Generate and create one private signing-key file without following links
 /// or replacing an incumbent pathname.
 pub fn create_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
@@ -50,7 +53,7 @@ pub fn create_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> 
         .to_pkcs8_pem(Default::default())
         .context("failed to serialize signing key")?;
     parent
-        .atomic_write_if_same(name, None, pem.as_bytes(), 0o600)
+        .atomic_write_if_same(name, None, pem.as_bytes(), 0o600, SIGNING_KEY_TEMP_PURPOSE)
         .with_context(|| format!("create signing key {}", path.display()))?;
     Ok(signing_key)
 }

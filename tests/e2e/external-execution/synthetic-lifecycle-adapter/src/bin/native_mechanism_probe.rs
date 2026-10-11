@@ -11,6 +11,9 @@
 //! completion fence, cloud lifetime, or retained worker result. Scratch state
 //! is retained for the enclosing disposable fixture owner, including failures.
 
+/// Owner token carried by the secure temporaries this adapter publishes.
+const SYNTHETIC_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("synthetic");
+
 use anyhow::{Context as _, Result, ensure};
 use lillux::{
     PinnedDirectory,
@@ -219,6 +222,7 @@ fn stage_runtime(
                 path.file_name().context("runtime filename absent")?,
                 &bytes,
                 0o755,
+                SYNTHETIC_TEMP_PURPOSE,
             )?
             .context("runtime member already exists")?;
     }
@@ -233,7 +237,12 @@ fn observe(relative: &str, request: Request) -> Result<Observation> {
     stage_runtime(&input, &runtime, &request.runtime_sha256)?;
     let candidate = scratch.create_child(OsStr::new("candidate"), 0o700)?;
     candidate
-        .atomic_create_pinned_regular(OsStr::new("counter"), b"0000000000000000", 0o644)?
+        .atomic_create_pinned_regular(
+            OsStr::new("counter"),
+            b"0000000000000000",
+            0o644,
+            SYNTHETIC_TEMP_PURPOSE,
+        )?
         .context("counter already exists")?;
     // Ordinary private CAS initialization, not a fabricated candidate-launch
     // binding. It contains no signed heads, project admission or worker state.
@@ -469,7 +478,12 @@ fn guest_parent() -> Result<()> {
     })
     .map_err(anyhow::Error::msg)?;
     drop(child.take_input().map_err(anyhow::Error::msg)?);
-    work.atomic_create_pinned_regular(OsStr::new("parent.ready"), b"1", 0o644)?
+    work.atomic_create_pinned_regular(
+        OsStr::new("parent.ready"),
+        b"1",
+        0o644,
+        SYNTHETIC_TEMP_PURPOSE,
+    )?
         .context("guest handshake already present")?;
     let deadline = MonotonicDeadline::after(Duration::from_secs(45));
     while !deadline.has_elapsed() {

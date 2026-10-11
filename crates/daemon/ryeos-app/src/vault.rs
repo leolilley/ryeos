@@ -907,6 +907,7 @@ impl NodeVault for SealedEnvelopeVault {
                 access.artifact_name(),
                 encoded.as_bytes(),
                 0o600,
+                crate::APP_TEMP_PURPOSE,
             )?;
         }
         let retained = self.read_relay_bootstrap_artifact(access, &key)?;

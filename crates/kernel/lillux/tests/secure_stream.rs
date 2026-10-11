@@ -2,6 +2,8 @@ use std::ffi::OsStr;
 
 use lillux::PinnedDirectory;
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 #[test]
 fn streamed_atomic_create_is_bounded_and_never_publishes_a_partial_file() {
     let root = tempfile::tempdir().unwrap();
@@ -9,14 +11,26 @@ fn streamed_atomic_create_is_bounded_and_never_publishes_a_partial_file() {
     let mut oversized = std::io::Cursor::new(b"12345".to_vec());
     assert!(
         directory
-            .atomic_create_regular_from_reader(OsStr::new("payload"), &mut oversized, 4, 0o600,)
+            .atomic_create_regular_from_reader(
+                OsStr::new("payload"),
+                &mut oversized,
+                4,
+                0o600,
+                TEST_PURPOSE,
+            )
             .is_err()
     );
     assert!(!root.path().join("payload").exists());
 
     let mut admitted = std::io::Cursor::new(b"1234".to_vec());
     let (_, written) = directory
-        .atomic_create_regular_from_reader(OsStr::new("payload"), &mut admitted, 4, 0o600)
+        .atomic_create_regular_from_reader(
+            OsStr::new("payload"),
+            &mut admitted,
+            4,
+            0o600,
+            TEST_PURPOSE,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(written, 4);

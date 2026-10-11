@@ -4,6 +4,10 @@
 //! bundle from the sealed supervisor bootstrap. It never uses ambient proxy,
 //! CA, credential, redirect, or endpoint configuration.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const SUPERVISOR_TEMP_PURPOSE: lillux::TempPurpose =
+    lillux::TempPurpose::new("supervisor");
+
 pub mod entrypoint;
 mod http_transport;
 pub mod relay_transport;

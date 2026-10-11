@@ -157,6 +157,7 @@ fn restore_recovery_sources_and_projection(
                     expected.as_ref(),
                     content.as_bytes(),
                     0o600,
+                    crate::SCHEDULER_TEMP_PURPOSE,
                 )?;
                 let path = directory.path().join(name);
                 let verified = ryeos_scheduler::projection::verify_schedule_source_content(
@@ -1033,7 +1034,13 @@ fn write_reconciled_schedule(
     let filename = format!("{}.yaml", schedule.schedule_id);
     let filename = std::ffi::OsStr::new(&filename);
     let expected = schedules_dir.open_regular(filename, false)?;
-    schedules_dir.atomic_write_if_same(filename, expected.as_ref(), &bytes, 0o600)?;
+    schedules_dir.atomic_write_if_same(
+        filename,
+        expected.as_ref(),
+        &bytes,
+        0o600,
+        crate::SCHEDULER_TEMP_PURPOSE,
+    )?;
     let spec_path = schedules_dir.path().join(filename);
     let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
     let verified = ryeos_scheduler::projection::verify_schedule_source_content(
@@ -1133,6 +1140,7 @@ impl ScheduleReconcileTx {
                         expected.as_ref(),
                         bytes,
                         0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE,
                     )?;
                 }
                 None => {

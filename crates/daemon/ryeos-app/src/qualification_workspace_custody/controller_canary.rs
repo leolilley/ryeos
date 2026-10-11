@@ -104,7 +104,12 @@ impl OriginalCanary {
         let value = Zeroizing::new(lillux::sha256_hex(&entropy[..]));
         let bytes = Zeroizing::new(format!("{}\n", value.as_str()));
         let file = directory
-            .atomic_create_pinned_regular(OsStr::new(FILE), bytes.as_bytes(), 0o600)?
+            .atomic_create_pinned_regular(
+                OsStr::new(FILE),
+                bytes.as_bytes(),
+                0o600,
+                crate::APP_TEMP_PURPOSE,
+            )?
             .context("Q original canary leaf already exists")?;
         require_private_single_link(&file)?;
         let observed = file.observation()?;

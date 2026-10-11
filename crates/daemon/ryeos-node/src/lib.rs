@@ -1,5 +1,8 @@
 //! Shared RyeOS local node lifecycle and bootstrap semantics.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const NODE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("node");
+
 pub mod bundle_set_apply;
 pub mod bundle_set_update;
 mod control;

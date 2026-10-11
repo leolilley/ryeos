@@ -3,6 +3,9 @@
 //! No product claim follows from these checks alone. The installed verifier
 //! still needs to own the native guest and real app-server observations.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const VERIFIER_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("verifier");
+
 pub mod app_server;
 pub mod consumer_checker_host;
 mod consumer_checker_program;

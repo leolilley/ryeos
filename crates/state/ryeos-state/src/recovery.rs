@@ -237,6 +237,56 @@ impl RecoveryAcknowledgementCustody {
     }
 }
 
+/// Thread-projection children that hold State's durable recovery records.
+const THREAD_PROJECTION_RECORD_DIRECTORIES: [&str; 3] =
+    ["pending", "staged-cas-roots", "durable-cas-uploads"];
+
+/// Remove interrupted State-owned secure publications from State's recovery
+/// directory, its thread-projection directory and that directory's record
+/// children. The caller holds the exclusive runtime-state namespace lock, so
+/// no State writer can still own one of these temporaries. Debris carrying
+/// another owner's token is left in place; a prefixed name without an exact
+/// owner token cannot be attributed and refuses startup.
+pub(crate) fn sweep_interrupted_state_publications(
+    recovery_parent: &lillux::PinnedDirectory,
+    thread_projection: &lillux::PinnedDirectory,
+) -> Result<usize> {
+    let mut removed = sweep_state_temporaries_in(recovery_parent)?;
+    removed += sweep_state_temporaries_in(thread_projection)?;
+    for child in THREAD_PROJECTION_RECORD_DIRECTORIES {
+        let directory = thread_projection.open_child_directory(std::ffi::OsStr::new(child))?;
+        if let Some(directory) = directory {
+            removed += sweep_state_temporaries_in(&directory)?;
+        }
+    }
+    Ok(removed)
+}
+
+fn sweep_state_temporaries_in(directory: &lillux::PinnedDirectory) -> Result<usize> {
+    let mut removed = 0;
+    for name in directory.entry_names()? {
+        let path = directory.path().join(&name);
+        match lillux::classify_secure_temp_name(&name, crate::STATE_TEMP_PURPOSE) {
+            lillux::SecureTempOwnership::NotTemp | lillux::SecureTempOwnership::Foreign => {}
+            lillux::SecureTempOwnership::Own => {
+                let file = directory.open_regular(&name, false)?.with_context(|| {
+                    format!("interrupted State publication disappeared: {}", path.display())
+                })?;
+                directory.remove_if_same(&name, &file).with_context(|| {
+                    format!("remove interrupted State publication {}", path.display())
+                })?;
+                removed += 1;
+            }
+            lillux::SecureTempOwnership::Malformed => anyhow::bail!(
+                "State recovery directory holds a secure temporary without an exact owner token: {}; \
+                 stop the node, remove that entry, then start it again",
+                path.display()
+            ),
+        }
+    }
+    Ok(removed)
+}
+
 /// Guarded evidence read. With the owning native factory the read runs in
 /// that factory's scope, so its own held projection leases answer for their
 /// owner; without one the read refuses whenever any lease is listed.
@@ -2214,7 +2264,7 @@ impl RecoveryStore {
         rand::rngs::OsRng.fill_bytes(&mut generated);
         if self
             .directory
-            .atomic_create_pinned_regular(name, &generated, 0o600)?
+            .atomic_create_pinned_regular(name, &generated, 0o600, crate::STATE_TEMP_PURPOSE)?
             .is_some()
         {
             return Ok(generated);
@@ -2302,7 +2352,7 @@ impl RecoveryStore {
         // publication collision is accepted only after exact guarded intake.
         if self
             .directory
-            .atomic_create_regular(name, &bytes, 0o600)?
+            .atomic_create_regular(name, &bytes, 0o600, crate::STATE_TEMP_PURPOSE)?
             .is_none()
         {
             anyhow::ensure!(
@@ -2824,7 +2874,13 @@ impl RecoveryStore {
             self.directory.ensure_open_regular_same_mount(file)?;
         }
         self.directory
-            .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
+            .atomic_write_if_same(
+                name,
+                expected.as_ref(),
+                bytes.as_bytes(),
+                0o600,
+                crate::STATE_TEMP_PURPOSE,
+            )
             .context("durably write recovery generation")
     }
 
@@ -3146,6 +3202,7 @@ impl RecoveryStore {
                 expected,
                 bytes.as_bytes(),
                 0o600,
+                crate::STATE_TEMP_PURPOSE,
             )
             .with_context(|| {
                 format!(
@@ -3259,7 +3316,13 @@ fn publish_staging_record(
     let name = std::ffi::OsStr::new(&name);
     let expected = directory.open_regular(name, false)?;
     directory
-        .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
+        .atomic_write_if_same(
+            name,
+            expected.as_ref(),
+            bytes.as_bytes(),
+            0o600,
+            crate::STATE_TEMP_PURPOSE,
+        )
         .context("durably write staging roots")?;
     #[cfg(test)]
     if FAIL_AFTER_STAGING_PUBLICATION.with(|fail| fail.replace(false)) {
@@ -4140,6 +4203,44 @@ mod tests {
         )
         .expect("decode current Remove wire");
         decoded.validate().expect("current Remove wire validates");
+    }
+
+    #[test]
+    fn startup_sweep_removes_only_state_owned_secure_temporaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let recovery_path = temp.path().join("recovery");
+        let projection_path = recovery_path.join("thread-projection");
+        fs::create_dir_all(projection_path.join("pending")).unwrap();
+        let own = |pid: u32| format!(".secure.tmp.{}.{pid}.1", crate::STATE_TEMP_PURPOSE.as_str());
+        let owned = [
+            recovery_path.join(own(11)),
+            projection_path.join(own(12)),
+            projection_path.join("pending").join(own(13)),
+        ];
+        let retained = [
+            recovery_path.join(".secure.tmp.reset.14.1"),
+            projection_path.join(".secure.tmp.scheduler.15.1"),
+            projection_path.join("generation.json"),
+        ];
+        for path in owned.iter().chain(&retained) {
+            fs::write(path, b"bytes").unwrap();
+        }
+        let parent = lillux::PinnedDirectory::open(&recovery_path).unwrap().unwrap();
+        let projection = lillux::PinnedDirectory::open(&projection_path).unwrap().unwrap();
+
+        assert_eq!(sweep_interrupted_state_publications(&parent, &projection).unwrap(), 3);
+        for path in &owned {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &retained {
+            assert!(path.is_file(), "{}", path.display());
+        }
+
+        let retired_format = projection_path.join(".secure.tmp.16.1");
+        fs::write(&retired_format, b"unattributed").unwrap();
+        let error = sweep_interrupted_state_publications(&parent, &projection).unwrap_err();
+        assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
+        assert!(retired_format.is_file());
     }
 
     #[test]

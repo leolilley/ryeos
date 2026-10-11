@@ -5,6 +5,10 @@ use std::ffi::OsStr;
 use std::io::{Read, Seek as _, SeekFrom};
 use std::sync::Arc;
 
+/// Owner token for the secure temporaries managed activation publishes into
+/// its archive cache. Cache reconciliation removes only debris carrying it.
+const CONTENT_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("content");
+
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1070,12 +1074,22 @@ fn reconcile_activation_cache(cache: &lillux::PinnedDirectory) -> Result<()> {
         if lillux::valid_hash(name) {
             continue;
         }
-        if !name.starts_with(".secure.tmp.") {
-            bail!("managed activation cache contains an unexpected entry");
+        match lillux::classify_secure_temp_name(entry.name(), CONTENT_TEMP_PURPOSE) {
+            lillux::SecureTempOwnership::Own => cache
+                .remove_pinned_regular_if_same(&entry)
+                .context("remove managed activation cache crash orphan")?,
+            // Another owner's interrupted publication is not this cache's
+            // to remove, and it does not block reconciliation.
+            lillux::SecureTempOwnership::Foreign => continue,
+            lillux::SecureTempOwnership::Malformed => bail!(
+                "managed activation cache holds a secure temporary without an exact owner token: {}; \
+                 stop the node, remove that entry, then retry the activation",
+                entry.path().display()
+            ),
+            lillux::SecureTempOwnership::NotTemp => {
+                bail!("managed activation cache contains an unexpected entry")
+            }
         }
-        cache
-            .remove_pinned_regular_if_same(&entry)
-            .context("remove managed activation cache crash orphan")?;
     }
     cache.ensure_path_binding()?;
     Ok(())
@@ -1321,6 +1335,7 @@ fn obtain_archive(
         &mut response,
         source.maximum_compressed_bytes,
         0o600,
+        CONTENT_TEMP_PURPOSE,
     )?;
     let archive = match created {
         Some((archive, _)) => archive,
@@ -1397,6 +1412,7 @@ fn import_offline_archive(
         &mut input,
         source.maximum_compressed_bytes,
         0o600,
+        CONTENT_TEMP_PURPOSE,
     )?;
     root.ensure_path_binding()?;
     let archive = match created {
@@ -1442,7 +1458,13 @@ fn reserve_archive_cache(
     if entry_limit == 0 {
         bail!("managed archive cache entry limit is zero");
     }
-    let mut entries = cache.regular_files_bounded(CACHE_RECONCILIATION_ENTRY_LIMIT)?;
+    // Only verified archives are this cache's to account and evict; another
+    // owner's interrupted publication left by reconciliation stays in place.
+    let mut entries = cache
+        .regular_files_bounded(CACHE_RECONCILIATION_ENTRY_LIMIT)?
+        .into_iter()
+        .filter(|entry| entry.name().to_str().is_some_and(lillux::valid_hash))
+        .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.name().cmp(right.name()));
     let mut retained = entries.iter().try_fold(0u64, |total, entry| {
         total
@@ -1832,6 +1854,7 @@ fn extract_archive(
             &mut entry,
             member.maximum_bytes,
             mode,
+            CONTENT_TEMP_PURPOSE,
         )?;
         let mut file = match created {
             Some((file, _)) => file,
@@ -2106,6 +2129,7 @@ fn stage_whole_tree_entry(
                     &mut digesting,
                     maximum_file_bytes,
                     portable_mode,
+                    CONTENT_TEMP_PURPOSE,
                 )?
             };
             let (observed_size, digest) = digesting.finish();
@@ -3223,16 +3247,31 @@ mod tests {
     fn cache_reconciliation_removes_crash_orphans_before_retry_accounting() {
         let root = tempfile::tempdir().unwrap();
         let cache = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
-        let orphan_name = OsStr::new(".secure.tmp.4242.7");
-        let mut orphan = cache
-            .open_regular_create(orphan_name, true, true, 0o600)
-            .unwrap();
-        std::io::Write::write_all(&mut orphan, b"partial archive").unwrap();
-        orphan.sync_all().unwrap();
+        let orphan_name = format!(".secure.tmp.{}.4242.7", CONTENT_TEMP_PURPOSE.as_str());
+        let orphan_name = OsStr::new(&orphan_name);
+        let foreign_name = OsStr::new(".secure.tmp.state.4242.8");
+        for name in [orphan_name, foreign_name] {
+            let mut file = cache.open_regular_create(name, true, true, 0o600).unwrap();
+            std::io::Write::write_all(&mut file, b"partial archive").unwrap();
+            file.sync_all().unwrap();
+        }
 
         reconcile_activation_cache(&cache).unwrap();
 
         assert!(cache.open_regular(orphan_name, false).unwrap().is_none());
+        assert!(cache.open_regular(foreign_name, false).unwrap().is_some());
+
+        let retired_format = OsStr::new(".secure.tmp.4242.9");
+        cache
+            .open_regular_create(retired_format, true, true, 0o600)
+            .unwrap();
+        let error = reconcile_activation_cache(&cache).unwrap_err();
+        assert!(
+            error.to_string().contains("without an exact owner token"),
+            "{error:#}"
+        );
+        assert!(cache.open_regular(retired_format, false).unwrap().is_some());
+        assert!(cache.open_regular(foreign_name, false).unwrap().is_some());
     }
 
     #[test]
@@ -3278,7 +3317,13 @@ mod tests {
         let name = OsStr::new(&digest);
         let mut bytes = b"wrong archive bytes".as_slice();
         let archive = cache
-            .atomic_create_pinned_regular_from_reader(name, &mut bytes, 1024, 0o600)
+            .atomic_create_pinned_regular_from_reader(
+                name,
+                &mut bytes,
+                1024,
+                0o600,
+                CONTENT_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap()
             .0;

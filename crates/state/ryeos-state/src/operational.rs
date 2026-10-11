@@ -1963,6 +1963,7 @@ fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<File>
             None,
             OPERATIONAL_INITIALIZED_CONTENT,
             0o600,
+            crate::STATE_TEMP_PURPOSE,
         )
         .context("publish operational initialization marker")?;
     inspect_initialized_marker(directory)?.ok_or_else(|| {

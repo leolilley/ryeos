@@ -61,7 +61,13 @@ impl MailboxFiles {
         self.root.ensure_path_binding()?;
         let name = OsStr::new(name);
         if self.root.open_pinned_regular(name, false)?.is_none() {
-            match self.root.atomic_write_if_same(name, None, bytes, 0o600) {
+            match self.root.atomic_write_if_same(
+                name,
+                None,
+                bytes,
+                0o600,
+                crate::SUPERVISOR_TEMP_PURPOSE,
+            ) {
                 Ok(()) => {}
                 Err(error)
                     if error
@@ -501,6 +507,7 @@ mod tests {
                 None,
                 b"{\"partial\"",
                 0o600,
+                crate::SUPERVISOR_TEMP_PURPOSE,
             )
             .unwrap();
         assert!(
@@ -515,6 +522,7 @@ mod tests {
                 None,
                 b"{\"payload\":",
                 0o600,
+                crate::SUPERVISOR_TEMP_PURPOSE,
             )
             .unwrap();
         assert!(

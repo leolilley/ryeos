@@ -73,7 +73,13 @@ impl GcLock {
             .context("open existing GC state file")?;
         let state_bytes = serde_json::to_vec_pretty(&state)?;
         directory
-            .atomic_write_if_same(state_name, existing_state.as_ref(), &state_bytes, 0o600)
+            .atomic_write_if_same(
+                state_name,
+                existing_state.as_ref(),
+                &state_bytes,
+                0o600,
+                crate::STATE_TEMP_PURPOSE,
+            )
             .context("publish GC state file")?;
         let state_file = directory
             .open_regular(state_name, true)?

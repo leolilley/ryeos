@@ -99,7 +99,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 let name = OsString::from(format!("{}.json", entry.hash));
                 if staging
                     .directory()
-                    .atomic_create_regular(&name, &content, 0o600)?
+                    .atomic_create_regular(&name, &content, 0o600, crate::API_TEMP_PURPOSE)?
                     .is_none()
                 {
                     anyhow::bail!("duplicate remote object artifact name");

@@ -5,6 +5,8 @@
 //! native Linux x86_64 execution. No Codex executable or network/model account
 //! is needed. This enrolls a synthetic fixture account, not real Codex access.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -162,6 +164,7 @@ async fn enroll(
             &mut std::io::Cursor::new(&runtime),
             32768,
             0o755,
+            TEST_PURPOSE,
         )?
         .is_some(),
         "fixture runtime already exists"

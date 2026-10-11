@@ -111,7 +111,12 @@ mod controls {
         let fixture = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
         let initial = [0x31; 64];
-        directory.atomic_create_regular(OsStr::new("record"), &initial, 0o600).unwrap().unwrap();
+        directory.atomic_create_regular(
+            OsStr::new("record"),
+            &initial,
+            0o600,
+            crate::secure_fs::TEST_TEMP_PURPOSE,
+        ).unwrap().unwrap();
         let pin = directory.open_pinned_regular(OsStr::new("record"), true).unwrap().unwrap();
         let identity = pin.identity().unwrap();
         let deadline = MonotonicDeadline::after(crate::time::Duration::from_secs(5));

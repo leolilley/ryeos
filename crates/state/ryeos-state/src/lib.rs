@@ -7,6 +7,9 @@
 //! The crate does NOT own the signing key (daemon passes a [`Signer`] trait),
 //! item resolution (engine), or low-level CAS primitives (lillux).
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub const STATE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("state");
+
 pub mod admission;
 pub mod bundle_events;
 pub mod bundle_outbox;

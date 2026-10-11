@@ -365,7 +365,12 @@ pub fn request_outer_settlement(
         started.read_stable_bounded(&started.observation()?, MAX_OUTER_COMPLETION_BYTES as u64)?;
     ConsumerOuterCompletionRequest::parse_for_inputs(&started_bytes, record, challenge)?;
     if protected_owner
-        .atomic_create_pinned_regular(OsStr::new(OUTER_FINISH), &expected, 0o400)?
+        .atomic_create_pinned_regular(
+            OsStr::new(OUTER_FINISH),
+            &expected,
+            0o400,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .is_none()
     {
         ensure!(
@@ -450,7 +455,12 @@ pub fn run_outer_protocol(
     let start_bytes =
         ConsumerOuterCompletionRequest::for_inputs(record, challenge)?.canonical_bytes()?;
     protected_owner
-        .atomic_create_pinned_regular(OsStr::new(OUTER_START), &start_bytes, 0o400)?
+        .atomic_create_pinned_regular(
+            OsStr::new(OUTER_START),
+            &start_bytes,
+            0o400,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .context("outer owner execution was already attempted")?;
     let observed = crate::native_guest::run_prepared_protocol(
         || completion_requested(protected_owner, record, challenge),
@@ -496,7 +506,12 @@ pub fn run_outer_protocol(
         "outer owner evidence exceeds bound"
     );
     protected_owner
-        .atomic_create_pinned_regular(OsStr::new(OUTER_OBSERVATION), &bytes, 0o400)?
+        .atomic_create_pinned_regular(
+            OsStr::new(OUTER_OBSERVATION),
+            &bytes,
+            0o400,
+            crate::VERIFIER_TEMP_PURPOSE,
+        )?
         .context("outer owner observation already exists")?;
     protected_owner.ensure_path_binding()?;
     ensure!(

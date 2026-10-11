@@ -378,6 +378,7 @@ impl<'a> ScheduleSourceMutation<'a> {
             self.current_file.as_ref(),
             &bytes,
             0o600,
+            crate::API_TEMP_PURPOSE,
         )?;
         let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
         let verified =

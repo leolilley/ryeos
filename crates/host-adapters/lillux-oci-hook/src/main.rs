@@ -1,4 +1,7 @@
 //! Installed OCI lifecycle hook for the hard-contained workflow product.
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const OCI_HOOK_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("oci-hook");
+
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read as _;
@@ -282,7 +285,13 @@ fn write_record(
         existing.require_owner(0)?;
     }
     let bytes = lillux::canonical_json(&serde_json::to_value(record)?)?.into_bytes();
-    directory.atomic_write_pinned_if_same(name.as_ref(), existing.as_ref(), &bytes, 0o600)?;
+    directory.atomic_write_pinned_if_same(
+        name.as_ref(),
+        existing.as_ref(),
+        &bytes,
+        0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
+    )?;
     Ok(())
 }
 
@@ -320,6 +329,7 @@ fn write_setup_transaction(
         existing.as_ref(),
         &bytes,
         0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
     )?;
     Ok(())
 }
@@ -448,6 +458,7 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
         existing.as_ref(),
         &bytes,
         0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
     )?;
     process_root
         .require_retained_lifetime()

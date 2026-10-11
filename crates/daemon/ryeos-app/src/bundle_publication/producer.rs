@@ -1866,7 +1866,13 @@ impl PersistentBundleReleaseAdapter {
         let name = format!("{id}.json");
         let incumbent = directory.open_regular(OsStr::new(&name), false)?;
         let bytes = lillux::canonical_json(value)?.into_bytes();
-        directory.atomic_write_if_same(OsStr::new(&name), incumbent.as_ref(), &bytes, 0o600)?;
+        directory.atomic_write_if_same(
+            OsStr::new(&name),
+            incumbent.as_ref(),
+            &bytes,
+            0o600,
+            crate::APP_TEMP_PURPOSE,
+        )?;
         directory.ensure_path_binding()?;
         Ok(())
     }

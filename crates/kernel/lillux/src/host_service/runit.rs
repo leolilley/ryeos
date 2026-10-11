@@ -13,6 +13,7 @@ use crate::{
 };
 
 const RECORDS: &str = "lillux-host-service";
+const HOST_SERVICE_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("host-service");
 const LAUNCH_RECORD: &str = "launch.json";
 const MANAGER_RECORD: &str = "manager.json";
 const STATE_DIRECTORY: &str = "state";
@@ -177,6 +178,7 @@ impl HostServiceController for RunitService {
                 None,
                 b"",
                 0o644,
+                HOST_SERVICE_TEMP_PURPOSE,
             ),
             (false, Some(file)) => self.directory.remove_pinned_regular_if_same(&file),
             _ => Ok(()),
@@ -313,7 +315,13 @@ fn ensure_root_regular(
     mode: u32,
 ) -> Result<()> {
     let Some(existing) = directory.open_pinned_regular(OsStr::new(name), false)? else {
-        return directory.atomic_write_pinned_if_same(OsStr::new(name), None, bytes, mode);
+        return directory.atomic_write_pinned_if_same(
+            OsStr::new(name),
+            None,
+            bytes,
+            mode,
+            HOST_SERVICE_TEMP_PURPOSE,
+        );
     };
     existing.require_owner(0)?;
     let current = existing.read_stable_bounded(&existing.observation()?, 64 * 1024)?;

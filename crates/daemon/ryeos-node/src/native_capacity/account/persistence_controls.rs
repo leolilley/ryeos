@@ -46,9 +46,9 @@ impl Fixture {
         let (policy, genesis, target) = redo::controls::fixture();
         let debit = genesis.successor(Operation::Debit, target, &policy).unwrap();
         let account = directory.atomic_create_pinned_regular(OsStr::new("account"),
-            &encode(genesis.target()).unwrap(), 0o600).unwrap().unwrap();
+            &encode(genesis.target()).unwrap(), 0o600, crate::NODE_TEMP_PURPOSE).unwrap().unwrap();
         directory.atomic_create_pinned_regular(OsStr::new("anchor"),
-            &genesis.encode(&policy).unwrap(), 0o600).unwrap().unwrap();
+            &genesis.encode(&policy).unwrap(), 0o600, crate::NODE_TEMP_PURPOSE).unwrap().unwrap();
         let store = RetainedStore::open(directory.try_clone().unwrap(), account.identity().unwrap()).unwrap();
         let mut anchor = RetainedAnchor::retain(directory.try_clone().unwrap(), directory.identity().unwrap()).unwrap();
         let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(30));
@@ -135,7 +135,12 @@ fn pending_recovery_charge_cannot_retry_the_earlier_debit_or_refund_consumption(
 fn unbound_stage_refuses_before_more_staging_and_remains_available_to_operator() {
     let mut f = Fixture::new();
     let name = OsStr::new(".secure.authoring.unbound");
-    let orphan = f.directory.atomic_create_pinned_regular(name, b"unbound stage", 0o600).unwrap().unwrap();
+    let orphan = f.directory.atomic_create_pinned_regular(
+        name,
+        b"unbound stage",
+        0o600,
+        crate::NODE_TEMP_PURPOSE,
+    ).unwrap().unwrap();
     let identity = orphan.identity().unwrap();
     for _ in 0..3 {
         assert!(f.publish(f.debit).is_err());

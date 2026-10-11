@@ -47,6 +47,7 @@ impl OwnedQualificationFixture {
                 OsStr::new(&contract.leaf),
                 &bytes,
                 ProjectFile::REGULAR_MODE,
+                crate::GUEST_TEMP_PURPOSE,
             )?
             .context("new Q fixture leaf already exists")?;
         require_time(deadline)?;
@@ -224,7 +225,7 @@ mod tests {
         let (_temporary, fixture) = make_fixture(b"initial");
         fixture
             .directory
-            .atomic_create_regular(OsStr::new("extra"), b"", 0o600)
+            .atomic_create_regular(OsStr::new("extra"), b"", 0o600, crate::GUEST_TEMP_PURPOSE)
             .unwrap();
         assert!(fixture.read_frozen_file(deadline()).is_err());
 

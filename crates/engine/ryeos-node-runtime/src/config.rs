@@ -81,6 +81,7 @@ fn publish_bootstrap_config(
         existing.as_ref(),
         yaml.as_bytes(),
         0o600,
+        crate::NODE_RUNTIME_TEMP_PURPOSE,
     )
     .context("publish daemon bootstrap config")?;
     Ok(true)

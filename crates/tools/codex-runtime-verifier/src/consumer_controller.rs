@@ -1182,7 +1182,12 @@ pub(crate) mod tests {
                         .unwrap()
                         .into_bytes();
                     let file = directory
-                        .atomic_create_pinned_regular(name, &bytes, 0o400)
+                        .atomic_create_pinned_regular(
+                            name,
+                            &bytes,
+                            0o400,
+                            crate::VERIFIER_TEMP_PURPOSE,
+                        )
                         .unwrap()
                         .unwrap();
                     Some((file.observation().unwrap(), bytes))
