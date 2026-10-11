@@ -3762,13 +3762,10 @@ mod tests {
         impl SchedulerHistoryResetParticipant for Participant {
             fn preflight(&self, permit: &SchedulerResetPreview<'_>) -> Result<()> {
                 let runtime = permit.runtime_directory()?;
-                let recovery = runtime
-                    .open_child_directory(std::ffi::OsStr::new("recovery"))?
-                    .context("recovery namespace absent")?;
+                let recovery =
+                    ryeos_state::RecoveryStore::from_refs_root(&runtime.path().join("refs"))?;
                 assert!(
-                    recovery
-                        .entry_no_follow(std::ffi::OsStr::new("thread-history-discard.json"))?
-                        .is_none(),
+                    !recovery.thread_history_discard_in_progress()?,
                     "preflight must precede State activation"
                 );
                 let call = self
@@ -3813,15 +3810,12 @@ mod tests {
                 permit: &SchedulerResetRetirement<'_, '_>,
                 _retirement: &SchedulerHistoryRetirement,
             ) -> Result<usize> {
-                let recovery = permit
-                    .runtime_directory()?
-                    .open_child_directory(std::ffi::OsStr::new("recovery"))?
-                    .context("recovery namespace absent")?;
+                let recovery = ryeos_state::RecoveryStore::from_refs_root(
+                    &permit.runtime_directory()?.path().join("refs"),
+                )?;
                 assert!(
-                    recovery
-                        .entry_no_follow(std::ffi::OsStr::new("thread-history-discard.json"))?
-                        .is_some(),
-                    "cross-store marker must remain through terminal scheduler acknowledgement"
+                    recovery.thread_history_discard_in_progress()?,
+                    "cross-store marker must remain Active through terminal scheduler acknowledgement"
                 );
                 self.completed
                     .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3860,11 +3854,16 @@ mod tests {
                 .completed
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
+        let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(
+            &config.runtime_state_dir(),
+        )
+        .unwrap();
+        assert!(!recovery.thread_history_discard_in_progress().unwrap());
         assert!(
-            !config
-                .runtime_state_dir()
-                .join("recovery/thread-history-discard.json")
-                .exists()
+            recovery
+                .last_acknowledged_thread_history_discard()
+                .unwrap()
+                .is_some()
         );
     }
 

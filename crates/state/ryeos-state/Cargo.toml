@@ -32,5 +32,6 @@ url = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+lillux = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

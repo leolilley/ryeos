@@ -149,6 +149,27 @@ impl OriginalStateTerminalSnapshot {
     }
 }
 
+/// Memory and steps of one fresh State ACK receipt and its verification.
+const STATE_ACK_RECEIPT_MEMORY_BYTES: u64 = 256;
+const STATE_ACK_RECEIPT_STEPS: u64 = 1;
+
+/// (read bytes, memory bytes, cleanup steps) one State ACK attempt that
+/// rewrites the discard marker charges before any effect: the marker
+/// rewrite's bounded work plus the fresh receipt.
+pub const STATE_ACK_EFFECT_PREPAY: (u64, u64, u64) = {
+    let quote = crate::recovery::thread_history_discard_acknowledgement_quote();
+    (
+        quote.read_bytes,
+        quote.memory_bytes + STATE_ACK_RECEIPT_MEMORY_BYTES,
+        quote.steps + STATE_ACK_RECEIPT_STEPS,
+    )
+};
+
+/// (read bytes, memory bytes, cleanup steps) a replay of a cached State ACK
+/// charges: the fresh receipt only, with no marker read or rewrite.
+pub const STATE_ACK_REPLAY_PREPAY: (u64, u64, u64) =
+    (0, STATE_ACK_RECEIPT_MEMORY_BYTES, STATE_ACK_RECEIPT_STEPS);
+
 /// Keeps every actual State root, factory and generation custody after SQL close.
 /// Native close is not filesystem disposal, aggregate settlement or success.
 pub struct ClosedOriginalState {
@@ -250,9 +271,10 @@ impl ClosedOriginalState {
     ) -> anyhow::Result<Arc<OriginalStateAcknowledgement>> {
         authority.require(self)?;
         if let Some(body) = self.acknowledgement.get() {
-            // A cached effect needs no marker read/removal. Prepay only this
+            // A cached effect needs no marker read or rewrite. Prepay only this
             // fresh bounded receipt and its verification under original custody.
-            (authority.prepay)(0, 256, 1)?;
+            let (read_bytes, memory_bytes, steps) = STATE_ACK_REPLAY_PREPAY;
+            (authority.prepay)(read_bytes, memory_bytes, steps)?;
             let receipt = Arc::new(OriginalStateAcknowledgement {
                 state: self.clone(),
                 body: body.clone(),
@@ -265,12 +287,16 @@ impl ClosedOriginalState {
             )?;
             return Ok(receipt);
         }
-        // The recovery reader admits at most 512 marker bytes and probes one
-        // extra byte to refuse growth. Charge all 513 read bytes, bounded
-        // scratch/decoded marker and ACK receipts plus the finite
-        // identity/read/remove/directory-sync work BEFORE any ACK effect.
-        // Each uncertain attempt consumes the same original counters.
-        (authority.prepay)(513, 2048, 32)?;
+        // Charge one complete ACK attempt BEFORE any ACK effect: the marker
+        // rewrite's bounded quote (513 read bytes: 512 admitted plus the
+        // growth probe; memory for the read buffer, decoded marker, encoded
+        // Acknowledged bytes and temporary-name scratch; pinned intake,
+        // conditional atomic write and directory sync steps) plus the fresh
+        // receipt and its verification, which the cached path above charges
+        // as 256 bytes and one step. Each uncertain attempt consumes the
+        // same original counters.
+        let (read_bytes, memory_bytes, steps) = STATE_ACK_EFFECT_PREPAY;
+        (authority.prepay)(read_bytes, memory_bytes, steps)?;
         authority.require(self)?;
         let recovery = {
             let custody = self
@@ -282,7 +308,7 @@ impl ClosedOriginalState {
             };
             context.recovery.final_ack_custody()
         };
-        // No State bookkeeping guard spans marker read, removal or sync.
+        // No State bookkeeping guard spans marker read, rewrite or sync.
         recovery.finish(authority.guard, authority.operation)?;
         drop(recovery);
 
@@ -1921,5 +1947,17 @@ mod outside_quote_tests {
         assert_eq!(quote_state_physical_transfer(2).unwrap(),
             OutsideWork { bytes: 9216, steps: 80 });
         assert!(quote_state_physical_transfer(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn state_ack_prepay_is_the_marker_rewrite_quote_plus_one_receipt() {
+        let rewrite = crate::recovery::thread_history_discard_acknowledgement_quote();
+        let (read, memory, steps) = super::STATE_ACK_EFFECT_PREPAY;
+        let (replay_read, replay_memory, replay_steps) = super::STATE_ACK_REPLAY_PREPAY;
+        assert_eq!(read, 513);
+        assert_eq!((replay_read, replay_memory, replay_steps), (0, 256, 1));
+        assert_eq!(memory, rewrite.memory_bytes + replay_memory);
+        assert_eq!(steps, rewrite.steps + replay_steps);
+        assert_eq!(steps, 15);
     }
 }

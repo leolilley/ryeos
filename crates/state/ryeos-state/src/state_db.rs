@@ -68,7 +68,7 @@ pub use destination_join::{
     quote_state_source_coalescing,
 };
 pub(crate) use destination_join::OriginalStateDestinationJoin;
-pub use original_close::{OriginalStatePhysicalCustody, OriginalOutsideStateFinalizer, OriginalStateOutsideRetirementFailure, ClosedOriginalState, OriginalStateFinalizer, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority, OriginalStateRetirementFailure, ReleasedOriginalStateRetirement};
+pub use original_close::{STATE_ACK_EFFECT_PREPAY, STATE_ACK_REPLAY_PREPAY, OriginalStatePhysicalCustody, OriginalOutsideStateFinalizer, OriginalStateOutsideRetirementFailure, ClosedOriginalState, OriginalStateFinalizer, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority, OriginalStateRetirementFailure, ReleasedOriginalStateRetirement};
 #[doc(hidden)]
 pub use original_close::{
     quote_state_finalizer_frame, quote_state_outside_continuation,
@@ -8922,6 +8922,177 @@ mod tests {
         assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
         assert!(retired_format.is_file());
         assert!(foreign.is_file());
+    }
+
+    fn discard_operation_for_startup() -> crate::recovery::ThreadHistoryDiscardOperationRef {
+        crate::recovery::ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        }
+    }
+
+    /// The marker gate runs before every SQLite open, so its verdict is
+    /// observable whether or not this host admits the later database opens.
+    fn locked_open_error(root_path: &Path) -> Option<String> {
+        let root = lillux::PinnedDirectory::open(root_path).unwrap().unwrap();
+        let lock = root.lock_exclusive().unwrap();
+        StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
+            root_path,
+            root,
+            lock,
+            Arc::new(RecordingRepairSink::default()),
+            test_trust_store(),
+            &NoLiveRecovery,
+        )
+        .err()
+        .map(|error| format!("{error:#}"))
+    }
+
+    #[test]
+    fn startup_accepts_an_acknowledged_discard_marker_and_refuses_active_or_retired_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let operation = discard_operation_for_startup();
+        let store = crate::recovery::RecoveryStore::from_runtime_state_dir(dir.path()).unwrap();
+        crate::recovery::CasMutationGuard::ensure_anchor(dir.path()).unwrap();
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        drop(guard);
+        let active = locked_open_error(dir.path())
+            .expect("ordinary startup must refuse an Active discard marker");
+        assert!(active.contains("offline execution-history reset is incomplete"), "{active}");
+
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        drop(guard);
+        let marker = store.root().join("thread-history-discard.json");
+        assert!(marker.is_file(), "the Acknowledged record persists");
+        assert!(!store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(store.thread_history_discard_operation().unwrap(), None);
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation.clone())
+        );
+        if let Some(error) = locked_open_error(dir.path()) {
+            assert!(
+                !error.contains("reset is incomplete") && !error.contains("thread-history discard"),
+                "an Acknowledged marker must not block startup: {error}"
+            );
+        }
+
+        let retired = format!(
+            "{{\"kind\":\"thread_history_discard\",\"operation\":{{\"operation_id\":\"{}\",\"sha256\":\"{}\"}},\"schema\":2}}",
+            operation.operation_id, operation.sha256
+        );
+        std::fs::write(&marker, retired.as_bytes()).unwrap();
+        let refused = locked_open_error(dir.path())
+            .expect("ordinary startup must refuse a retired-schema discard marker");
+        assert!(
+            refused.contains(crate::recovery::EXECUTION_HISTORY_SCRATCH_REPAIR),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), retired.into_bytes());
+    }
+
+    const ACK_ABORT_CHILD: &str = "RYEOS_STATE_ACK_ABORT_CHILD";
+
+    /// Child half of `crash_during_acknowledgement_leaves_only_state_debris_for_the_startup_sweep`.
+    /// It does nothing unless that test spawned this process.
+    #[test]
+    fn acknowledgement_abort_child() {
+        let Ok(root) = std::env::var(ACK_ABORT_CHILD) else {
+            return;
+        };
+        lillux::disable_process_core_dumps().unwrap();
+        let root = Path::new(&root);
+        let store = crate::recovery::RecoveryStore::from_runtime_state_dir(root).unwrap();
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(root).unwrap();
+        lillux::test_hooks::set_atomic_create_hook(
+            lillux::test_hooks::AtomicCreateHookSelector {
+                purpose: crate::STATE_TEMP_PURPOSE,
+                target: "thread-history-discard.json".into(),
+                occurrence: 1,
+            },
+            lillux::test_hooks::AtomicCreateHookAction::Abort,
+        );
+        let result = store.finish_thread_history_discard(&guard, &discard_operation_for_startup());
+        panic!("armed abort hook did not fire during acknowledgement: {result:?}");
+    }
+
+    #[test]
+    fn crash_during_acknowledgement_leaves_only_state_debris_for_the_startup_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let operation = discard_operation_for_startup();
+        let store = crate::recovery::RecoveryStore::from_runtime_state_dir(dir.path()).unwrap();
+        crate::recovery::CasMutationGuard::ensure_anchor(dir.path()).unwrap();
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        drop(guard);
+        let marker = store.root().join("thread-history-discard.json");
+        let active = std::fs::read(&marker).unwrap();
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state_db::tests::acknowledgement_abort_child",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(ACK_ABORT_CHILD, dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let status = child.wait_with_output().unwrap().status;
+        assert!(!status.success() && status.code().is_none(), "{status:?}");
+
+        // The rename never happened: the marker is the exact Active record,
+        // and the only other entry is the child's State-owned temporary.
+        assert_eq!(std::fs::read(&marker).unwrap(), active);
+        assert_eq!(store.thread_history_discard_operation().unwrap(), Some(operation.clone()));
+        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(store.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "thread-history-discard.json")
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        let debris = names.pop().unwrap();
+        match lillux::parse_secure_temp_name(&debris) {
+            lillux::SecureTempClass::Temp { purpose, pid: owner, seq: _ } => {
+                assert_eq!(purpose, crate::STATE_TEMP_PURPOSE.as_str());
+                assert_eq!(owner, pid);
+            }
+            other => panic!("unexpected debris {other:?}"),
+        }
+        let debris = store.root().join(debris);
+
+        // The resumed acknowledgement publishes through a fresh temporary.
+        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        drop(guard);
+        assert!(debris.is_file());
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation.clone())
+        );
+        drop(store);
+
+        if let Some(error) = locked_open_error(dir.path()) {
+            assert!(
+                !error.contains("reset is incomplete"),
+                "an Acknowledged marker must not block startup: {error}"
+            );
+        }
+        assert!(!debris.exists(), "{}", debris.display());
+        assert!(marker.is_file());
     }
 
     #[derive(Default)]

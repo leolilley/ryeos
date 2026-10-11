@@ -195,10 +195,26 @@ pub(crate) struct RecoveryAcknowledgementCustody {
     directory: std::sync::Arc<lillux::PinnedDirectory>,
 }
 impl RecoveryAcknowledgementCustody {
+    /// Rewrite this exact operation's Active marker to Acknowledged in one
+    /// same-coordinate rename, so the marker is never absent between the two
+    /// phases. A retry over the same Acknowledged operation only syncs.
     pub(crate) fn finish(
         &self,
         cas_mutation_guard: &CasMutationGuard,
         operation: &ThreadHistoryDiscardOperationRef,
+    ) -> Result<()> {
+        let mut work = AcknowledgementWork::default();
+        self.finish_counted(cas_mutation_guard, operation, &mut work)
+    }
+
+    /// `finish` with every bounded read, allocation and filesystem step
+    /// tallied into `work`, so the caller's prepaid quote can be checked
+    /// against the work actually performed.
+    fn finish_counted(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
+        work: &mut AcknowledgementWork,
     ) -> Result<()> {
         anyhow::ensure!(
             cas_mutation_guard.is_exclusive(),
@@ -207,34 +223,112 @@ impl RecoveryAcknowledgementCustody {
         cas_mutation_guard.ensure_protects_pinned_runtime(&self.runtime_directory)?;
         operation.validate()?;
         let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        let Some(pin) = self.directory.open_mount_entry(name)? else {
-            return self
-                .directory
-                .sync()
-                .context("sync acknowledged thread-history discard activation");
-        };
+        let (pin, marker) = pin_thread_history_discard_marker(&self.directory, work)?
+            .context("thread-history discard acknowledgement found no marker to acknowledge")?;
         anyhow::ensure!(
-            read_thread_history_discard_operation(&self.directory)?.as_ref() == Some(operation),
-            "thread-history discard acknowledgement differs from its active operation"
+            &marker.operation == operation,
+            "thread-history discard acknowledgement differs from its marker's operation"
         );
-        let pinned = lillux::observe_open_file_identity(&pin)?;
-        let current = self
-            .directory
-            .entry_no_follow(name)?
-            .context("thread-history discard marker disappeared before acknowledgement")?;
-        anyhow::ensure!(
-            current.entry_type == lillux::PinnedEntryType::Regular
-                && current.containing_device == pinned.device()
-                && current.inode == pinned.inode(),
-            "thread-history discard marker changed before acknowledgement"
-        );
-        self.directory
-            .remove_if_same(name, &pin)
-            .context("remove completed thread-history discard activation")?;
-        self.directory
-            .sync()
-            .context("sync completed thread-history discard activation")
+        match marker.phase {
+            ThreadHistoryDiscardPhase::Acknowledged => {
+                work.steps += 1;
+                self.directory
+                    .sync()
+                    .context("sync acknowledged thread-history discard")
+            }
+            ThreadHistoryDiscardPhase::Active => {
+                let acknowledged = ThreadHistoryDiscardMarker::for_operation(
+                    operation,
+                    ThreadHistoryDiscardPhase::Acknowledged,
+                )?
+                .canonical_bytes()?;
+                work.memory_bytes += acknowledged.capacity() as u64 + ACK_TEMP_NAME_SCRATCH_BYTES;
+                work.steps += ACK_ATOMIC_WRITE_STEPS;
+                self.directory
+                    .atomic_write_if_same(
+                        name,
+                        Some(&pin),
+                        &acknowledged,
+                        0o600,
+                        crate::STATE_TEMP_PURPOSE,
+                    )
+                    .context("acknowledge completed thread-history discard")?;
+                work.steps += 1;
+                self.directory
+                    .sync()
+                    .context("sync completed thread-history discard acknowledgement")
+            }
+        }
     }
+}
+
+/// Bounded read, memory and filesystem steps of one ACK attempt.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcknowledgementWork {
+    pub(crate) read_bytes: u64,
+    pub(crate) memory_bytes: u64,
+    pub(crate) steps: u64,
+}
+
+/// Upper bound on a secure temporary's NUL-terminated name: the 12-byte
+/// `.secure.tmp.` prefix, a purpose token of at most 16 bytes, a separator, a
+/// decimal u32 pid (10), a separator, a decimal u64 sequence (20) and the NUL.
+const ACK_TEMP_NAME_SCRATCH_BYTES: u64 = 12 + 16 + 1 + 10 + 1 + 20 + 1;
+
+/// Filesystem steps inside one conditional atomic write: temporary create,
+/// mode set, write, fsync, interruption hook check, incumbent identity check,
+/// rename and directory sync.
+const ACK_ATOMIC_WRITE_STEPS: u64 = 8;
+
+/// Filesystem steps of pinned marker intake: pin, presence probe, guarded
+/// open and bounded read, pinned identity, and current-entry identity.
+const MARKER_PINNED_INTAKE_STEPS: u64 = 5;
+
+/// The prepaid bound of one ACK attempt that rewrites an Active marker to
+/// Acknowledged. Reads: every admitted marker byte plus the one growth probe.
+/// Memory: the read buffer, the decoded marker with its three strings, the
+/// canonical re-encoding it is compared against, the encoded Acknowledged
+/// bytes and the temporary-name scratch. Steps: pinned
+/// intake, the conditional atomic write and the final directory sync. A retry
+/// over an Acknowledged marker does strictly less.
+pub(crate) const fn thread_history_discard_acknowledgement_quote() -> AcknowledgementWork {
+    let max = THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64;
+    AcknowledgementWork {
+        read_bytes: max + 1,
+        memory_bytes: (max + 1)
+            + (std::mem::size_of::<ThreadHistoryDiscardMarker>() as u64 + max)
+            + max
+            + max
+            + ACK_TEMP_NAME_SCRATCH_BYTES,
+        steps: MARKER_PINNED_INTAKE_STEPS + ACK_ATOMIC_WRITE_STEPS + 1,
+    }
+}
+
+/// Pin the marker inode, read it through the guarded reader and prove the
+/// read named the pinned inode. Absent markers return `None`.
+fn pin_thread_history_discard_marker(
+    directory: &lillux::PinnedDirectory,
+    work: &mut AcknowledgementWork,
+) -> Result<Option<(std::fs::File, ThreadHistoryDiscardMarker)>> {
+    let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+    work.steps += 1;
+    let Some(pin) = directory.open_mount_entry(name)? else {
+        return Ok(None);
+    };
+    let marker = read_thread_history_discard_marker_in(None, directory, work)?
+        .context("thread-history discard marker disappeared during pinned intake")?;
+    work.steps += 2;
+    let pinned = lillux::observe_open_file_identity(&pin)?;
+    let current = directory
+        .entry_no_follow(name)?
+        .context("thread-history discard marker disappeared during pinned intake")?;
+    anyhow::ensure!(
+        current.entry_type == lillux::PinnedEntryType::Regular
+            && current.containing_device == pinned.device()
+            && current.inode == pinned.inode(),
+        "thread-history discard marker changed during pinned intake"
+    );
+    Ok(Some((pin, marker)))
 }
 
 /// Thread-projection children that hold State's durable recovery records.
@@ -308,14 +402,31 @@ fn read_thread_history_discard_operation(
     read_thread_history_discard_operation_in(None, directory)
 }
 
+/// The in-progress operation: only an Active marker names one. An
+/// Acknowledged marker is the completed record of the last discard.
 fn read_thread_history_discard_operation_in(
     factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     directory: &lillux::PinnedDirectory,
 ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+    let mut work = AcknowledgementWork::default();
+    Ok(
+        read_thread_history_discard_marker_in(factory, directory, &mut work)?
+            .filter(|marker| marker.phase == ThreadHistoryDiscardPhase::Active)
+            .map(|marker| marker.operation),
+    )
+}
+
+fn read_thread_history_discard_marker_in(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    directory: &lillux::PinnedDirectory,
+    work: &mut AcknowledgementWork,
+) -> Result<Option<ThreadHistoryDiscardMarker>> {
     let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+    work.steps += 1;
     if directory.entry_no_follow(name)?.is_none() {
         return Ok(None);
     }
+    work.steps += 1;
     let bytes = guarded_evidence_read(
         factory,
         directory,
@@ -323,13 +434,22 @@ fn read_thread_history_discard_operation_in(
         THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
     )?
     .context("thread-history discard marker disappeared during intake")?;
+    work.read_bytes += bytes.len() as u64 + 1;
+    work.memory_bytes += bytes.capacity() as u64;
+    ThreadHistoryDiscardMarker::refuse_retired_schema(&bytes)?;
     let marker: ThreadHistoryDiscardMarker =
         serde_json::from_slice(&bytes).context("decode strict thread-history discard marker")?;
+    work.memory_bytes += (std::mem::size_of::<ThreadHistoryDiscardMarker>()
+        + marker.kind.capacity()
+        + marker.operation.operation_id.capacity()
+        + marker.operation.sha256.capacity()) as u64;
+    let canonical = marker.canonical_bytes()?;
+    work.memory_bytes += canonical.capacity() as u64;
     anyhow::ensure!(
-        marker.canonical_bytes()? == bytes,
+        canonical == bytes,
         "thread-history discard marker is not canonical"
     );
-    Ok(Some(marker.operation))
+    Ok(Some(marker))
 }
 
 fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 32]> {
@@ -347,6 +467,35 @@ fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 3
 
 const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
 const THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES: usize = 512;
+const THREAD_HISTORY_DISCARD_MARKER_KIND: &str = "thread_history_discard";
+const THREAD_HISTORY_DISCARD_MARKER_SCHEMA: u32 = 3;
+/// The marker schema before the Active/Acknowledged phase existed. It is
+/// refused, never upgraded.
+const RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA: u32 = 2;
+
+/// The explicit repair that clears execution-history reset scratch and a
+/// retired thread-history discard marker.
+pub const EXECUTION_HISTORY_SCRATCH_REPAIR: &str =
+    "ryeos node reset execution-history-scratch --confirm";
+
+/// A thread-history discard marker written under a retired schema. Startup
+/// and reset refuse it; only the explicit scratch repair clears it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredThreadHistoryDiscardMarker {
+    pub schema: u32,
+}
+
+impl std::fmt::Display for RetiredThreadHistoryDiscardMarker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "thread-history discard marker uses retired schema {}; stop the node and run `{}` to clear it",
+            self.schema, EXECUTION_HISTORY_SCRATCH_REPAIR
+        )
+    }
+}
+
+impl std::error::Error for RetiredThreadHistoryDiscardMarker {}
 
 /// Opaque activation reference. Shape validation is not operation authority:
 /// App must authenticate the staged signed bytes, options and original owners.
@@ -375,41 +524,89 @@ impl ThreadHistoryDiscardOperationRef {
     }
 }
 
+/// Whether a discard is still in progress or is the acknowledged record of
+/// the last completed discard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ThreadHistoryDiscardPhase {
+    Active,
+    Acknowledged,
+}
+
+impl ThreadHistoryDiscardPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadHistoryDiscardMarker {
     kind: String,
     schema: u32,
+    phase: ThreadHistoryDiscardPhase,
     operation: ThreadHistoryDiscardOperationRef,
 }
 
+/// Only the schema number of a marker of any generation.
+#[derive(Deserialize)]
+struct ThreadHistoryDiscardMarkerSchemaProbe {
+    schema: u32,
+}
+
 impl ThreadHistoryDiscardMarker {
-    fn for_operation(operation: &ThreadHistoryDiscardOperationRef) -> Result<Self> {
+    fn for_operation(
+        operation: &ThreadHistoryDiscardOperationRef,
+        phase: ThreadHistoryDiscardPhase,
+    ) -> Result<Self> {
         operation.validate()?;
         Ok(Self {
-            kind: "thread_history_discard".to_owned(),
-            schema: 2,
+            kind: THREAD_HISTORY_DISCARD_MARKER_KIND.to_owned(),
+            schema: THREAD_HISTORY_DISCARD_MARKER_SCHEMA,
+            phase,
             operation: operation.clone(),
         })
     }
 
+    /// Refuse a retired-schema marker with its typed error before strict
+    /// decoding reports it as merely malformed.
+    fn refuse_retired_schema(bytes: &[u8]) -> Result<()> {
+        if let Ok(probe) = serde_json::from_slice::<ThreadHistoryDiscardMarkerSchemaProbe>(bytes)
+            && probe.schema == RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA
+        {
+            return Err(RetiredThreadHistoryDiscardMarker {
+                schema: probe.schema,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn canonical_bytes(&self) -> Result<Vec<u8>> {
         anyhow::ensure!(
-            self.kind == "thread_history_discard" && self.schema == 2,
+            self.kind == THREAD_HISTORY_DISCARD_MARKER_KIND
+                && self.schema == THREAD_HISTORY_DISCARD_MARKER_SCHEMA,
             "unsupported thread-history discard marker"
         );
         self.operation.validate()?;
-        // This validated schema has only fixed ASCII kind/schema and two
-        // exact hexadecimal strings. Write its canonical sorted-key JSON
-        // directly into one bounded buffer, without intermediate JSON maps.
+        // This validated schema has only a fixed ASCII kind, schema and phase
+        // and two exact hexadecimal strings. Write its canonical sorted-key
+        // JSON directly into one bounded buffer, without intermediate maps.
         let mut bytes = Vec::with_capacity(THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES);
-        bytes.extend_from_slice(
-            b"{\"kind\":\"thread_history_discard\",\"operation\":{\"operation_id\":\"",
-        );
+        bytes.extend_from_slice(b"{\"kind\":\"");
+        bytes.extend_from_slice(THREAD_HISTORY_DISCARD_MARKER_KIND.as_bytes());
+        bytes.extend_from_slice(b"\",\"operation\":{\"operation_id\":\"");
         bytes.extend_from_slice(self.operation.operation_id.as_bytes());
         bytes.extend_from_slice(b"\",\"sha256\":\"");
         bytes.extend_from_slice(self.operation.sha256.as_bytes());
-        bytes.extend_from_slice(b"\"},\"schema\":2}");
+        bytes.extend_from_slice(b"\"},\"phase\":\"");
+        bytes.extend_from_slice(self.phase.as_str().as_bytes());
+        bytes.extend_from_slice(b"\",\"schema\":");
+        bytes.extend_from_slice(THREAD_HISTORY_DISCARD_MARKER_SCHEMA.to_string().as_bytes());
+        bytes.push(b'}');
         anyhow::ensure!(
             bytes.len() <= THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
             "thread-history discard marker exceeds its byte bound"
@@ -2317,15 +2514,32 @@ impl RecoveryStore {
         read_thread_history_discard_operation_in(factory, &self.directory)
     }
 
-    /// Ordinary startup refuses any active marker, including malformed or
-    /// unsupported evidence. Re-entry must verify the exact staged operation
-    /// before a projection preview can manufacture new accounting.
+    /// Ordinary startup refuses an Active marker and any malformed,
+    /// unsupported or retired-schema evidence. An Acknowledged marker is the
+    /// record of a completed discard and does not block startup. Re-entry must
+    /// verify the exact staged operation before a projection preview can
+    /// manufacture new accounting.
     pub fn thread_history_discard_in_progress(&self) -> Result<bool> {
         Ok(self.thread_history_discard_operation()?.is_some())
     }
 
+    /// The operation of the last completed discard, when the marker records
+    /// one as Acknowledged. An Active marker returns `None`.
+    pub fn last_acknowledged_thread_history_discard(
+        &self,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        let mut work = AcknowledgementWork::default();
+        Ok(
+            read_thread_history_discard_marker_in(None, &self.directory, &mut work)?
+                .filter(|marker| marker.phase == ThreadHistoryDiscardPhase::Acknowledged)
+                .map(|marker| marker.operation),
+        )
+    }
+
     /// Activate the already-staged immutable operation after actual CAS
     /// admission. An uncertain acknowledgement retries this same reference.
+    /// The Acknowledged record of an earlier discard is replaced in one
+    /// same-coordinate rename; a different Active operation is refused.
     pub(crate) fn begin_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
@@ -2336,17 +2550,46 @@ impl RecoveryStore {
             "thread-history discard requires the exclusive CAS guard"
         );
         self.ensure_guard(cas_mutation_guard)?;
-        let bytes = ThreadHistoryDiscardMarker::for_operation(operation)?.canonical_bytes()?;
+        let bytes = ThreadHistoryDiscardMarker::for_operation(
+            operation,
+            ThreadHistoryDiscardPhase::Active,
+        )?
+        .canonical_bytes()?;
         let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        if let Some(active) = self.thread_history_discard_operation()? {
-            anyhow::ensure!(
-                &active == operation,
-                "thread-history discard marker activates a different operation"
-            );
-            return self
-                .directory
-                .sync()
-                .context("sync retained thread-history discard activation");
+        let mut work = AcknowledgementWork::default();
+        if let Some((pin, marker)) = pin_thread_history_discard_marker(&self.directory, &mut work)? {
+            match marker.phase {
+                ThreadHistoryDiscardPhase::Active => {
+                    anyhow::ensure!(
+                        &marker.operation == operation,
+                        "thread-history discard marker activates a different operation"
+                    );
+                    return self
+                        .directory
+                        .sync()
+                        .context("sync retained thread-history discard activation");
+                }
+                ThreadHistoryDiscardPhase::Acknowledged => {
+                    // An acknowledged operation is finished and never revived.
+                    anyhow::ensure!(
+                        &marker.operation != operation,
+                        "thread-history discard operation was already acknowledged"
+                    );
+                    self.directory
+                        .atomic_write_if_same(
+                            name,
+                            Some(&pin),
+                            &bytes,
+                            0o600,
+                            crate::STATE_TEMP_PURPOSE,
+                        )
+                        .context("replace acknowledged thread-history discard with activation")?;
+                    return self
+                        .directory
+                        .sync()
+                        .context("sync thread-history discard activation");
+                }
+            }
         }
         // The no-replace publisher never overwrites another operation. A
         // publication collision is accepted only after exact guarded intake.
@@ -2366,7 +2609,8 @@ impl RecoveryStore {
     }
 
     /// Acknowledge only this exact operation after every participating owner
-    /// is terminal. Keep the staged operation until this removal is durable.
+    /// is terminal. Keep the staged operation until the Acknowledged marker
+    /// is durable.
     pub(crate) fn finish_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
@@ -4270,6 +4514,269 @@ mod tests {
             .finish_thread_history_discard(&guard, &operation)
             .unwrap();
         assert!(!store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation)
+        );
+    }
+
+    fn discard_operation(id: char, digest: char) -> ThreadHistoryDiscardOperationRef {
+        ThreadHistoryDiscardOperationRef {
+            operation_id: id.to_string().repeat(32),
+            sha256: digest.to_string().repeat(64),
+        }
+    }
+
+    fn marker_bytes(
+        operation: &ThreadHistoryDiscardOperationRef,
+        phase: ThreadHistoryDiscardPhase,
+    ) -> Vec<u8> {
+        ThreadHistoryDiscardMarker::for_operation(operation, phase)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap()
+    }
+
+    fn recovery_entry_names(store: &RecoveryStore) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(store.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn discard_marker_schema_three_bytes_are_canonical_sorted_json() {
+        let operation = discard_operation('a', 'b');
+        let expected = format!(
+            "{{\"kind\":\"thread_history_discard\",\"operation\":{{\"operation_id\":\"{}\",\"sha256\":\"{}\"}},\"phase\":\"acknowledged\",\"schema\":3}}",
+            operation.operation_id, operation.sha256
+        );
+        let marker = ThreadHistoryDiscardMarker::for_operation(
+            &operation,
+            ThreadHistoryDiscardPhase::Acknowledged,
+        )
+        .unwrap();
+        assert_eq!(marker.canonical_bytes().unwrap(), expected.as_bytes());
+        let value = serde_json::to_value(&marker).unwrap();
+        assert_eq!(
+            lillux::canonical_json(&value).unwrap().into_bytes(),
+            expected.into_bytes()
+        );
+    }
+
+    #[test]
+    fn acknowledgement_rewrites_the_marker_in_place_and_retries_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            marker_bytes(&operation, ThreadHistoryDiscardPhase::Active)
+        );
+        assert_eq!(store.last_acknowledged_thread_history_discard().unwrap(), None);
+
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let acknowledged = marker_bytes(&operation, ThreadHistoryDiscardPhase::Acknowledged);
+        assert_eq!(std::fs::read(&marker).unwrap(), acknowledged);
+        let marker_inode = || {
+            store
+                .directory
+                .entry_no_follow(std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER))
+                .unwrap()
+                .unwrap()
+                .inode
+        };
+        let inode = marker_inode();
+        assert_eq!(store.thread_history_discard_operation().unwrap(), None);
+        assert!(!store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation.clone())
+        );
+
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), acknowledged);
+        assert_eq!(marker_inode(), inode);
+        assert_eq!(
+            recovery_entry_names(&store),
+            vec![THREAD_HISTORY_DISCARD_MARKER.to_owned()]
+        );
+    }
+
+    #[test]
+    fn acknowledgement_refuses_a_different_acknowledged_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        let before = std::fs::read(&marker).unwrap();
+        for other in [discard_operation('c', 'b'), discard_operation('a', 'd')] {
+            let error = store
+                .finish_thread_history_discard(&guard, &other)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("differs from its marker's operation"),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read(&marker).unwrap(), before);
+        }
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation)
+        );
+    }
+
+    #[test]
+    fn acknowledgement_refuses_an_absent_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let error = store
+            .finish_thread_history_discard(&guard, &discard_operation('a', 'b'))
+            .unwrap_err();
+        assert!(error.to_string().contains("found no marker"), "{error:#}");
+        assert!(recovery_entry_names(&store).is_empty());
+    }
+
+    #[test]
+    fn activation_replaces_an_acknowledged_marker_and_refuses_a_different_active_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let first = discard_operation('a', 'b');
+        let second = discard_operation('c', 'd');
+        store.begin_thread_history_discard(&guard, &first).unwrap();
+        store.finish_thread_history_discard(&guard, &first).unwrap();
+
+        store.begin_thread_history_discard(&guard, &second).unwrap();
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        let active = marker_bytes(&second, ThreadHistoryDiscardPhase::Active);
+        assert_eq!(std::fs::read(&marker).unwrap(), active);
+        assert!(store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.thread_history_discard_operation().unwrap(),
+            Some(second.clone())
+        );
+        assert_eq!(store.last_acknowledged_thread_history_discard().unwrap(), None);
+
+        let error = store
+            .begin_thread_history_discard(&guard, &first)
+            .unwrap_err();
+        assert!(error.to_string().contains("different operation"), "{error:#}");
+        assert!(store.finish_thread_history_discard(&guard, &first).is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), active);
+        assert_eq!(
+            recovery_entry_names(&store),
+            vec![THREAD_HISTORY_DISCARD_MARKER.to_owned()]
+        );
+    }
+
+    #[test]
+    fn retired_schema_two_marker_is_refused_naming_the_scratch_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        let retired = format!(
+            "{{\"kind\":\"thread_history_discard\",\"operation\":{{\"operation_id\":\"{}\",\"sha256\":\"{}\"}},\"schema\":2}}",
+            operation.operation_id, operation.sha256
+        );
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        std::fs::write(&marker, retired.as_bytes()).unwrap();
+        let refusals = [
+            store.thread_history_discard_operation().map(drop),
+            store.thread_history_discard_in_progress().map(drop),
+            store.last_acknowledged_thread_history_discard().map(drop),
+            store.begin_thread_history_discard(&guard, &operation),
+            store.finish_thread_history_discard(&guard, &operation),
+        ];
+        for refusal in refusals {
+            let error = refusal.unwrap_err();
+            let retired = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RetiredThreadHistoryDiscardMarker>())
+                .unwrap_or_else(|| panic!("untyped refusal: {error:#}"));
+            assert_eq!(retired.schema, 2);
+            assert!(
+                format!("{error:#}").contains(EXECUTION_HISTORY_SCRATCH_REPAIR),
+                "{error:#}"
+            );
+        }
+        assert_eq!(std::fs::read(&marker).unwrap(), retired.into_bytes());
+        assert_eq!(
+            EXECUTION_HISTORY_SCRATCH_REPAIR,
+            "ryeos node reset execution-history-scratch --confirm"
+        );
+    }
+
+    #[test]
+    fn acknowledgement_work_stays_within_its_prepaid_quote() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let quote = thread_history_discard_acknowledgement_quote();
+        let custody = store.final_ack_custody();
+        let within = |work: AcknowledgementWork| {
+            work.read_bytes <= quote.read_bytes
+                && work.memory_bytes <= quote.memory_bytes
+                && work.steps <= quote.steps
+        };
+
+        let mut rewrite = AcknowledgementWork::default();
+        custody
+            .finish_counted(&guard, &operation, &mut rewrite)
+            .unwrap();
+        assert!(within(rewrite), "{rewrite:?} exceeds {quote:?}");
+        // The rewrite is the most expensive attempt: it takes every step.
+        assert_eq!(rewrite.steps, quote.steps);
+        assert_eq!(
+            rewrite.read_bytes,
+            marker_bytes(&operation, ThreadHistoryDiscardPhase::Active).len() as u64 + 1
+        );
+
+        let mut retry = AcknowledgementWork::default();
+        custody.finish_counted(&guard, &operation, &mut retry).unwrap();
+        assert!(within(retry), "{retry:?} exceeds {quote:?}");
+        assert!(retry.steps < rewrite.steps);
+
+        // The temporary-name scratch bounds the longest name a State writer
+        // can generate: maximal pid and sequence digits.
+        let longest = format!(
+            ".secure.tmp.{}.{}.{}",
+            "x".repeat(16),
+            u32::MAX,
+            u64::MAX
+        );
+        assert!(longest.len() as u64 + 1 <= ACK_TEMP_NAME_SCRATCH_BYTES);
+        assert_eq!(quote.read_bytes, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64 + 1);
     }
 
     #[test]
@@ -4308,17 +4815,20 @@ mod tests {
 
     #[test]
     fn discard_activation_refuses_unbound_malformed_and_noncanonical_markers() {
-        let valid = ThreadHistoryDiscardMarker::for_operation(&ThreadHistoryDiscardOperationRef {
-            operation_id: "a".repeat(32),
-            sha256: "b".repeat(64),
-        })
+        let valid = ThreadHistoryDiscardMarker::for_operation(
+            &ThreadHistoryDiscardOperationRef {
+                operation_id: "a".repeat(32),
+                sha256: "b".repeat(64),
+            },
+            ThreadHistoryDiscardPhase::Active,
+        )
         .unwrap();
         let value = serde_json::to_value(&valid).unwrap();
         let mut cases = vec![
             br#"{"kind":"thread_history_discard","schema":1}"#.to_vec(),
             vec![b'x'; THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES + 1],
         ];
-        for key in ["kind", "schema", "operation"] {
+        for key in ["kind", "schema", "phase", "operation"] {
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(key);
             cases.push(lillux::canonical_json(&missing).unwrap().into_bytes());
@@ -4331,6 +4841,9 @@ mod tests {
         let mut extra = value.clone();
         extra["operation"]["authority"] = serde_json::json!(true);
         cases.push(lillux::canonical_json(&extra).unwrap().into_bytes());
+        let mut unknown_phase = value.clone();
+        unknown_phase["phase"] = serde_json::json!("retired");
+        cases.push(lillux::canonical_json(&unknown_phase).unwrap().into_bytes());
         let mut wrong_id = value.clone();
         wrong_id["operation"]["operation_id"] = serde_json::json!("A".repeat(32));
         cases.push(lillux::canonical_json(&wrong_id).unwrap().into_bytes());

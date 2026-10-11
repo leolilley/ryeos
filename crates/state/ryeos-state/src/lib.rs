@@ -118,10 +118,10 @@ pub use provider_call_observation::{
 };
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
-    DurableExternalCandidateReceipt, HeadOperation, PendingChainHeadTransition,
+    DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, HeadOperation, PendingChainHeadTransition,
     PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
-    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, ThreadHistoryDiscardOperationRef,
-    TransitionPhase,
+    RecoveryStore, RetiredThreadHistoryDiscardMarker, StagedCasRootHashes, StagedCasRootLease,
+    ThreadHistoryDiscardOperationRef, TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

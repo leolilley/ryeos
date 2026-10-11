@@ -5804,18 +5804,17 @@ pub(super) struct OriginalReadyForFinalAck {
 impl OriginalReadyForFinalAck {
     /// Actual State effect or cached receipt replay, irreversibly charged to
     /// the same original cleanup/read/memory owner BEFORE State effects.
-    /// The guarded max512 reader can read the extra growth byte: charge513.
+    /// Only State's own fixed effect and replay quotes are admitted.
     pub(super) fn debit_state_ack_attempt(
         &self,
         read_bytes: u64,
         memory_bytes: u64,
         steps: u64,
     ) -> Result<()> {
+        let attempt = (read_bytes, memory_bytes, steps);
         ensure!(
-            matches!(
-                (read_bytes, memory_bytes, steps),
-                (513, 2048, 32) | (0, 256, 1)
-            ),
+            attempt == ryeos_state::state_db::STATE_ACK_EFFECT_PREPAY
+                || attempt == ryeos_state::state_db::STATE_ACK_REPLAY_PREPAY,
             "State ACK attempt differs from fixed original effect/replay bound"
         );
         self.require_custody()?;
