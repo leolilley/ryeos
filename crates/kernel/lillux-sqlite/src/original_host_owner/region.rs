@@ -53,6 +53,10 @@ impl NativeHostRegion {
         Ok(())
     }
     pub fn bytes(&self) -> u64 { self.layout.bytes() as u64 }
+    /// The process and resident generation this controller pins; the
+    /// generation is absent until initialization drew one.
+    pub fn process(&self) -> u32 { self.process }
+    pub fn generation(&self) -> Option<u64> { self.generation }
     /// Retains `raw` first, then checkpoints, debits the placement work
     /// (normal) and `release_steps` (cleanup) from that same counter, mints
     /// the matching release credit and checkpoints again.

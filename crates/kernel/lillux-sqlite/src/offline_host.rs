@@ -11,15 +11,17 @@
 //!
 //! Connections finish in-process. Every connection a consumer opens must be
 //! closed or released and its terminal handed back with
-//! [`OfflineNativeHost::retain_terminal`] before [`OfflineNativeHost::finish`];
-//! the region seal refuses while any factory alias survives.
-use crate::original_host_owner::backing::HostStorage;
+//! [`OfflineNativeHost::retain_terminal`] before
+//! [`OfflineNativeHost::finish_backend`]; [`OfflineNativeHost::release`]
+//! refuses while any alias of the factory or backend terminal survives.
+use crate::original_host_owner::backing::{HostStorage, HostStorageRegionReleaseFact};
 use crate::original_host_owner::region::{NativeHostRegion, next_resident_generation};
 use crate::original_host_owner::OriginalNativeRegionHandle;
 use crate::{
     ClosedOriginalProjectionLease, OriginalDestinationCustodyFailure,
     OriginalDestinationOutsideCustody, OriginalLiveNativeDrainInputs,
-    OriginalNativeAdmissionAuthority, OriginalNativeBudget, OriginalNativeBudgetOwner,
+    OriginalNativeAdmissionAuthority, OriginalNativeArenaDisposition, OriginalNativeBudget,
+    OriginalNativeBudgetOwner, OriginalNativeBudgetSnapshot,
     OriginalNativeCleanupAuthority, OriginalNativeConnectionAdmission,
     OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority, OriginalNativeFactory,
     OriginalNativeFactoryFailure, OriginalNativeOutsideLeafEvidence,
@@ -53,19 +55,65 @@ pub fn offline_native_required_cleanup_steps(storage: u64, tickets: u32) -> Resu
         .context("offline native cleanup quote overflow")
 }
 
-/// Final ticket and work census of a released host.
+/// Plain facts of a host whose backend finished: the region it pins, the
+/// arena disposition and budget evidence of the backend terminal, and the
+/// ticket and terminal census. No field carries an owner, so callers keep
+/// them across [`OfflineNativeHost::release`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfflineNativeCensus {
+pub struct OfflineNativeFacts {
+    pub process: u32,
+    pub generation: u64,
+    pub region_bytes: u64,
+    /// Funded storage of the raw budget.
     pub storage_bytes: u64,
-    pub connections_issued: u32,
+    pub arena: OriginalNativeArenaDisposition,
+    /// The budget handle's counters at its retirement.
+    pub budget: OriginalNativeBudgetSnapshot,
+    pub tickets_issued: u32,
+    /// Ticketed terminals, including released unpublished tickets.
     pub terminals: usize,
+    /// Acquisitions refused before a ticket was debited.
+    pub ticketless: usize,
     pub leases: usize,
-    pub allocator_steps: u64,
-    pub cleanup_steps: u64,
 }
 
+/// A released host. `facts` is present when the backend finished, and
+/// `region` when an admitted region was physically released; a partial host
+/// refused before its factory finished carries neither.
+pub struct OfflineNativeReleased {
+    pub facts: Option<OfflineNativeFacts>,
+    pub region: Option<HostStorageRegionReleaseFact>,
+}
+impl std::fmt::Debug for OfflineNativeReleased {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfflineNativeReleased")
+            .field("facts", &self.facts)
+            .field("region_released", &self.region.is_some())
+            .finish()
+    }
+}
+
+/// A refused finish stage with the whole host retained for another attempt.
+pub struct OfflineNativeRetained {
+    pub host: OfflineNativeHost,
+    pub error: anyhow::Error,
+}
+impl std::fmt::Debug for OfflineNativeRetained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfflineNativeRetained").field("error", &self.error).finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for OfflineNativeRetained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "offline native host release refused; host retained: {:#}", self.error)
+    }
+}
+impl std::error::Error for OfflineNativeRetained {}
+
 /// Sole owner of one process-scoped native arena. No Drop performs native
-/// cleanup; [`Self::finish`] is the only teardown and it is resumable.
+/// cleanup. Teardown is [`Self::finish_backend`] then [`Self::release`]
+/// (composed by [`Self::finish`]); each stage is resumable, and `release`
+/// consumes the host so nothing can reach its factory or region afterwards.
 pub struct OfflineNativeHost {
     authority: Arc<dyn OfflineNativeAuthority>,
     region: NativeHostRegion,
@@ -84,8 +132,8 @@ pub struct OfflineNativeHost {
     leases: Mutex<Vec<Arc<ClosedOriginalProjectionLease>>>,
     drained: Option<OriginalLiveNativeDrainInputs>,
     backend: Option<Arc<OriginalNativeTerminal>>,
-    census: Option<OfflineNativeCensus>,
-    released: bool,
+    /// Recorded once the backend finished and the budget handle retired.
+    facts: Option<OfflineNativeFacts>,
     /// Funded storage of `raw`, reported identically on every finish path.
     storage_bytes: u64,
 }
@@ -111,14 +159,15 @@ impl std::error::Error for OfflineNativeHostFailure {}
 impl OfflineNativeHostFailure {
     /// Tear down the partial host. `Ok` carries the original refusal; `Err`
     /// keeps the partial host and the cleanup refusal for another attempt.
-    pub fn release(mut self) -> std::result::Result<anyhow::Error, Self> {
-        let Some(host) = self.host.as_mut() else { return Ok(self.error) };
+    pub fn release(self) -> std::result::Result<anyhow::Error, Self> {
+        let Self { host, error } = self;
+        let Some(host) = host else { return Ok(error) };
         match host.finish() {
-            Ok(_) => Ok(self.error),
-            Err(cleanup) => {
-                self.error = self.error.context(format!("partial host release retained: {cleanup:#}"));
-                Err(self)
-            }
+            Ok(_) => Ok(error),
+            Err(OfflineNativeRetained { host, error: cleanup }) => Err(Self {
+                host: Some(host),
+                error: error.context(format!("partial host release retained: {cleanup:#}")),
+            }),
         }
     }
 }
@@ -169,8 +218,7 @@ impl OfflineNativeHost {
             leases: Mutex::new(Vec::new()),
             drained: None,
             backend: None,
-            census: None,
-            released: false,
+            facts: None,
             storage_bytes: 0,
         }
     }
@@ -254,8 +302,18 @@ impl OfflineNativeHost {
         Ok(())
     }
 
+    /// The admitting factory: valid from Ready until the backend finishes.
     pub fn factory(&self) -> Result<&Arc<OriginalNativeFactory>> {
         ensure!(self.ready && self.backend.is_none(), "offline native factory is not admitting");
+        self.factory.as_ref().context("offline native factory absent")
+    }
+
+    /// The same factory after [`Self::finish_backend`] completed and before
+    /// [`Self::release`], for the post-backend steps that join the backend
+    /// terminal: final acknowledgements, retirements after the backend and
+    /// outside custody. It admits no new connection.
+    pub fn post_backend_factory(&self) -> Result<&Arc<OriginalNativeFactory>> {
+        ensure!(self.backend.is_some() && self.facts.is_some(), "offline native backend has not finished");
         self.factory.as_ref().context("offline native factory absent")
     }
 
@@ -272,11 +330,7 @@ impl OfflineNativeHost {
         &self,
         terminal: OriginalNativeConnectionTerminal,
     ) -> std::result::Result<(), (OriginalNativeConnectionTerminal, anyhow::Error)> {
-        let checked = self
-            .factory
-            .as_ref()
-            .context("offline native factory absent")
-            .and_then(|factory| terminal.require_original(factory));
+        let checked = self.census_open().and_then(|factory| terminal.require_original(factory));
         if let Err(error) = checked {
             return Err((terminal, error));
         }
@@ -291,16 +345,18 @@ impl OfflineNativeHost {
         &self,
         lease: Arc<ClosedOriginalProjectionLease>,
     ) -> std::result::Result<(), (Arc<ClosedOriginalProjectionLease>, anyhow::Error)> {
-        let checked = self
-            .factory
-            .as_ref()
-            .context("offline native factory absent")
-            .and_then(|factory| lease.require_original(factory));
+        let checked = self.census_open().and_then(|factory| lease.require_original(factory));
         if let Err(error) = checked {
             return Err((lease, error));
         }
         self.leases.lock().unwrap_or_else(PoisonError::into_inner).push(lease);
         Ok(())
+    }
+
+    /// The census closes when the backend finishes against it.
+    fn census_open(&self) -> Result<&Arc<OriginalNativeFactory>> {
+        ensure!(self.backend.is_none(), "offline native census closed: the backend already finished");
+        self.factory.as_ref().context("offline native factory absent")
     }
 
     /// Issued ticket count and recorded terminals plus leases.
@@ -312,77 +368,125 @@ impl OfflineNativeHost {
         Ok((issued, recorded))
     }
 
-    /// Close admission, drain and finish the backend against the exhaustive
-    /// terminal census, retire the budget handle, drop every factory alias
-    /// this host owns, then seal, dispose and release the region. Each stage
-    /// is retained before the next; a refusal can be retried.
-    pub fn finish(&mut self) -> Result<OfflineNativeCensus> {
-        if self.released {
-            return self.census.clone().context("released offline native host lacks its census");
+    /// Close admission, release every debited-but-unpublished ticket, drain
+    /// and finish the backend against the exhaustive terminal census, retire
+    /// the budget handle and record [`OfflineNativeFacts`]. The region stays
+    /// unsealed and the factory stays reachable through
+    /// [`Self::post_backend_factory`]. Each stage is retained before the
+    /// next; a retry after success returns the same terminal.
+    pub fn finish_backend(&mut self) -> Result<Arc<OriginalNativeTerminal>> {
+        if self.facts.is_some() {
+            return self.backend.clone().context("finished offline native backend terminal absent");
         }
         self.closed.store(true, Ordering::Release);
         self.authority.checkpoint(true)?;
-        if let Some(factory) = self.factory.clone() {
-            if self.backend.is_none() {
-                let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner).clone();
-                // The factory's own Ready acknowledgement selects the finish:
-                // initialization can refuse after Ready was published.
-                let finished = if factory.ready_acknowledged()? {
-                    let admission = self.admission.clone().context("offline admission absent")?;
-                    let released = admission.release_ticketed(&factory)?;
-                    self.terminals.lock().unwrap_or_else(PoisonError::into_inner).extend(released);
-                    let terminals = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clone();
-                    if self.drained.is_none() {
-                        let cleanup: Arc<dyn OriginalNativeCleanupAuthority> = Arc::new(OfflineCleanup { admission });
-                        // SAFETY: admission is closed above and never reopens;
-                        // the cleanup authority rechecks producer quiescence
-                        // and the caller's cleanup window before every effect.
-                        self.drained = Some(unsafe { OriginalLiveNativeDrainInputs::issued(factory.clone(), cleanup) }?);
-                    }
-                    let drained = self.drained.as_ref().context("offline drain inputs absent")?;
-                    factory.finish_live_backend(&terminals, &leases, drained)
-                } else {
-                    factory.finish_original_initialization_refusal()
-                };
-                match finished {
-                    Ok(terminal) => self.backend = Some(terminal),
-                    Err(failure) => {
-                        let error = anyhow::anyhow!("offline native backend finish retained: {failure}");
-                        self.factory_failures.push(failure);
-                        return Err(error);
-                    }
+        let factory = self.factory.clone().context("offline native factory absent; no backend to finish")?;
+        if self.backend.is_none() {
+            let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            // The factory's own Ready acknowledgement selects the finish:
+            // initialization can refuse after Ready was published.
+            let finished = if factory.ready_acknowledged()? {
+                let admission = self.admission.clone().context("offline admission absent")?;
+                let released = admission.release_ticketed(&factory)?;
+                self.terminals.lock().unwrap_or_else(PoisonError::into_inner).extend(released);
+                let terminals = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                if self.drained.is_none() {
+                    let cleanup: Arc<dyn OriginalNativeCleanupAuthority> = Arc::new(OfflineCleanup { admission });
+                    // SAFETY: admission is closed above and never reopens;
+                    // the cleanup authority rechecks producer quiescence
+                    // and the caller's cleanup window before every effect.
+                    self.drained = Some(unsafe { OriginalLiveNativeDrainInputs::issued(factory.clone(), cleanup) }?);
+                }
+                let drained = self.drained.as_ref().context("offline drain inputs absent")?;
+                factory.finish_live_backend(&terminals, &leases, drained)
+            } else {
+                factory.finish_original_initialization_refusal()
+            };
+            match finished {
+                Ok(terminal) => self.backend = Some(terminal),
+                Err(failure) => {
+                    let error = anyhow::anyhow!("offline native backend finish retained: {failure}");
+                    self.factory_failures.push(failure);
+                    return Err(error);
                 }
             }
-            if self.census.is_none() {
-            let backend = self.backend.clone().context("offline native backend terminal absent")?;
-            let admission = self.admission.clone().context("offline admission absent")?;
-            let snapshot = admission.budget.retire_original_handle(&factory, &backend)?;
-            let terminals = self.terminals.lock().unwrap_or_else(PoisonError::into_inner).len();
-            let leases = self.leases.lock().unwrap_or_else(PoisonError::into_inner).len();
-            self.census = Some(OfflineNativeCensus {
-                storage_bytes: self.storage_bytes,
-                connections_issued: snapshot.connections_issued,
-                terminals,
-                leases,
-                allocator_steps: snapshot.allocator_steps,
-                cleanup_steps: snapshot.cleanup_steps,
-            });
-            }
         }
-        // Every alias this host owns ends here; consumers already handed
-        // their terminals back. The seal below refuses any survivor.
-        drop(self.backend.take());
+        let backend = self.backend.clone().context("offline native backend terminal absent")?;
+        let admission = self.admission.clone().context("offline admission absent")?;
+        let budget = admission.budget.retire_original_handle(&factory, &backend)?;
+        let generation = self.region.generation().context("finished offline native region lacks its generation")?;
+        self.facts = Some(OfflineNativeFacts {
+            process: self.region.process(),
+            generation,
+            region_bytes: self.region.bytes(),
+            storage_bytes: self.storage_bytes,
+            arena: backend.arena_disposition()?,
+            tickets_issued: budget.connections_issued,
+            budget,
+            terminals: self.terminals.lock().unwrap_or_else(PoisonError::into_inner).len(),
+            ticketless: self.ticketless.lock().unwrap_or_else(PoisonError::into_inner).len(),
+            leases: self.leases.lock().unwrap_or_else(PoisonError::into_inner).len(),
+        });
+        Ok(backend)
+    }
+
+    /// The facts recorded by [`Self::finish_backend`].
+    pub fn facts(&self) -> Result<OfflineNativeFacts> {
+        self.facts.clone().context("offline native backend has not finished")
+    }
+
+    /// End the host. In order: drop the drain inputs, terminals, leases,
+    /// destination, factory failures and ticketed preparations; refuse,
+    /// keeping both and naming their counts, while any alias of the backend
+    /// terminal or the factory survives outside this host; only then drop
+    /// both and seal, dispose and release the region. A refusal returns the
+    /// whole host, and every completed stage stays done for the retry.
+    ///
+    /// A host whose factory exists must have finished its backend first.
+    ///
+    /// ```compile_fail,E0382
+    /// fn released(host: lillux_sqlite::offline_host::OfflineNativeHost) {
+    ///     let _ = host.release();
+    ///     let _ = host.post_backend_factory();
+    /// }
+    /// ```
+    pub fn release(mut self) -> std::result::Result<OfflineNativeReleased, OfflineNativeRetained> {
+        match self.release_stages() {
+            Ok(released) => Ok(released),
+            Err(error) => Err(OfflineNativeRetained { host: self, error }),
+        }
+    }
+
+    fn release_stages(&mut self) -> Result<OfflineNativeReleased> {
+        self.closed.store(true, Ordering::Release);
+        self.authority.checkpoint(true)?;
+        ensure!(
+            self.factory.is_none() || self.facts.is_some(),
+            "offline native release refused: the backend has not finished"
+        );
         drop(self.drained.take());
         self.terminals.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.ticketless.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.leases.lock().unwrap_or_else(PoisonError::into_inner).clear();
         drop(self.destination.take());
         self.factory_failures.clear();
-        drop(self.factory.take());
-        drop(self.publication_failure.take());
         if let Some(admission) = &self.admission {
             admission.ticketed.lock().unwrap_or_else(PoisonError::into_inner).clear();
         }
+        // The host holds one reference to each, and the backend terminal one
+        // more to its factory. Any other reference is a caller alias.
+        let backend = self.backend.as_ref().map_or(0, Arc::strong_count);
+        let backend_held = usize::from(self.backend.is_some());
+        let factory = self.factory.as_ref().map_or(0, Arc::strong_count);
+        let factory_held = usize::from(self.factory.is_some()) + backend_held;
+        ensure!(
+            backend == backend_held && factory == factory_held,
+            "offline native release refused while aliases survive: backend terminal strong count {backend} \
+             (host holds {backend_held}), factory strong count {factory} (host holds {factory_held}); both retained"
+        );
+        drop(self.backend.take());
+        drop(self.factory.take());
+        drop(self.publication_failure.take());
         drop(self.admission.take());
         let authority = self.authority.clone();
         self.region.begin_close()?;
@@ -391,17 +495,23 @@ impl OfflineNativeHost {
             return Err(error.context(format!("offline native region release retained; region {census}")));
         }
         self.region.require_released()?;
-        let census = self.census.clone().unwrap_or(OfflineNativeCensus {
-            storage_bytes: self.storage_bytes,
-            connections_issued: 0,
-            terminals: 0,
-            leases: 0,
-            allocator_steps: 0,
-            cleanup_steps: 0,
-        });
-        self.census = Some(census.clone());
-        self.released = true;
-        Ok(census)
+        let region = match &self.facts {
+            Some(facts) => Some(self.region.region_release_fact(facts.generation, facts.region_bytes)?),
+            None => None,
+        };
+        Ok(OfflineNativeReleased { facts: self.facts.clone(), region })
+    }
+
+    /// [`Self::finish_backend`] then [`Self::release`]; a partial host
+    /// without a factory goes straight to release.
+    pub fn finish(mut self) -> std::result::Result<OfflineNativeReleased, OfflineNativeRetained> {
+        if self.factory.is_some() {
+            match self.finish_backend() {
+                Ok(backend) => drop(backend),
+                Err(error) => return Err(OfflineNativeRetained { host: self, error }),
+            }
+        }
+        self.release()
     }
 }
 

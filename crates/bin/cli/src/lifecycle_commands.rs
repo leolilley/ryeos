@@ -537,13 +537,13 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     .context("replay-index reset requires the daemon to be stopped")?;
     let activation = ryeos_app::offline_native::reset_replay_indexes(&config, &_state_lock)
         .context("activate current replay indexes through the offline native host")?;
-    let (path, report, census) = (activation.database, activation.report, activation.census);
+    let (path, report, facts) = (activation.database, activation.report, activation.facts);
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "activated",
             "database": path,
             "replay_indexes": report,
-            "native_connections": census.connections_issued,
+            "native_connections": facts.tickets_issued,
         }))?;
     } else {
         let mut status =
@@ -630,7 +630,7 @@ fn run_node_external_content_reset_command(
             "status": if args.dry_run { "inspected" } else { "retired" },
             "bindings": bindings,
             "requires_reimport": !args.dry_run,
-            "native_connections": reset.census.connections_issued,
+            "native_connections": reset.facts.tickets_issued,
         }))?;
     } else if args.dry_run {
         console.text(&format!(

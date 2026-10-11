@@ -44,6 +44,16 @@ impl Default for TestNativeEnvelope {
 static SERIAL: Mutex<()> = Mutex::new(());
 static HOLDER: Mutex<Option<String>> = Mutex::new(None);
 static LEAKED: Mutex<Option<String>> = Mutex::new(None);
+/// Hosts whose teardown refused, kept owned for the life of the process.
+static RETAINED: Mutex<Vec<OfflineNativeHost>> = Mutex::new(Vec::new());
+
+/// Record a refused teardown and keep its host; returns the refusal text.
+fn retain_leaked(retained: crate::offline_host::OfflineNativeRetained) -> String {
+    let census = format!("{:#}", retained.error);
+    *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
+    RETAINED.lock().unwrap_or_else(PoisonError::into_inner).push(retained.host);
+    census
+}
 
 fn current_holder() -> String {
     let thread = std::thread::current();
@@ -215,10 +225,9 @@ impl TestNativeHost {
     /// Tear down this arena and install a fresh one under the same serial
     /// guard, for suites that need more than one envelope of tickets.
     pub fn cycle(&mut self) {
-        let mut live = self.live.take().expect("live test host present");
-        if let Err(error) = live.finish() {
-            let census = format!("{error:#}");
-            *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
+        let live = self.live.take().expect("live test host present");
+        if let Err(retained) = live.finish() {
+            let census = retain_leaked(retained);
             panic!("TestNativeHost cycle leaked its arena: {census}");
         }
         match install(self.envelope) {
@@ -233,12 +242,11 @@ impl TestNativeHost {
 
 impl Drop for TestNativeHost {
     fn drop(&mut self) {
-        let Some(mut live) = self.live.take() else { return };
+        let Some(live) = self.live.take() else { return };
         let finished = live.finish();
         *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        if let Err(error) = finished {
-            let census = format!("{error:#}");
-            *LEAKED.lock().unwrap_or_else(PoisonError::into_inner) = Some(census.clone());
+        if let Err(retained) = finished {
+            let census = retain_leaked(retained);
             if !std::thread::panicking() {
                 panic!("TestNativeHost leaked its arena: {census}");
             }
@@ -660,7 +668,7 @@ mod tests {
         for n in 1..200 {
             let authority = Arc::new(RefuseNth { n, seen: std::sync::atomic::AtomicUsize::new(0) });
             match issue(raw(16 * MIB, 4, cleanup), authority) {
-                Ok(mut host) => {
+                Ok(host) => {
                     host.finish().unwrap();
                     break;
                 }
@@ -699,9 +707,9 @@ mod tests {
         };
         let error = failure.release().unwrap_or_else(|retained| panic!("partial host retained: {retained}"));
         assert!(format!("{error:#}").contains("cleanup steps"), "{error:#}");
-        let mut host = issue(raw(32 * MIB, 8, required), Arc::new(TestAuthority)).unwrap();
-        let census = host.finish().unwrap();
-        assert_eq!((census.connections_issued, census.terminals), (0, 0));
+        let host = issue(raw(32 * MIB, 8, required), Arc::new(TestAuthority)).unwrap();
+        let facts = host.finish().unwrap().facts.expect("ready host facts");
+        assert_eq!((facts.tickets_issued, facts.terminals), (0, 0));
     }
 
     #[test]
@@ -709,7 +717,7 @@ mod tests {
         let _serial = serial();
         let authority = Arc::new(Windows { operation: std::sync::atomic::AtomicBool::new(true) });
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
-        let mut host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
+        let host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
         let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
         let value: i64 = connection.with_sql(|sql| Ok(sql.query_row("SELECT 7", [], |row| row.get(0))?)).unwrap();
         assert_eq!(value, 7);
@@ -725,20 +733,128 @@ mod tests {
                 retained(&host, OriginalNativeConnectionTerminal::Released(released));
             }
         }
-        let census = host.finish().unwrap();
-        assert_eq!(census.connections_issued as usize, census.terminals);
+        let facts = host.finish().unwrap().facts.expect("ready host facts");
+        assert_eq!(facts.tickets_issued as usize, facts.terminals);
+    }
+
+    /// Refuses cleanup-window checkpoints while `refuse` is set.
+    struct CleanupGate {
+        refuse: std::sync::atomic::AtomicBool,
+    }
+    impl OfflineNativeAuthority for CleanupGate {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            ensure!(!(cleanup && self.refuse.load(std::sync::atomic::Ordering::Acquire)), "cleanup window refused");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn offline_host_release_refuses_while_a_factory_alias_survives_and_resumes() {
+        let _serial = serial();
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
+        assert!(host.post_backend_factory().is_err(), "post-backend factory before the backend finished");
+        drop(host.finish_backend().unwrap());
+        assert!(host.factory().is_err() && host.destination().is_err(), "admission ends with the backend");
+        let alias = host.post_backend_factory().unwrap().clone();
+        let facts = host.facts().unwrap();
+        let retained = host.release().expect_err("release must refuse while a factory alias survives");
+        let message = format!("{:#}", retained.error);
+        assert!(message.contains("factory strong count 3 (host holds 2)"), "{message}");
+        let host = retained.host;
+        assert_eq!(host.facts().unwrap(), facts);
+        assert!(Arc::ptr_eq(host.post_backend_factory().unwrap(), &alias), "refusal keeps the factory");
+        drop(alias);
+        let released = host.release().unwrap();
+        assert_eq!(released.facts, Some(facts));
+    }
+
+    #[test]
+    fn offline_host_release_refuses_while_the_backend_terminal_survives_and_resumes() {
+        let _serial = serial();
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
+        let terminal = host.finish_backend().unwrap();
+        let retained = host.release().expect_err("release must refuse while the backend terminal survives");
+        let message = format!("{:#}", retained.error);
+        assert!(message.contains("backend terminal strong count 2 (host holds 1)")
+            && message.contains("factory strong count 2 (host holds 2)"), "{message}");
+        let mut host = retained.host;
+        let again = host.finish_backend().unwrap();
+        assert!(Arc::ptr_eq(&again, &terminal), "refusal keeps the backend terminal");
+        drop(again);
+        drop(terminal);
+        host.release().unwrap();
+    }
+
+    #[test]
+    fn offline_host_finish_backend_and_release_resume_after_refusal() {
+        let _serial = serial();
+        let authority = Arc::new(CleanupGate { refuse: std::sync::atomic::AtomicBool::new(false) });
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut host = issue(raw(16 * MIB, 4, cleanup), authority.clone()).unwrap();
+        authority.refuse.store(true, std::sync::atomic::Ordering::Release);
+        assert!(host.finish_backend().is_err(), "backend finish checks the cleanup window");
+        assert!(host.facts().is_err() && host.post_backend_factory().is_err());
+        authority.refuse.store(false, std::sync::atomic::Ordering::Release);
+        let first = host.finish_backend().unwrap();
+        let second = host.finish_backend().unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "a finished backend returns its cached terminal");
+        drop((first, second));
+        authority.refuse.store(true, std::sync::atomic::Ordering::Release);
+        let retained = host.release().expect_err("release checks the cleanup window");
+        assert!(format!("{:#}", retained.error).contains("cleanup window refused"));
+        authority.refuse.store(false, std::sync::atomic::Ordering::Release);
+        retained.host.release().unwrap();
+    }
+
+    #[test]
+    fn offline_host_release_requires_the_finished_backend() {
+        let _serial = serial();
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
+        let retained = host.release().expect_err("release before the backend finished");
+        assert!(format!("{:#}", retained.error).contains("backend has not finished"));
+        retained.host.finish().unwrap();
+    }
+
+    #[test]
+    fn offline_host_facts_match_the_census_and_the_region_release() {
+        let _serial = serial();
+        let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
+        let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
+        for _ in 0..2 {
+            let connection = transient(&host).unwrap_or_else(|failure| panic!("open refused: {failure}"));
+            let closed = connection.close().unwrap_or_else(|failure| panic!("close refused: {failure}"));
+            retained(&host, OriginalNativeConnectionTerminal::Closed(closed));
+        }
+        let (issued, recorded) = host.ticket_census().unwrap();
+        assert_eq!((issued, recorded), (2, 2));
+        drop(host.finish_backend().unwrap());
+        let facts = host.facts().unwrap();
+        assert_eq!(facts.tickets_issued, issued);
+        assert_eq!(facts.budget.connections_issued, issued);
+        assert_eq!(facts.terminals + facts.leases, recorded);
+        assert_eq!((facts.ticketless, facts.storage_bytes), (0, 16 * MIB));
+        assert_eq!(facts.arena, crate::OriginalNativeArenaDisposition::Released);
+        assert_eq!(facts.process, std::process::id());
+        assert!(facts.region_bytes > 0 && facts.budget.allocator_steps > 0);
+        let released = host.release().unwrap();
+        assert_eq!(released.facts.as_ref(), Some(&facts));
+        let region = released.region.expect("admitted region release fact");
+        assert_eq!(region.generation().unwrap(), facts.generation);
+        assert_eq!(region.bytes().unwrap() as u64, facts.region_bytes);
     }
 
     #[test]
     fn offline_host_finish_retains_custody_while_an_alias_survives_and_resumes() {
         let _serial = serial();
         let cleanup = offline_native_required_cleanup_steps(16 * MIB, 4).unwrap();
-        let mut host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
+        let host = issue(raw(16 * MIB, 4, cleanup), Arc::new(TestAuthority)).unwrap();
         let alias = host.factory().unwrap().clone();
-        let refused = host.finish().expect_err("seal must refuse while a factory alias survives");
-        assert!(format!("{refused:#}").contains("release retained"), "{refused:#}");
+        let retained = host.finish().expect_err("finish must refuse while a factory alias survives");
+        assert!(format!("{:#}", retained.error).contains("aliases survive"), "{:#}", retained.error);
         drop(alias);
-        host.finish().unwrap();
-        host.finish().unwrap();
+        retained.host.finish().unwrap();
     }
 }

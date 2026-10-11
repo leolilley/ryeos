@@ -10,7 +10,9 @@
 //! must use a durable claim (as execution-history reset does), not this host.
 
 use anyhow::{Context, Result, ensure};
-use lillux_sqlite::offline_host::{OfflineNativeAuthority, OfflineNativeCensus, OfflineNativeHost};
+use lillux_sqlite::offline_host::{
+    OfflineNativeAuthority, OfflineNativeFacts, OfflineNativeHost, OfflineNativeRetained,
+};
 use lillux_sqlite::{
     OriginalNativeBudget, OriginalNativeConnectionTerminal, OriginalNativeDestinationAuthority,
     OriginalNativeFactory,
@@ -192,20 +194,29 @@ impl OfflineNativeSession {
         self.host.retain_terminal(terminal)
     }
 
-    /// Finish the host. A refusal keeps the session and its host for retry.
-    pub fn finish(mut self) -> std::result::Result<OfflineNativeCensus, (Self, anyhow::Error)> {
-        match self.host.finish() {
-            Ok(census) => Ok(census),
-            Err(error) => Err((self, error)),
+    /// Finish the host's backend, capture its facts, then release the host.
+    /// A refusal keeps the session and its host for retry.
+    pub fn finish(self) -> std::result::Result<OfflineNativeFacts, (Self, anyhow::Error)> {
+        let Self { authority, mut host } = self;
+        let facts = match host.finish_backend().and_then(|backend| {
+            drop(backend);
+            host.facts()
+        }) {
+            Ok(facts) => facts,
+            Err(error) => return Err((Self { authority, host }, error)),
+        };
+        match host.release() {
+            Ok(_) => Ok(facts),
+            Err(OfflineNativeRetained { host, error }) => Err((Self { authority, host }, error)),
         }
     }
 }
 
-/// Completed replay-index activation and the released host's census.
+/// Completed replay-index activation and the released host's facts.
 pub struct ReplayIndexActivation {
     pub database: PathBuf,
     pub report: ryeos_state::operational::ReplayIndexResetReport,
-    pub census: OfflineNativeCensus,
+    pub facts: OfflineNativeFacts,
 }
 
 /// Explicit stopped-node replay-index activation. The caller holds the
@@ -249,10 +260,10 @@ pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<R
         }
     })();
     match (activated, session.finish()) {
-        (Ok(report), Ok(census)) => Ok(ReplayIndexActivation {
+        (Ok(report), Ok(facts)) => Ok(ReplayIndexActivation {
             database: runtime_dir.join(ryeos_state::operational::OPERATIONAL_DB_FILENAME),
             report,
-            census,
+            facts,
         }),
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err((session, error))) => Err(retained_session(session, error)
@@ -275,10 +286,10 @@ pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<R
 }
 
 /// Completed external-content binding cutover (or its preview) and the
-/// released host's census.
+/// released host's facts.
 pub struct ExternalContentBindingReset {
     pub bindings: usize,
-    pub census: OfflineNativeCensus,
+    pub facts: OfflineNativeFacts,
 }
 
 /// Explicit stopped-node retirement of every external-content binding head.
@@ -370,7 +381,7 @@ pub fn reset_external_content_bindings(
         }
     })();
     match (discarded, session.finish()) {
-        (Ok(bindings), Ok(census)) => Ok(ExternalContentBindingReset { bindings, census }),
+        (Ok(bindings), Ok(facts)) => Ok(ExternalContentBindingReset { bindings, facts }),
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err((session, error))) => Err(retained_session(session, error)
             .context("external-content binding reset done; offline native host release retained")),
