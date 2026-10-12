@@ -177,6 +177,15 @@ impl Drop for TestHostSerial {
     }
 }
 
+/// The serial guard alone, for a test whose code under test issues its own
+/// production native host, such as an offline reset. It excludes every
+/// [`TestNativeHost`] and every other holder for its lifetime, and panics
+/// like [`TestNativeHost::acquire`] if a previous host leaked its arena.
+/// Never hold it while acquiring a host on the same thread.
+pub fn serial() -> TestHostSerial {
+    TestHostSerial { _serial: acquire_serial(), _thread: PhantomData }
+}
+
 /// Issue a production [`OfflineNativeHost`] under the serial guard with the
 /// caller's authority, for a consumer whose controller owns the host and
 /// its staged teardown. Panics on a refused install, like
@@ -258,6 +267,48 @@ impl TestNativeHost {
         }
         .expect("test bound inputs");
         self.factory().open_bound(inputs)
+    }
+
+    /// Create the database `name` beneath `root` on one bound ticket of
+    /// this host, run `sql` on it, and close it into the census: a test
+    /// source established through the native gate.
+    pub fn create_bound(&self, root: Arc<PinnedDirectory>, name: &OsStr, domain: OriginalNativeDomain, sql: &str) {
+        let connection = match self.open_bound(root, name, OriginalNativeBoundMode::CreateExclusive, domain) {
+            Ok(connection) => connection,
+            Err(failure) => {
+                let error = failure.to_string();
+                self.retire_open_failure(failure);
+                panic!("test bound create refused: {error}");
+            }
+        };
+        let executed = connection.with_sql(|connection| Ok(connection.execute_batch(sql)?));
+        self.close(connection);
+        if let Err(error) = executed {
+            panic!("test bound create SQL refused: {error:#}");
+        }
+    }
+
+    /// Run `work` on the existing database `name` beneath `root` on one
+    /// bound ticket of this host, then close it into the census: a test
+    /// read of a store through the native gate.
+    pub fn with_existing<T>(
+        &self,
+        root: Arc<PinnedDirectory>,
+        name: &OsStr,
+        domain: OriginalNativeDomain,
+        work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
+    ) -> T {
+        let connection = match self.open_bound(root, name, OriginalNativeBoundMode::Existing, domain) {
+            Ok(connection) => connection,
+            Err(failure) => {
+                let error = failure.to_string();
+                self.retire_open_failure(failure);
+                panic!("test bound open refused: {error}");
+            }
+        };
+        let result = connection.with_sql(work);
+        self.close(connection);
+        result.unwrap_or_else(|error| panic!("test bound SQL refused: {error:#}"))
     }
 
     /// Close a connection and record its terminal in this host's census.

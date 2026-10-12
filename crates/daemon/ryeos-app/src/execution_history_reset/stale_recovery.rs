@@ -265,12 +265,35 @@ fn bounded_names(directory: &lillux::PinnedDirectory, bound: usize, place: &str)
     Ok(names)
 }
 
-fn regular_identity(directory: &lillux::PinnedDirectory, name: &str, place: &str) -> Result<(u64, u64)> {
+/// The shared runtime namespace's names. Its size is not the reset's
+/// scratch, so an overfull namespace is not refused as a scratch repair.
+fn runtime_names(runtime: &lillux::PinnedDirectory) -> Result<Vec<OsString>> {
+    let names = runtime.entry_names_bounded(RUNTIME_SCAN_BOUND + 1)?;
+    if names.len() > RUNTIME_SCAN_BOUND {
+        return Err(super::scratch::runtime_namespace_overfull(RUNTIME_SCAN_BOUND));
+    }
+    Ok(names)
+}
+
+/// The observed identity of a regular entry. `owned` names the reset-owned
+/// directory under `.ai/node` holding it; a non-regular entry there is not
+/// the reset's to remove, so it is refused as foreign with its relative path
+/// for removal by hand. Elsewhere it needs the scratch repair.
+fn regular_identity(
+    directory: &lillux::PinnedDirectory,
+    name: &str,
+    place: &str,
+    owned: Option<&str>,
+) -> Result<(u64, u64)> {
     let entry = directory
         .entry_no_follow(OsStr::new(name))?
         .with_context(|| format!("{place} entry `{name}` disappeared during recovery"))?;
     if entry.entry_type != lillux::PinnedEntryType::Regular {
-        return Err(repair(format!("{place} entry `{name}` is not a regular file")));
+        let what = format!("{place} entry `{name}` is not a regular file");
+        return Err(match owned {
+            Some(parent) => foreign(what, format!(".ai/node/{parent}/{name}")),
+            None => repair(what),
+        });
     }
     Ok((entry.containing_device, entry.inode))
 }
@@ -309,7 +332,7 @@ fn scan_ledger(
             return Err(repair(format!("{PLACE} name `{text}` names no operation")));
         }
         bound.charge(2)?;
-        let identity = regular_identity(roots.ledger, &text, PLACE)?;
+        let identity = regular_identity(roots.ledger, &text, PLACE, Some(LEDGER_DIRECTORY))?;
         let bytes = lillux_sqlite::read_regular_without_sqlite_alias(roots.ledger, &name, RECORD_BYTES)?
             .with_context(|| format!("{PLACE} record `{text}` disappeared during recovery"))?;
         operations
@@ -368,7 +391,7 @@ fn scan_runtime(
     // The shared namespace's size is not the reset's work: one scan is
     // charged, and each name taken as the reset's is charged as it is read.
     bound.charge(1)?;
-    for name in bounded_names(roots.runtime, RUNTIME_SCAN_BOUND, "runtime namespace")? {
+    for name in runtime_names(roots.runtime)? {
         let Some(text) = name.to_str() else { continue };
         let public = text.strip_prefix("cleanup.").unwrap_or(text);
         let Some(operation) = public.strip_prefix(super::original_operation::PREFIX).and_then(operation_of) else {
@@ -385,22 +408,26 @@ fn scan_runtime(
 /// runtime namespace, with its observed identity.
 fn scan_reset_temporaries(roots: &Roots<'_>, bound: &mut RecoveryBound) -> Result<Vec<AbandonedDeposit>> {
     let mut debris = Vec::new();
-    for (location, place, limit) in [
-        (DepositLocation::Ledger, "offline quota ledger", SCAN_BOUND),
-        (DepositLocation::InspectionParent, "offline reset inspections parent", SCAN_BOUND),
-        (DepositLocation::RuntimeNamespace, "runtime namespace", RUNTIME_SCAN_BOUND),
+    for (location, place, owned) in [
+        (DepositLocation::Ledger, "offline quota ledger", Some(LEDGER_DIRECTORY)),
+        (DepositLocation::InspectionParent, "offline reset inspections parent", Some(INSPECTIONS_DIRECTORY)),
+        (DepositLocation::RuntimeNamespace, "runtime namespace", None),
     ] {
         let Some(directory) = roots.directory(location) else {
             continue;
         };
         bound.charge(1)?;
-        for name in bounded_names(directory, limit, place)? {
+        let names = match owned {
+            Some(_) => bounded_names(directory, SCAN_BOUND, place)?,
+            None => runtime_names(directory)?,
+        };
+        for name in names {
             if is_reset_temporary(&name) != Some(true) {
                 continue;
             }
             bound.charge(1)?;
             let text = utf8(&name, "reset temporary debris")?;
-            let (device, inode) = regular_identity(directory, &text, "reset temporary debris")?;
+            let (device, inode) = regular_identity(directory, &text, "reset temporary debris", owned)?;
             debris.push(AbandonedDeposit {
                 location,
                 name: text,
@@ -603,7 +630,8 @@ fn observe_abandoned(
             continue;
         };
         bound.charge(3)?;
-        let (device, inode) = regular_identity(copy_root, name, "offline reset inspections parent")?;
+        let (device, inode) =
+            regular_identity(copy_root, name, "offline reset inspections parent", Some(INSPECTIONS_DIRECTORY))?;
         let bytes = lillux_sqlite::read_regular_without_sqlite_alias(copy_root, OsStr::new(name), RECORD_BYTES)?
             .with_context(|| format!("creation witness `{name}` disappeared during recovery"))?;
         let evidence = CreatedDirectoryRecord::verified(&bytes, roots.identity)
@@ -663,7 +691,7 @@ fn observe_abandoned(
     if reservation.mode() == OriginalInspectionMode::Mutating && !resumed {
         for name in &stale.runtime {
             bound.charge(3)?;
-            let (device, inode) = regular_identity(roots.runtime, name, "runtime namespace")?;
+            let (device, inode) = regular_identity(roots.runtime, name, "runtime namespace", None)?;
             let bytes = lillux_sqlite::read_regular_without_sqlite_alias(roots.runtime, OsStr::new(name), RECORD_BYTES)?
                 .with_context(|| format!("staged operation `{name}` disappeared during recovery"))?;
             super::original_operation::require_own_operation_file(&bytes, roots.identity, operation)
@@ -1297,6 +1325,35 @@ mod tests {
         }
     }
 
+    /// An entry of the reset's own grammar in the ledger or the inspections
+    /// parent that is not a regular file is not the reset's to remove: it
+    /// refuses naming its relative path for removal by hand, and nothing is
+    /// removed.
+    #[test]
+    fn recovery_refuses_a_non_regular_entry_of_its_own_grammar_as_foreign() {
+        for (place, parent) in [("ledger", LEDGER_DIRECTORY), ("inspections", INSPECTIONS_DIRECTORY)] {
+            let node = node();
+            let claim = stale_claim(&node, OriginalInspectionMode::DryRun, false);
+            let name = if place == "ledger" {
+                format!("disposed.{claim}")
+            } else {
+                format!("created.inspection.{claim}.runtime")
+            };
+            let directory = if place == "ledger" { node.ledger() } else { node.inspections() };
+            std::fs::create_dir(directory.join(&name)).unwrap();
+            let before = (names(&node.ledger()), names(&node.inspections()));
+            let error = recover(&node).unwrap_err();
+            let message = format!("{error:#}");
+            let refusal = error.chain().find_map(|cause| cause.downcast_ref::<ResetScratchRepairRequired>());
+            let path = refusal.and_then(|refusal| refusal.foreign.clone()).unwrap_or_default();
+            assert_eq!(path, format!(".ai/node/{parent}/{name}"), "{name}: {message}");
+            assert!(message.contains("is not a regular file"), "{name}: {message}");
+            assert!(message.contains(&format!("remove `{path}` by hand")), "{name}: {message}");
+            assert_eq!((names(&node.ledger()), names(&node.inspections())), before, "{name}");
+            assert!(directory.join(&name).is_dir());
+        }
+    }
+
     /// A reservation beside its release that is not the one the release
     /// settles cannot be attributed, and nothing is removed.
     #[test]
@@ -1345,7 +1402,9 @@ mod tests {
     }
 
     /// The runtime namespace is scanned to a bound; past it recovery
-    /// refuses rather than settle from a truncated scan.
+    /// refuses rather than settle from a truncated scan. The namespace's
+    /// size is not reset scratch, so the refusal does not offer the scratch
+    /// repair: it says the namespace itself needs attention.
     #[test]
     fn recovery_refuses_a_runtime_namespace_past_its_scan_bound() {
         let node = node();
@@ -1354,8 +1413,14 @@ mod tests {
             std::fs::write(node.runtime().join(format!("other.{index}")), b"").unwrap();
         }
         let error = recover(&node).unwrap_err();
-        assert!(repair_named(&error), "{error:#}");
-        assert!(format!("{error:#}").contains("runtime namespace holds more than"), "{error:#}");
+        let message = format!("{error:#}");
+        assert!(
+            error.chain().all(|cause| cause.downcast_ref::<ResetScratchRepairRequired>().is_none()),
+            "{message}"
+        );
+        assert!(message.contains("runtime namespace holds more than"), "{message}");
+        assert!(message.contains("the namespace itself needs attention"), "{message}");
+        assert!(message.contains("cannot clear it"), "{message}");
         assert_eq!(names(&node.ledger()).len(), 1);
     }
 

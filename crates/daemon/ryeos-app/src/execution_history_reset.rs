@@ -2201,21 +2201,28 @@ fn run_execution_history_reset_owned(
                 .context("begin scheduler journal and projection retirement")?;
             // Keep this original same-thread frame: it owns the State lock,
             // runtime namespace pin/lock, StateDb, RuntimeDb and exclusive
-            // CAS guard. An attempt error is diagnostic only; retry that same
-            // cursor and never stringify/drop its native owner. Refusals are
-            // retried for a bounded window after the last advance; past it
-            // the reset refuses with the frame still held, ending the attempt
-            // before the permit and the frame owners behind it.
+            // CAS guard. Within the window an attempt error is diagnostic
+            // only: retry that same cursor and never stringify its native
+            // owner. Only an advance that follows another successful advance
+            // is progress and restarts the window, so an error that resolves
+            // and recurs cannot hold the reset open. A refusal past the
+            // window returns, which ends the attempt before the permit and
+            // before the frame owners declared ahead of it.
             let mut last_retry_notice: Option<std::time::Instant> = None;
             let mut window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
+            let mut previous_ok = false;
             let retirement = loop {
                 match attempt.advance(&permit) {
                     Ok(Some(retirement)) => break retirement,
                     Ok(None) => {
-                        window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
+                        if previous_ok {
+                            window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
+                        }
+                        previous_ok = true;
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                     Err(error) => {
+                        previous_ok = false;
                         if window.has_elapsed() {
                             return Err(scheduler_settlement_pending(error, "advance scheduler retirement"));
                         }
@@ -2246,8 +2253,9 @@ fn run_execution_history_reset_owned(
 
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Finalizing, None);
     if let (Some(participant), Some(retirement)) = (participant, scheduler_retirement.as_ref()) {
-        // Bounded like the advance loop; a refusal past the window keeps the
-        // State marker Active, so the next reset resumes the operation.
+        // Bounded like the advance loop. A refusal past the window returns,
+        // which ends the scheduler attempt before the permit; the State
+        // marker stays Active, so the next reset resumes the operation.
         let window = lillux::time::MonotonicDeadline::after(SCHEDULER_SETTLEMENT_WINDOW);
         loop {
             match permit
@@ -2271,8 +2279,9 @@ fn run_execution_history_reset_owned(
         }
     }
     // End every borrowed scheduler frame before consuming the actual Runtime.
-    // Its own terminal completion succeeded above; failed completion still
-    // retains the original live frame and never reaches this handoff.
+    // Its own terminal completion succeeded above; a completion refused past
+    // its window returned there, ending the attempt before the permit just
+    // as this handoff does.
     drop(scheduler_retirement_attempt);
     drop(permit);
     operational_db.close(Arc::clone(&native_factory))
@@ -2888,9 +2897,61 @@ mod tests {
         .unwrap();
     }
 
+    /// Names the app root of the failed acquisition that
+    /// [`failed_acquisition_attempt_child`] runs in its own process.
+    const FAILED_ACQUISITION_ROOT: &str = "RYEOS_TEST_FAILED_ACQUISITION_ROOT";
+
+    /// The failed attempt of
+    /// [`real_reset_retains_published_claim_when_runtime_inspection_cannot_open`],
+    /// run in a child process; without its root variable it does nothing.
+    #[test]
+    fn failed_acquisition_attempt_child() {
+        use super::original_quota_claim::QuotaCustodyFailure;
+        let Some(root) = std::env::var_os(FAILED_ACQUISITION_ROOT) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let config = Config::load(&ConfigSources {
+            app_root: Some(root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        let _serial = lillux_sqlite::test_host::serial();
+        let error = run_execution_history_reset(
+            &ExecutionHistoryResetOptions {
+                app_root: Some(root.clone()),
+                dry_run: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        // The controller's failure wraps the quota custody it retains.
+        let custody = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<QuotaCustodyFailure>())
+            .unwrap_or_else(|| panic!("reset refusal retains its quota custody: {error:#}"));
+        assert_eq!(custody.phase(), QuotaFailurePhase::Acquisition);
+        let path = config
+            .app_root
+            .join(".ai/node/offline-reset-quota")
+            .join(format!("reserved.{}", custody.claim().operation_id()));
+        assert!(path.exists(), "the failed acquisition's reservation is published");
+        assert!(
+            !config.db_path.exists(),
+            "failed inspection cannot create the absent original"
+        );
+        // The error retains the ORIGINAL claim, and a live claim holds the
+        // StateLock: no other stopped-node frame can open meanwhile.
+        assert!(StateLock::acquire(&default_lock_path(&root)).is_err());
+    }
+
+    /// A dry run whose Runtime inspection cannot open fails in Acquisition
+    /// with its published claim retained. The attempt runs in its own
+    /// process, as each `ryeos node reset` does: its retained custody ends
+    /// only with that process, and ending it refunds nothing.
     #[test]
     fn real_reset_retains_published_claim_when_runtime_inspection_cannot_open() {
-        use super::original_quota_claim::QuotaCustodyFailure;
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -2900,33 +2961,33 @@ mod tests {
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
         install_offline_policy(&config, &identity, true);
-        let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::new(trust)).unwrap());
+        crate::runtime_db::test_native::seed_node(&config, false);
         assert!(!config.db_path.exists());
-        let error = run_execution_history_reset(
-            &ExecutionHistoryResetOptions {
-                app_root: Some(tmp.path().to_owned()),
-                dry_run: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .unwrap_err();
-        let custody = error.downcast_ref::<QuotaCustodyFailure>().unwrap();
-        assert_eq!(custody.phase(), QuotaFailurePhase::Acquisition);
-        let claim = Arc::clone(custody.claim());
-        let path = config
-            .app_root
-            .join(".ai/node/offline-reset-quota")
-            .join(format!("reserved.{}", claim.operation_id()));
-        let original = std::fs::read(&path).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execution_history_reset::tests::failed_acquisition_attempt_child",
+                "--nocapture",
+            ])
+            .env(FAILED_ACQUISITION_ROOT, tmp.path())
+            .output()
+            .unwrap();
         assert!(
-            !config.db_path.exists(),
-            "failed inspection cannot create the absent original"
+            child.status.success(),
+            "failed acquisition child failed: {}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
         );
-        // The error kept the ORIGINAL claim; a new stopped-node observation
-        // frame may authenticate it without constructing a replacement owner.
+        let ledger = config.app_root.join(".ai/node/offline-reset-quota");
+        let reserved: Vec<_> = std::fs::read_dir(&ledger)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("reserved."))
+            .collect();
+        assert_eq!(reserved.len(), 1, "{reserved:?}");
+        let original = std::fs::read(&reserved[0]).unwrap();
+        assert!(!config.db_path.exists());
+
         let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
@@ -2935,9 +2996,6 @@ mod tests {
         let policy =
             OfflineResetPolicyOwner::load(&config, &identity, &state_lock, &runtime, &namespace)
                 .unwrap();
-        claim.require_published(&policy, &identity).unwrap();
-        drop(error);
-        assert_eq!(std::fs::read(&path).unwrap(), original);
         let replacement = OriginalQuotaClaim::prepare(
             &policy,
             &identity,
@@ -2950,6 +3008,7 @@ mod tests {
             replacement.publish(&policy, &identity).is_err(),
             "failed acquisition cannot refund its charge"
         );
+        assert_eq!(std::fs::read(&reserved[0]).unwrap(), original);
     }
 
     #[test]
@@ -2963,7 +3022,7 @@ mod tests {
         .unwrap();
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
-        std::fs::create_dir_all(config.runtime_state_dir()).unwrap();
+        crate::runtime_db::test_native::seed_node(&config, false);
         install_offline_policy(&config, &identity, true);
         let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
@@ -3725,8 +3784,11 @@ mod tests {
                 let recovery = ryeos_state::RecoveryStore::from_refs_root(
                     &permit.runtime_directory()?.path().join("refs"),
                 )?;
+                // The reset holds its projection leases here, so the marker
+                // is read in the scope of the permit's native factory.
+                let factory = permit.native_factory()?.context("reset permit native factory")?;
                 assert!(
-                    recovery.thread_history_discard_in_progress()?,
+                    recovery.thread_history_discard_operation_scoped(factory)?.is_some(),
                     "cross-store marker must remain Active through terminal scheduler acknowledgement"
                 );
                 self.completed
@@ -3743,11 +3805,9 @@ mod tests {
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
         install_offline_policy(&config, &identity, true);
-        let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::new(trust)).unwrap());
-        drop(RuntimeDb::open(&config.db_path).unwrap());
+        crate::runtime_db::test_native::seed_node(&config, true);
         drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        let _serial = lillux_sqlite::test_host::serial();
         let participant = Participant {
             completed: std::sync::atomic::AtomicBool::new(false),
             preflights: std::sync::atomic::AtomicUsize::new(0),
@@ -3779,61 +3839,92 @@ mod tests {
         );
     }
 
+    /// Scheduler participant whose terminal completion refuses while
+    /// `refuse` is set.
+    struct RefusingParticipant {
+        refuse: bool,
+    }
+    struct CompletedAttempt;
+    impl SchedulerHistoryRetirementAttempt for CompletedAttempt {
+        fn advance(
+            &mut self,
+            permit: &SchedulerResetRetirement<'_, '_>,
+        ) -> Result<Option<SchedulerHistoryRetirement>> {
+            permit.runtime_directory()?;
+            Ok(Some(SchedulerHistoryRetirement {
+                journal_artifacts: 0,
+                rows: ryeos_scheduler_contract::SchedulerFireHistoryDiscardReport::default(),
+                generation: None,
+            }))
+        }
+    }
+    impl SchedulerHistoryResetParticipant for RefusingParticipant {
+        fn preflight(&self, permit: &SchedulerResetPreview<'_>) -> Result<()> {
+            permit.runtime_directory().map(|_| ())
+        }
+        fn preview(
+            &self,
+            _permit: &SchedulerResetPreview<'_>,
+        ) -> Result<ryeos_scheduler_contract::SchedulerFireHistoryAccounting> {
+            Ok(ryeos_scheduler_contract::SchedulerFireHistoryAccounting::Exact {
+                counts: Default::default(),
+            })
+        }
+        fn begin_retirement<'a>(
+            &self,
+            permit: &'a SchedulerResetRetirement<'_, '_>,
+        ) -> Result<Box<dyn SchedulerHistoryRetirementAttempt + 'a>> {
+            permit.runtime_directory()?;
+            Ok(Box::new(CompletedAttempt))
+        }
+        fn complete(
+            &self,
+            permit: &SchedulerResetRetirement<'_, '_>,
+            _retirement: &SchedulerHistoryRetirement,
+        ) -> Result<usize> {
+            permit.runtime_directory()?;
+            anyhow::ensure!(!self.refuse, "scheduler terminal journal refused");
+            Ok(0)
+        }
+    }
+
+    /// Names the app root of the refused attempt that
+    /// [`scheduler_refused_attempt_child`] runs in its own process.
+    const REFUSED_ATTEMPT_ROOT: &str = "RYEOS_TEST_REFUSED_RESET_ROOT";
+
+    /// The refused attempt of
+    /// [`scheduler_refusal_past_its_window_leaves_a_settlement_the_next_reset_resumes`],
+    /// run in a child process; without its root variable it does nothing.
+    #[test]
+    fn scheduler_refused_attempt_child() {
+        let Some(root) = std::env::var_os(REFUSED_ATTEMPT_ROOT) else {
+            return;
+        };
+        let _serial = lillux_sqlite::test_host::serial();
+        let options = ExecutionHistoryResetOptions {
+            app_root: Some(PathBuf::from(root)),
+            ..Default::default()
+        };
+        let error = run_execution_history_reset(&options, Some(&RefusingParticipant { refuse: true }))
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("settlement pending"), "{message}");
+        assert!(
+            message.contains("the next `ryeos node reset execution-history` recovers it"),
+            "{message}"
+        );
+        assert!(message.contains("scheduler terminal journal refused"), "{message}");
+    }
+
     /// A scheduler stage refused past its window ends the reset with the
     /// settlement pending: State still marks the operation Active, the
     /// attempt's reservation stays, and the next reset settles that stale
-    /// attempt as resumed and completes the operation.
+    /// attempt as resumed and completes the operation. The refused attempt
+    /// runs in its own process, as each `ryeos node reset` does: its
+    /// retained custody, including the StateLock and the native lease
+    /// registration, ends only with that process.
     #[test]
     fn scheduler_refusal_past_its_window_leaves_a_settlement_the_next_reset_resumes() {
-        struct Participant {
-            refuse: std::sync::atomic::AtomicBool,
-        }
-        struct Attempt;
-        impl SchedulerHistoryRetirementAttempt for Attempt {
-            fn advance(
-                &mut self,
-                permit: &SchedulerResetRetirement<'_, '_>,
-            ) -> Result<Option<SchedulerHistoryRetirement>> {
-                permit.runtime_directory()?;
-                Ok(Some(SchedulerHistoryRetirement {
-                    journal_artifacts: 0,
-                    rows: ryeos_scheduler_contract::SchedulerFireHistoryDiscardReport::default(),
-                    generation: None,
-                }))
-            }
-        }
-        impl SchedulerHistoryResetParticipant for Participant {
-            fn preflight(&self, permit: &SchedulerResetPreview<'_>) -> Result<()> {
-                permit.runtime_directory().map(|_| ())
-            }
-            fn preview(
-                &self,
-                _permit: &SchedulerResetPreview<'_>,
-            ) -> Result<ryeos_scheduler_contract::SchedulerFireHistoryAccounting> {
-                Ok(ryeos_scheduler_contract::SchedulerFireHistoryAccounting::Exact {
-                    counts: Default::default(),
-                })
-            }
-            fn begin_retirement<'a>(
-                &self,
-                permit: &'a SchedulerResetRetirement<'_, '_>,
-            ) -> Result<Box<dyn SchedulerHistoryRetirementAttempt + 'a>> {
-                permit.runtime_directory()?;
-                Ok(Box::new(Attempt))
-            }
-            fn complete(
-                &self,
-                permit: &SchedulerResetRetirement<'_, '_>,
-                _retirement: &SchedulerHistoryRetirement,
-            ) -> Result<usize> {
-                permit.runtime_directory()?;
-                anyhow::ensure!(
-                    !self.refuse.load(std::sync::atomic::Ordering::SeqCst),
-                    "scheduler terminal journal refused"
-                );
-                Ok(0)
-            }
-        }
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -3843,26 +3934,26 @@ mod tests {
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
         install_offline_policy(&config, &identity, true);
-        let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::new(trust)).unwrap());
-        drop(RuntimeDb::open(&config.db_path).unwrap());
+        crate::runtime_db::test_native::seed_node(&config, true);
         drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
-        let participant = Participant { refuse: std::sync::atomic::AtomicBool::new(true) };
-        let options = ExecutionHistoryResetOptions {
-            app_root: Some(tmp.path().to_owned()),
-            ..Default::default()
-        };
 
-        let error = run_execution_history_reset(&options, Some(&participant)).unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("settlement pending"), "{message}");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execution_history_reset::tests::scheduler_refused_attempt_child",
+                "--nocapture",
+            ])
+            .env(REFUSED_ATTEMPT_ROOT, tmp.path())
+            .output()
+            .unwrap();
         assert!(
-            message.contains("the next `ryeos node reset execution-history` recovers it"),
-            "{message}"
+            child.status.success(),
+            "refused attempt child failed: {}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
         );
-        assert!(message.contains("scheduler terminal journal refused"), "{message}");
-        drop(error);
+
+        let _serial = lillux_sqlite::test_host::serial();
         let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(&config.runtime_state_dir()).unwrap();
         let active = recovery
             .thread_history_discard_operation()
@@ -3874,8 +3965,11 @@ mod tests {
             "the refused attempt's reservation stays for recovery"
         );
 
-        participant.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
-        let report = run_execution_history_reset(&options, Some(&participant)).unwrap();
+        let options = ExecutionHistoryResetOptions {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        };
+        let report = run_execution_history_reset(&options, Some(&RefusingParticipant { refuse: false })).unwrap();
         assert!(report.performed);
         let resumed: Vec<_> = report
             .recovered
@@ -4171,6 +4265,38 @@ mod tests {
         assert!(require_absent_scheduler_history(&config, &directory).is_err());
         assert_eq!(std::fs::read(file).unwrap(), b"unknown schema");
     }
+    /// Every entry of the State recovery tree beneath `root`, sorted.
+    fn recovery_entries(root: &Path) -> Vec<PathBuf> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root.join("recovery")];
+        while let Some(directory) = pending.pop() {
+            let Ok(children) = std::fs::read_dir(&directory) else { continue };
+            for child in children {
+                let path = child.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                entries.push(path);
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    /// A scheduler source database at `root`, created through the native
+    /// gate on a test host released before return.
+    fn seed_scheduler_source(root: &Path, sql: &str) {
+        let host = lillux_sqlite::test_host::TestNativeHost::acquire();
+        let directory = Arc::new(lillux::PinnedDirectory::open(root).unwrap().unwrap());
+        host.create_bound(
+            directory,
+            std::ffi::OsStr::new("scheduler.sqlite3"),
+            lillux_sqlite::OriginalNativeDomain::NodeScheduler,
+            sql,
+        );
+        drop(host.release());
+    }
+
     pub(super) fn issue_inspection_claim(
         directory: &lillux::PinnedDirectory,
         namespace: &lillux::PinnedDirectoryLock,
@@ -4190,7 +4316,7 @@ mod tests {
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
         install_offline_policy(&config, &identity, true);
         let state_lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
-        fixture_operational_source::establish(directory, namespace, &identity).unwrap();
+        fixture_operational_source::establish(directory, namespace).unwrap();
         let policy =
             OfflineResetPolicyOwner::load(&config, &identity, &state_lock, directory, namespace)
                 .unwrap();
@@ -4216,10 +4342,7 @@ mod tests {
     fn scheduler_preview_retains_real_native_close_proof_without_mutating_source() {
         let tmp = TempDir::new().unwrap();
         let source = tmp.path().join("scheduler.sqlite3");
-        let conn = rusqlite::Connection::open(&source).unwrap();
-        conn.execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(7);")
-            .unwrap();
-        conn.close().unwrap();
+        seed_scheduler_source(tmp.path(), "CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(7);");
         let original = std::fs::read(&source).unwrap();
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
@@ -4308,10 +4431,7 @@ mod tests {
     fn scheduler_accounting_failure_retains_actual_native_close_proof() {
         let tmp = TempDir::new().unwrap();
         let source = tmp.path().join("scheduler.sqlite3");
-        let conn = rusqlite::Connection::open(&source).unwrap();
-        conn.execute_batch("CREATE TABLE sample(value INTEGER);")
-            .unwrap();
-        conn.close().unwrap();
+        seed_scheduler_source(tmp.path(), "CREATE TABLE sample(value INTEGER);");
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
         let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
@@ -4859,6 +4979,7 @@ mod tests {
                 &namespace,
                 &directory.path().join("runtime.sqlite3"),
             );
+            let recovery_before = recovery_entries(tmp.path());
             std::fs::write(&sidecar, b"retained history").unwrap();
             let permit = SchedulerResetPreview {
                 runtime_directory: &directory,
@@ -4880,7 +5001,7 @@ mod tests {
             );
             assert_eq!(std::fs::read(sidecar).unwrap(), b"retained history");
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
-            assert!(!tmp.path().join("recovery").exists());
+            assert_eq!(recovery_entries(tmp.path()), recovery_before, "refusal records no recovery state");
         }
     }
 
@@ -4900,6 +5021,7 @@ mod tests {
                 &namespace,
                 &directory.path().join("runtime.sqlite3"),
             );
+            let recovery_before = recovery_entries(tmp.path());
             std::fs::create_dir(&sidecar).unwrap();
             let permit = SchedulerResetPreview {
                 runtime_directory: &directory,
@@ -4921,7 +5043,7 @@ mod tests {
             );
             assert!(sidecar.is_dir());
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
-            assert!(!tmp.path().join("recovery").exists());
+            assert_eq!(recovery_entries(tmp.path()), recovery_before, "refusal records no recovery state");
         }
     }
 
@@ -4944,6 +5066,7 @@ mod tests {
                 &namespace,
                 &directory.path().join("runtime.sqlite3"),
             );
+            let recovery_before = recovery_entries(tmp.path());
             std::os::unix::fs::symlink(&target, &sidecar).unwrap();
             let permit = SchedulerResetPreview {
                 runtime_directory: &directory,
@@ -4966,7 +5089,7 @@ mod tests {
             assert_eq!(std::fs::read_link(sidecar).unwrap(), target);
             assert_eq!(std::fs::read(target).unwrap(), b"retained history");
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
-            assert!(!tmp.path().join("recovery").exists());
+            assert_eq!(recovery_entries(tmp.path()), recovery_before, "refusal records no recovery state");
         }
     }
 }

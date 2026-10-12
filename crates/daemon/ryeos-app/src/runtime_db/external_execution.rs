@@ -3116,7 +3116,7 @@ pub(crate) mod tests {
     fn direct_program_retention_is_bounded_and_exact_across_database_reopen() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let mut reservation = direct_owner_reservation(&db);
         let ExternalAllocationOwner::DirectThread { program, .. } = &mut reservation.owner else {
             unreachable!()
@@ -3130,7 +3130,7 @@ pub(crate) mod tests {
         // Storage-only fixture, deliberately not a born compiler admission.
         retain_direct_owner_fixture(&db, &reservation, "contact_pending");
         drop(db);
-        let reopened = RuntimeDb::open(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             reopened
                 .external_allocation(&reservation.placement_thread_id)
@@ -3185,7 +3185,7 @@ pub(crate) mod tests {
     #[test]
     fn direct_owner_is_closed_and_not_a_synthetic_session() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = direct_owner_reservation(&db);
         reservation.validate().unwrap();
         db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &reservation)?)).unwrap();
@@ -3231,7 +3231,7 @@ pub(crate) mod tests {
     #[test]
     fn direct_contact_checks_exact_claim_chain_epoch_and_stop() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let original = direct_owner_reservation(&db);
         assert!(db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &original)?)).unwrap());
         for mutation in ["chain", "nonce", "epoch", "daemon"] {
@@ -3266,7 +3266,7 @@ pub(crate) mod tests {
     #[test]
     fn retained_direct_occurrence_survives_claim_rotation_for_cleanup_only() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = direct_owner_reservation(&db);
         retain_direct_owner_fixture(&db, &reservation, "contact_pending");
         db.fixture_release_thread_launch_claim(&reservation.placement_thread_id, "direct-claim")
@@ -3323,7 +3323,7 @@ pub(crate) mod tests {
     #[test]
     fn direct_uncontacted_settlement_releases_retention_not_contact_authority() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = direct_owner_reservation(&db);
         retain_direct_owner_fixture(&db, &reservation, "reserved");
         assert!(
@@ -3514,7 +3514,7 @@ pub(crate) mod tests {
     #[test]
     fn activation_identity_binds_the_distinct_guest_owner_runtime() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = reservation(&db, "guest-runtime-binding");
         let occurrence = ExternalAllocationOccurrence {
             schema: 1,
@@ -3554,7 +3554,7 @@ pub(crate) mod tests {
         ] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("runtime.sqlite3");
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let reservation = reservation(&db, "atomic-late");
             let placement = &reservation.placement_thread_id;
             reserve(&db, &reservation).unwrap();
@@ -3619,7 +3619,7 @@ pub(crate) mod tests {
             reservation.startup_deadline().unwrap();
             settle(&db).unwrap();
             drop(db);
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             assert_eq!(
                 db.external_allocation(placement).unwrap().unwrap().phase,
                 ExternalAllocationPhase::Quarantined
@@ -3660,7 +3660,7 @@ pub(crate) mod tests {
     #[test]
     fn duplicate_evidence_still_fences_an_expired_live_cap_atomically() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = reservation(&db, "duplicate-late");
         let placement = &reservation.placement_thread_id;
         reserve(&db, &reservation).unwrap();
@@ -3698,7 +3698,7 @@ pub(crate) mod tests {
     #[test]
     fn startup_reservation_is_strict_and_has_one_exact_capsule_budget() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reserved = reservation(&db, "startup-shape");
         reserved.validate_startup_budget(60_000).unwrap();
         assert!(reserved.validate_startup_budget(60_001).is_err());
@@ -3745,11 +3745,11 @@ pub(crate) mod tests {
     fn startup_anchor_survives_reopen_and_refuses_budget_renewal() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reserved = reservation(&db, "startup-retained");
         reserve(&db, &reserved).unwrap();
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(reserve(&db, &reserved).unwrap().reservation, reserved);
         let mut renewed = reserved.clone();
         renewed.startup_started_at_ms += 1;
@@ -3768,7 +3768,7 @@ pub(crate) mod tests {
     fn expired_startup_refuses_new_contact_but_preserves_uncertain_cleanup() {
         for contacted in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
             let mut reserved = reservation(&db, "startup-expiry");
             reserved.startup_deadline_ms = reserved.startup_started_at_ms + 250;
             reserve(&db, &reserved).unwrap();
@@ -3807,7 +3807,7 @@ pub(crate) mod tests {
     #[test]
     fn external_contact_accepts_the_live_public_workspace_and_refuses_freeze() {
         let active_dir = tempfile::tempdir().unwrap();
-        let active_db = RuntimeDb::open(&active_dir.path().join("runtime.sqlite3")).unwrap();
+        let active_db = crate::runtime_db::test_native::TestRuntime::open(&active_dir.path().join("runtime.sqlite3"));
         let active = reservation(&active_db, "active");
         active_db
             .conn.with_sql(|connection| Ok(connection.execute(
@@ -3821,7 +3821,7 @@ pub(crate) mod tests {
         );
 
         let frozen_dir = tempfile::tempdir().unwrap();
-        let frozen_db = RuntimeDb::open(&frozen_dir.path().join("runtime.sqlite3")).unwrap();
+        let frozen_db = crate::runtime_db::test_native::TestRuntime::open(&frozen_dir.path().join("runtime.sqlite3"));
         let frozen = reservation(&frozen_db, "frozen");
         frozen_db
             .conn.with_sql(|connection| Ok(connection.execute(
@@ -3836,7 +3836,7 @@ pub(crate) mod tests {
     #[test]
     fn quarantined_external_start_failure_retains_session_and_credential_fence() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reserved = reservation(&db, "failed-start");
         reserve(&db, &reserved).unwrap();
         db.claim_external_allocation_contact(
@@ -3897,7 +3897,7 @@ pub(crate) mod tests {
     fn external_contact_is_claimed_once_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reserved = reservation(&db, "one");
         assert_eq!(
             reserve(&db, &reserved).unwrap().phase,
@@ -3943,7 +3943,7 @@ pub(crate) mod tests {
         ));
         assert!(db.inspect_thread_history_discard().is_err());
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained_json: String = db.conn.with_sql(|connection| Ok(connection.query_row(
             "SELECT binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
             [&reserved.binding_hash], |row| row.get(0))?)).unwrap();
@@ -3979,7 +3979,7 @@ pub(crate) mod tests {
     #[test]
     fn guest_package_delivery_is_subordinate_to_exact_activation_and_signed_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reservation = reservation(&db, "one");
         let occurrence = ExternalAllocationOccurrence {
             schema: 1,
@@ -4045,7 +4045,7 @@ pub(crate) mod tests {
     fn supervisor_activation_requires_bound_occurrence_and_reconciles_exactly() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reservation = reservation(&db, "one");
         reserve(&db, &reservation).unwrap();
         let occurrence = ExternalAllocationOccurrence {
@@ -4093,7 +4093,7 @@ pub(crate) mod tests {
         );
         drop(db);
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             !db.begin_external_supervisor_activation("T-one", &intent)
                 .unwrap()
@@ -4131,7 +4131,7 @@ pub(crate) mod tests {
     #[test]
     fn first_supervisor_activation_requires_a_live_launch_owner() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reservation = reservation(&db, "orphaned");
         reserve(&db, &reservation).unwrap();
         db.claim_external_allocation_contact(
@@ -4176,7 +4176,7 @@ pub(crate) mod tests {
     fn recovery_validation_recomputes_supervisor_activation_request_identity() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reservation = reservation(&db, "activation-digest");
         reserve(&db, &reservation).unwrap();
         db.claim_external_allocation_contact(
@@ -4257,7 +4257,7 @@ pub(crate) mod tests {
     #[test]
     fn contacted_no_occurrence_requires_exact_evidence_and_releases_capacity() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let first = reservation(&db, "one");
         reserve(&db, &first).unwrap();
         assert!(matches!(
@@ -4297,7 +4297,7 @@ pub(crate) mod tests {
     fn exact_terminal_observation_is_distinct_from_termination_intent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reservation = reservation(&db, "one");
         reserve(&db, &reservation).unwrap();
         db.claim_external_allocation_contact("T-one", &reservation.request_digest)
@@ -4362,7 +4362,7 @@ pub(crate) mod tests {
         }
         drop(db);
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
         db.settle_external_terminal("T-one", &observation).unwrap();
         db.settle_external_terminal("T-one", &observation).unwrap();
@@ -4391,7 +4391,7 @@ pub(crate) mod tests {
         // cleanup may retire the already-bound occurrence by its exact ID.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reservation = reservation(&db, "uncertain-activation");
         reserve(&db, &reservation).unwrap();
         db.claim_external_allocation_contact(
@@ -4426,7 +4426,7 @@ pub(crate) mod tests {
         );
         drop(db);
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             !db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
                 .unwrap()
@@ -4481,7 +4481,7 @@ pub(crate) mod tests {
     fn predecessor_guest_package_binding_refuses_before_reopen_decode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         let mut predecessor = serde_json::to_value(&retained).unwrap();
         predecessor["document"]["schema"] = serde_json::Value::from(9);
@@ -4509,31 +4509,27 @@ pub(crate) mod tests {
             .unwrap();
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("predecessor binding must require explicit reset");
-        let message = format!("{error:#}");
-        assert!(message.contains("explicit no-backcompat reset"));
+        let message = crate::runtime_db::test_native::live_open_refusal(&path);
+        assert!(message.contains("explicit no-backcompat reset"), "{message}");
         assert!(message.contains(&format!(
             "stored schema_epoch={}",
             RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
         )));
         assert!(!message.contains("decode retained external binding"));
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let preserved: String = conn
-            .query_row(
+        let preserved: String = crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.query_row(
                 "SELECT binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
                 [retained.digest()],
                 |row| row.get(0),
-            )
-            .unwrap();
+            )?)
+        });
         assert_eq!(preserved, predecessor);
     }
 
     #[test]
     fn external_reservation_atomically_retains_exact_binding_generation() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reservation = reservation(&db, "one");
         let mut wrong = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         let mut value = serde_json::to_value(&wrong).unwrap();
@@ -4689,7 +4685,7 @@ pub(crate) mod tests {
     #[test]
     fn recovery_rechecks_allocation_limits_against_retained_binding() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reservation = reservation(&db, "one");
         reserve(&db, &reservation).unwrap();
 
@@ -4713,7 +4709,7 @@ pub(crate) mod tests {
     #[test]
     fn external_no_contact_cancel_settles_without_reopening_the_intent() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reserved = reservation(&db, "one");
         reserve(&db, &reserved).unwrap();
         db.cancel_external_allocation("T-one").unwrap();
@@ -4738,7 +4734,7 @@ pub(crate) mod tests {
     #[test]
     fn external_contact_rechecks_workspace_readiness_in_claim_transaction() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reserved = reservation(&db, "one");
         reserve(&db, &reserved).unwrap();
         db.conn.with_sql(|connection| Ok(connection.execute(
@@ -4759,7 +4755,7 @@ pub(crate) mod tests {
     #[test]
     fn external_late_occurrence_identifies_cleanup_without_releasing_quarantine() {
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reserved = reservation(&db, "one");
         reserve(&db, &reserved).unwrap();
         assert!(matches!(
@@ -4830,7 +4826,7 @@ pub(crate) mod tests {
         assert!(reserve(&missing_claim_db, &missing_claim_reservation).is_err());
 
         let stale_owner = tempfile::tempdir().unwrap();
-        let stale_owner_db = RuntimeDb::open(&stale_owner.path().join("runtime.sqlite3")).unwrap();
+        let stale_owner_db = crate::runtime_db::test_native::TestRuntime::open(&stale_owner.path().join("runtime.sqlite3"));
         let stale_owner_reservation = reservation(&stale_owner_db, "stale-owner");
         stale_owner_db
             .conn.with_sql(|connection| Ok(connection.execute(
@@ -4845,7 +4841,7 @@ pub(crate) mod tests {
         assert!(reserve(&stale_owner_db, &stale_owner_reservation).is_err());
 
         let dir = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let reserved = reservation(&db, "one");
         let mut wrong = reserved.clone();
         wrong.schema = 1;

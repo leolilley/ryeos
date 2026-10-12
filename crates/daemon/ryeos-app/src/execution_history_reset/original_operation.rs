@@ -779,12 +779,15 @@ impl OriginalOperation {
                     == serde_json::to_string(&state.runtime_directory().identity()?)?,
             "active original operation requires its actual exclusive State runtime"
         );
+        // With the owning factory the marker is read in its scope, so the
+        // projection leases that factory holds do not refuse the read.
+        let recovery = state.require_recovery()?;
+        let active = match factory {
+            Some(factory) => recovery.thread_history_discard_operation_scoped(factory)?,
+            None => recovery.thread_history_discard_operation()?,
+        };
         ensure!(
-            state
-                .require_recovery()?
-                .thread_history_discard_operation()?
-                .as_ref()
-                == Some(&self.reference),
+            active.as_ref() == Some(&self.reference),
             "original reset operation is not activated by its exact State marker"
         );
         self.require_staged_in(factory, state.runtime_directory())?;

@@ -45,6 +45,8 @@ pub mod source_verification;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod verify;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};

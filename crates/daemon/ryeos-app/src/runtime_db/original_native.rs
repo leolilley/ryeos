@@ -304,29 +304,11 @@ impl RuntimeDb {
 mod native_reference_tests {
     use super::*;
     use lillux_sqlite::test_host::TestNativeHost;
-    use lillux_sqlite::{OriginalNativeBoundMode, OriginalNativeDomain, OriginalNativeTransientInputs};
+    use lillux_sqlite::{OriginalNativeBoundMode, OriginalNativeDomain};
+
+    use super::super::test_native::{retire, runtime_reference};
 
     const NAME: &str = "runtime.sqlite3";
-
-    fn runtime_reference(host: &TestNativeHost) -> sqlite_schema::ClosedNativeSchemaSqlReference {
-        // SAFETY: test-only issuance under this host's own funded factory.
-        let inputs = unsafe {
-            OriginalNativeTransientInputs::issued(
-                OriginalNativeDomain::NodeRuntimeSchemaReference,
-                host.destination(),
-            )
-        }
-        .expect("Runtime reference inputs");
-        match sqlite_schema::prepare_native_schema_sql_reference(
-            Arc::clone(host.factory()),
-            inputs,
-            OriginalNativeDomain::NodeRuntimeSchemaReference,
-            &runtime_schema_sql(),
-        ) {
-            Ok(reference) => reference,
-            Err(failure) => panic!("Runtime schema reference refused under the gate: {failure}"),
-        }
-    }
 
     fn bound(
         host: &TestNativeHost,
@@ -334,39 +316,7 @@ mod native_reference_tests {
         mode: OriginalNativeBoundMode,
         domain: OriginalNativeDomain,
     ) -> OriginalNativeBoundInputs {
-        // SAFETY: test-only issuance under this host's own funded factory.
-        unsafe {
-            OriginalNativeBoundInputs::issued(
-                Arc::clone(root),
-                std::ffi::OsStr::new(NAME),
-                mode,
-                domain,
-                host.destination(),
-                None,
-            )
-        }
-        .expect("Runtime bound inputs")
-    }
-
-    /// Hand every closed terminal to the host census; returns the domains.
-    fn retire(host: &TestNativeHost, db: RuntimeDb) -> Vec<OriginalNativeDomain> {
-        let closed = match db.close_original_runtime(Arc::clone(host.factory())) {
-            Ok(closed) => closed,
-            Err(failure) => panic!("Runtime close refused: {failure}"),
-        };
-        let terminals = closed.native_terminals().expect("closed Runtime census");
-        let domains = terminals
-            .iter()
-            .map(|terminal| match terminal {
-                OriginalNativeConnectionTerminal::Closed(owner) => owner.domain(),
-                OriginalNativeConnectionTerminal::Released(_) => panic!("closed Runtime yields closed terminals"),
-            })
-            .collect();
-        for terminal in terminals {
-            host.retain_terminal(terminal);
-        }
-        drop(closed);
-        domains
+        super::super::test_native::bound(host, root, &root.path().join(NAME), mode, domain)
     }
 
     fn open_mutation(

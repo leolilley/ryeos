@@ -2005,7 +2005,7 @@ mod tests {
             byte_count: 4,
         };
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2107,7 +2107,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, recovery, identity) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2216,7 +2216,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, recovery, identity) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2445,7 +2445,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, _, _) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.conn.with_sql(|connection| Ok(connection.execute("UPDATE scoped_child_attempt SET recipe_digest='not-a-digest' WHERE attempt_id=?1", [&initial.attempt_id])?)).unwrap();
@@ -2459,7 +2459,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, recovery, identity) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2498,7 +2498,7 @@ mod tests {
             "b".repeat(64),
         );
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2555,7 +2555,7 @@ mod tests {
         let (initial, recovery, identity) = fixture();
         let former_bytes;
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2609,7 +2609,7 @@ mod tests {
             let path = temp.path().join("runtime.sqlite3");
             let (initial, _, _) = fixture();
             {
-                let db = RuntimeDb::open(&path).unwrap();
+                let db = crate::runtime_db::test_native::TestRuntime::open(&path);
                 seed_owner(&db, &initial.owner);
                 db.reserve_scoped_child_attempt(&initial).unwrap();
                 let replacement = corrupt_fence.map(|_| {

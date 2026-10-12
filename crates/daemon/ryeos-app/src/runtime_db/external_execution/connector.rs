@@ -793,7 +793,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (placement, channel_digest) = released(&db, "prepared-connector");
         let generation = db
             .external_connector_capability_generation(&placement)
@@ -823,7 +823,7 @@ mod tests {
         );
         drop(db);
 
-        let reopened = RuntimeDb::open(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             reopened.external_connector(&placement).unwrap(),
             Some(prepared)
@@ -834,7 +834,7 @@ mod tests {
     fn connector_connection_is_one_use_and_disconnect_is_terminal() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (placement, _) = released(&db, "connected-connector");
         let generation = db
             .external_connector_capability_generation(&placement)
@@ -858,7 +858,7 @@ mod tests {
                 .unwrap()
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             !db.connect_external_connector(&placement, &generation, &capability_hash, &first_peer,)
                 .unwrap()
@@ -890,7 +890,7 @@ mod tests {
                 .is_err()
         );
         drop(db);
-        let reopened = RuntimeDb::open(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             reopened.external_connector(&placement).unwrap(),
             Some(closed)
@@ -911,7 +911,7 @@ mod tests {
             "UPDATE credential_profile SET lock_owner=NULL",
         ] {
             let root = tempfile::tempdir().unwrap();
-            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
             let (placement, _) = released(&db, "connection-authority");
             let generation = db
                 .external_connector_capability_generation(&placement)
@@ -953,7 +953,7 @@ mod tests {
     fn stale_released_channel_cannot_consume_the_connection_claim() {
         for state in ["quiescing", "stopping"] {
             let root = tempfile::tempdir().unwrap();
-            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
             let (placement, _) = released(&db, &format!("stale-{state}"));
             let generation = db
                 .external_connector_capability_generation(&placement)
@@ -983,7 +983,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner) = released_authority(&db, "revoked-connector");
         let placement = binding.placement_thread_id;
         let generation = db
@@ -1010,7 +1010,7 @@ mod tests {
         );
 
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, _) = released_authority(&db, "expired-connector");
         let mut expired = binding.clone();
         expired.issued_at_ms = 1;
@@ -1022,7 +1022,7 @@ mod tests {
         );
 
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (placement, _) = released(&db, "orphaned-connector");
         let generation = db
             .external_connector_capability_generation(&placement)
@@ -1048,7 +1048,7 @@ mod tests {
     fn recovery_rederives_connector_capability_generation() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (placement, _) = released(&db, "generation-corruption");
         let generation = db
             .external_connector_capability_generation(&placement)
@@ -1085,7 +1085,7 @@ mod tests {
     #[test]
     fn live_connector_blocks_capacity_settlement_and_rows_are_immutable() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (placement, _) = released(&db, "settlement-connector");
         let generation = db
             .external_connector_capability_generation(&placement)

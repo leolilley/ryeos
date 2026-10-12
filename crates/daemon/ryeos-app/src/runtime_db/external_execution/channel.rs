@@ -3123,7 +3123,7 @@ pub(super) mod tests {
     #[test]
     fn retained_session_channel_rejects_changed_runtime_and_owner_coordinates() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, _, _) = setup(&db);
         let allocation = db
             .external_allocation(&binding.placement_thread_id)
@@ -3232,7 +3232,7 @@ pub(super) mod tests {
     fn retained_direct_channel_joins_program_without_granting_live_admission() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (allocation, binding) = direct_channel_coordinates(&db);
         db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
         assert!(db.register_external_execution_channel(&binding).is_err());
@@ -3307,7 +3307,7 @@ pub(super) mod tests {
             .unwrap();
         assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &allocation.reservation)?)).unwrap());
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         // Current-owner loss cannot erase exact cleanup/history ownership.
         db.conn.with_sql(|connection| Ok(require_retained_channel_allocation(connection, &binding, &allocation)?)).unwrap();
         let mut quarantined = allocation.clone();
@@ -3393,7 +3393,7 @@ pub(super) mod tests {
         for boundary in ["activation", "attachment", "release"] {
             for loss in ["nonce", "epoch", "daemon", "stop"] {
                 let root = tempfile::tempdir().unwrap();
-                let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+                let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
                 let (_, binding, intent) = direct_bound_channel_fixture(&db);
                 let placement = &binding.placement_thread_id;
                 let owner = SigningKey::from_bytes(&[19; 32]);
@@ -3476,7 +3476,7 @@ pub(super) mod tests {
         use ryeos_state::external_execution::ExternalCommandOutputStream;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (_, binding, intent) = direct_bound_channel_fixture(&db);
         let placement = &binding.placement_thread_id;
         let owner = SigningKey::from_bytes(&[19; 32]);
@@ -3555,7 +3555,7 @@ pub(super) mod tests {
             cancel.digest()
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.conn.with_sql(|connection| Ok(NodeJournalOwner.require_owner(connection, &binding)?)).unwrap();
         assert!(
             db.pending_external_owner_transport_frames(placement, 8, 64 * 1024)
@@ -3723,7 +3723,7 @@ pub(super) mod tests {
     fn direct_applied_output_waits_for_delayed_release_applied_receipt() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, terminal, terminal_digest) =
             direct_output_fixture_with_release_application(
                 &db,
@@ -3748,7 +3748,7 @@ pub(super) mod tests {
                 .is_none()
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             db.external_direct_applied_output(placement)
                 .unwrap()
@@ -3800,7 +3800,7 @@ pub(super) mod tests {
         ] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("runtime.sqlite3");
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (binding, owner, terminal, digest) =
                 direct_output_fixture_with_exit(&db, exit.clone());
             let placement = &binding.placement_thread_id;
@@ -3949,7 +3949,7 @@ Ok(())
                 .is_err()
             );
             drop(db);
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (recovered_owner, recovered_output) = db
                 .external_direct_settled_owner_output(placement)
                 .unwrap()
@@ -4004,7 +4004,7 @@ Ok(())
     fn normal_direct_settlement_refuses_stale_new_intent_and_cancellation_poisoning() {
         for cancellation in ["before", "after", "stale", "quarantined"] {
             let root = tempfile::tempdir().unwrap();
-            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
             let (binding, owner, terminal, _) = direct_output_fixture(&db, 0);
             let placement = &binding.placement_thread_id;
             db.record_external_execution_frame(placement, &terminal)
@@ -4097,7 +4097,7 @@ Ok(())
         for exit_code in [0, 7] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("runtime.sqlite3");
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (binding, _, terminal, digest) = direct_output_fixture(&db, exit_code);
             let placement = &binding.placement_thread_id;
             assert!(
@@ -4143,7 +4143,7 @@ Ok(())
                 Some(output.clone())
             );
             drop(db);
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             assert_eq!(
                 db.collect_external_direct_output(placement).unwrap(),
                 Some(output)
@@ -4155,7 +4155,7 @@ Ok(())
     fn direct_output_collector_cancellation_and_settlement_do_not_turn_data_into_success() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, terminal, digest) = direct_output_fixture(&db, 0);
         let placement = &binding.placement_thread_id;
         db.author_external_owner_revocation(placement, &owner)
@@ -4210,7 +4210,7 @@ Ok(())
             Some(output.clone())
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.collect_external_direct_output(placement).unwrap(),
             Some(output)
@@ -4220,7 +4220,7 @@ Ok(())
     #[test]
     fn direct_output_collector_refuses_digest_tampering_without_applying_partial_data() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, _, terminal, _) = direct_output_fixture(&db, 0);
         let placement = &binding.placement_thread_id;
         db.record_external_execution_frame(placement, &terminal)
@@ -4248,7 +4248,7 @@ Ok(())
         ] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("runtime.sqlite3");
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (_, mut binding, intent) = direct_bound_channel_fixture(&db);
             let placement = binding.placement_thread_id.clone();
             let owner = SigningKey::from_bytes(&[19; 32]);
@@ -4327,7 +4327,7 @@ Ok(())
                 .is_err()
             );
             drop(db);
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let replay = db
                 .exchange_external_supervisor_frame(
                     &placement,
@@ -4375,7 +4375,7 @@ Ok(())
         };
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (_, binding, intent) = direct_bound_channel_fixture(&db);
         let placement = &binding.placement_thread_id;
         let owner = SigningKey::from_bytes(&[19; 32]);
@@ -4455,7 +4455,7 @@ let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).
 Ok(())
 }).unwrap();
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let repeated = db
             .exchange_external_supervisor_frame(placement, &terminal, &owner, 16, 1024 * 1024)
             .unwrap();
@@ -4471,7 +4471,7 @@ Ok(())
     fn direct_sticky_stop_survives_failed_ack_transaction_without_reauthoring() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (_, binding, intent) = direct_bound_channel_fixture(&db);
         let placement = &binding.placement_thread_id;
         let owner = SigningKey::from_bytes(&[19; 32]);
@@ -4513,7 +4513,7 @@ Ok(())
         db.conn.with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER test_refuse_owner_ack")?))
             .unwrap();
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retry = db
             .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
             .unwrap();
@@ -4525,7 +4525,7 @@ Ok(())
     #[test]
     fn first_channel_registration_rechecks_bootstrap_expiry_atomically() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let reservation = super::super::tests::reservation(&db, "expired-attach");
         super::super::tests::reserve(&db, &reservation).unwrap();
         db.claim_external_allocation_contact(
@@ -4593,7 +4593,7 @@ Ok(())
     #[test]
     fn dedicated_session_refuses_direct_channel_before_registration() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (_, _, _, mut binding, _, _) = pending_channel(
             &db,
             "wrong-direct-owner",
@@ -4622,7 +4622,7 @@ Ok(())
     #[test]
     fn exact_registered_channel_replays_after_bootstrap_expiry() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, _, _) = setup(&db);
         db.register_external_execution_channel_at(&binding, binding.expires_at_ms + 1)
             .unwrap();
@@ -4636,7 +4636,7 @@ Ok(())
     #[test]
     fn retained_non_start_refuses_a_previously_authenticated_channel() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (reservation, occurrence, activation, binding, _, _) = pending_channel(
             &db,
             "not-started-before-attach",
@@ -4669,7 +4669,7 @@ Ok(())
     #[test]
     fn attached_channel_refuses_later_non_start_observation() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (reservation, occurrence, activation, binding, _, _) = pending_channel(
             &db,
             "attach-before-not-started",
@@ -4766,7 +4766,7 @@ Ok(())
     #[test]
     fn startup_expiry_refuses_first_release_through_both_owner_paths() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (reservation, _, _, binding, owner, supervisor) = pending_channel_with_startup(
             &db,
             "startup-cutoff",
@@ -4822,7 +4822,7 @@ Ok(())
     fn retained_release_survives_startup_expiry_without_new_execution_authority() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (reservation, _, _, binding, owner, supervisor) = pending_channel_with_startup(
             &db,
             "startup-replay",
@@ -4844,7 +4844,7 @@ Ok(())
             .unwrap();
         wait_past_startup(&reservation);
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let replay = db
             .admit_external_ready_and_author_release(
                 &binding.placement_thread_id,
@@ -4897,7 +4897,7 @@ Ok(())
     #[test]
     fn expired_live_cap_refuses_first_release_but_not_exact_retained_replay() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -4977,7 +4977,7 @@ Ok(())
     #[test]
     fn readiness_is_applied_only_with_one_exact_controller_release() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
 
@@ -5028,7 +5028,7 @@ Ok(())
     #[test]
     fn completion_quiesce_is_exactly_one_and_coordinate_bound() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -5062,7 +5062,7 @@ Ok(())
     #[test]
     fn failed_release_authoring_rolls_back_readiness_application() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -5106,7 +5106,7 @@ Ok(())
     #[test]
     fn uncertain_readiness_application_never_authors_release() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -5141,7 +5141,7 @@ Ok(())
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
         let (placement, expected_sequence, expected_digest, expected_wire) = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (binding, owner, supervisor) = setup(&db);
             ready(&db, &binding, &supervisor);
             let release = db
@@ -5160,7 +5160,7 @@ Ok(())
             )
         };
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
         let replay = db
             .admit_external_ready_and_author_release(&placement, &owner, test_startup_deadline())
@@ -5186,7 +5186,7 @@ Ok(())
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
         let (reservation, activation, binding, owner, supervisor) = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (reservation, _, activation, binding, owner, supervisor) = pending_channel(
                 &db,
                 "pending-before-reopen",
@@ -5204,7 +5204,7 @@ Ok(())
             (reservation, activation, binding, owner, supervisor)
         };
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             !db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
                 .unwrap()
@@ -5242,7 +5242,7 @@ Ok(())
     fn historical_release_is_not_live_readiness_after_cancel_or_quiesce() {
         for terminal in ["cancel", "quiesce"] {
             let root = tempfile::tempdir().unwrap();
-            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
             let (binding, owner, supervisor) = setup(&db);
             let placement = &binding.placement_thread_id;
             ready(&db, &binding, &supervisor);
@@ -5278,7 +5278,7 @@ Ok(())
     #[test]
     fn historical_release_is_not_live_readiness_after_execution_deadline() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (_, _, _, mut binding, owner, supervisor) =
             pending_channel(&db, "short-ready", "short-ready", 100, 1024 * 1024);
         binding.execution_deadline_ms = binding.issued_at_ms + 500;
@@ -5306,7 +5306,7 @@ Ok(())
     #[test]
     fn orphaned_workspace_cannot_apply_ready_or_author_release() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -5344,7 +5344,7 @@ Ok(())
     #[test]
     fn protocol_output_claim_is_ordered_and_eof_finishes_only_after_delivery() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -5463,7 +5463,7 @@ Ok(())
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
         let (placement, output_digest) = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (binding, owner, supervisor) = setup(&db);
             let placement = binding.placement_thread_id.clone();
             let ready_digest = ready(&db, &binding, &supervisor);
@@ -5495,7 +5495,7 @@ Ok(())
             (placement, output_digest)
         };
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.claim_next_external_protocol_output(&placement).unwrap(),
             ExternalProtocolOutputClaim::Uncertain {
@@ -5508,7 +5508,7 @@ Ok(())
     #[test]
     fn cancellation_refuses_new_output_but_allows_exact_claimed_finish() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -5568,7 +5568,7 @@ Ok(())
     #[test]
     fn sticky_cancel_retains_output_without_permitting_fresh_connector_delivery() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -5613,7 +5613,7 @@ Ok(())
     #[test]
     fn expired_output_cannot_be_newly_claimed() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (_, _, _, mut binding, owner, supervisor) =
             pending_channel(&db, "short-output", "short-output", 100, 1024 * 1024);
         binding.execution_deadline_ms = binding.issued_at_ms + 500;
@@ -5653,7 +5653,7 @@ Ok(())
     fn settled_channel_reopens_as_immutable_history_without_live_owner() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let allocation = db.external_allocation(placement).unwrap().unwrap();
@@ -5703,7 +5703,7 @@ Ok(())
             .unwrap();
         drop(db);
 
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.external_allocation(placement).unwrap().unwrap().phase,
             ExternalAllocationPhase::Terminated
@@ -5744,7 +5744,7 @@ Ok(())
     #[test]
     fn application_transitions_recheck_exact_session_owner_atomically() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -5819,7 +5819,7 @@ Ok(())
     #[test]
     fn claimed_delivery_can_finish_after_revocation_without_reopening_input() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -5884,7 +5884,7 @@ Ok(())
     fn cancellation_closes_execution_before_missing_data_catches_up() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -5935,7 +5935,7 @@ Ok(())
                 .is_err()
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(db.external_execution_revoked(placement).unwrap());
         db.record_external_execution_frame(placement, &input)
             .unwrap();
@@ -5979,7 +5979,7 @@ Ok(())
     #[test]
     fn signed_export_claim_alone_is_not_a_retained_candidate_or_acknowledgement() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let supervisor_direction = ChannelDirection::SupervisorToOwner;
@@ -6075,7 +6075,7 @@ Ok(())
     fn sealed_export_claims_complete_retained_prefix_and_recovers_exactly() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let supervisor_direction = ChannelDirection::SupervisorToOwner;
@@ -6187,7 +6187,7 @@ Ok(())
         drop(plan);
         drop(db);
 
-        let reopened = RuntimeDb::open(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             reopened
                 .recoverable_external_candidate_imports(Some(placement))
@@ -6254,7 +6254,7 @@ Ok(())
 
         let runtime_root = tempfile::tempdir().unwrap();
         let path = runtime_root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (_, _, _, binding, owner, supervisor) = pending_channel_with_base(
             &db,
             "controller-import",
@@ -6607,7 +6607,7 @@ Ok(())
     fn saturated_ordinary_transcript_still_retains_cancellation_and_stop() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup_limits(&db, 1, 1024 * 1024);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -6661,7 +6661,7 @@ Ok(())
         db.record_external_execution_frame(placement, &stopped)
             .unwrap();
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
         assert_eq!(db.conn.with_sql(|connection| Ok(read_guard(connection)?)).unwrap(), 1);
     }
@@ -6670,7 +6670,7 @@ Ok(())
     fn queued_input_drains_before_quiesce_across_reopen() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -6722,7 +6722,7 @@ Ok(())
                 .is_err()
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             db.claim_external_frame_application(placement, direction, 2, &input_digest)
                 .unwrap()
@@ -6742,7 +6742,7 @@ Ok(())
     fn external_channel_reopen_preserves_exact_transcript_and_claimed_application() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -6774,7 +6774,7 @@ Ok(())
             .unwrap()
         );
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             !db.claim_external_frame_application(
                 placement,
@@ -6804,7 +6804,7 @@ Ok(())
     #[test]
     fn external_channel_cancel_preserves_remote_uncertainty_without_settling_allocation() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -6887,7 +6887,7 @@ Ok(())
     #[test]
     fn external_channel_rejects_forks_keys_and_premature_export() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         db.register_external_execution_channel(&binding).unwrap();
@@ -6960,7 +6960,7 @@ Ok(())
     fn quarantined_owner_withholds_release_across_reopen_but_retains_cancel() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         ready(&db, &binding, &supervisor);
@@ -6982,7 +6982,7 @@ Ok(())
         )
         .unwrap();
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             db.pending_external_owner_transport_frames(placement, 16, 1024 * 1024)
                 .unwrap()
@@ -7019,7 +7019,7 @@ Ok(())
     #[test]
     fn signed_exchange_replays_exact_backlog_and_advances_only_from_peer_evidence() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let (ready_wire, ready_digest) = wire(
@@ -7256,7 +7256,7 @@ Ok(())
     #[test]
     fn runtime_applied_exchange_retains_one_signed_no_effect_observation() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let ready_digest = ready(&db, &binding, &supervisor);
@@ -7371,11 +7371,12 @@ Ok(())
         assert!(
             duplicate_error
                 .to_string()
-                .contains("runtime-applied observation was already retained")
+                .contains("runtime-applied observation was already retained"),
+            "{duplicate_error:#}"
         );
         db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();
         drop(db);
-        let reopened = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         assert_eq!(
             reopened
                 .external_runtime_applied_observation(placement)
@@ -7390,7 +7391,7 @@ Ok(())
     #[test]
     fn signed_exchange_delivers_sticky_cancel_across_revoked_predecessor() {
         let root = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
         let (ready_wire, ready_digest) = wire(

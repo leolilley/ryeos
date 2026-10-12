@@ -1292,7 +1292,7 @@ mod tests {
         let parent = parent();
         let upload = upload(&parent);
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             db.reserve_runtime_snapshot(&parent).unwrap();
             db.reserve_runtime_snapshot_upload_stage(&upload).unwrap();
             assert!(matches!(
@@ -1305,7 +1305,7 @@ mod tests {
             ));
         }
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             assert!(matches!(
                 db.claim_runtime_snapshot_upload_stage(
                     &upload.operation_id,
@@ -1317,7 +1317,7 @@ mod tests {
             db.bind_runtime_snapshot_upload_receipt(&receipt(&parent, &upload), false)
                 .unwrap();
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.claim_runtime_snapshot_upload_stage(&upload.operation_id, &upload.digest().unwrap())
                 .unwrap(),

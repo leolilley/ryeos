@@ -20,6 +20,8 @@ pub(crate) use original_native::{OriginalRuntimeAcquisitionFailure, OriginalRunt
 pub(crate) use original_inspection::RuntimeInspectionReferenceRelease;
 mod live_native;
 mod original_inspection;
+#[cfg(test)]
+pub(crate) mod test_native;
 #[doc(hidden)]
 pub use original_inspection::{
     quote_inspection_outside_continuation,
@@ -23533,7 +23535,7 @@ mod tests {
     fn owned_runtime_inspection_is_native_readonly_and_explicitly_closes() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.sqlite3");
-        let original = RuntimeDb::open(&path).unwrap();
+        let original = crate::runtime_db::test_native::TestRuntime::open(&path);
         drop(original);
         let original_bytes = fs::read(&path).unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -23653,9 +23655,9 @@ mod tests {
     use ryeos_engine::contracts::CancellationMode;
     use tempfile::TempDir;
 
-    fn fresh_db() -> (TempDir, RuntimeDb) {
+    fn fresh_db() -> (TempDir, crate::runtime_db::test_native::TestRuntime) {
         let tmp = TempDir::new().unwrap();
-        let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&tmp.path().join("runtime.db"));
         (tmp, db)
     }
 
@@ -27041,7 +27043,7 @@ mod tests {
 
             // A crash before the owner fact leaves an exact, discoverable
             // journal and retains both its candidate and service-root pins.
-            let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&tmp.path().join("runtime.db"));
             let pending = db.dedicated_sessions_in_state("discarding").unwrap();
             assert_eq!(pending.len(), 1);
             assert_eq!(
@@ -27800,7 +27802,7 @@ mod tests {
     fn runtime_schema_without_in_process_reservation_contract_rejects_without_cutover_advice() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.conn.with_sql(|connection| Ok(connection.execute_batch(
                 "DROP INDEX idx_in_process_handler_reservation_phase_thread;
                  DROP TABLE in_process_handler_reservation;",
@@ -27808,9 +27810,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("missing current reservation contract must fail closed");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
@@ -27928,9 +27928,7 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("an older daemon must reject a newer runtime store");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
         assert!(message.contains(&format!(
             "stored schema_epoch={}",
@@ -27988,9 +27986,7 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("an unowned database must fail closed");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
         assert!(message.contains("refusing to classify or reset unowned store"));
         assert!(
@@ -28055,7 +28051,7 @@ mod tests {
     fn predecessor_reset_never_decodes_embedded_authority_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.conn.with_sql(|connection| Ok(connection.execute(
                 "INSERT INTO runtime_action_intent(
                      operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
@@ -28087,7 +28083,7 @@ mod tests {
     fn explicit_history_reset_refuses_newer_project_authority() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let newer = lillux::canonical_json(&serde_json::json!({
             "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
             "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH + 1,
@@ -28136,7 +28132,7 @@ mod tests {
     fn existing_reset_inspection_classifies_predecessor_without_mutation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let predecessor = lillux::canonical_json(&serde_json::json!({
             "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
             "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
@@ -28996,10 +28992,10 @@ mod tests {
                 )
             };
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             reserve(&db, &seed, &operation_id, &"e".repeat(64)).unwrap();
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = db
             .runtime_action_for_protocol_invocation("T-parent", &seed.invocation)
             .unwrap()
@@ -29064,7 +29060,7 @@ mod tests {
             };
             let seed = runtime_workspace_seed(access);
             {
-                let db = RuntimeDb::open(&path).unwrap();
+                let db = crate::runtime_db::test_native::TestRuntime::open(&path);
                 reserve_test_workspace_operation(&db, &seed, "T-child").unwrap();
                 // A reservation is not authority to launch or select input.
                 assert!(
@@ -29090,7 +29086,7 @@ mod tests {
                 Released,
             ] {
                 {
-                    let db = RuntimeDb::open(&path).unwrap();
+                    let db = crate::runtime_db::test_native::TestRuntime::open(&path);
                     if phase == Quiesced && access == WorkspaceAccess::ImmutableCurrentGeneration {
                         // Input binding and quiesced authority must commit together.
                         assert!(
@@ -29124,7 +29120,7 @@ mod tests {
                         .unwrap();
                     }
                 }
-                let db = RuntimeDb::open(&path).unwrap();
+                let db = crate::runtime_db::test_native::TestRuntime::open(&path);
                 let retained = db
                     .get_runtime_action_intent(&operation_id)
                     .unwrap()
@@ -29189,13 +29185,13 @@ mod tests {
         let path = tmp.path().join("runtime.db");
         let seed = hook_seed();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             assert!(matches!(
                 db.reserve_hook_dispatch(&seed).unwrap(),
                 HookDispatchReservation::Execute
             ));
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.reserve_hook_dispatch(&seed).unwrap(),
             HookDispatchReservation::PendingUnknown
@@ -29740,7 +29736,7 @@ mod tests {
             reserved.runtime_custody
         );
         drop(db);
-        let db = RuntimeDb::open(&_tmp.path().join("runtime.db")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&_tmp.path().join("runtime.db"));
         assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
         assert_eq!(db.process_resource_materialization_pins().unwrap(), pins);
         assert!(
@@ -29904,7 +29900,7 @@ mod tests {
         assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
         assert_eq!(db.process_resource_cas_roots().unwrap(), roots);
         drop(db);
-        let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&tmp.path().join("runtime.db"));
         assert!(db.process_resource_owners().unwrap()[0].cleanup_proved);
         assert_eq!(
             db.process_resource_owners().unwrap()[0].runtime_custody,
@@ -30185,7 +30181,7 @@ mod tests {
         );
         let path = tmp.path().join("runtime.db");
         drop(db);
-        let reopened = RuntimeDb::open(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             reopened
                 .thread_process_scope_reservations()
@@ -30945,7 +30941,7 @@ mod tests {
             );
         }
         drop(db);
-        let reopened = RuntimeDb::open(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(!reopened.requires_explicit_history_reset());
     }
 
@@ -31195,9 +31191,7 @@ mod tests {
             .unwrap();
         }
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("owned stale runtime database must be rejected");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
@@ -31217,13 +31211,11 @@ mod tests {
     fn open_rejects_predecessor_runtime_shape_without_decoding_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         rewrite_as_recognized_runtime_predecessor(&db, "reserved", None);
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("non-current runtime structure must fail closed");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
@@ -31261,7 +31253,7 @@ mod tests {
     fn predecessor_detached_project_authority_is_not_decoded_during_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let predecessor = lillux::canonical_json(&serde_json::json!({
             "kind": "projectless",
             "environment": { "kind": "none" }
@@ -31286,9 +31278,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("unwrapped detached authority must require explicit reset");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
         assert!(message.contains("explicit no-backcompat reset"));
         assert!(message.contains(&format!(
@@ -31312,7 +31302,7 @@ mod tests {
     fn predecessor_follow_project_authority_is_not_decoded_during_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let predecessor = lillux::canonical_json(&serde_json::json!({
             "kind": "projectless",
             "environment": { "kind": "none" }
@@ -31336,9 +31326,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("unwrapped follow authority must require explicit reset");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
         assert!(message.contains("explicit no-backcompat reset"));
         assert!(message.contains(&format!(
@@ -31362,7 +31350,7 @@ mod tests {
     fn open_preserves_historical_adapter_protocol_provenance_without_rewriting_it() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let mut metadata = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
         metadata["isolation"] = serde_json::json!({
             "policy_digest": null,
@@ -31391,8 +31379,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let reopened = RuntimeDb::open(&path)
-            .expect("historical adapter provenance must not prevent store startup");
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         let runtime = reopened
             .get_runtime_info("T-historical-adapter")
             .unwrap()
@@ -31416,7 +31403,7 @@ mod tests {
     fn open_preserves_former_launch_authority_as_opaque_thread_scoped_history() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let mut predecessor = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
         predecessor["schema_version"] = Value::from(LAUNCH_METADATA_SCHEMA_VERSION - 1);
         predecessor["admitted_project_authority"] = serde_json::json!({
@@ -31530,13 +31517,11 @@ mod tests {
     fn committed_predecessor_follow_rejects_without_interpreting_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         rewrite_as_recognized_runtime_predecessor(&db, "waiting", Some("T-successor"));
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("committed predecessor follow must fail closed");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
@@ -31561,7 +31546,7 @@ mod tests {
     fn explicit_history_reset_replaces_any_owned_predecessor_schema_without_interpretation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.conn.with_sql(|connection| Ok(connection.execute_batch(
                 "CREATE TABLE \"retired parent\" (id INTEGER PRIMARY KEY);
                  CREATE TABLE \"retired \"\"runtime\"\" table\" (
@@ -31629,7 +31614,7 @@ mod tests {
     fn explicit_history_reset_rebuilds_credentials_only_from_stable_authority() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.conn.with_sql(|connection| Ok(connection.execute_batch(
                 "DROP INDEX idx_credential_profile_owner_state;
                  DROP TABLE credential_profile;
@@ -32917,9 +32902,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("predecessor follow authority must fail closed");
+        let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(format!("{error:#}").contains("explicit no-backcompat reset"));
 
         let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();

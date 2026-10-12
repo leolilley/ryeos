@@ -794,13 +794,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let snapshot = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (source, occurrence) = source(&db, false);
             let snapshot = ready_snapshot(&db, &source, &occurrence);
             db.reserve_runtime_snapshot(&snapshot).unwrap();
             snapshot
         };
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.runtime_snapshot_operation(&snapshot.operation_id)
                 .unwrap()
@@ -819,11 +819,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let (intent, occurrence) = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             source(&db, true)
         };
         let termination = termination(&intent, &occurrence);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.reserve_bootstrap_termination(&termination).unwrap();
         assert!(matches!(
             db.claim_bootstrap_termination_attempt(&termination.operation_id)
@@ -831,7 +831,7 @@ mod tests {
             BootstrapTerminationClaim::StartAttempt(_)
         ));
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.claim_bootstrap_termination_attempt(&termination.operation_id)
                 .unwrap(),

@@ -925,7 +925,7 @@ mod tests {
         let path = tmp.path().join("runtime.db");
         let intent = intent();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             db.reserve_snapshot_bootstrap(&intent).unwrap();
             assert!(matches!(
                 db.claim_snapshot_bootstrap_attempt(&intent.operation_id)
@@ -933,7 +933,7 @@ mod tests {
                 SnapshotBootstrapAttemptClaim::StartAttempt(_)
             ));
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.claim_snapshot_bootstrap_attempt(&intent.operation_id)
                 .unwrap(),
@@ -951,7 +951,7 @@ mod tests {
         intent.production_binding_digest = retained.digest().to_owned();
         intent.operation_id = intent.derived_operation_id().unwrap();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             db.reserve_snapshot_bootstrap_with_binding(&intent, &retained)
                 .unwrap();
             assert_eq!(
@@ -975,7 +975,7 @@ mod tests {
                     .is_err()
             );
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let reopened = db
             .retained_snapshot_bootstrap_binding(&intent.operation_id)
             .unwrap()
@@ -1007,7 +1007,7 @@ mod tests {
         intent.operation_id = intent.derived_operation_id().unwrap();
         let root = "b".repeat(64);
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let reserved = db
                 .reserve_snapshot_bootstrap_with_binding(&intent, &retained)
                 .unwrap();
@@ -1043,7 +1043,7 @@ mod tests {
                 params![intent.operation_id, "c".repeat(64)],
             )?)).is_err());
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.snapshot_bootstrap_lifecycle_roots().unwrap(),
             vec![root.clone()]
@@ -1093,7 +1093,7 @@ mod tests {
             observed_at_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap(),
         };
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             db.reserve_snapshot_bootstrap(&intent).unwrap();
             db.claim_snapshot_bootstrap_attempt(&intent.operation_id)
                 .unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
                     .is_err()
             );
         }
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = db
             .snapshot_bootstrap_operation(&intent.operation_id)
             .unwrap()

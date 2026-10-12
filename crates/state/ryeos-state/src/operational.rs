@@ -65,7 +65,7 @@ pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 pub const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 
-const SCHEMA_SQL: &str = concat!(r#"
+pub(crate) const SCHEMA_SQL: &str = concat!(r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA user_version=6;
@@ -367,7 +367,7 @@ CREATE INDEX idx_replay_records_retention
 CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 "#;
 
-fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
+pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
     sqlite_schema::SchemaSpec {
         application_id: OPERATIONAL_APP_ID,
         tables: &[
@@ -1814,7 +1814,7 @@ impl OperationalDb {
     }
 }
 
-fn configure_connection(conn: &Connection) -> Result<()> {
+pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")
         .context("enable operational foreign keys")?;
     conn.pragma_update(None, "synchronous", "FULL")
@@ -1956,7 +1956,7 @@ fn inspect_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<Opt
     Ok(Some(marker))
 }
 
-fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<File> {
+pub(crate) fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<File> {
     directory
         .atomic_write_if_same(
             OsStr::new(OPERATIONAL_INITIALIZED_FILENAME),

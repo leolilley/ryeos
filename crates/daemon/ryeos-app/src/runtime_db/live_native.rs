@@ -155,7 +155,16 @@ impl RuntimeDb {
                     initialize_current_runtime_schema(connection, path, Some(schema_reference.definition()))?;
                 }
                 let epoch = runtime_operator_schema_epoch(connection, path)?;
-                ensure!(epoch == RUNTIME_OPERATOR_SCHEMA_EPOCH, "live Runtime requires current operator epoch; explicit stopped history retirement required");
+                if epoch != RUNTIME_OPERATOR_SCHEMA_EPOCH {
+                    let error = incompatible_runtime_operator_schema(epoch);
+                    if epoch > RUNTIME_OPERATOR_SCHEMA_EPOCH {
+                        return Err(error);
+                    }
+                    return Err(error).context(format!(
+                        "runtime database contains predecessor execution authority and requires the explicit no-backcompat reset ({})",
+                        path.display()
+                    ));
+                }
                 validate_current_runtime_store(connection, path, Some(schema_reference.definition()))?;
                 let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
                 ensure!(integrity == "ok", "live Runtime integrity refused: {integrity}");

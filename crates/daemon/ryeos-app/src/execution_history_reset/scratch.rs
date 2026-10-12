@@ -177,6 +177,25 @@ fn names(directory: &lillux::PinnedDirectory, place: &str) -> Result<Vec<std::ff
     Ok(names)
 }
 
+/// The refusal of a runtime namespace holding more than `bound` names. The
+/// namespace is shared with every other runtime owner, so its size is not
+/// reset scratch: neither the reset nor the scratch repair can clear it.
+pub(super) fn runtime_namespace_overfull(bound: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the runtime namespace holds more than {bound} names; the namespace itself needs attention: \
+         its size is beyond the reset's scratch, so `{}` cannot clear it",
+        ryeos_state::EXECUTION_HISTORY_SCRATCH_REPAIR
+    )
+}
+
+fn runtime_names(runtime: &lillux::PinnedDirectory) -> Result<Vec<std::ffi::OsString>> {
+    let names = runtime.entry_names_bounded(SCAN_BOUND + 1)?;
+    if names.len() > SCAN_BOUND {
+        return Err(runtime_namespace_overfull(SCAN_BOUND));
+    }
+    Ok(names)
+}
+
 /// What one removal found at a name of the reset's grammar.
 enum Removal {
     Absent,
@@ -194,8 +213,8 @@ fn remove_entry(directory: &lillux::PinnedDirectory, name: &OsStr, tree: bool, d
         return Ok(Removal::Absent);
     };
     match entry.entry_type {
-        lillux::PinnedEntryType::Regular if dry_run => Ok(Removal::Removed),
-        lillux::PinnedEntryType::Regular => {
+        lillux::PinnedEntryType::Regular if !tree && dry_run => Ok(Removal::Removed),
+        lillux::PinnedEntryType::Regular if !tree => {
             let pin = directory.open_mount_entry(name)?.context("scratch entry disappeared")?;
             Ok(if directory.unlink_regular_if_same(name, &pin)? { Removal::Removed } else { Removal::Absent })
         }
@@ -334,7 +353,7 @@ pub fn repair_execution_history_scratch(
             act(inspections, ScratchLocation::Inspections, &name, own, directory)?;
         }
     }
-    for name in names(&runtime, "runtime namespace")? {
+    for name in runtime_names(&runtime)? {
         let own = match name.to_str().and_then(staged_operation) {
             // The staged file of an operation an Active marker names is
             // the operation the next reset resumes.
@@ -496,7 +515,8 @@ mod tests {
     }
 
     /// An entry of the reset's grammar that is not of the kind its name
-    /// declares is reported and left; the repair continues past it.
+    /// declares is reported and left; the repair continues past it. That
+    /// includes a regular file at an inspection directory's name.
     #[test]
     fn scratch_repair_leaves_entries_of_the_wrong_kind_and_continues() {
         let node = node();
@@ -504,7 +524,14 @@ mod tests {
         let ledger = node.config.app_root.join(".ai/node").join(LEDGER_DIRECTORY);
         let inspections = node.config.app_root.join(".ai/node").join(INSPECTIONS_DIRECTORY);
         let link = inspections.join(format!("inspection.{operation}.runtime"));
-        std::os::unix::fs::symlink(node.config.app_root.join(".ai"), &link).unwrap();
+        // The link names `.ai`, two levels above the inspections parent.
+        lillux::PinnedDirectory::open(&inspections)
+            .unwrap()
+            .unwrap()
+            .create_symlink(OsStr::new(&format!("inspection.{operation}.runtime")), b"../..")
+            .unwrap();
+        let file = inspections.join(format!("inspection.{operation}.scheduler"));
+        std::fs::write(&file, b"not a tree").unwrap();
         std::fs::create_dir(ledger.join(format!("reserved.{operation}"))).unwrap();
         std::fs::write(ledger.join(format!("disposed.{operation}")), b"scratch").unwrap();
         std::fs::write(inspections.join(format!("created.inspection.{operation}.runtime")), b"witness").unwrap();
@@ -512,12 +539,40 @@ mod tests {
             let report = repair(&node, dry_run);
             let mut left: Vec<_> = report.left.iter().map(|entry| entry.name.clone()).collect();
             left.sort();
-            assert_eq!(left, [format!("inspection.{operation}.runtime"), format!("reserved.{operation}")]);
+            assert_eq!(
+                left,
+                [
+                    format!("inspection.{operation}.runtime"),
+                    format!("inspection.{operation}.scheduler"),
+                    format!("reserved.{operation}"),
+                ]
+            );
             assert_eq!(report.removed.len(), 2, "{report:?}");
         }
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert!(node.config.app_root.join(".ai").is_dir(), "the link's target is untouched");
+        assert_eq!(std::fs::read(&file).unwrap(), b"not a tree", "the regular file is left in place");
         assert!(!ledger.join(format!("disposed.{operation}")).exists());
+    }
+
+    /// A runtime namespace past the scan bound is refused as needing
+    /// attention of its own: its size is not scratch this repair clears.
+    #[test]
+    fn scratch_repair_refuses_an_overfull_runtime_namespace_as_beyond_its_scratch() {
+        let node = node();
+        let runtime = node.config.runtime_state_dir();
+        for index in 0..=SCAN_BOUND {
+            std::fs::write(runtime.join(format!("other.{index}")), b"").unwrap();
+        }
+        let error = repair_execution_history_scratch(&ExecutionHistoryScratchRepairOptions {
+            app_root: Some(node.config.app_root.clone()),
+            dry_run: false,
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&format!("runtime namespace holds more than {SCAN_BOUND} names")), "{message}");
+        assert!(message.contains("the namespace itself needs attention"), "{message}");
+        assert!(runtime.join("other.0").exists());
     }
 
     /// A held StateLock refuses as a running daemon; any other failure to
