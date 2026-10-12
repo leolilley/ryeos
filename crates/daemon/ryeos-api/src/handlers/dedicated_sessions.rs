@@ -10751,7 +10751,7 @@ mod tests {
     use ryeos_app::worker_handoff::{
         WORKER_SESSION_HANDOFF_OPERATION, WorkerHandoffJobRole, WorkerSessionHandoffJobOperation,
     };
-    use ryeos_state::{NewSyncJob, StateDb, TrustStore};
+    use ryeos_state::{NewSyncJob, TrustStore};
 
     #[test]
     fn candidate_return_preserves_interactive_and_completed_bounded_root_lifecycles() {
@@ -11194,7 +11194,7 @@ mod tests {
     #[test]
     fn status_finds_a_handoff_older_than_the_former_global_job_cap() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tempdir.path(), std::sync::Arc::new(TrustStore::new())).unwrap();
+        let db = ryeos_app::test_support::TestState::open(tempdir.path(), std::sync::Arc::new(TrustStore::new())).unwrap();
         for index in 0..520 {
             let chain_root_id = if index == 0 {
                 "T-sought".to_owned()

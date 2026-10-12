@@ -1234,7 +1234,7 @@ mod tests {
         let mount_path = temporary.path().join("mount");
         std::fs::create_dir(&private_path).unwrap();
         std::fs::create_dir(&mount_path).unwrap();
-        let state = ryeos_state::StateDb::open(
+        let state = ryeos_state::test_support::TestState::open(
             &runtime_path,
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )

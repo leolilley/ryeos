@@ -89,6 +89,7 @@ tempfile = { workspace = true }
 ryeos-api = { workspace = true, features = ["handoff-test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
+ryeos-scheduler = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

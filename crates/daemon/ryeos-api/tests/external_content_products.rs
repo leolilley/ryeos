@@ -36,12 +36,15 @@ const TERMINAL: &str = "T-00000000-0000-0000-0000-000000000002";
 const PRODUCT_BYTES: &[u8] = b"exact input";
 const REMOTE_ORIGIN: &str = "site:product-source";
 
+/// Fields drop in declaration order: the application, then the owner that
+/// closes its Store, then the directory.
 struct Fixture {
-    _directory: tempfile::TempDir,
     state: Arc<AppState>,
     context: HandlerContext,
     evidence: ProductCaptureEvidence,
     witness_hash: String,
+    _store_owner: ryeos_app::test_support::TestStateStore,
+    _directory: tempfile::TempDir,
 }
 
 fn fixture(large_tier: bool, import_ceiling: u64, publish: bool) -> Fixture {
@@ -54,7 +57,7 @@ fn fixture_with_remote_owner(
     publish: bool,
     remote_owner: bool,
 ) -> Fixture {
-    let (directory, mut state) = test_state::build_test_state();
+    let (directory, store_owner, mut state) = test_state::build_test_state();
     let closure = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()
@@ -241,11 +244,12 @@ fn fixture_with_remote_owner(
     };
     drop(guard);
     Fixture {
-        _directory: directory,
         state: Arc::new(state),
         context,
         evidence,
         witness_hash,
+        _store_owner: store_owner,
+        _directory: directory,
     }
 }
 

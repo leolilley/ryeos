@@ -707,7 +707,7 @@ mod tests {
         let root = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
         let state_root = tempfile::tempdir().unwrap();
         let db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+            ryeos_state::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
                 .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
@@ -863,7 +863,7 @@ mod tests {
 
         let state_root = tempfile::tempdir().unwrap();
         let state_db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+            ryeos_state::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
                 .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();

@@ -296,7 +296,7 @@ fn install_live_engine(
     large_runtime: bool,
     isolation_policy: ryeos_engine::isolation::IsolationPolicy,
 ) {
-    use ryeos_app::node_policy::sections::external_content::{
+    use ryeos_node_runtime::node_policy::sections::external_content::{
         ExternalContentImportLimits, ExternalContentImportPolicyRecord,
         ManagedExternalContentPolicy,
     };
@@ -335,7 +335,7 @@ fn install_live_engine(
     let core = ryeos_engine::test_support::core_bundle_root();
     let standard = ryeos_engine::test_support::standard_bundle_root();
     let trust = ryeos_engine::test_support::live_trust_store();
-    let isolation = ryeos_app::engine_init::load_test_execution_isolation(
+    let isolation = ryeos_node_runtime::engine_init::load_test_execution_isolation(
         &state.config.app_root,
         &[core, standard, candidate_authoring_bundle.clone()],
         &trust,
@@ -380,11 +380,11 @@ fn install_live_engine(
     state.services = Arc::new(ryeos_api::registry::build_service_registry());
     state.service_descriptors = ryeos_api::handlers::ALL;
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(import_policy),
             Arc::new(
-                ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+                ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
                     schema: 1,
                     max_roots: 256,
                     max_objects: 32_768,
@@ -780,7 +780,7 @@ fn publish_external_runtime_product_witness(
         &attestation,
         state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
             .unwrap()
             .closure_limits()
             .unwrap(),
@@ -1025,7 +1025,7 @@ async fn prepare_external_worker_program_and_binding(
         "selected external worker consumer must retain the exact base generation"
     );
     let maximum_bytes = state.node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
         .unwrap().limits.max_total_bytes;
     let response = ryeos_api::handlers::external_content_products::compose(
         ryeos_app::operator_external_content::product_composition::ComposeRetainedProductsRequest {
@@ -1173,7 +1173,9 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
     let runtime_directory = lillux::PinnedDirectory::open(runtime.path())
         .unwrap()
         .unwrap();
-    let mut state = ryeos_app::state::test_support::build(root.path()).unwrap();
+    // The store owner is declared before the application so that every
+    // early return drops the application, and with it the Store, first.
+    let (store_owner, mut state) = ryeos_app::state::test_support::build(root.path()).unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
     let runtime_manifest = install_external_large_runtime_content(&state, &runtime_directory);
@@ -1257,7 +1259,7 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         &state.daemon_build,
     )
     .unwrap();
-    let mut extensions = (*state.extensions).clone();
+    let extensions = (*state.extensions).clone();
     extensions.insert(execution_identity);
     state.extensions = Arc::new(extensions);
     let authority = state.state_store.pinned_state_authority().unwrap();
@@ -1360,7 +1362,7 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
     }
     let capsule_hash = admission.unwrap();
     let authority = state.state_store.pinned_state_authority().unwrap();
-    let _guard = authority.acquire_shared_guard().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
     let value = authority
         .cas_store()
         .unwrap()
@@ -1406,6 +1408,10 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         runtime_manifest_hash
     );
     ryeos_app::external_placement::preflight_external_candidate_program(&state, program).unwrap();
+    drop(guard);
+    drop(authority);
+    drop(state);
+    store_owner.close().unwrap();
 }
 
 async fn execute_recorded_service(
@@ -2573,7 +2579,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
     let runtime_manifest_hash =
         ryeos_state::external_content_manifest_digest(&runtime_manifest).unwrap();
 
-    let mut state = ryeos_app::state::test_support::build(root.path()).unwrap();
+    let (store_owner, mut state) = ryeos_app::state::test_support::build(root.path()).unwrap();
     let (external_bundle, external_trust, _) = install_signed_test_bundle(root.path(), false);
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
@@ -2743,7 +2749,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             &bootstrap,
             &supervisor,
             &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
-                &bootstrap.controller.network_inputs,
+                &bootstrap.controller.http().unwrap().network_inputs,
                 b"nameserver 127.0.0.1\n",
                 b"127.0.0.1 localhost\n",
             )
@@ -2825,6 +2831,8 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             .unwrap(),
         binding
     );
+    drop(state);
+    store_owner.close().unwrap();
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -2843,11 +2851,21 @@ fn run_production_tls_candidate_with_test_stack(
                 .enable_all()
                 .build()
                 .unwrap();
+            // The Store is opened on this thread, which drives the scenario,
+            // and closes here only after the runtime has ended every task
+            // that could still hold the application.
+            let mut root = tempfile::tempdir().unwrap();
+            let (store_owner, state) =
+                ryeos_app::state::test_support::build(root.path()).unwrap();
             runtime.block_on(run_production_tls_candidate(
+                &mut root,
+                state,
                 codex,
                 scripted_turn,
                 publication,
             ));
+            drop(runtime);
+            store_owner.close().unwrap();
         })
         .unwrap()
         .join()
@@ -3119,8 +3137,19 @@ fn stage_pinned_codex_command_tools(codex: &Path, closed_guest_shell: bool) -> t
     tools
 }
 
+/// Keep a failed scenario's node root on disk for diagnosis. The root stays
+/// owned by the thread that opened its Store, which closes the Store before
+/// the root's owner drops; with cleanup disabled that drop leaves it in place.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn retain_failed_node(root: &mut tempfile::TempDir) -> PathBuf {
+    root.disable_cleanup(true);
+    root.path().to_path_buf()
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 async fn run_production_tls_candidate(
+    root: &mut tempfile::TempDir,
+    mut state: ryeos_app::state::AppState,
     codex: Option<(PathBuf, String)>,
     scripted_turn: bool,
     publication: PublicationScenario,
@@ -3153,7 +3182,6 @@ async fn run_production_tls_candidate(
     })
     .unwrap();
 
-    let root = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let qualification_runtime = tempfile::tempdir().unwrap();
     let provider_state = tempfile::tempdir().unwrap();
@@ -3192,7 +3220,6 @@ async fn run_production_tls_candidate(
     let runtime_directory = lillux::PinnedDirectory::open(runtime.path())
         .unwrap()
         .unwrap();
-    let mut state = ryeos_app::state::test_support::build(root.path()).unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
     let (project, project_lifeline) = ryeos_app::temp_dir_guard::create_runtime_workspace(
@@ -3292,7 +3319,7 @@ async fn run_production_tls_candidate(
     assert_eq!(admitted.source, after.source);
     assert_eq!(admitted.profile, after.profile);
     let trust = ryeos_engine::test_support::live_trust_store();
-    state.isolation = ryeos_app::engine_init::load_test_daemon_execution_isolation(
+    state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
         root.path(),
         &state.config.uds_path,
         &[
@@ -3309,7 +3336,7 @@ async fn run_production_tls_candidate(
         &state.daemon_build,
     )
     .unwrap();
-    let mut extensions = (*state.extensions).clone();
+    let extensions = (*state.extensions).clone();
     extensions.insert(execution_identity);
     state.extensions = Arc::new(extensions);
     let runtime_witness_hash = publish_external_runtime_product_witness(&state, &runtime_manifest);
@@ -3381,7 +3408,7 @@ async fn run_production_tls_candidate(
             .is_some_and(|status| status.is_terminal())
         {
             if thread.status != "completed" {
-                let retained_node = root.keep();
+                let retained_node = retain_failed_node(root);
                 panic!(
                     "qualification verifier failed; root={verifier_thread_id}; retained_node={}; detail={thread:#?}",
                     retained_node.display()
@@ -3390,7 +3417,7 @@ async fn run_production_tls_candidate(
             break;
         }
         if Instant::now() >= qualification_deadline {
-            let retained_node = root.keep();
+            let retained_node = retain_failed_node(root);
             panic!(
                 "qualification verifier did not settle; root={verifier_thread_id}; retained_node={}; detail={thread:#?}",
                 retained_node.display()
@@ -3428,7 +3455,7 @@ async fn run_production_tls_candidate(
             true,
             hosted_policy.clone(),
         );
-        state.isolation = ryeos_app::engine_init::load_test_daemon_execution_isolation(
+        state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
             &state.config.uds_path,
             &[
@@ -3846,7 +3873,7 @@ async fn run_production_tls_candidate(
             Err(error) => {
                 // Preserve this synthetic node's exact CAS/journal on failure,
                 // rather than erasing capsule evidence during panic cleanup.
-                let retained_node = root.keep();
+                let retained_node = retain_failed_node(root);
                 // The adapter journal is a separate failure domain. Keep it
                 // too: controller intent alone cannot prove occurrence death
                 // or recover a lost activation observation. Print paths only,
@@ -3876,7 +3903,7 @@ async fn run_production_tls_candidate(
             }
         };
         if public["thread"]["status"] != "completed" {
-            let retained_node = root.keep();
+            let retained_node = retain_failed_node(root);
             let retained_provider_state = provider_state.keep();
             panic!(
                 "public worker terminal failed; retained_node={}; retained_provider_state={}; \
@@ -5428,10 +5455,14 @@ fn exercise_activation_fault(fault: &str) {
         .unwrap();
     let manifest = ryeos_state::observe_external_content_tree_exact(&runtime).unwrap();
     let runtime_hash = ryeos_state::external_content_manifest_digest(&manifest).unwrap();
-    let base_db =
-        ryeos_state::StateDb::open(base_store.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .unwrap();
-    let base_state = base_db.pinned_authority().unwrap();
+    // The base snapshot needs content-addressed storage only, so it lives in
+    // a private scratch CAS rather than a node State database.
+    let base_state = ryeos_state::private_cas::open_private_scratch_cas(
+        &lillux::PinnedDirectory::open(base_store.path())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     let base_guard = base_state.acquire_shared_guard().unwrap();
     let base_cas = base_state.cas_store().unwrap();
     let policy = ProjectSnapshotPolicy::new(
@@ -5661,7 +5692,8 @@ fn exercise_activation_fault(fault: &str) {
                     max_bytes: 64 * 1024,
                 },
             },
-        },
+        }
+        .into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: reservation.placement_thread_id.clone(),
         occurrence_id: occurrence.occurrence_id.clone(),
@@ -5694,6 +5726,15 @@ fn exercise_activation_fault(fault: &str) {
         post_execution_timeout_seconds: 1,
         candidate_export_max_bytes: 1024,
         channel_max_bytes: 1024 * 1024,
+        // The signed profiles' `external-supervisor-journal` envelope.
+        native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
     };
     let activation = SupervisorActivationIntent {
         activation_request_digest: "6".repeat(64),

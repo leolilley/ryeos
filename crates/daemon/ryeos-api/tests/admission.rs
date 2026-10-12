@@ -29,7 +29,7 @@ fn store_subject(state: &ryeos_app::state::AppState) -> String {
 
 #[tokio::test]
 async fn admission_submit_writes_attestation_and_status_reads_it() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let subject_hash = store_subject(&state);
     let state = Arc::new(state);
 
@@ -96,7 +96,7 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
 
 #[tokio::test]
 async fn admission_submit_cannot_widen_node_object_closure_policy() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let subject_hash = store_subject(&state);
     let error = admission_submit::handle(
         admission_submit::Request {
@@ -121,7 +121,7 @@ async fn admission_submit_cannot_widen_node_object_closure_policy() {
 
 #[tokio::test]
 async fn admission_status_reports_missing_head() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let status = admission_status::handle(
         admission_status::Request {
             subject_hash: "ab".repeat(32),
@@ -137,7 +137,7 @@ async fn admission_status_reports_missing_head() {
 
 #[tokio::test]
 async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "test-admission-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -168,7 +168,7 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
 
 #[tokio::test]
 async fn admission_claim_rejects_wildcard_requested_scope() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "wildcard-request-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -186,7 +186,7 @@ async fn admission_claim_rejects_wildcard_requested_scope() {
 
 #[tokio::test]
 async fn admission_claim_rejects_wildcard_token_file_scope() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "wildcard-token-file-token";
     write_admission_token_file(&state, token, &["ryeos.execute.service.*"], None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -204,7 +204,7 @@ async fn admission_claim_rejects_wildcard_token_file_scope() {
 
 #[tokio::test]
 async fn admission_claim_rejects_wrong_audience_signature() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "wrong-audience-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -228,7 +228,7 @@ async fn admission_claim_rejects_wrong_audience_signature() {
 
 #[tokio::test]
 async fn admission_claim_rejects_origin_site_changed_after_signing() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "tampered-origin-site-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -241,7 +241,7 @@ async fn admission_claim_rejects_origin_site_changed_after_signing() {
 
 #[tokio::test]
 async fn admission_claim_enforces_hosted_policy_token_ttl() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(60);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(60);
     let token = "too-long-hosted-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -260,7 +260,7 @@ async fn admission_claim_enforces_hosted_policy_token_ttl() {
 
 #[tokio::test]
 async fn admission_claim_rejects_aged_overlong_hosted_policy_token() {
-    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(60);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(60);
     let token = "aged-too-long-hosted-token";
     let issued_at_unix = now_unix() - 540;
     write_admission_token_file_with_issued_at(
@@ -287,7 +287,7 @@ async fn admission_claim_rejects_aged_overlong_hosted_policy_token() {
 
 #[tokio::test]
 async fn admission_claim_refuses_explicitly_disabled_policy_before_token_use() {
-    let (_tmp, state) = test_state::build_test_state_with_disabled_hosted_admission();
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_disabled_hosted_admission();
     let token = "disabled-hosted-admission-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let token_path = admission_token_path(

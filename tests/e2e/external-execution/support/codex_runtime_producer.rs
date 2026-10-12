@@ -223,7 +223,7 @@ pub fn prepare(
         ),
     )?;
 
-    use ryeos_app::node_policy::sections::external_content::{
+    use ryeos_node_runtime::node_policy::sections::external_content::{
         ExternalContentImportPolicyRecord, ExternalContentImportRoot, ManagedExternalContentPolicy,
     };
     let import_policy_path = state_path.join(".ai/node/policies/external_content.yaml");

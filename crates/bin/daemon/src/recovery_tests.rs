@@ -18,7 +18,7 @@ use ryeos_engine::contracts::{
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     // Reuse the state owner. Opening a second RuntimeDb here would wait on
     // the exclusive namespace lock deliberately retained by the first one.
     let db = &state.state_store;
@@ -57,16 +57,17 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
         // directory identities name live authority. The current-boot branch
         // must retain uncertainty when it cannot recover the exact scope.
         let planned = serde_json::json!({
-            "version": 2, "control_timeout": {"secs": 1, "nanos": 0},
+            "version": 3, "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
+                "cgroup_enclosure": current["backend"]["cgroup_enclosure"],
                 "parent": {"containing_device": 1, "inode": 2}, "name": worker}
         });
         let allocation = serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
-        bound["version"] = 4.into();
+        bound["version"] = 5.into();
         bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
         let recovery = serde_json::from_value(bound).unwrap();
         let retained = ryeos_app::runtime_db::DedicatedWorkerScopeReservation {
@@ -77,20 +78,25 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
             recovery: Some(recovery),
         };
         let raw = lillux::canonical_json(&serde_json::to_value(retained).unwrap()).unwrap();
-        rusqlite::Connection::open(&state.config.db_path)
-            .unwrap()
-            .execute(
-                "UPDATE dedicated_session SET worker_scope=?1 WHERE placement_thread_id=?2",
-                rusqlite::params![raw, placement],
-            )
+        state
+            .state_store
+            .with_runtime_sql_for_test(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET worker_scope=?1 WHERE placement_thread_id=?2",
+                    rusqlite::params![raw, placement],
+                )?)
+            })
             .unwrap();
     }
-    rusqlite::Connection::open(&state.config.db_path)
-        .unwrap()
-        .execute(
-            "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
-            [lillux::canonical_json(&current).unwrap()],
-        )
+    let host_lifetime = lillux::canonical_json(&current).unwrap();
+    state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            Ok(connection.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
+                [host_lifetime],
+            )?)
+        })
         .unwrap();
     super::reconcile::reconcile_dedicated_worker_startup(&state)
         .await
@@ -134,9 +140,9 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
 #[cfg(target_os = "linux")]
 #[test]
 fn precontact_resource_scope_recovery_discards_without_relaunch() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let planned = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "control_timeout": {"secs": 1, "nanos": 0},
         "configuration": {"version": 3, "backend": {
             "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
@@ -191,13 +197,10 @@ fn precontact_resource_scope_recovery_discards_without_relaunch() {
 #[cfg(target_os = "linux")]
 #[test]
 fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch() {
-    let (tmpdir, mut state) = build_test_state();
-    let accounting = Arc::new(
-        ryeos_app::accounting_db::AccountingDb::open_default(
-            &tmpdir.path().join("unattached-resource-accounting"),
-        )
-        .unwrap(),
-    );
+    let (tmpdir, _state_owner, mut state) = build_test_state();
+    let accounting_owner =
+        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("unattached-resource-accounting")).unwrap();
+    let accounting = accounting_owner.shared();
     let execution_budget_id = "exec-unattached-resource";
     let root_chain_id = "T-unattached-resource";
     let now = lillux::time::timestamp_millis();
@@ -217,7 +220,7 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
     // crashed before any RuntimeDb owner attachment. Startup may only prove it
     // dead, release the unissued hold, and fence its gate; it cannot relaunch.
     let local_scope = serde_json::from_value(serde_json::json!({
-        "version": 4,
+        "version": 5,
         "control_timeout": {"secs": 1, "nanos": 0},
         "configuration": {"version": 3, "backend": {
             "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
@@ -373,18 +376,19 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
         accounting.account_snapshot(execution_budget_id).unwrap()[0].held,
         ryeos_accounting::UsdNanos::ZERO
     );
+    // The ledger closes into the census after every alias is gone.
+    drop(state);
+    drop(accounting);
+    accounting_owner.close().unwrap();
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn unattached_resource_owner_without_settlement_authority_remains_quarantined() {
-    let (tmpdir, mut state) = build_test_state();
-    let accounting = Arc::new(
-        ryeos_app::accounting_db::AccountingDb::open_default(
-            &tmpdir.path().join("unknown-resource-accounting"),
-        )
-        .unwrap(),
-    );
+    let (tmpdir, _state_owner, mut state) = build_test_state();
+    let accounting_owner =
+        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("unknown-resource-accounting")).unwrap();
+    let accounting = accounting_owner.shared();
     let budget = "exec-unknown-resource";
     let root = "T-unknown-resource";
     accounting
@@ -430,18 +434,19 @@ fn unattached_resource_owner_without_settlement_authority_remains_quarantined() 
         accounting.open_resource_owner_recoveries().unwrap().len(),
         1
     );
+    // The ledger closes into the census after every alias is gone.
+    drop(state);
+    drop(accounting);
+    accounting_owner.close().unwrap();
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
-    let (tmpdir, mut state) = build_test_state();
-    let accounting = Arc::new(
-        ryeos_app::accounting_db::AccountingDb::open_default(
-            &tmpdir.path().join("resource-accounting"),
-        )
-        .unwrap(),
-    );
+    let (tmpdir, _state_owner, mut state) = build_test_state();
+    let accounting_owner =
+        ryeos_app::test_support::TestAccountingDb::open(&tmpdir.path().join("resource-accounting")).unwrap();
+    let accounting = accounting_owner.shared();
     let execution_budget_id = "exec-resource-recovery";
     let root_chain_id = "T-resource-recovery";
     let now = lillux::time::timestamp_millis();
@@ -596,7 +601,7 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
         )
         .unwrap();
     let planned_scope = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "control_timeout": {"secs": 1, "nanos": 0},
         "configuration": {"version": 3, "backend": {
             "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
@@ -609,7 +614,7 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
     let allocation: lillux::ProcessScopeAllocation =
         serde_json::from_value(planned_scope.clone()).unwrap();
     let mut bound_scope = planned_scope;
-    bound_scope["version"] = 4.into();
+    bound_scope["version"] = 5.into();
     bound_scope["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
     let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound_scope).unwrap();
     attached_identity.process_scope = Some(recovery.clone());
@@ -678,12 +683,23 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
             .committed,
         charged
     );
+    // The ledger closes into the census after every alias is gone.
+    drop(state);
+    drop(accounting);
+    accounting_owner.close().unwrap();
 }
 
-fn build_test_state() -> (tempfile::TempDir, AppState) {
+/// The Store owner sits between the directory and the application so
+/// destructuring drops the application before the Store closes. It stays on
+/// the building thread.
+fn build_test_state() -> (
+    tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
+    AppState,
+) {
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let runtime_state_dir = tmpdir.path().join(".ai/state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+    let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(tmpdir.path())
+        .join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity/node-key.pem");
     let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -704,17 +720,8 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let state_store = Arc::new(
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            tmpdir.path().to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier.clone(),
-            Arc::new(head_trust),
-        )
-        .unwrap(),
-    );
+    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), Arc::new(head_trust)).unwrap();
+    let state_store = std::sync::Arc::clone(store_owner.store());
     let engine = Arc::new(ryeos_engine::engine::Engine::new(
         ryeos_engine::kind_registry::KindRegistry::empty(),
         ryeos_engine::parsers::ParserDispatcher::new(
@@ -754,8 +761,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         commands: vec![],
     };
 
-    let controller_lifetime =
-        ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+    let controller_lifetime = store_owner.controller_lifetime();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),
@@ -816,7 +822,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         scoped_producer_processes: Arc::new(Default::default()),
         qualification_workspace_custody: Arc::new(Default::default()),
     };
-    (tmpdir, state)
+    (tmpdir, store_owner, state)
 }
 
 fn thread_record(
@@ -927,7 +933,7 @@ fn resume_intent(thread_id: &str) -> super::reconcile::ResumeIntent {
 
 #[tokio::test]
 async fn shared_recovery_dispatch_settles_only_the_unreconstructable_target() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let bad = "T-bad-recovery";
     state
         .state_store
@@ -977,7 +983,7 @@ async fn shared_recovery_dispatch_settles_only_the_unreconstructable_target() {
 
 #[tokio::test]
 async fn shared_recovery_dispatch_never_overwrites_a_competing_claim() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-claimed-recovery";
     state
         .state_store
@@ -1046,7 +1052,7 @@ fn seed_live_recovery(
 
 #[tokio::test]
 async fn periodic_recovery_waits_only_the_thread_with_a_missing_live_root() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let projects = tempfile::tempdir().unwrap();
     let project = projects.path().join("missing-project");
     std::fs::create_dir(&project).unwrap();
@@ -1085,7 +1091,7 @@ async fn periodic_recovery_waits_only_the_thread_with_a_missing_live_root() {
 
 #[tokio::test]
 async fn periodic_recovery_permanently_refuses_only_the_structurally_invalid_root() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
         project.path().join(ryeos_engine::AI_DIR),
@@ -1166,7 +1172,7 @@ fn seed_in_process_handler(state: &AppState, thread_id: &str) -> InProcessHandle
 
 #[tokio::test]
 async fn live_recovery_boundary_recognizes_exact_daemon_handler_owner() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-live-daemon-owned-handler";
     let owner = seed_in_process_handler(&state, thread_id);
     let report = super::reconcile::reconcile_live_threads(&state)
@@ -1187,25 +1193,25 @@ async fn live_recovery_boundary_recognizes_exact_daemon_handler_owner() {
 
 fn seed_in_process_reservation_without_root(state: &AppState, thread_id: &str, phase: &str) {
     let launch_metadata = in_process_launch_metadata_json();
-    let connection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    let transaction = connection.unchecked_transaction().unwrap();
-    transaction
-        .execute(
-            "INSERT INTO thread_runtime (
-                thread_id, chain_root_id, pid, pgid, metadata, launch_metadata
-             ) VALUES (?1, ?1, NULL, NULL, NULL, ?2)",
-            rusqlite::params![thread_id, launch_metadata],
-        )
+    state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO thread_runtime (
+                    thread_id, chain_root_id, pid, pgid, metadata, launch_metadata
+                 ) VALUES (?1, ?1, NULL, NULL, NULL, ?2)",
+                rusqlite::params![thread_id, launch_metadata],
+            )?;
+            transaction.execute(
+                "INSERT INTO in_process_handler_reservation (
+                    thread_id, phase, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, 1, 1)",
+                rusqlite::params![thread_id, phase],
+            )?;
+            Ok(transaction.commit()?)
+        })
         .unwrap();
-    transaction
-        .execute(
-            "INSERT INTO in_process_handler_reservation (
-                thread_id, phase, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, 1, 1)",
-            rusqlite::params![thread_id, phase],
-        )
-        .unwrap();
-    transaction.commit().unwrap();
 }
 
 fn in_process_launch_metadata_json() -> String {
@@ -1221,28 +1227,28 @@ fn in_process_launch_metadata_json() -> String {
 }
 
 fn seed_in_process_reservation_for_existing_root(state: &AppState, thread_id: &str, phase: &str) {
-    let connection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    let transaction = connection.unchecked_transaction().unwrap();
-    assert_eq!(
-        transaction
-            .execute(
+    let launch_metadata = in_process_launch_metadata_json();
+    let updated = state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let updated = transaction.execute(
                 "UPDATE thread_runtime
                     SET launch_metadata = ?2
                   WHERE thread_id = ?1",
-                rusqlite::params![thread_id, in_process_launch_metadata_json()],
-            )
-            .unwrap(),
-        1
-    );
-    transaction
-        .execute(
-            "INSERT INTO in_process_handler_reservation (
-                thread_id, phase, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, 1, 1)",
-            rusqlite::params![thread_id, phase],
-        )
+                rusqlite::params![thread_id, launch_metadata],
+            )?;
+            transaction.execute(
+                "INSERT INTO in_process_handler_reservation (
+                    thread_id, phase, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, 1, 1)",
+                rusqlite::params![thread_id, phase],
+            )?;
+            transaction.commit()?;
+            Ok(updated)
+        })
         .unwrap();
-    transaction.commit().unwrap();
+    assert_eq!(updated, 1);
 }
 
 fn seed_pending_in_process_reservation_without_root(state: &AppState, thread_id: &str) {
@@ -1250,46 +1256,46 @@ fn seed_pending_in_process_reservation_without_root(state: &AppState, thread_id:
 }
 
 fn regress_in_process_reservation_to_pending(state: &AppState, thread_id: &str) {
-    let connection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    assert_eq!(
-        connection
-            .execute(
+    let changed = state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            Ok(connection.execute(
                 "UPDATE in_process_handler_reservation
-                    SET phase = 'pending', updated_at_ms = 1
-                  WHERE thread_id = ?1 AND phase = 'running'",
+                            SET phase = 'pending', updated_at_ms = 1
+                      WHERE thread_id = ?1 AND phase = 'running'",
                 rusqlite::params![thread_id],
-            )
-            .unwrap(),
-        1
-    );
+            )?)
+        })
+        .unwrap();
+    assert_eq!(changed, 1);
 }
 
 fn set_in_process_reservation_phase(state: &AppState, thread_id: &str, phase: &str) {
-    let connection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    assert_eq!(
-        connection
-            .execute(
+    let changed = state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            Ok(connection.execute(
                 "UPDATE in_process_handler_reservation
-                    SET phase = ?2, updated_at_ms = 1
-                  WHERE thread_id = ?1",
+                            SET phase = ?2, updated_at_ms = 1
+                      WHERE thread_id = ?1",
                 rusqlite::params![thread_id, phase],
-            )
-            .unwrap(),
-        1
-    );
+            )?)
+        })
+        .unwrap();
+    assert_eq!(changed, 1);
 }
 
 fn delete_in_process_reservation(state: &AppState, thread_id: &str) {
-    let connection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    assert_eq!(
-        connection
-            .execute(
+    let changed = state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            Ok(connection.execute(
                 "DELETE FROM in_process_handler_reservation WHERE thread_id = ?1",
                 rusqlite::params![thread_id],
-            )
-            .unwrap(),
-        1
-    );
+            )?)
+        })
+        .unwrap();
+    assert_eq!(changed, 1);
 }
 
 fn assert_service_interrupted(state: &AppState, thread_id: &str, recovery_mode: &str) {
@@ -1316,7 +1322,7 @@ fn assert_service_interrupted(state: &AppState, thread_id: &str, recovery_mode: 
 
 #[test]
 fn exact_terminal_postcommit_repair_republishes_the_persisted_terminal_event() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-postcommit-repair";
     let owner = seed_in_process_handler(&state, thread_id);
     let mut subscriber = state.event_streams.subscribe(thread_id);
@@ -1407,7 +1413,7 @@ fn exact_terminal_postcommit_repair_republishes_the_persisted_terminal_event() {
 
 #[test]
 fn shutdown_authoritative_audit_refuses_to_run_while_an_owner_is_active() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-shutdown-owner-gate";
     let owner = seed_in_process_handler(&state, thread_id);
 
@@ -1446,7 +1452,7 @@ fn shutdown_authoritative_audit_refuses_to_run_while_an_owner_is_active() {
 
 #[test]
 fn shutdown_authoritative_audit_repairs_and_retires_an_ownerless_terminal() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-shutdown-terminal-repair";
     let owner = seed_in_process_handler(&state, thread_id);
     state
@@ -1495,7 +1501,7 @@ fn shutdown_authoritative_audit_repairs_and_retires_an_ownerless_terminal() {
 
 #[tokio::test]
 async fn reservation_reconciliation_accepts_a_preconverged_discarded_pending_birth() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-race-discarded-birth";
     seed_pending_in_process_reservation_without_root(&state, thread_id);
     assert!(
@@ -1520,7 +1526,7 @@ async fn reservation_reconciliation_accepts_a_preconverged_discarded_pending_bir
 
 #[tokio::test]
 async fn reservation_reconciliation_accepts_a_preconverged_retired_terminal() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-race-retired-terminal";
     let owner = seed_in_process_handler(&state, thread_id);
     state
@@ -1578,7 +1584,7 @@ async fn reservation_reconciliation_accepts_a_preconverged_retired_terminal() {
 
 #[tokio::test]
 async fn startup_reconciliation_discards_pending_in_process_birth_without_root() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-pending-no-root";
     seed_pending_in_process_reservation_without_root(&state, thread_id);
 
@@ -1615,7 +1621,7 @@ async fn startup_reconciliation_rejects_committed_reservation_phases_without_a_r
             "terminal-confirmed in-process reservation",
         ),
     ] {
-        let (_tmpdir, state) = build_test_state();
+        let (_tmpdir, _state_owner, state) = build_test_state();
         let thread_id = format!("T-service-{phase}-no-root");
         seed_in_process_reservation_without_root(&state, &thread_id, phase);
 
@@ -1628,7 +1634,7 @@ async fn startup_reconciliation_rejects_committed_reservation_phases_without_a_r
 
 #[tokio::test]
 async fn startup_reconciliation_rejects_terminal_phase_against_running_root() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-terminal-phase-running-root";
     let owner = seed_in_process_handler(&state, thread_id);
     set_in_process_reservation_phase(&state, thread_id, "terminal_confirmed");
@@ -1651,7 +1657,7 @@ async fn startup_reconciliation_rejects_terminal_phase_against_running_root() {
 #[tokio::test]
 async fn startup_reconciliation_rejects_every_reservation_phase_against_created_root() {
     for phase in ["pending", "running", "terminal_confirmed"] {
-        let (_tmpdir, state) = build_test_state();
+        let (_tmpdir, _state_owner, state) = build_test_state();
         let thread_id = format!("T-service-{phase}-created-root");
         state
             .state_store
@@ -1677,7 +1683,7 @@ async fn startup_reconciliation_rejects_every_reservation_phase_against_created_
 
 #[tokio::test]
 async fn startup_reconciliation_rejects_nonterminal_in_process_root_without_reservation() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-running-without-reservation";
     let owner = seed_in_process_handler(&state, thread_id);
     delete_in_process_reservation(&state, thread_id);
@@ -1697,7 +1703,7 @@ async fn startup_reconciliation_rejects_nonterminal_in_process_root_without_rese
 
 #[tokio::test]
 async fn startup_reconciliation_advances_pending_committed_root_before_owner_loss_settlement() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-pending-committed";
     let owner = seed_in_process_handler(&state, thread_id);
     regress_in_process_reservation_to_pending(&state, thread_id);
@@ -1726,7 +1732,7 @@ async fn startup_reconciliation_advances_pending_committed_root_before_owner_los
 
 #[tokio::test]
 async fn startup_reconciliation_fails_running_in_process_handler_without_resume() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let owner = seed_in_process_handler(&state, "T-service-running");
     state
         .state_store
@@ -1754,7 +1760,7 @@ async fn startup_reconciliation_fails_running_in_process_handler_without_resume(
 
 #[tokio::test]
 async fn reservation_reconciliation_terminalizes_ownerless_root_without_projection_visibility() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-stale-projection";
     let owner = seed_in_process_handler(&state, thread_id);
     state
@@ -1786,7 +1792,7 @@ async fn reservation_reconciliation_terminalizes_ownerless_root_without_projecti
 
 #[tokio::test]
 async fn live_reconciliation_preserves_a_registered_in_process_handler() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-owned";
     let owner = seed_in_process_handler(&state, thread_id);
 
@@ -1821,7 +1827,7 @@ async fn live_reconciliation_preserves_a_registered_in_process_handler() {
 
 #[tokio::test]
 async fn live_reconciliation_fails_an_unregistered_in_process_handler_idempotently() {
-    let (_tmpdir, state) = build_test_state();
+    let (_tmpdir, _state_owner, state) = build_test_state();
     let thread_id = "T-service-orphan";
     let mut record = thread_record(
         thread_id,
@@ -1897,14 +1903,137 @@ async fn live_reconciliation_fails_an_unregistered_in_process_handler_idempotent
     );
 }
 
+/// Retain in this node's CAS a complete admitted structured-session capsule
+/// and return its content hash with its structured protocol identity: the
+/// profile hash and per-schema hashes a committed hosted command must retain.
+/// Dedicated recovery resolves the session's authority from exactly this
+/// object.
+fn store_structured_session_capsule(state: &AppState) -> (String, String, serde_json::Value) {
+    use ryeos_state::objects::{
+        AdmittedDirectCommandClosure, AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity,
+        AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
+        DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
+        DirectRuntimeSourceSpace, PERSISTENT_SESSION_CAPSULE_KIND,
+        PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION, PersistentSessionLifecycleContract,
+        PersistentSessionWireContract,
+    };
+
+    let contract = serde_json::json!({"fixture":"terminal-replay", "schema_version":ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]}, "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
+    let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
+    let schema_hashes =
+        std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);
+    let exact_program = serde_json::json!({"fixture":"terminal-replay"});
+    let exact_program_hash = ryeos_state::objects::canonical_value_digest(&exact_program).unwrap();
+    let executable_blob_hash = "9".repeat(64);
+    let capsule = AdmittedPersistentSessionCapsule {
+        external_candidate: None,
+        schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
+        kind: PERSISTENT_SESSION_CAPSULE_KIND.to_owned(),
+        exact_program,
+        exact_program_hash,
+        lifecycle: PersistentSessionLifecycleContract {
+            max_processes: 1,
+            max_inflight_per_process: 1,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            max_cpu_seconds: 1,
+            real_uid_process_limit: 1,
+            ready_timeout_ms: 1,
+            request_timeout_ms: 1,
+            idle_timeout_ms: 1,
+        },
+        wire: PersistentSessionWireContract {
+            channel_env: "RYEOS_SESSION_FD".to_owned(),
+            wire_protocol: "ryeos.structured-session".to_owned(),
+            wire_version: 2,
+            max_frame_bytes: 1024,
+        },
+        artifact_identity: AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executor_ref: "native:fixture".to_owned(),
+            root_subject_source_content_digest: "a".repeat(64),
+            root_subject_signer_fingerprint: Some("f".repeat(64)),
+            root_subject_source_identity: DirectRootSourceIdentity::Bundle {
+                manifest_hash: "b".repeat(64),
+                manifest_signer_fingerprint: "f".repeat(64),
+            },
+            protocol_ref: "protocol:fixture/session".to_owned(),
+            protocol_content_hash: "c".repeat(64),
+            protocol_signer_fingerprint: "f".repeat(64),
+            execution_plan_hash: lillux::sha256_hex(
+                lillux::canonical_json(&serde_json::json!({})).unwrap().as_bytes(),
+            ),
+            executable_identity: DirectExecutableIdentity::CapturedContent {
+                content_hash: executable_blob_hash.clone(),
+            },
+            runtime_identity: DirectRuntimeIdentity {
+                runtime_ref: "runtime:fixture/session".to_owned(),
+                runtime_source_space: DirectRuntimeSourceSpace::Bundle,
+                runtime_content_hash: "6".repeat(64),
+                runtime_signer_fingerprint: "f".repeat(64),
+                runtime_bundle_manifest_hash: Some("7".repeat(64)),
+                runtime_bundle_signer_fingerprint: Some("f".repeat(64)),
+            },
+        },
+        execution_closure: AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan: serde_json::json!({}),
+            protocol_descriptor_document: "fixture protocol".to_owned(),
+            command: AdmittedDirectCommandClosure::ContentAddressed {
+                executable_blob_hash: executable_blob_hash.clone(),
+                execution_path: ryeos_state::objects::admitted_direct_command_execution_path(
+                    &executable_blob_hash,
+                    std::path::Path::new("fixture-session"),
+                )
+                .unwrap(),
+            },
+            admitted_project_root: None,
+        },
+        execution_realization_hash: "8".repeat(64),
+        source_binding_hash: None,
+        retained_product_selections: None,
+        retained_external_runtime_qualification: None,
+        retained_external_runtime_content_qualification: None,
+        structured_session_profile: Some(AdmittedStructuredSessionProfile {
+            profile_hash: profile_hash.clone(),
+            contract,
+            schema_hashes: schema_hashes.clone(),
+            baseline_source: "baseline.toml".to_owned(),
+            baseline_destination: "config.toml".to_owned(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
+            auxiliary_configs: Vec::new(),
+            runtime_configs: Vec::new(),
+        }),
+        executable_search: Vec::new(),
+        process_environment: std::collections::BTreeMap::new(),
+        runtime_ref: "runtime:fixture/session".to_owned(),
+        executor_ref: "native:fixture".to_owned(),
+    };
+    let hash = state
+        .state_store
+        .pinned_state_authority()
+        .unwrap()
+        .cas_store()
+        .unwrap()
+        .store_object(&capsule.to_value().unwrap())
+        .unwrap();
+    (
+        hash,
+        profile_hash,
+        serde_json::to_value(schema_hashes).unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_epoch() {
-    let (tmpdir, state) = build_test_state();
+    let (tmpdir, _state_owner, state) = build_test_state();
     let session_id = "T-hosted-root-replay";
     let workspace_id = "W-hosted-root-replay";
     let worker_id = "worker-hosted-root-replay";
     let profile_id = "P-hosted-root-replay";
-    let capsule_hash = "a".repeat(64);
+    let (capsule_hash, protocol_profile_hash, protocol_schema_hashes) =
+        store_structured_session_capsule(&state);
     let base_snapshot = "b".repeat(64);
     let request_digest = "c".repeat(64);
     let observation_digest = "d".repeat(64);
@@ -1941,23 +2070,21 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
             None,
         )
         .unwrap();
-    assert_eq!(
-        state
-            .state_store
-            .claim_thread_launch(session_id, "claim-hosted-replay", "launch-hosted-replay")
-            .unwrap(),
-        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
-    );
-    let launch_owner = state
+    // Worker attachment and dedicated contact happen under this daemon's
+    // registered launch owner, as they did in the daemon that later died.
+    let claim = state
         .state_store
-        .get_launch_claim(session_id)
+        .claim_thread_launch_active(session_id, "claim-hosted-replay", "launch-hosted-replay")
         .unwrap()
-        .unwrap()
-        .claimed_by;
+        .expect("the hosted root launch is claimed");
+    let launch_owner = claim.claimed_by.clone();
     state
         .state_store
         .claim_execution_workspace_construction(workspace_id, session_id, &launch_owner)
         .unwrap();
+    // Dedicated contact requires the root's exact retained membership in the
+    // constructed view, bound before any descriptor contact.
+    let view_identity = "hosted-root-replay-view";
     state
         .state_store
         .bind_execution_workspace(WorkspaceBinding {
@@ -1966,11 +2093,22 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
             workspace_id,
             thread_id: session_id,
             launch_owner: Some(&launch_owner),
-            backend_id: None,
-            backend_version: None,
-            pinned_root_identities: None,
-            mount_identity: None,
+            backend_id: Some("native"),
+            backend_version: Some("fixture-build"),
+            pinned_root_identities: Some("fixture-pinned-roots"),
+            mount_identity: Some(view_identity),
         })
+        .unwrap();
+    state
+        .state_store
+        .bind_thread_workspace(
+            session_id,
+            &ryeos_app::runtime_db::RuntimeWorkspaceBinding {
+                workspace_id: workspace_id.to_owned(),
+                view_identity: view_identity.to_owned(),
+                borrower_launch_owner: claim.owner,
+            },
+        )
         .unwrap();
 
     state
@@ -2140,8 +2278,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "idempotency_key":"command-hosted-root-replay",
                         "canonical_command":command_payload,
                         "admitted_session_capsule_hash":capsule_hash,
-                        "protocol_profile_hash":"f".repeat(64),
-                        "protocol_schema_hashes":{"fixture":"1".repeat(64)},
+                        "protocol_profile_hash":protocol_profile_hash,
+                        "protocol_schema_hashes":protocol_schema_hashes,
                     }),
                 },
                 NewEventRecord {

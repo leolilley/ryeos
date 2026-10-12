@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn foldback_roots_complete_capture_before_opening_any_input_and_preserves_equality() {
         let temporary = tempfile::tempdir().unwrap();
-        let state = ryeos_state::StateDb::open(
+        let state = ryeos_app::test_support::TestState::open(
             temporary.path(),
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn malformed_later_mutation_refuses_before_staging_or_capturing_earlier_files() {
         let temporary = tempfile::tempdir().unwrap();
-        let state = ryeos_state::StateDb::open(
+        let state = ryeos_app::test_support::TestState::open(
             temporary.path(),
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn operational_shadow_delta_uses_the_same_input_boundary_as_capture() {
         let temporary = tempfile::tempdir().unwrap();
-        let state = ryeos_state::StateDb::open(
+        let state = ryeos_app::test_support::TestState::open(
             temporary.path(),
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )

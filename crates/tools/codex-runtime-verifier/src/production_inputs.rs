@@ -62,13 +62,8 @@ impl ProductionPrivateStaging {
         let state_root = self
             .occurrence
             .create_child(std::ffi::OsStr::new("capture-state"), 0o700)?;
-        let state = ryeos_state::StateDb::open(
-            state_root.path(),
-            std::sync::Arc::new(ryeos_state::TrustStore::new()),
-        )?;
-        let authority = state.pinned_authority()?;
+        let authority = ryeos_state::private_cas::open_private_scratch_cas(&state_root)?;
         let guard = authority.acquire_shared_guard()?;
-        drop(state);
         let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
             ryeos_state::project_sync::ProjectSyncScope::FullProject,
             vec![],
@@ -449,9 +444,12 @@ mod tests {
                 let manifest = ryeos_state::observe_external_content_tree_exact(&tree).unwrap();
                 (tree.inherited_descriptor_authority().unwrap(), manifest)
             } else {
+                // Each file realization carries distinct bytes so every admitted
+                // role resolves to exactly one manifest hash.
+                let body = format!("fixture-executable:{id}");
                 root.atomic_create_pinned_regular(
                     OsStr::new(id),
-                    b"fixture-executable",
+                    body.as_bytes(),
                     0o755,
                     crate::VERIFIER_TEMP_PURPOSE,
                 )
@@ -463,8 +461,8 @@ mod tests {
                     .unwrap();
                 let manifest =
                     ryeos_state::external_content::single_file_manifest_from_verified_blob(
-                        &lillux::sha256_hex(b"fixture-executable"),
-                        18,
+                        &lillux::sha256_hex(body.as_bytes()),
+                        body.len() as u64,
                         0o755,
                     )
                     .unwrap();

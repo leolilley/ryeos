@@ -3561,6 +3561,7 @@ dependencies = [
  "ryeos-api",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-codex-external-configuration",
  "ryeos-codex-runtime-verifier",
  "ryeos-engine",
  "ryeos-executor",

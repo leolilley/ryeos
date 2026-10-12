@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn external_direct_notification_loss_does_not_release_live_host_claim() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let thread_id = "T-external-host-notification-loss";
         let owners = reserved_owners(&state, thread_id);
         let (entered, entered_rx) = std::sync::mpsc::sync_channel(1);
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn external_direct_notification_follows_guard_and_claim_release() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let thread_id = "T-external-host-completed";
         let owners = reserved_owners(&state, thread_id);
         let notification = spawn_owned(state.clone(), thread_id.into(), owners, |_| {
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn external_direct_shutdown_refuses_before_thread_lookup_or_allocation() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let thread_id = "T-external-host-shutdown";
         let owners = reserved_owners(&state, thread_id);
         state

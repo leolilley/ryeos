@@ -767,14 +767,14 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         }
     };
 
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Read the projected result through `service:threads/get`; the running
+    // daemon's projection is never opened from the test process.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let result = loop {
-        if let Ok(db) = ryeos_state::projection::ProjectionDb::open(&projection_path)
-            && let Ok(Some(result)) = ryeos_state::queries::get_thread_result(&db, &thread_id)
+    let detail = loop {
+        if let Ok(Some(detail)) = h.get_thread(&thread_id).await
+            && !detail["result"].is_null()
         {
-            break result;
+            break detail;
         }
         assert!(
             Instant::now() < deadline,
@@ -782,18 +782,22 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert_eq!(result.status, "failed", "response={status} {body:#}");
+    assert_eq!(
+        detail["thread"]["status"].as_str(),
+        Some("failed"),
+        "response={status} {body:#}"
+    );
     assert!(
-        result.outcome_code.is_none(),
+        detail["result"]["outcome_code"].is_null(),
         "generic managed-launch finalization must retain its typed cause in error"
     );
-    let error: serde_json::Value = serde_json::from_str(
-        result
-            .error
-            .as_deref()
-            .expect("rotated reconstruction failure retains structured error"),
-    )
-    .expect("projected failure error is JSON");
+    let error = match &detail["result"]["error"] {
+        serde_json::Value::String(text) => {
+            serde_json::from_str(text).expect("projected failure error is JSON")
+        }
+        serde_json::Value::Null => panic!("rotated reconstruction failure retains structured error"),
+        structured => structured.clone(),
+    };
     assert_eq!(error["code"].as_str(), Some("launch_failure"));
     assert!(
         error["message"]
@@ -1165,27 +1169,21 @@ model:
     // the response so any pre-launch fixture regression is explicit in failure
     // diagnostics rather than discarded.
 
-    // Open the projection DB and find the thread row created for
-    // this directive invocation. ProjectionDb writes happen on the
-    // daemon side; give it a brief settle window so the row is
-    // visible to a fresh read.
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Find the thread row created for this directive invocation. Projection
+    // writes happen on the daemon side; poll briefly until the row is
+    // visible.
+    // Read the thread rows through `service:threads/list`, never by opening
+    // the running daemon's projection. The test principal requests the
+    // subject and any runtime row this launch could record, so the principal
+    // filter hides neither.
+    let mut threads = Vec::new();
     for _ in 0..20 {
-        if projection_path.exists() {
+        threads = h.list_threads(100).await.expect("threads/list");
+        if threads.iter().any(|t| t.item_ref == "directive:p16/flow") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        projection_path.exists(),
-        "selected projection must exist at {}",
-        projection_path.display()
-    );
-
-    let db =
-        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject_thread = threads
         .iter()
@@ -1212,10 +1210,17 @@ model:
          runtime ref. Got: {:#?}",
         subject_thread
     );
+    // The executor ref is not part of the list row; read the thread itself.
+    let subject_detail = h
+        .get_thread(&subject_thread.thread_id)
+        .await
+        .expect("threads/get")
+        .expect("subject thread is visible to its requester");
+    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
     assert!(
-        subject_thread.executor_ref.starts_with("native:"),
+        executor_ref.starts_with("native:"),
         "thread.executor_ref records the runtime executor binary; got: {:?}",
-        subject_thread.executor_ref
+        executor_ref
     );
 
     // Defense in depth: there must NOT be a separate row recorded
@@ -1287,23 +1292,18 @@ config:
     // row identity below — regardless of dispatch outcome.
     let _ = (status, body);
 
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Read the thread rows through `service:threads/list`, never by opening
+    // the running daemon's projection. The test principal requests the
+    // subject and any runtime row this launch could record, so the principal
+    // filter hides neither.
+    let mut threads = Vec::new();
     for _ in 0..20 {
-        if projection_path.exists() {
+        threads = h.list_threads(100).await.expect("threads/list");
+        if threads.iter().any(|t| t.item_ref == "graph:p4/flow") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        projection_path.exists(),
-        "selected projection must exist at {}",
-        projection_path.display()
-    );
-
-    let db =
-        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject_thread = threads
         .iter()
@@ -1330,10 +1330,17 @@ config:
          not the runtime ref. Got: {:#?}",
         subject_thread
     );
+    // The executor ref is not part of the list row; read the thread itself.
+    let subject_detail = h
+        .get_thread(&subject_thread.thread_id)
+        .await
+        .expect("threads/get")
+        .expect("subject thread is visible to its requester");
+    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
     assert!(
-        subject_thread.executor_ref.starts_with("native:"),
+        executor_ref.starts_with("native:"),
         "thread.executor_ref records the runtime executor binary; got: {:?}",
-        subject_thread.executor_ref
+        executor_ref
     );
 
     // Defense in depth: no parallel thread row recorded against the
@@ -1400,12 +1407,11 @@ config:
     );
     assert!(response.get("thread").is_none(), "response={response:#}");
 
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
-    if projection_path.exists() {
-        let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
-            .expect("open projection db");
-        let threads = ryeos_state::queries::list_threads(&db, 100).expect("list threads");
+    // `service:threads/list` shows the rows of the requesting principal. Any
+    // durable thread this validation could create would be requested by the
+    // test principal, so the check holds within that principal.
+    {
+        let threads = h.list_threads(100).await.expect("threads/list");
         assert!(
             threads
                 .iter()

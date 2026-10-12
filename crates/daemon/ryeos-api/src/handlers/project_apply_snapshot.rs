@@ -2456,7 +2456,7 @@ mod tests {
     #[cfg(feature = "scheduling")]
     #[tokio::test]
     async fn retry_loop_skips_active_and_pending_acquisition_before_later_real_sessions() {
-        let (_state_root, mut state) = shared_test_state::build_test_state();
+        let (_state_root, store_owner, mut state) = shared_test_state::build_test_state();
         let registry = Arc::new(project_deploy::ProjectScheduleRecoveryOwners::default());
         Arc::get_mut(&mut state.extensions)
             .expect("test state extension owner is unique")
@@ -2467,14 +2467,26 @@ mod tests {
                 .unwrap()
                 .expect("test runtime directory exists"),
         );
-        let db = Arc::new(
-            ryeos_scheduler::SchedulerDb::open_bound(Arc::clone(&runtime_directory)).unwrap(),
-        );
+        // The scheduler store opens natively on the host under the test's
+        // node Store, in the node's runtime directory, and settles into that
+        // host's census once the service has closed it.
+        let db = ryeos_app::test_support::with_store_host(|host| {
+            match ryeos_scheduler::test_native::open_at_on(host, &state.config.runtime_state_dir()) {
+                Ok(db) => Arc::new(db),
+                Err(failure) => {
+                    let error = failure.to_string();
+                    ryeos_scheduler::test_native::settle_refusal_on(host, failure);
+                    panic!("open test scheduler store: {error}");
+                }
+            }
+        });
+        db.finish_fire_projection_rebuild()
+            .expect("publish the fresh test fire projection");
         let scheduler = Arc::new(
             ryeos_scheduler_service::SchedulerService::new(
                 state.config.app_root.clone(),
                 runtime_directory,
-                db,
+                Arc::clone(&db),
                 Arc::new(tokio::sync::RwLock::new(())),
                 Arc::clone(&state.identity),
                 Arc::new(ryeos_engine::trust::TrustStore::empty()),
@@ -2511,7 +2523,8 @@ mod tests {
                 operation_type: APPLY_OPERATION_TYPE.to_owned(),
                 operation: serde_json::to_value(operation).unwrap(),
                 peer: None,
-                roots: Vec::new(),
+                // Recovery refuses a job that does not root its target.
+                roots: vec![operation.target_snapshot_hash.clone()],
                 heads: Vec::new(),
                 max_attempts: 3,
             };
@@ -2609,6 +2622,16 @@ mod tests {
             Some(project_deploy::ProjectScheduleRecoveryOwner::PendingSessionAcquisition)
         ));
         scheduler.close_after_shutdown_drain().unwrap();
+
+        // Settle in drop order: the application and every scheduler alias go
+        // first, then the closed scheduler store files its terminals with the
+        // host, and only then does the Store owner close.
+        drop(state);
+        drop(scheduler);
+        ryeos_app::test_support::with_store_host(|host| {
+            ryeos_scheduler::test_native::settle_on(host, db);
+        });
+        store_owner.close().unwrap();
     }
 
     fn test_operation(project: &Path, transaction_id: &str) -> ApplyOperation {

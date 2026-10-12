@@ -4958,6 +4958,7 @@ mod tests {
         )
         .unwrap();
         let (hash, value, canonical) = closure_test_object(serde_json::json!({}));
+        let canonical_len = canonical.len();
         let entry = CasEntry {
             hash: hash.clone(),
             kind: "object".to_string(),
@@ -4972,7 +4973,7 @@ mod tests {
                 object_hashes: vec![hash.clone()],
                 ..ObjectsClosureSummary::default()
             },
-            object_bytes: u64::try_from(canonical.len() * 2).unwrap(),
+            object_bytes: u64::try_from(canonical_len * 2).unwrap(),
             blob_bytes: 0,
             entries: vec![entry.clone(), entry],
         };
@@ -5094,7 +5095,10 @@ mod tests {
 
     #[test]
     fn closure_raw_envelope_rejects_oversized_blob_before_string_decode() {
+        // Closure roots are objects; the oversized blob is one of the root's
+        // dependencies, advertised but not returned as an object entry.
         let root = "55".repeat(32);
+        let blob = "66".repeat(32);
         let mut policy = test_object_closure_policy();
         policy.max_blobs = 1;
         policy.max_blob_bytes = 3;
@@ -5108,8 +5112,8 @@ mod tests {
             "closure": {
                 "roots": [root],
                 "complete": true,
-                "object_hashes": [],
-                "blob_hashes": [root],
+                "object_hashes": [root],
+                "blob_hashes": [blob],
                 "large_object_hashes": [],
                 "missing_objects": [],
                 "missing_blobs": [],
@@ -5118,7 +5122,7 @@ mod tests {
             },
             "object_bytes": 0,
             "blob_bytes": 4,
-            "entries": [{"hash":root, "kind":"blob", "data":"YWJjZA=="}]
+            "entries": [{"hash":blob, "kind":"blob", "data":"YWJjZA=="}]
         });
         let requested_roots = vec![root];
         let error = parse_raw_objects_closure_get(
@@ -5127,7 +5131,10 @@ mod tests {
             &options,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("per-blob byte limit"));
+        assert!(
+            error.to_string().contains("per-blob byte limit"),
+            "unexpected refusal: {error:#}"
+        );
         assert!(!error.to_string().contains("invalid base64"));
     }
 

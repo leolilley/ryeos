@@ -407,6 +407,9 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         effective_capabilities: request.declared_capabilities.clone(),
         observed_provider_spec_sha256: request.provider_spec.digest.clone(),
         observed_snapshot_production_spec_sha256: None,
+        // This adapter has no materialized-source bootstrap path, so it
+        // observes no bootstrap profile and cannot authorize one.
+        observed_bootstrap_profile_digest: None,
         artifacts: request.artifacts.clone(),
     };
     response.validate_for(&request)?;

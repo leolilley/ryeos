@@ -96,8 +96,8 @@ async fn start_mock_remote(public_key: Value) -> Result<(String, MockContacts)> 
 
 #[tokio::test]
 async fn remote_configure_descriptor_match_writes_config() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let (url, _claims) = start_mock_remote(public_key.clone()).await.unwrap();
     let descriptor_path = write_descriptor(&local_state, "prod", &url, &public_key);
@@ -119,9 +119,9 @@ async fn remote_configure_descriptor_match_writes_config() {
 
 #[tokio::test]
 async fn remote_configure_descriptor_mismatch_does_not_write_config() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let (_wrong_tmp, wrong_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
+    let wrong_state = remote_identity();
     let live_public_key = public_key_response(&remote_state);
     let pinned_public_key = public_key_response(&wrong_state);
     let (url, _claims) = start_mock_remote(live_public_key).await.unwrap();
@@ -145,7 +145,7 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
 
 #[tokio::test]
 async fn remote_configure_rejects_credential_url_before_contact_or_persistence() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let app_root = local_state.config.app_root.clone();
 
     let error = remote_configure::handle(
@@ -166,8 +166,8 @@ async fn remote_configure_rejects_credential_url_before_contact_or_persistence()
 
 #[tokio::test]
 async fn remote_configure_normalizes_direct_url_before_persistence() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let (url, _contacts) = start_mock_remote(public_key).await.unwrap();
     let app_root = local_state.config.app_root.clone();
@@ -192,9 +192,9 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
 
 #[tokio::test]
 async fn remote_admit_refuses_to_send_token_on_live_identity_mismatch() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_pinned_tmp, pinned_state) = test_state::build_test_state();
-    let (_live_tmp, live_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let pinned_state = remote_identity();
+    let live_state = remote_identity();
     let live_public_key = public_key_response(&live_state);
     let (url, contacts) = start_mock_remote(live_public_key).await.unwrap();
 
@@ -223,8 +223,8 @@ async fn remote_admit_refuses_to_send_token_on_live_identity_mismatch() {
 
 #[tokio::test]
 async fn remote_admit_refuses_to_send_token_on_live_vault_mismatch() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let live_public_key = public_key_response(&remote_state);
     let (url, contacts) = start_mock_remote(live_public_key.clone()).await.unwrap();
 
@@ -251,9 +251,9 @@ async fn remote_admit_refuses_to_send_token_on_live_vault_mismatch() {
 
 #[tokio::test]
 async fn remote_admit_ignores_project_shadow_before_releasing_token() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_operator_tmp, operator_state) = test_state::build_test_state();
-    let (_attacker_tmp, attacker_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let operator_state = remote_identity();
+    let attacker_state = remote_identity();
     let operator_public_key = public_key_response(&operator_state);
     let attacker_public_key = public_key_response(&attacker_state);
     let (operator_url, operator_contacts) = start_mock_remote(operator_public_key.clone())
@@ -297,8 +297,8 @@ async fn remote_admit_ignores_project_shadow_before_releasing_token() {
 
 #[tokio::test]
 async fn remote_bind_project_copies_project_only_remote_to_user_config() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let project_root = tempfile::tempdir().unwrap();
     let project_root = project_root.path().canonicalize().unwrap();
@@ -344,8 +344,8 @@ async fn remote_bind_project_copies_project_only_remote_to_user_config() {
 
 #[tokio::test]
 async fn remote_list_retains_configured_site_coordinate() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let mut remotes = HashMap::new();
     remotes.insert(
@@ -369,8 +369,8 @@ async fn remote_list_retains_configured_site_coordinate() {
 
 #[tokio::test]
 async fn remote_doctor_rejects_stale_configured_site_coordinate() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let (url, contacts) = start_mock_remote(public_key).await.unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -428,8 +428,8 @@ async fn remote_doctor_rejects_stale_configured_site_coordinate() {
 
 #[tokio::test]
 async fn remote_doctor_and_status_reject_stale_configured_vault_without_signed_contact() {
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let (url, contacts) = start_mock_remote(public_key.clone()).await.unwrap();
     let mut stale = remote_config("prod", &url, &public_key);
@@ -474,17 +474,40 @@ async fn remote_doctor_and_status_reject_stale_configured_vault_without_signed_c
     assert_eq!(contacts.signed_contact_count.load(Ordering::SeqCst), 0);
 }
 
-fn public_key_response(state: &AppState) -> Value {
+/// The signed identity of a mock remote node. These tests talk to a mock
+/// remote, so a remote needs only its node identity, never a node Store; the
+/// test process keeps the one Store of its local node.
+struct RemoteIdentity {
+    identity: ryeos_node_runtime::identity::NodeIdentity,
+    _directory: tempfile::TempDir,
+}
+
+fn remote_identity() -> RemoteIdentity {
+    let directory = tempfile::tempdir().unwrap();
+    let identity =
+        ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("node-key.pem"))
+            .unwrap();
+    RemoteIdentity {
+        identity,
+        _directory: directory,
+    }
+}
+
+/// The site the test-state composition gives every node.
+const TEST_SITE_ID: &str = "site:testhost";
+
+fn public_key_response(remote: &RemoteIdentity) -> Value {
     let signing_key = format!(
         "ed25519:{}",
-        base64::engine::general_purpose::STANDARD.encode(state.identity.verifying_key().as_bytes())
+        base64::engine::general_purpose::STANDARD
+            .encode(remote.identity.verifying_key().as_bytes())
     );
     json!({
-        "principal_id": state.identity.principal_id(),
-        "fingerprint": state.identity.fingerprint(),
+        "principal_id": remote.identity.principal_id(),
+        "fingerprint": remote.identity.fingerprint(),
         "signing_key": signing_key,
         "vault_fingerprint": "vault-test-fingerprint",
-        "site_id": state.threads.site_id().to_string(),
+        "site_id": TEST_SITE_ID,
     })
 }
 

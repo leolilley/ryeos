@@ -114,7 +114,7 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
     use std::sync::Arc;
 
     let root = tempfile::tempdir()?;
-    let mut state = ryeos_app::state::test_support::build(root.path())?;
+    let (_state_owner, mut state) = ryeos_app::state::test_support::build(root.path())?;
     let core = ryeos_engine::test_support::core_bundle_root();
     let standard = ryeos_engine::test_support::standard_bundle_root();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
@@ -477,7 +477,8 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
         let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader { app_root: state, trust_store: &trust };
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let policy = ryeos_node_runtime::node_policy::load_snapshot(state, &trust, &table)?;
-        let config = loader.load_full(&ryeos_app::node_config::NodeConfigTable::new(),
+        let config = ryeos_app::node_config::loader::NodeConfigLoader { app_root: state, trust_store: &trust }
+            .load_full(&ryeos_app::node_config::NodeConfigTable::new(),
             &loader.load_bundle_section()?,
             policy.require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()?,
             &table)?;

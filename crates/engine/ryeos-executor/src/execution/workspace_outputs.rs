@@ -314,7 +314,7 @@ mod tests {
     fn both_storage_tiers_preserve_links_modes_empty_and_absent_roots() {
         for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
             let temporary = tempfile::tempdir().unwrap();
-            let state = ryeos_state::StateDb::open(
+            let state = ryeos_app::test_support::TestState::open(
                 temporary.path(),
                 std::sync::Arc::new(ryeos_state::TrustStore::new()),
             )
@@ -463,7 +463,7 @@ mod tests {
         use ryeos_isolation_protocol::{WorkspaceMutation, WorkspaceMutationKind as Mutation};
         for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
             let temporary = tempfile::tempdir().unwrap();
-            let state = ryeos_state::StateDb::open(
+            let state = ryeos_app::test_support::TestState::open(
                 temporary.path(),
                 std::sync::Arc::new(ryeos_state::TrustStore::new()),
             )

@@ -636,14 +636,12 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
 #[test]
 fn sse_dispatch_launch_collision() {
     use ryeos_node_runtime::identity::NodeIdentity;
-    use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
+    use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner};
     use ryeos_app::thread_lifecycle::new_thread_id;
     use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
 
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
-    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
 
     let identity = NodeIdentity::create(&key_path).expect("create identity");
@@ -654,15 +652,8 @@ fn sse_dispatch_launch_collision() {
         *identity.verifying_key(),
     );
     let write_barrier = WriteBarrier::new();
-    let state_store = StateStore::new_with_head_trust(
-        tmpdir.path().to_path_buf(),
-        runtime_state_dir,
-        runtime_db_path,
-        signer,
-        write_barrier,
-        Arc::new(head_trust),
-    )
-    .expect("open state store");
+    let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust))
+        .expect("open state store");
 
     let id = new_thread_id();
 

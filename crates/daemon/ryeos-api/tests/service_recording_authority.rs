@@ -66,7 +66,7 @@ fn failing_route_handler(
 #[tokio::test(flavor = "multi_thread")]
 async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
     HANDLER_CALLS.store(0, Ordering::SeqCst);
-    let (_tmp, mut state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
     services.register_raw("federation.capabilities", counting_handler);
     state.services = Arc::new(services);
@@ -121,7 +121,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn compiled_recorded_route_returns_thread_identity_and_persists_attribution() {
-    let (_tmp, mut state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
     services.register_raw("federation.capabilities", route_handler);
     state.services = Arc::new(services);
@@ -191,7 +191,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_identity_bootstrap_is_unrecorded() {
-    let (_tmp, state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_bundles();
     let invoker = CompiledServiceInvocation {
         service_ref: "service:identity/public_key".to_string(),
         subject_kind: "service".to_string(),
@@ -230,7 +230,7 @@ async fn public_identity_bootstrap_is_unrecorded() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
-    let (_tmp, mut state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
     services.register_raw("federation.capabilities", route_handler);
     state.services = Arc::new(services);
@@ -302,7 +302,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity() {
-    let (_tmp, mut state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
     services.register_raw("federation.capabilities", failing_route_handler);
     state.services = Arc::new(services);
@@ -364,23 +364,23 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution() {
-    let (_tmp, state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_bundles();
     let invoker = CompiledServiceInvocation {
-        service_ref: "service:scheduler/pause".to_string(),
+        service_ref: "service:threads/cancel".to_string(),
         subject_kind: "service".to_string(),
-        endpoint: "scheduler.pause".to_string(),
+        endpoint: "threads.cancel".to_string(),
     };
     let error = match invoker
         .invoke(RouteInvocationContext {
-            route_id: "scheduler/pause".into(),
+            route_id: "threads/cancel".into(),
             method: Method::POST,
-            uri: "/scheduler/pause".parse().unwrap(),
+            uri: "/threads/cancel".parse().unwrap(),
             captures: Default::default(),
             headers: HeaderMap::new(),
             body_raw: Vec::new(),
-            input: json!({"schedule_id": "daily"}),
+            input: json!({"thread_id": "T-route-cap-denial"}),
             principal: Some(RoutePrincipal {
-                id: "route:scheduler/pause".to_string(),
+                id: "route:threads/cancel".to_string(),
                 scopes: Vec::new(),
                 verifier_key: "none",
                 verified: false,
@@ -408,21 +408,21 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() {
-    let (_tmp, state) = test_state::build_test_state_with_bundles();
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_bundles();
     let invoker = CompiledServiceInvocation {
-        service_ref: "service:scheduler/pause".to_string(),
+        service_ref: "service:threads/cancel".to_string(),
         subject_kind: "service".to_string(),
-        endpoint: "scheduler.pause".to_string(),
+        endpoint: "threads.cancel".to_string(),
     };
     let error = match invoker
         .invoke(RouteInvocationContext {
-            route_id: "scheduler/pause".into(),
+            route_id: "threads/cancel".into(),
             method: Method::POST,
-            uri: "/scheduler/pause".parse().unwrap(),
+            uri: "/threads/cancel".parse().unwrap(),
             captures: Default::default(),
             headers: HeaderMap::new(),
             body_raw: Vec::new(),
-            input: json!({"schedule_id": "daily"}),
+            input: json!({"thread_id": "T-route-cap-denial"}),
             principal: Some(RoutePrincipal {
                 id: "route:test-denied".to_string(),
                 scopes: Vec::new(),

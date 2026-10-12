@@ -103,7 +103,9 @@ mod tests {
     use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
     use ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime;
-    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent;
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        RUNTIME_SNAPSHOT_INTENT_SCHEMA, RuntimeSnapshotIntent, RuntimeSnapshotSource,
+    };
 
     #[test]
     fn same_measurement_code_accepts_distinct_products_and_rejects_substitution() {
@@ -139,7 +141,11 @@ mod tests {
                 &owner_hash,
                 &key,
                 &GuestOwnerRuntimeProfile {
-                    schema: 1,
+                    schema: 2,
+                    account: lillux::GuestRuntimeAccount::Unix {
+                        uid: 65534,
+                        gid: 65534,
+                    },
                     private_source_max_bytes: 32 * 1024 * 1024,
                     private_source_max_inodes: 1024,
                     owner_timeout_seconds: timeout,
@@ -154,17 +160,22 @@ mod tests {
             // Expectations are retained production inputs, never copied from
             // the measurement that is about to be checked.
             let mut intent = RuntimeSnapshotIntent {
-                schema: 1,
+                schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
                 operation_id: String::new(),
                 owner_principal: format!("fp:{}", "1".repeat(64)),
                 provider_id: "fixture".into(),
                 source_occurrence_id: format!("source-{index}"),
+                source_bootstrap_operation_id: None,
+                source_created_at: None,
+                source_timeout_seconds: None,
                 provider_group_id: "fixture-group".into(),
                 production_profile_digest: "2".repeat(64),
                 adapter_artifact_hash: "3".repeat(64),
                 provider_spec_digest: "4".repeat(64),
                 settings_digest: "5".repeat(64),
-                product_witness_hash: "6".repeat(64),
+                source: RuntimeSnapshotSource::CapturedProduct {
+                    product_witness_hash: "6".repeat(64),
+                },
                 guest_runtime_manifest_hash: product.manifest_hash().into(),
                 owner_executable_sha256: owner_hash.clone(),
                 controller_public_root: controller_root.clone(),

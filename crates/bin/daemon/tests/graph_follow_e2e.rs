@@ -257,16 +257,12 @@ fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
     .unwrap_or_default()
 }
 
-fn all_threads(state_path: &Path) -> Vec<ryeos_state::queries::ThreadRow> {
-    let projection_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let projection = match ryeos_state::projection::ProjectionDb::open(&projection_path) {
-        Ok(projection) => projection,
-        Err(_) => return Vec::new(),
-    };
-    ryeos_state::queries::list_threads(&projection, 200).unwrap_or_default()
+/// Threads visible to the test principal through `service:threads/list`.
+/// The test principal requests the parent and every child, successor and
+/// service thread these graphs start, so the principal filter hides none of
+/// them.
+async fn all_threads(h: &DaemonHarness) -> Vec<common::ListedThread> {
+    h.list_threads(200).await.unwrap_or_default()
 }
 
 /// True iff `thread_id` has an event of `event_type` whose payload `node` == `node`.
@@ -636,7 +632,7 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
             thread != parent_thread_id && thread_has_event(&events, &thread, "thread_completed")
         });
         if child_done && successor_done {
-            let threads = all_threads(&h.state_path);
+            let threads = all_threads(&h).await;
             let parent = threads
                 .iter()
                 .find(|thread| thread.thread_id == parent_thread_id)
@@ -648,13 +644,27 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
                         && thread.chain_root_id == parent.chain_root_id
                 })
                 .expect("follow-resume successor");
-            assert_eq!(
-                successor.base_project_snapshot_hash, parent.result_project_snapshot_hash,
-                "the successor must resume from the exact generation frozen at follow"
-            );
             assert!(
                 successor.admitted_launch_capsule_hash.is_some(),
                 "the resumed segment must retain an admitted capsule"
+            );
+            let successor_id = successor.thread_id.clone();
+            // The retained snapshot coordinates are not part of the thread
+            // RPC. The test is finished with the daemon, so stop it and read
+            // them from its Store.
+            h.kill_daemon().await.expect("stop daemon");
+            let store = common::open_stopped_node_store(&h.state_path)
+                .expect("open stopped node store");
+            let (parent_row, successor_row) = store
+                .with_state_db(|db| {
+                    Ok((db.get_thread(&parent_thread_id)?, db.get_thread(&successor_id)?))
+                })
+                .expect("read thread rows");
+            let parent_row = parent_row.expect("parent row");
+            let successor_row = successor_row.expect("successor row");
+            assert_eq!(
+                successor_row.base_project_snapshot_hash, parent_row.result_project_snapshot_hash,
+                "the successor must resume from the exact generation frozen at follow"
             );
             break;
         }
@@ -1388,7 +1398,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (parent, child) = loop {
-        let threads = all_threads(&h.state_path);
+        let threads = all_threads(&h).await;
         let parent = threads.iter().find(|thread| thread.thread_id == parent_id);
         let child = threads
             .iter()
@@ -1466,7 +1476,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
     let completion_deadline = Instant::now() + Duration::from_secs(90);
     let (successor_id, terminal_events) = loop {
         let events = all_events(&h.state_path);
-        let projected_threads = all_threads(&h.state_path);
+        let projected_threads = all_threads(&h).await;
         let child_completed = thread_has_event(&events, &child.thread_id, "thread_completed");
         let successor = events
             .iter()
@@ -1531,7 +1541,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         "the submitted operator input must be folded exactly once"
     );
 
-    let threads = all_threads(&h.state_path);
+    let threads = all_threads(&h).await;
     let service = threads
         .iter()
         .find(|thread| thread.thread_id == service_id)
@@ -1555,7 +1565,14 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         service.project_root, parent.project_root,
         "service audit authority and target execution authority must remain distinct"
     );
-    assert!(service.base_project_snapshot_hash.is_none());
+    assert!(
+        service
+            .project_authority
+            .as_ref()
+            .and_then(|authority| authority.operational_snapshot_projection())
+            .is_none(),
+        "the service audit root must not pin a base project snapshot"
+    );
 
     let matching_children = threads
         .iter()

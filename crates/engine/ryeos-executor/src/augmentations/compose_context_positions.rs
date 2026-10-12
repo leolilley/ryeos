@@ -2402,10 +2402,17 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn lifecycle_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
+    /// The Store owner sits between the directory and the application so
+    /// destructuring drops the application before the Store closes. It stays
+    /// on the building thread.
+    pub(crate) fn lifecycle_test_state() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         let temp = tempfile::tempdir().expect("test tempdir");
-        let runtime_state_dir = temp.path().join(".ai/state");
-        let runtime_db_path = temp.path().join("runtime.sqlite3");
+        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(temp.path())
+            .join("runtime.sqlite3");
         let key_path = temp.path().join("identity/node-key.pem");
         let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().expect("test bind"),
@@ -2427,17 +2434,8 @@ pub(crate) mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(
-            ryeos_app::state_store::StateStore::new_with_head_trust(
-                temp.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                Arc::new(head_trust),
-            )
-            .expect("test state store"),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(temp.path(), signer, write_barrier.clone(), Arc::new(head_trust)).expect("test state store");
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -2476,8 +2474,7 @@ pub(crate) mod tests {
             routes: Vec::new(),
             commands: Vec::new(),
         };
-        let controller_lifetime =
-            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -2543,7 +2540,7 @@ pub(crate) mod tests {
             scoped_producer_processes: Arc::new(Default::default()),
             qualification_workspace_custody: Arc::new(Default::default()),
         };
-        (temp, state)
+        (temp, store_owner, state)
     }
 
     #[cfg(target_os = "linux")]
@@ -2582,10 +2579,13 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn bound_runtime_children_fixture() -> (tempfile::TempDir, ryeos_app::state::AppState)
-    {
+    pub(crate) fn bound_runtime_children_fixture() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         use ryeos_app::runtime_db::{RuntimeWorkspaceBinding, WorkspaceBinding, WorkspaceState};
-        let (temp, state) = lifecycle_test_state();
+        let (temp, store_owner, state) = lifecycle_test_state();
         let store = &state.state_store;
         let parent = "T-runtime-parent";
         store
@@ -2664,7 +2664,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        (temp, state)
+        (temp, store_owner, state)
     }
 
     #[test]
@@ -2714,7 +2714,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cancellation_settles_attached_augmentation_child_while_blocking_wait_is_in_flight() {
-        let (temp, state) = lifecycle_test_state();
+        let (temp, _store_owner, state) = lifecycle_test_state();
         let thread_id = "T-augmentation-cancel-inflight";
         let descendant_pid_path = temp.path().join("augmentation-descendant.pid");
         let (worker_done_tx, worker_done_rx) = mpsc::channel();

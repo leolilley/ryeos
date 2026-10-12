@@ -3183,7 +3183,7 @@ mod tests {
         };
         for large in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
             let authority = state.state_store.pinned_state_authority().unwrap();
             let cas = authority.cas_store().unwrap();
             let ordinary = store_tree_closure(&cas, &[("content", b"retained")]);
@@ -3440,6 +3440,9 @@ mod tests {
             assert!(path.join("payload").exists());
             // An unrelated empty pin namespace cannot authorize this repair or
             // sweep. It has a cache root so absence alone cannot explain refusal.
+            // One Store is live per process: the owner closes first, and its
+            // durable pin stays behind in its own namespace only.
+            store.close().unwrap();
             let other_app = dir.path().join("other-app");
             let other = open_custody_store(&other_app);
             let other_cache =
@@ -3461,12 +3464,11 @@ mod tests {
         for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
             let dir = tempfile::tempdir().unwrap();
             let app = dir.path().join("app");
+            // One Store is live per process. The pinned authority outlives
+            // each Store owner, and no Store opens while a CAS guard is held.
             let owner = open_custody_store(&app);
             let authority = owner.pinned_state_authority().unwrap();
-            // All store/anchor initialization precedes the original CAS guard;
-            // opening another namespace while holding it is not this test's authority.
             let other_app = dir.path().join("other-app");
-            let other = open_custody_store(&other_app);
             let other_cache =
                 ExternalMaterializationCache::from_runtime_state_root(&other_app.join(".ai/state"));
             lillux::PinnedDirectory::open_or_create(&other_cache.root).unwrap();
@@ -3542,25 +3544,36 @@ mod tests {
             let target =
                 lillux::PinnedDirectory::open_or_create(&dir.path().join("output")).unwrap();
             let budget = PrivateMaterializationBudget::new(4096);
-            let restore = |store| {
+            let restore = |guard: &ryeos_state::CasMutationGuard,
+                           store: Option<&ryeos_app::state_store::StateStore>| {
                 restore_workspace_output_tree(
-                    &authority, &guard, &target, hash, storage, &budget, store,
+                    &authority, guard, &target, hash, storage, &budget, store,
                 )
             };
             assert!(
-                restore(Some(&owner)).is_err(),
+                restore(&guard, Some(&owner)).is_err(),
                 "live generation must not be repaired"
             );
             assert!(target.entries_no_follow().unwrap().is_empty());
             drop(generation);
             assert!(
-                restore(None).is_err(),
+                restore(&guard, None).is_err(),
                 "CAS authority alone must not authorize deletion"
             );
-            assert!(restore(Some(&other)).is_err());
+            // The idle, unpinned generation is offered to an unrelated empty
+            // pin namespace while the owner is closed.
+            drop(guard);
+            owner.close().unwrap();
+            let other = open_custody_store(&other_app);
+            let guard = authority.acquire_shared_guard().unwrap();
+            assert!(restore(&guard, Some(&other)).is_err());
+            drop(guard);
+            other.close().unwrap();
             assert!(path.join("unexpected").exists());
             assert!(target.entries_no_follow().unwrap().is_empty());
-            restore(Some(&owner)).unwrap();
+            let owner = open_custody_store(&app);
+            let guard = authority.acquire_shared_guard().unwrap();
+            restore(&guard, Some(&owner)).unwrap();
             let expected: &[u8] = match storage {
                 ProductStorage::Content => b"small runtime",
                 ProductStorage::LargeContent => large_bytes,
@@ -3709,7 +3722,7 @@ mod tests {
     fn association_complete_metadata_preserves_hash_aliases_for_both_tiers() {
         for large in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
             let set = association_inventory(&state, large);
             let owner = association_owner(&state, &set);
             let references = std::sync::Arc::strong_count(&owner);
@@ -3767,7 +3780,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn association_refuses_incomplete_changed_and_noncanonical_expected_sets() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let set = association_inventory(&state, false);
         let owner = association_owner(&state, &set);
         let original = set.to_value().unwrap();
@@ -3831,7 +3844,7 @@ mod tests {
             ExternalRealizationBinding::PrivateRuntimeView,
         ] {
             let root = tempfile::tempdir().unwrap();
-            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
             let set = association_inventory(&state, false);
             let project_only = ryeos_state::objects::ExternalContentRealizationSet::new(
                 set.iter()
@@ -3870,7 +3883,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn association_refuses_parallel_cardinality_order_and_descriptor_class_changes() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let set = association_inventory(&state, false);
         for variant in 0..8 {
             let mut owner = association_owner(&state, &set);
@@ -3919,7 +3932,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn association_refuses_missing_or_replaced_named_generation_retaining_original() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let set = association_inventory(&state, false);
         let owner = association_owner(&state, &set);
         let cache = ExternalMaterializationCache::from_runtime_state_root(
@@ -3973,7 +3986,7 @@ mod tests {
     fn association_refuses_replaced_file_content_retaining_original_readable_inode() {
         for large in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
             let set = association_inventory(&state, large);
             let owner = association_owner(&state, &set);
             let cache = ExternalMaterializationCache::from_runtime_state_root(
@@ -4017,7 +4030,7 @@ mod tests {
     fn association_borrow_retains_actual_owner_leases_without_descriptor_substitution() {
         for large in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
             let set = association_inventory(&state, large);
             let owner = association_owner(&state, &set);
             let file_descriptor = owner.guest_sources[2].clone();
@@ -4066,7 +4079,7 @@ mod tests {
                 .contains("MAX_MOUNTS")
         );
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let invocation = serde_json::to_value(
             ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture(),
         )

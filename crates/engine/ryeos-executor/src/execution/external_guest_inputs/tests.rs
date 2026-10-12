@@ -129,7 +129,7 @@ fn product_input_redemption_retains_sorted_descriptors_exact_manifest_and_origin
     // Existing test-only storage scaffold supplies a resolution shape, not
     // publisher/launch admission. This test invokes real CAS redemption only.
     let root = tempfile::tempdir().unwrap();
-    let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+    let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
     let (mut first, manifest_value) = fixture(false);
     let manifest = ExternalContentManifestObject::from_value(&manifest_value).unwrap();
     let authority = state.state_store.pinned_state_authority().unwrap();
@@ -234,7 +234,7 @@ fn product_input_redemption_retains_sorted_descriptors_exact_manifest_and_origin
 fn consumer_inventory_uses_retained_normal_and_large_realizations_without_worker_coordinates() {
     for large in [false, true] {
         let temporary = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(temporary.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(temporary.path()).unwrap();
         let (entry, value) = fixture(large);
         let authority = state.state_store.pinned_state_authority().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -338,7 +338,7 @@ fn consumer_inventory_uses_retained_normal_and_large_realizations_without_worker
 #[cfg(target_os = "linux")]
 fn consumer_tree_inventory_has_explicit_portable_root_mode() {
     let temporary = tempfile::tempdir().unwrap();
-    let state = ryeos_app::state::test_support::build(temporary.path()).unwrap();
+    let (_state_owner, state) = ryeos_app::state::test_support::build(temporary.path()).unwrap();
     let (mut entry, mut value) = fixture(false);
     value["entries"][0]["path"] = json!("tool");
     entry.kind = ExternalContentKind::Tree;

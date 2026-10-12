@@ -25,7 +25,6 @@ use std::{
     ffi::OsStr,
     io::{Seek as _, Write as _},
     path::Path,
-    sync::Arc,
 };
 
 const MEMBERS: [&str; 5] = [
@@ -247,11 +246,11 @@ fn observe(relative: &str, request: Request) -> Result<Observation> {
     // Ordinary private CAS initialization, not a fabricated candidate-launch
     // binding. It contains no signed heads, project admission or worker state.
     let state_root = scratch.create_child(OsStr::new("cas-state"), 0o700)?;
-    let state =
-        ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))?;
-    let authority = state.pinned_authority()?;
-    let guard = authority.acquire_shared_guard()?;
-    drop(state);
+    let authority = ryeos_state::private_cas::open_private_scratch_cas(&state_root)
+        .context("initialize private probe CAS")?;
+    let guard = authority
+        .acquire_shared_guard()
+        .context("guard private probe CAS")?;
     let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
         ryeos_state::project_sync::ProjectSyncScope::FullProject,
         Vec::new(),

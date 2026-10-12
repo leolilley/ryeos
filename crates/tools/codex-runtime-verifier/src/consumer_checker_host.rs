@@ -951,8 +951,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn run_runtime_conformance(case: ConformanceCase) -> Result<()> {
         use std::ffi::OsString;
-        use std::io::{Read as _, Write as _};
-        use std::os::fd::AsFd as _;
+        use std::io::Read as _;
         use std::path::{Path, PathBuf};
         use lillux::{LinuxSandboxMount, LinuxSandboxMountAccess as Access};
         let deadline = MonotonicDeadline::after(Duration::from_secs(60));
@@ -1215,13 +1214,9 @@ mod tests {
             verify_root(&runtime_source)?;
             ensure!(!deadline.has_elapsed(),"runtime preparation original deadline expired");
             held.release_once().map_err(anyhow::Error::msg)?;
-            let mut input = lillux::exec::DeadlinePipeStream::new(pipes.stdin.as_fd(),deadline)?;
-            input.write_all(b"103\n")?;
-            drop(input);
             // Bootstrap consumes stdin EOF before opening the sealed header.
-            drop(pipes.stdin);
-            let mut output = lillux::exec::DeadlinePipeStream::new(pipes.stdout.as_fd(),deadline)?;
-            let mut diagnostics = lillux::exec::DeadlinePipeStream::new(pipes.stderr.as_fd(),deadline)?;
+            let mut outputs = pipes.finish_input_into_output_pipes_until(b"103\n",deadline).map_err(|(_pipes,error)| error)?;
+            let lillux::sandbox::LinuxSandboxOutputStreams {mut output, mut diagnostics} = outputs.output_streams()?;
             // Both pipes are serviced in one nonblocking bounded loop: a noisy
             // refusal cannot block stdout behind a full diagnostic pipe.
             let mut bytes = Vec::new(); let mut refusal_witness = Vec::new(); let mut out_eof=false; let mut err_eof=false;
@@ -1329,10 +1324,10 @@ mod tests {
     }
 
     fn observing_peer(script: &str) -> Attempt {
-        let mut state = Attempt {
-            child: Some(peer(script)),
-            ..Default::default()
-        };
+        // Attempt owns a Drop, so fields are assigned after default
+        // construction rather than through struct update syntax.
+        let mut state = Attempt::default();
+        state.child = Some(peer(script));
         let child = state.child.as_mut().unwrap();
         state.drain = Some(child.take_error().unwrap().start_discarding().unwrap());
         state.output = Some(child.take_output().unwrap());
@@ -1623,10 +1618,10 @@ mod tests {
     fn startup_write_failure_keeps_exact_child_and_pipe_owners() {
         // Keep a dedicated writer across exact child reap; broken input is
         // refusal with retained ownership, not successful checker output.
-        let mut state = Attempt {
-            child: Some(peer("exit 0")),
-            ..Default::default()
-        };
+        // Attempt owns a Drop, so fields are assigned after default
+        // construction rather than through struct update syntax.
+        let mut state = Attempt::default();
+        state.child = Some(peer("exit 0"));
         state.input = Some(state.child.as_mut().unwrap().take_input().unwrap());
         let deadline = MonotonicDeadline::after(Duration::from_secs(5));
         state

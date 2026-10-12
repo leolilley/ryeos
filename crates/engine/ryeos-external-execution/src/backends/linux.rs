@@ -1848,7 +1848,7 @@ mod tests {
         std::fs::write(temp.path().join("vendor/existing/base.py"), b"hidden base").unwrap();
         std::fs::write(temp.path().join("settings.json"), b"base settings").unwrap();
         std::fs::write(temp.path().join("policy.py"), b"original policy").unwrap();
-        let db = ryeos_state::StateDb::open(
+        let db = ryeos_state::test_support::TestState::open(
             state.path(),
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )

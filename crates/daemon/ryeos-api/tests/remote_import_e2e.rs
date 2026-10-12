@@ -1,7 +1,9 @@
 mod test_state;
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::extract::State;
@@ -113,24 +115,10 @@ where
         })
 }
 
-async fn start_remote_server(
-    state: Arc<AppState>,
-) -> Result<(String, tokio::task::JoinHandle<()>)> {
-    start_remote_server_with_closure(state, false).await
-}
-
-async fn start_remote_server_with_closure(
-    state: Arc<AppState>,
-    lie_about_closure: bool,
-) -> Result<(String, tokio::task::JoinHandle<()>)> {
-    let incomplete_roots = if lie_about_closure {
-        None
-    } else {
-        Some(HashSet::new())
-    };
-    start_remote_server_with_incomplete_roots(state, incomplete_roots).await
-}
-
+/// Serves the remote node's federation surface. `incomplete_roots` selects
+/// which closure requests receive a response that claims completeness while
+/// carrying only the root object: `None` lies about every root, `Some(set)`
+/// lies only about the roots in the set, and an empty set never lies.
 async fn start_remote_server_with_incomplete_roots(
     state: Arc<AppState>,
     incomplete_roots: Option<HashSet<String>>,
@@ -267,17 +255,13 @@ async fn incomplete_closure_response(
     })))
 }
 
-fn remote_config(name: &str, url: &str, remote: &AppState) -> RemoteConfig {
+fn remote_config(name: &str, remote: &RemoteNode) -> RemoteConfig {
     RemoteConfig {
         name: name.to_string(),
-        url: url.to_string(),
-        principal_id: remote.identity.principal_id(),
-        signing_key: format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD
-                .encode(remote.identity.verifying_key().as_bytes())
-        ),
-        site_id: remote.threads.site_id().to_string(),
+        url: remote.url.clone(),
+        principal_id: remote.principal_id.clone(),
+        signing_key: remote.signing_key.clone(),
+        site_id: remote.site_id.clone(),
         vault_fingerprint: "sha256:test-vault".to_string(),
         ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
         project_bindings: HashMap::new(),
@@ -311,36 +295,273 @@ async fn admit_subject(state: Arc<AppState>, subject_hash: String) -> String {
     admitted["attestation_hash"].as_str().unwrap().to_string()
 }
 
+// The remote node runs in a child process: the native state store admits one
+// live Store per process, and each test's local node already holds this
+// process's Store. The child is this same test binary, re-executed to run only
+// `remote_node_server` with a scenario named in the environment.
+
+/// Environment variable that turns `remote_node_server` into a remote node
+/// serving the named scenario.
+const REMOTE_SCENARIO_ENV: &str = "RYEOS_REMOTE_IMPORT_SERVER";
+
+/// Prefix of the one stdout line on which the remote node announces that it
+/// is serving. The test harness may write its own text earlier on that line.
+const REMOTE_READY_MARKER: &str = "RYEOS_REMOTE_IMPORT_READY ";
+
+/// One subject stored and admitted; every closure answer is honest.
+const SINGLE_SUBJECT: &str = "single-subject";
+
+/// Three subjects admitted, the second one carrying a blob dependency; every
+/// closure answer is honest.
+const THREE_SUBJECTS: &str = "three-subjects";
+
+/// A good subject that sorts before a bad one, both admitted; only the bad
+/// subject's closure answer claims completeness while omitting its blob.
+const GOOD_AND_BAD: &str = "good-and-bad";
+
+/// One subject with a blob dependency, admitted; every closure answer claims
+/// completeness while omitting the blob.
+const CLOSURE_LIE: &str = "closure-lie";
+
+/// Child-process entry point for the remote node. Without the scenario
+/// variable this test does nothing, so an ordinary run of the test binary
+/// passes it at once.
+#[test]
+fn remote_node_server() {
+    let Ok(scenario) = std::env::var(REMOTE_SCENARIO_ENV) else {
+        return;
+    };
+    let (_remote_tmp, _remote_state_owner, remote_state) = test_state::build_test_state();
+    let remote_state = Arc::new(remote_state);
+    // Worker threads keep serving while this thread blocks on stdin below.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (announcement, server) = runtime.block_on(serve_scenario(&scenario, remote_state.clone()));
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{REMOTE_READY_MARKER}{announcement}").unwrap();
+    stdout.flush().unwrap();
+    drop(stdout);
+
+    // The parent closes stdin to shut the remote node down.
+    let mut ignored = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut ignored).unwrap();
+
+    // The server and its connection tasks hold the application. They must all
+    // be gone before the application and then the Store owner drop.
+    runtime.block_on(async {
+        server.abort();
+        let _ = server.await;
+    });
+    drop(runtime);
+    drop(remote_state);
+}
+
+/// Stores and admits the scenario's subjects on the remote node, starts its
+/// server, and returns the announcement the parent reads.
+async fn serve_scenario(
+    scenario: &str,
+    state: Arc<AppState>,
+) -> (Value, tokio::task::JoinHandle<()>) {
+    let (subjects, attestations, incomplete_roots) = match scenario {
+        SINGLE_SUBJECT => {
+            let subject = store_subject(&state);
+            let attestation = admit_subject(state.clone(), subject.clone()).await;
+            (vec![subject], vec![attestation], Some(HashSet::new()))
+        }
+        THREE_SUBJECTS => {
+            let subject_a = store_subject_with_root(&state, "T-remote-import-e2e-a");
+            let subject_b = store_item_subject_with_blob(&state);
+            let subject_c = store_subject_with_root(&state, "T-remote-import-e2e-c");
+            let attestation_a = admit_subject(state.clone(), subject_a.clone()).await;
+            let attestation_b = admit_subject(state.clone(), subject_b.clone()).await;
+            let attestation_c = admit_subject(state.clone(), subject_c.clone()).await;
+            (
+                vec![subject_a, subject_b, subject_c],
+                vec![attestation_a, attestation_b, attestation_c],
+                Some(HashSet::new()),
+            )
+        }
+        GOOD_AND_BAD => {
+            let good_subject = store_subject_with_root(&state, "T-remote-import-partial-good");
+            let mut bad_subject =
+                store_item_subject_with_blob_content(&state, b"bad dependency 0");
+            for index in 1..64 {
+                if good_subject < bad_subject {
+                    break;
+                }
+                bad_subject = store_item_subject_with_blob_content(
+                    &state,
+                    format!("bad dependency {index}").as_bytes(),
+                );
+            }
+            assert!(
+                good_subject < bad_subject,
+                "test setup requires good head to sort before bad head"
+            );
+            let good_attestation = admit_subject(state.clone(), good_subject.clone()).await;
+            let bad_attestation = admit_subject(state.clone(), bad_subject.clone()).await;
+            let incomplete_roots = HashSet::from([bad_subject.clone()]);
+            (
+                vec![good_subject, bad_subject],
+                vec![good_attestation, bad_attestation],
+                Some(incomplete_roots),
+            )
+        }
+        CLOSURE_LIE => {
+            let subject = store_item_subject_with_blob(&state);
+            let attestation = admit_subject(state.clone(), subject.clone()).await;
+            (vec![subject], vec![attestation], None)
+        }
+        other => panic!("unknown remote import scenario: {other}"),
+    };
+
+    let (url, server) = start_remote_server_with_incomplete_roots(state.clone(), incomplete_roots)
+        .await
+        .unwrap();
+    let announcement = json!({
+        "url": url,
+        "principal_id": state.identity.principal_id(),
+        "signing_key": format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(state.identity.verifying_key().as_bytes())
+        ),
+        "site_id": state.threads.site_id(),
+        "subjects": subjects,
+        "attestations": attestations,
+    });
+    (announcement, server)
+}
+
+/// The child process running a remote node. Dropping it closes the child's
+/// stdin, which shuts the remote node down, and then reaps the child, killing
+/// it if it does not exit in time. No child outlives its guard.
+struct RemoteProcess {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    // Held until the child is reaped, so the harness text the child writes
+    // while shutting down never meets a closed pipe.
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for RemoteProcess {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A serving remote node and the facts it announced about itself.
+struct RemoteNode {
+    url: String,
+    principal_id: String,
+    signing_key: String,
+    site_id: String,
+    subjects: Vec<String>,
+    attestations: Vec<String>,
+    _process: RemoteProcess,
+}
+
+impl RemoteNode {
+    /// Starts a remote node for `scenario` and waits until it is serving.
+    fn start(scenario: &str) -> Self {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "remote_node_server",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(REMOTE_SCENARIO_ENV, scenario)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("remote node stdout is piped");
+        let mut process = RemoteProcess {
+            child,
+            stdin,
+            stdout: std::io::BufReader::new(stdout),
+        };
+
+        let announcement = loop {
+            let mut line = String::new();
+            let read = process.stdout.read_line(&mut line).unwrap();
+            assert!(
+                read > 0,
+                "remote node for scenario {scenario} exited before it was serving"
+            );
+            if let Some(start) = line.find(REMOTE_READY_MARKER) {
+                let payload = &line[start + REMOTE_READY_MARKER.len()..];
+                break serde_json::from_str::<Value>(payload.trim()).unwrap();
+            }
+        };
+
+        RemoteNode {
+            url: announced_string(&announcement, "url"),
+            principal_id: announced_string(&announcement, "principal_id"),
+            signing_key: announced_string(&announcement, "signing_key"),
+            site_id: announced_string(&announcement, "site_id"),
+            subjects: announced_strings(&announcement, "subjects"),
+            attestations: announced_strings(&announcement, "attestations"),
+            _process: process,
+        }
+    }
+
+    fn subjects<const N: usize>(&self) -> [String; N] {
+        self.subjects
+            .clone()
+            .try_into()
+            .expect("scenario announces this many subjects")
+    }
+
+    fn attestations<const N: usize>(&self) -> [String; N] {
+        self.attestations
+            .clone()
+            .try_into()
+            .expect("scenario announces this many attestations")
+    }
+}
+
+fn announced_string(announcement: &Value, field: &str) -> String {
+    announcement[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("remote node announcement lacks {field}"))
+        .to_string()
+}
+
+fn announced_strings(announcement: &Value, field: &str) -> Vec<String> {
+    announcement[field]
+        .as_array()
+        .unwrap_or_else(|| panic!("remote node announcement lacks {field}"))
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect()
+}
+
 #[tokio::test]
 async fn import_admitted_head_mirrors_remote_closure_and_records_job() {
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let subject_hash = store_subject(&remote_state);
-    let remote_state = Arc::new(remote_state);
-    let admitted = admission_submit::handle(
-        admission_submit::Request {
-            subject_hash: subject_hash.clone(),
-            policy: "local-node-v2".to_string(),
-            claim: "accepted".to_string(),
-            max_objects: Some(16),
-            max_blobs: Some(16),
-            max_object_bytes: Some(4096),
-            max_total_object_bytes: Some(4096),
-            max_blob_bytes: Some(4096),
-            max_total_blob_bytes: Some(4096),
-            max_links_per_object: Some(16),
-        },
-        remote_state.clone(),
-    )
-    .await
-    .unwrap();
-    let attestation_hash = admitted["attestation_hash"].as_str().unwrap().to_string();
+    let remote = RemoteNode::start(SINGLE_SUBJECT);
+    let [subject_hash]: [String; 1] = remote.subjects();
+    let [attestation_hash]: [String; 1] = remote.attestations();
 
-    let (base_url, server) = start_remote_server(remote_state.clone()).await.unwrap();
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    install_remote(
-        &local_state,
-        remote_config("upstream", &base_url, &remote_state),
-    );
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    install_remote(&local_state, remote_config("upstream", &remote));
     let local_state = Arc::new(local_state);
 
     let imported = remote_import_admitted_head::handle(
@@ -396,27 +617,16 @@ async fn import_admitted_head_mirrors_remote_closure_and_records_job() {
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();
-
-    server.abort();
 }
 
 #[tokio::test]
 async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let subject_a = store_subject_with_root(&remote_state, "T-remote-import-e2e-a");
-    let subject_b = store_item_subject_with_blob(&remote_state);
-    let subject_c = store_subject_with_root(&remote_state, "T-remote-import-e2e-c");
-    let remote_state = Arc::new(remote_state);
-    let attestation_a = admit_subject(remote_state.clone(), subject_a.clone()).await;
-    let attestation_b = admit_subject(remote_state.clone(), subject_b.clone()).await;
-    let attestation_c = admit_subject(remote_state.clone(), subject_c.clone()).await;
+    let remote = RemoteNode::start(THREE_SUBJECTS);
+    let [subject_a, subject_b, subject_c]: [String; 3] = remote.subjects();
+    let [attestation_a, attestation_b, attestation_c]: [String; 3] = remote.attestations();
 
-    let (base_url, server) = start_remote_server(remote_state.clone()).await.unwrap();
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    install_remote(
-        &local_state,
-        remote_config("upstream", &base_url, &remote_state),
-    );
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    install_remote(&local_state, remote_config("upstream", &remote));
     let local_state = Arc::new(local_state);
 
     let first = remote_sync_admitted_heads::handle(
@@ -517,43 +727,19 @@ async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();
-
-    server.abort();
 }
 
 #[tokio::test]
 async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let good_subject = store_subject_with_root(&remote_state, "T-remote-import-partial-good");
-    let mut bad_subject = store_item_subject_with_blob_content(&remote_state, b"bad dependency 0");
-    for index in 1..64 {
-        if good_subject < bad_subject {
-            break;
-        }
-        bad_subject = store_item_subject_with_blob_content(
-            &remote_state,
-            format!("bad dependency {index}").as_bytes(),
-        );
-    }
-    assert!(
-        good_subject < bad_subject,
-        "test setup requires good head to sort before bad head"
-    );
-    let remote_state = Arc::new(remote_state);
-    let good_attestation = admit_subject(remote_state.clone(), good_subject.clone()).await;
-    let bad_attestation = admit_subject(remote_state.clone(), bad_subject.clone()).await;
+    // The remote node answers the bad subject's closure request with a
+    // response that claims completeness while omitting its blob; the good
+    // subject sorts first, so it is imported before the failure.
+    let remote = RemoteNode::start(GOOD_AND_BAD);
+    let [good_subject, bad_subject]: [String; 2] = remote.subjects();
+    let [good_attestation, bad_attestation]: [String; 2] = remote.attestations();
 
-    let (base_url, server) = start_remote_server_with_incomplete_roots(
-        remote_state.clone(),
-        Some(HashSet::from([bad_subject.clone()])),
-    )
-    .await
-    .unwrap();
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    install_remote(
-        &local_state,
-        remote_config("upstream", &base_url, &remote_state),
-    );
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    install_remote(&local_state, remote_config("upstream", &remote));
     let local_state = Arc::new(local_state);
 
     let err = remote_sync_admitted_heads::handle(
@@ -623,36 +809,15 @@ async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();
-
-    server.abort();
 }
 
 #[tokio::test]
 async fn import_admitted_head_rejects_wrong_pinned_key() {
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let subject_hash = store_subject(&remote_state);
-    let remote_state = Arc::new(remote_state);
-    admission_submit::handle(
-        admission_submit::Request {
-            subject_hash: subject_hash.clone(),
-            policy: "local-node-v2".to_string(),
-            claim: "accepted".to_string(),
-            max_objects: Some(16),
-            max_blobs: Some(16),
-            max_object_bytes: Some(4096),
-            max_total_object_bytes: Some(4096),
-            max_blob_bytes: Some(4096),
-            max_total_blob_bytes: Some(4096),
-            max_links_per_object: Some(16),
-        },
-        remote_state.clone(),
-    )
-    .await
-    .unwrap();
+    let remote = RemoteNode::start(SINGLE_SUBJECT);
+    let [subject_hash]: [String; 1] = remote.subjects();
 
-    let (base_url, server) = start_remote_server(remote_state.clone()).await.unwrap();
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let mut cfg = remote_config("upstream", &base_url, &remote_state);
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let mut cfg = remote_config("upstream", &remote);
     let wrong_key = lillux::crypto::SigningKey::from_bytes(&[42; 32]).verifying_key();
     cfg.signing_key = format!(
         "ed25519:{}",
@@ -687,20 +852,15 @@ async fn import_admitted_head_rejects_wrong_pinned_key() {
         format!("{err:#}").contains("failed to verify federated head"),
         "unexpected error: {err:#}"
     );
-
-    server.abort();
 }
 
 #[tokio::test]
 async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let subject_hash = store_subject(&remote_state);
-    let remote_state = Arc::new(remote_state);
-    admit_subject(remote_state.clone(), subject_hash.clone()).await;
+    let remote = RemoteNode::start(SINGLE_SUBJECT);
+    let [subject_hash]: [String; 1] = remote.subjects();
 
-    let (base_url, server) = start_remote_server(remote_state.clone()).await.unwrap();
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    let mut cfg = remote_config("upstream", &base_url, &remote_state);
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let mut cfg = remote_config("upstream", &remote);
     let wrong_key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
     cfg.signing_key = format!(
         "ed25519:{}",
@@ -767,41 +927,16 @@ async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();
-
-    server.abort();
 }
 
 #[tokio::test]
 async fn import_admitted_head_rejects_remote_closure_completeness_lie_before_mirroring() {
-    let (_remote_tmp, remote_state) = test_state::build_test_state();
-    let subject_hash = store_item_subject_with_blob(&remote_state);
-    let remote_state = Arc::new(remote_state);
-    admission_submit::handle(
-        admission_submit::Request {
-            subject_hash: subject_hash.clone(),
-            policy: "local-node-v2".to_string(),
-            claim: "accepted".to_string(),
-            max_objects: Some(16),
-            max_blobs: Some(16),
-            max_object_bytes: Some(4096),
-            max_total_object_bytes: Some(4096),
-            max_blob_bytes: Some(4096),
-            max_total_blob_bytes: Some(4096),
-            max_links_per_object: Some(16),
-        },
-        remote_state.clone(),
-    )
-    .await
-    .unwrap();
+    // The remote node claims a complete closure that omits the subject's blob.
+    let remote = RemoteNode::start(CLOSURE_LIE);
+    let [subject_hash]: [String; 1] = remote.subjects();
 
-    let (base_url, server) = start_remote_server_with_closure(remote_state.clone(), true)
-        .await
-        .unwrap();
-    let (_local_tmp, local_state) = test_state::build_test_state();
-    install_remote(
-        &local_state,
-        remote_config("upstream", &base_url, &remote_state),
-    );
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    install_remote(&local_state, remote_config("upstream", &remote));
     let local_state = Arc::new(local_state);
 
     let err = remote_import_admitted_head::handle(
@@ -841,8 +976,6 @@ async fn import_admitted_head_rejects_remote_closure_completeness_lie_before_mir
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();
-
-    server.abort();
 }
 
 #[test]

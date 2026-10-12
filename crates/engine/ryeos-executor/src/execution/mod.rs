@@ -2395,7 +2395,7 @@ mod pinned_child_authority_tests {
     fn workspace_capture_deduplicates_scope_across_distinct_process_groups() {
         let boot = "00000000-0000-4000-8000-000000000000";
         let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
@@ -2464,7 +2464,7 @@ mod pinned_child_authority_tests {
 
         let state_root = tempfile::tempdir().unwrap();
         let state_db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+            ryeos_app::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
                 .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();

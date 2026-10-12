@@ -96,7 +96,7 @@ async fn get(state: Arc<AppState>, id: &str, owner: &str) -> Result<Value, Handl
 
 #[tokio::test]
 async fn exact_thread_get_exposes_retained_result_and_preserves_owner_boundary() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let owner = format!("fp:{}", "1".repeat(64));
     let result = "c".repeat(64);
     create_thread(&state, "T-retained-result", &owner);
@@ -138,7 +138,7 @@ async fn exact_thread_get_exposes_retained_result_and_preserves_owner_boundary()
 
 #[tokio::test]
 async fn projected_result_hash_drift_does_not_override_the_exact_thread_snapshot() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let owner = format!("fp:{}", "1".repeat(64));
     let result = "c".repeat(64);
     create_thread(&state, "T-retained-result", &owner);

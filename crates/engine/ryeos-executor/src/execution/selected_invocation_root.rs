@@ -280,6 +280,35 @@ fn acknowledge_pending_return<O>(
     destination: &std::sync::Mutex<SlotCore<O, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>,
     store: &ryeos_app::state_store::StateStore,
 ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
+    acknowledge_pending_return_to(destination, store)
+}
+
+/// The two App metadata calls that acknowledge a selected borrower's return.
+/// Production passes its Store; a unit control passes a stand-in for a Store
+/// that does not hold the borrower's claim, since one process keeps a single
+/// live Store at a time.
+trait SelectedReturnLedger {
+    fn mark_selected_metadata_restored(&self, borrower: &ryeos_app::SelectedBorrowTicket) -> anyhow::Result<()>;
+    fn ack_selected_borrow_return(
+        &self, borrower: &ryeos_app::SelectedBorrowTicket,
+    ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn>;
+}
+
+impl SelectedReturnLedger for ryeos_app::state_store::StateStore {
+    fn mark_selected_metadata_restored(&self, borrower: &ryeos_app::SelectedBorrowTicket) -> anyhow::Result<()> {
+        ryeos_app::state_store::StateStore::mark_selected_metadata_restored(self, borrower)
+    }
+    fn ack_selected_borrow_return(
+        &self, borrower: &ryeos_app::SelectedBorrowTicket,
+    ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
+        ryeos_app::state_store::StateStore::ack_selected_borrow_return(self, borrower)
+    }
+}
+
+fn acknowledge_pending_return_to<O>(
+    destination: &std::sync::Mutex<SlotCore<O, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>,
+    store: &dyn SelectedReturnLedger,
+) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
     let (borrower, original_owner) = {
         let slot = match destination.lock() {
             Ok(slot) => slot,
@@ -522,6 +551,14 @@ impl SelectedInvocationAttachment {
     pub(crate) fn validate_for_store(
         &self, store: &Arc<ryeos_app::state_store::StateStore>,
     ) -> anyhow::Result<()> {
+        self.validate_for_store_identity(Arc::as_ptr(store))
+    }
+
+    /// The Store generation check by identity alone: the root must be armed
+    /// with exactly the Store at `store`.
+    fn validate_for_store_identity(
+        &self, store: *const ryeos_app::state_store::StateStore,
+    ) -> anyhow::Result<()> {
         let root = self.root.upgrade()
             .ok_or_else(|| anyhow::anyhow!("selected invocation root detached"))?;
         anyhow::ensure!(!root.closed.load(Ordering::Acquire), "selected invocation root closed");
@@ -529,7 +566,7 @@ impl SelectedInvocationAttachment {
             .map_err(|_| anyhow::anyhow!("selected root generation poisoned"))?;
         let (registered, _) = generation.as_ref()
             .ok_or_else(|| anyhow::anyhow!("selected invocation root unarmed"))?;
-        anyhow::ensure!(Arc::ptr_eq(registered, store), "selected invocation Store generation mismatch");
+        anyhow::ensure!(std::ptr::eq(Arc::as_ptr(registered), store), "selected invocation Store generation mismatch");
         Ok(())
     }
 
@@ -684,21 +721,19 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0);
     }
 
-    fn actual_store(root: &std::path::Path) -> Arc<ryeos_app::state_store::StateStore> {
+    /// The owner dereferences to the Store `Arc`, closes the Store when
+    /// dropped and stays on the opening thread.
+    fn actual_store(root: &std::path::Path) -> ryeos_app::test_support::TestStateStore {
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node.pem")).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state = root.join(".ai/state");
-        Arc::new(ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.to_owned(), state.clone(), state.join("runtime.sqlite3"), signer,
-            ryeos_app::write_barrier::WriteBarrier::new(), Arc::new(trust),
-        ).unwrap())
+        ryeos_app::test_support::TestStateStore::open(root, signer, Arc::new(trust)).unwrap()
     }
 
     type MetadataProbeSlot = std::sync::Mutex<SlotCore<DropProbe, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>;
 
-    fn actual_metadata_probe() -> (tempfile::TempDir, Arc<ryeos_app::state_store::StateStore>, MetadataProbeSlot, Arc<std::sync::atomic::AtomicUsize>) {
+    fn actual_metadata_probe() -> (tempfile::TempDir, ryeos_app::test_support::TestStateStore, MetadataProbeSlot, Arc<std::sync::atomic::AtomicUsize>) {
         let root = tempfile::tempdir().unwrap();
         let store = actual_store(root.path());
         store.reserve_fresh_thread_launch_active(
@@ -716,14 +751,36 @@ mod tests {
         (root, store, slot, drops)
     }
 
+    /// A Store that does not hold the borrower's claim: it refuses the
+    /// restoration mark the way such a Store does and records the exact
+    /// borrower it was offered.
+    struct ForeignReturnLedger(std::sync::Mutex<Vec<ryeos_app::SelectedBorrowTicket>>);
+    impl SelectedReturnLedger for ForeignReturnLedger {
+        fn mark_selected_metadata_restored(&self, borrower: &ryeos_app::SelectedBorrowTicket) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(borrower.clone());
+            anyhow::bail!("selected borrower durable claim is absent")
+        }
+        fn ack_selected_borrow_return(
+            &self, _borrower: &ryeos_app::SelectedBorrowTicket,
+        ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
+            panic!("a refused restoration mark never reaches the return acknowledgment")
+        }
+    }
+
     #[test]
     fn actual_adapter_retries_retained_ticket_after_wrong_store_and_exact_ack() {
         let (_root, store, slot, drops) = actual_metadata_probe();
         let pointer = slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe;
-        let other_root = tempfile::tempdir().unwrap();
-        let other_store = actual_store(other_root.path());
-        assert!(acknowledge_pending_return(&slot, &other_store).is_err());
-        assert!(matches!(slot.lock().unwrap().phase, RootPhase::RestoredAwaitingBorrowAck(_)));
+        let retained = match &slot.lock().unwrap().phase {
+            RootPhase::RestoredAwaitingBorrowAck(borrower) => borrower.clone(),
+            _ => panic!("fixture pending return"),
+        };
+        // One process keeps a single live Store, so the wrong Store is a
+        // ledger that refuses the borrower like a Store without its claim.
+        let wrong = ForeignReturnLedger(std::sync::Mutex::new(Vec::new()));
+        assert!(acknowledge_pending_return_to(&slot, &wrong).is_err());
+        assert_eq!(*wrong.0.lock().unwrap(), vec![retained.clone()]);
+        assert_eq!(slot.lock().unwrap().phase, RootPhase::RestoredAwaitingBorrowAck(retained));
         assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::Returned);
         assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::AlreadyReturned);
         assert_eq!(slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe, pointer);
@@ -804,14 +861,19 @@ mod tests {
         let store = actual_store(root.path());
         let (mut barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
         barrier.register_from_store(&store).unwrap();
-        assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, &store));
-        assert!(barrier.register_from_store(&Arc::clone(&store)).is_err());
-        let other_root = tempfile::tempdir().unwrap();
-        let other_store = actual_store(other_root.path());
-        assert!(barrier.register_from_store(&other_store).is_err());
-        assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, &store));
+        assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, store.store()));
+        // Registration is one-shot: a registered barrier refuses before it
+        // consults whatever Store is offered, this one or any other.
+        assert!(barrier.register_from_store(&Arc::clone(store.store())).is_err());
+        assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, store.store()));
         assert!(attachment.validate_for_store(&store).is_ok());
-        assert!(attachment.validate_for_store(&other_store).is_err());
+        // One process keeps a single live Store, so another Store generation
+        // is offered by identity alone.
+        assert!(attachment.validate_for_store_identity(std::ptr::null()).is_err());
+        let elsewhere = std::sync::Arc::new(0_u8);
+        assert!(attachment
+            .validate_for_store_identity(std::sync::Arc::as_ptr(&elsewhere).cast())
+            .is_err());
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
@@ -823,14 +885,14 @@ mod tests {
         let store = actual_store(root.path());
         let (mut barrier, _attachment) = SelectedInvocationCompositionBarrier::bootstrap();
         barrier.register_from_store(&store).unwrap();
-        assert_eq!(Arc::strong_count(&store), 3);
+        assert_eq!(Arc::strong_count(store.store()), 3);
         assert!(barrier.release_closed_store_generation().is_err());
-        assert_eq!(Arc::strong_count(&store), 3);
+        assert_eq!(Arc::strong_count(store.store()), 3);
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
         barrier.release_closed_store_generation().unwrap();
         assert!(barrier.registered_generation.is_none());
         assert!(barrier.root.generation.lock().unwrap().is_none());
-        assert_eq!(Arc::strong_count(&store), 1);
+        assert_eq!(Arc::strong_count(store.store()), 1);
         barrier.release_closed_store_generation().unwrap();
     }
 

@@ -46,10 +46,18 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    fn build_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
+    /// The Store owner sits between the directory and the application so
+    /// destructuring drops the application before the Store closes.
+    fn build_test_state() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(
+            tmpdir.path(),
+        )
+        .join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -70,17 +78,8 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(
-            ryeos_app::state_store::StateStore::new_with_head_trust(
-                tmpdir.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                Arc::new(head_trust),
-            )
-            .unwrap(),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), Arc::new(head_trust)).unwrap();
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -123,8 +122,7 @@ mod tests {
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         );
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
-        let controller_lifetime =
-            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -189,13 +187,13 @@ mod tests {
             scoped_producer_processes: Arc::new(Default::default()),
             qualification_workspace_custody: Arc::new(Default::default()),
         };
-        (tmpdir, state)
+        (tmpdir, store_owner, state)
     }
 
     #[tokio::test]
     async fn none_verifier_always_succeeds() {
         let compiled = CompiledNoneVerifier;
-        let (_tmp, state) = build_test_state();
+        let (_tmp, _store_owner, state) = build_test_state();
         let ctx = crate::routes::invocation::RouteInvocationContext {
             route_id: "test-route".into(),
             method: axum::http::Method::GET,

@@ -1003,7 +1003,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_precontact_failure_settles_only_exact_bound_child() {
-        let (_temp, state) = bound_runtime_children_fixture();
+        let (_temp, _store_owner, state) = bound_runtime_children_fixture();
         let store = &state.state_store;
         let child = "T-runtime-child";
         let owner = store.get_launch_claim(child).unwrap().unwrap();
@@ -1042,7 +1042,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_wrong_owner_and_unknown_contact_preserve_membership() {
-        let (_temp, state) = bound_runtime_children_fixture();
+        let (_temp, _store_owner, state) = bound_runtime_children_fixture();
         let store = &state.state_store;
         let child = "T-runtime-child";
         let binding = store.thread_workspace_binding(child).unwrap();

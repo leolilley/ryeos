@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 // Command coercion must use HEAD, without invoking or publishing anything.
 #[tokio::test]
 async fn current_head_validation_uses_pinned_authority_without_invoking_or_publishing() {
-    let (_node, state) = test_state::build_test_state_with_bundles();
+    let (_node, _state_owner, state) = test_state::build_test_state_with_bundles();
     let project = tempfile::tempdir().unwrap();
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let mut principal = RoutePrincipal::anonymous(operator.principal_id(), "ryeos_signed");

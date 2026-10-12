@@ -9293,7 +9293,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn partial_credential_mint_unwind_revokes_exact_pair_and_preserves_error() {
-        let (temp, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+        let (temp, _store_owner, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
         let path = temp.path().to_path_buf();
         let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(&path, state.isolation.as_ref()).unwrap();
         let provenance = ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority).unwrap();
@@ -9317,7 +9317,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn callback_only_mint_failure_cannot_leave_first_credential_live() {
-        let (temp, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+        let (temp, _store_owner, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
         let path = temp.path().to_path_buf();
         let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(&path, state.isolation.as_ref()).unwrap();
         let provenance = ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority).unwrap();
@@ -9331,7 +9331,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn detached_unsettled_failure_requests_kill_and_preserves_workspace() {
-        let (_temp, state) =
+        let (_temp, _store_owner, state) =
             crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
             );
         let store = &state.state_store;
@@ -9358,7 +9358,11 @@ mod tests {
             failure,
         );
         report_detached_launch_failure(&state, child, mapped, Some(workspace));
-        assert!(store.thread_has_kill_command(child).unwrap(), "no durable Kill tombstone");
+        // The durable Kill tombstone is the runtime row's stop intent, which
+        // live reconcile reads to kill the exact group.
+        let runtime = state.threads.get_thread(child).unwrap().unwrap().runtime;
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Kill), "no durable Kill tombstone");
+        assert!(runtime.stop_requested_at_ms.is_some(), "no durable Kill tombstone");
         assert!(!is_terminal_status(&store.get_thread(child).unwrap().unwrap().status));
         assert!(workspace_path.exists(), "workspace removed before reconcile killed the process");
     }
@@ -9366,7 +9370,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn unsettled_direct_launch_cleanup_never_finalizes_or_disarms() {
-        let (_temp, state) =
+        let (_temp, _store_owner, state) =
             crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
             );
         let store = &state.state_store;
@@ -9412,7 +9416,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn direct_precontact_failure_settles_only_current_child_membership() {
-        let (_temp, state) =
+        let (_temp, _store_owner, state) =
             crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
             );
         let store = &state.state_store;
@@ -9444,7 +9448,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn direct_terminal_failure_without_contact_proof_retains_membership() {
-        let (_temp, state) =
+        let (_temp, _store_owner, state) =
             crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
             );
         let store = &state.state_store;

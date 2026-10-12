@@ -21,7 +21,6 @@ use std::{
     ffi::{OsStr, OsString},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 const CHUNK: usize = 16 * 1024;
@@ -543,16 +542,11 @@ fn run_in_directory(
     stage(&child(&root, "tools")?, &tools, &request.tools)?;
     let candidate = child(&root, "candidate")?;
     let state_root = scratch.create_child(OsStr::new("cas-state"), 0o700)?;
-    let state =
-        ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .context("initialize private verifier CAS")?;
-    let authority = state
-        .pinned_authority()
-        .context("pin private verifier CAS")?;
+    let authority = ryeos_state::private_cas::open_private_scratch_cas(&state_root)
+        .context("initialize private verifier CAS")?;
     let guard = authority
         .acquire_shared_guard()
         .context("guard private verifier CAS")?;
-    drop(state);
     let runtime_fd = runtime
         .inherited_descriptor_authority()
         .context("retain runtime mount")?;

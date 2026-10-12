@@ -77,7 +77,7 @@ async fn list(state: Arc<AppState>, ctx: HandlerContext, params: Value) -> anyho
 
 #[tokio::test]
 async fn lists_only_owner_metadata_with_stable_pagination() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let alice = format!("fp:{}", "a".repeat(64));
     let bob = format!("fp:{}", "b".repeat(64));
@@ -150,7 +150,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
 
 #[tokio::test]
 async fn empty_list_works_for_configured_local_operator() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let owner = NodeIdentity::load(&state.config.operator_signing_key_path)
         .unwrap()
         .principal_id();
@@ -169,7 +169,7 @@ async fn empty_list_works_for_configured_local_operator() {
 
 #[tokio::test]
 async fn list_rejects_unverified_nonoperator_and_unforwarded_requests() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let owner = format!("fp:{}", "a".repeat(64));
     for (verified, class, origin) in [
@@ -203,7 +203,7 @@ async fn list_rejects_unverified_nonoperator_and_unforwarded_requests() {
 
 #[tokio::test]
 async fn list_rejects_invalid_bounds_and_caller_selected_ownership() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let owner = format!("fp:{}", "a".repeat(64));
     for request in [

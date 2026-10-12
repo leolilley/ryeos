@@ -42,7 +42,7 @@ fn signed_command_selects_node_service_without_a_private_key_tool_bridge() {
 
 #[tokio::test]
 async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
-    let (_node, state) = test_state::build_test_state();
+    let (_node, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let client_dir = tempfile::tempdir().unwrap();
@@ -134,7 +134,7 @@ async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
 
 #[tokio::test]
 async fn non_operator_callers_are_rejected_before_decoding_or_grant_access() {
-    let (_node, state) = test_state::build_test_state();
+    let (_node, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     for context in [
@@ -180,7 +180,7 @@ async fn non_operator_callers_are_rejected_before_decoding_or_grant_access() {
 
 #[tokio::test]
 async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
-    let (_node, state) = test_state::build_test_state();
+    let (_node, state_owner, state) = test_state::build_test_state();
     let mut state = Arc::new(state);
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let client_dir = tempfile::tempdir().unwrap();
@@ -229,7 +229,9 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
     );
 
     let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&state.config.app_root);
-    let lock = Arc::new(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap());
+    // The Store's owner already holds this exact lock, as standalone
+    // dispatch does; a second acquisition would conflict with it.
+    let lock = state_owner.standalone_lock();
     let mut extensions = ryeos_app::extension_state::ExtensionState::new();
     extensions.insert(lock.clone());
     Arc::get_mut(&mut state).unwrap().extensions = Arc::new(extensions);

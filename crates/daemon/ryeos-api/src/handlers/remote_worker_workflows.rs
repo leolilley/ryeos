@@ -2979,7 +2979,8 @@ mod tests {
     use ryeos_state::signer::Signer;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn test_state_store(root: &Path) -> ryeos_app::state_store::StateStore {
+    /// The owner dereferences to the Store and closes it when dropped.
+    fn test_state_store(root: &Path) -> ryeos_app::test_support::TestStateStore {
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
@@ -2987,15 +2988,7 @@ mod tests {
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.to_owned(),
-            root.join(".ai/state"),
-            root.join("runtime.sqlite3"),
-            signer,
-            ryeos_app::write_barrier::WriteBarrier::new(),
-            Arc::new(trust),
-        )
-        .unwrap()
+        ryeos_app::test_support::TestStateStore::open(root, signer, Arc::new(trust)).unwrap()
     }
 
     #[test]

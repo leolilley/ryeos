@@ -1115,7 +1115,7 @@ mod tests {
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
-        let (directory, state) = super::release_test_state::build_test_state();
+        let (directory, _state_owner, state) = super::release_test_state::build_test_state();
         let state = Arc::new(state);
         let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
         let scopes =

@@ -19,9 +19,9 @@ use ryeos_app::event_store_service::EventStoreService;
 use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::kind_profiles::KindProfileRegistry;
-use ryeos_app::state_store::{NodeIdentitySigner, StateStore};
+use ryeos_app::state_store::NodeIdentitySigner;
+use ryeos_app::test_support::TestStateStore;
 use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
-use ryeos_app::write_barrier::WriteBarrier;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
 use tempfile::TempDir;
@@ -49,7 +49,9 @@ fn workspace_root() -> PathBuf {
 /// REAL signed `core` + `standard` bundle kind schemas (so `directive_run`,
 /// `graph_run`, and `worker_execution` and their continuation flags are present), backed by a temp
 /// state store. The temp dir is returned so it outlives the service.
-fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
+/// The Store owner sits between the directory and the lifecycle service so
+/// destructuring drops the service before the Store closes.
+fn lifecycle_with_real_kinds() -> (TempDir, TestStateStore, Arc<ThreadLifecycleService>) {
     let tmp = TempDir::new().unwrap();
 
     let trust_dir =
@@ -74,17 +76,8 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
         identity.fingerprint().to_string(),
         *identity.verifying_key(),
     );
-    let state_store = Arc::new(
-        StateStore::new_with_head_trust(
-            tmp.path().to_path_buf(),
-            tmp.path().join(".ai").join("state"),
-            tmp.path().join("runtime.sqlite3"),
-            signer,
-            WriteBarrier::new(),
-            Arc::new(head_trust),
-        )
-        .unwrap(),
-    );
+    let store_owner = TestStateStore::open(tmp.path(), signer, Arc::new(head_trust)).unwrap();
+    let state_store = std::sync::Arc::clone(store_owner.store());
     let events = Arc::new(EventStoreService::new(state_store.clone()));
     let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
     let engine = Arc::new(ryeos_engine::engine::Engine::new(
@@ -106,7 +99,7 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
         )
         .unwrap(),
     );
-    (tmp, threads)
+    (tmp, store_owner, threads)
 }
 
 fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
@@ -138,7 +131,7 @@ fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
 
 #[test]
 fn get_thread_view_reflects_real_kind_continuation_authority() {
-    let (_tmp, threads) = lifecycle_with_real_kinds();
+    let (_tmp, _store_owner, threads) = lifecycle_with_real_kinds();
 
     // directive_run ships `supports_continuation: true`.
     threads
@@ -210,7 +203,7 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
 
 #[test]
 fn thread_list_reflects_real_kind_continuation_authority() {
-    let (_tmp, threads) = lifecycle_with_real_kinds();
+    let (_tmp, _store_owner, threads) = lifecycle_with_real_kinds();
     threads
         .create_thread_for_test(&create_params("T-dir", "directive_run"))
         .unwrap();

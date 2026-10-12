@@ -59,7 +59,7 @@ fn signed_command_and_service_use_the_same_dual_mode_node_endpoint() {
 
 #[tokio::test]
 async fn node_path_inspection_refuses_unauthenticated_remote_and_wrong_local_callers() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let local = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let contexts = [
@@ -108,7 +108,7 @@ async fn node_path_inspection_refuses_unauthenticated_remote_and_wrong_local_cal
 
 #[tokio::test]
 async fn configured_local_operator_reaches_strict_request_validation() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let local = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let context = HandlerContext::new_with_authority(
         local.principal_id(),

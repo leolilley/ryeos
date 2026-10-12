@@ -1562,10 +1562,10 @@ mod tests {
 
     #[test]
     fn indexed_provider_record_repairs_missing_accounting_publication_proof() {
-        let (tmp, mut state) = super::super::tests::setup_app_state();
-        let ledger = Arc::new(
-            AccountingDb::open_default(&tmp.path().join("accounting-proof-repair")).unwrap(),
-        );
+        let (tmp, _state_owner, mut state) = super::super::tests::setup_app_state();
+        let ledger_owner =
+            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("accounting-proof-repair")).unwrap();
+        let ledger = ledger_owner.shared();
         state.accounting = Some(Arc::clone(&ledger));
 
         let thread_id = "T-publication-repair";
@@ -1727,6 +1727,10 @@ mod tests {
         assert_eq!(proof.record_hash, record_hash);
         verify_provider_call_publication_proof(&state, &proof).unwrap();
         authority_store.ensure_guard(&guard).unwrap();
+        // The ledger closes into the census after every alias is gone.
+        drop(state);
+        drop(ledger);
+        ledger_owner.close().unwrap();
     }
 
     #[test]

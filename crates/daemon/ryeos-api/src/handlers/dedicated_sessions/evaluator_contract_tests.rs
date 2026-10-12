@@ -12,15 +12,18 @@ use ryeos_engine::{contracts::*, effective_program::*, resolution::TrustClass};
 use ryeos_state::objects::*;
 use serde_json::{Value, json};
 
+/// Fields drop in declaration order: the application, then the owner that
+/// closes its Store, then the directory.
 struct Fixture {
-    _root: tempfile::TempDir,
     state: ryeos_app::state::AppState,
+    _store_owner: ryeos_app::test_support::TestStateStore,
+    _root: tempfile::TempDir,
 }
 
 impl Fixture {
     fn new() -> Result<Self> {
         let root = tempfile::tempdir()?;
-        let mut state = ryeos_app::state::test_support::build(root.path())?;
+        let (store_owner, mut state) = ryeos_app::state::test_support::build(root.path())?;
         let bundle = root.path().join("evaluator-bundle");
         let key = lillux::crypto::SigningKey::from_bytes(&[71; 32]);
         let write = |path: &str, body: &str| -> Result<()> {
@@ -142,7 +145,11 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
             .with_effective_validators(validators)
             .with_registered_bundle_roots(registered),
         );
-        Ok(Self { _root: root, state })
+        Ok(Self {
+            state,
+            _store_owner: store_owner,
+            _root: root,
+        })
     }
 
     fn capsule(&self, kind: &str) -> Result<(AdmittedLaunchCapsule, ThreadSnapshot)> {
@@ -226,9 +233,10 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
         let finalized = finalize_effective_program(candidate, proof)?;
         let lifecycle = ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
         let authority = self.state.state_store.pinned_state_authority()?;
-        let guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
-        let (request, runtime_ref, artifact, closure, driver) = if kind == "graph" {
+        // The shared CAS guard is a fork-sensitive descriptor: each branch takes
+        // it only after any launch preparation that may fork has finished.
+        let (guard, request, runtime_ref, artifact, closure, driver) = if kind == "graph" {
             use ryeos_app::thread_lifecycle::managed_runtime_identity as managed;
             let selected = managed::resolve_current_managed_runtime_selection(engine, None, kind)?;
             let executable = managed::resolve_current_managed_executor_identity(engine, &selected)?;
@@ -278,6 +286,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 executor_blob_hash: executable.content_hash,
             };
             (
+                authority.acquire_shared_guard()?,
                 request,
                 selected.runtime.canonical_ref.to_string(),
                 artifact,
@@ -305,6 +314,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 finalized.resolution(),
             )?;
             let protocol = resolve_direct_terminator_protocol(engine, &request)?;
+            let guard = authority.acquire_shared_guard()?;
             let closure = prepared.admit_execution_closure(
                 &cas,
                 &self.state.isolation,
@@ -315,6 +325,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
             )?;
             let artifact = prepared.admitted_artifact_identity(&request, protocol)?;
             (
+                guard,
                 request,
                 prepared.runtime_ref()?.to_owned(),
                 artifact,

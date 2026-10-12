@@ -179,7 +179,9 @@ fn retained_inputs_capsule(
             "args":[{"kind":"admitted_source_entry"}], "cwd":live,
             "env":{"FARM_DATA":live.join("data.txt"),"RETAINED_ONLY":"retained-value"},
             "stdin":null, "timeout_secs":30
-        }, "executor_chain":[records.binding().owner.canonical_ref,capsule.executor_ref]}],
+        }, "executor_chain":[records.binding().owner.canonical_ref,capsule.executor_ref]},
+            // The plan builder always ends the subprocess with Complete.
+            {"node_type":"complete", "id":"complete"}],
         "entrypoint":"spawn", "capabilities":{"requires_model":false,
             "requires_subprocess":true,"requires_network":false,"custom":[]},
         "materialization_requirements":[], "network_authority_ceiling":"isolated",
@@ -229,7 +231,7 @@ fn direct_inputs_assemble_exact_retained_base_product_source_and_keep_source_lea
     use ryeos_external_execution_contract::{
         GuestMountAccess, GuestMountContentAuthority, GuestMountRole,
     };
-    let (root, state, records, source_bytes) =
+    let (root, _store_owner, state, records, source_bytes) =
         crate::execution::source_closure::tests::external_delivery::state_and_source();
     let live = root.path().join("mutable-project");
     let (capsule, product_hash, protocol) = retained_inputs_capsule(&state, &records, &live);
@@ -364,7 +366,7 @@ fn direct_inputs_assemble_exact_retained_base_product_source_and_keep_source_lea
 fn direct_input_assembly_refuses_storage_only_source_capsule_before_materialization() {
     use crate::execution::source_closure::tests::external_delivery::{capsule, state_and_source};
 
-    let (_root, state, records, _) = state_and_source();
+    let (_root, _store_owner, state, records, _) = state_and_source();
     let (capsule, _) = capsule(&records);
     // This fixture has genuine signed source records, but its sealed invocation
     // still carries the synthetic managed runtime route. The direct input owner
@@ -394,7 +396,7 @@ fn direct_input_assembly_refuses_storage_only_source_capsule_before_materializat
 #[test]
 #[cfg(target_os = "linux")]
 fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
-    let (root, state, records, _) =
+    let (root, _store_owner, state, records, _) =
         crate::execution::source_closure::tests::external_delivery::state_and_source();
     let (capsule, _, protocol) = retained_inputs_capsule(&state, &records, root.path());
     for coordinate in ["ref", "digest", "signer", "descriptor"] {
@@ -427,7 +429,7 @@ fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
 #[cfg(target_os = "linux")]
 fn evaluator_input_custody_rejects_missing_and_b_snapshot_substitution() {
     use ryeos_app::thread_lifecycle::{CandidateEvaluationAuthority, CandidateOperationPurpose};
-    let (root, state, records, _) =
+    let (root, _store_owner, state, records, _) =
         crate::execution::source_closure::tests::external_delivery::state_and_source();
     let path = root.path().join("candidate-materialization");
     let (capsule, _, _) = retained_inputs_capsule(&state, &records, &path);
@@ -544,7 +546,7 @@ fn selected_member_capsule(mut capsule: AdmittedLaunchCapsule) -> AdmittedLaunch
 fn selected_c_member_uses_sealed_cas_descriptor_and_refuses_missing_custody() {
     use ryeos_app::thread_lifecycle::prepare_external_direct_project_file;
     use ryeos_external_execution_contract::{GuestMountContentAuthority, GuestMountRole};
-    let (root, state, records, _) =
+    let (root, _store_owner, state, records, _) =
         crate::execution::source_closure::tests::external_delivery::state_and_source();
     let path = root.path().join("candidate-input-materialization");
     let (ordinary, _, protocol) = retained_inputs_capsule(&state, &records, &path);
@@ -625,6 +627,9 @@ fn selected_c_member_uses_sealed_cas_descriptor_and_refuses_missing_custody() {
     let package_parent = lillux::PinnedDirectory::open(package_parent.path())
         .unwrap()
         .unwrap();
+    // A package parent must be owner-private; a fresh temporary directory
+    // carries the process umask's mode.
+    package_parent.tighten_owner_private_directory().unwrap();
     let bootstrap_bytes = b"candidate-file-package-bootstrap";
     let supervisor_bytes = b"candidate-file-package-supervisor";
     let launcher_bytes = b"candidate-file-package-launcher";

@@ -842,12 +842,20 @@ mod tests {
 
     /// Build a minimal AppState for verify_request tests. Mirrors the
     /// build_test_state helper in routes/invokers/none_invocation.rs.
-    fn build_test_state() -> (TempDir, ryeos_app::state::AppState) {
+    /// The Store owner sits between the directory and the application so
+    /// destructuring drops the application before the Store closes.
+    fn build_test_state() -> (
+        TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         use std::sync::Arc;
 
         let tmpdir = TempDir::new().unwrap();
-        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(
+            tmpdir.path(),
+        )
+        .join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -868,17 +876,8 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(
-            ryeos_app::state_store::StateStore::new_with_head_trust(
-                tmpdir.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                Arc::new(head_trust),
-            )
-            .unwrap(),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), Arc::new(head_trust)).unwrap();
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -921,8 +920,7 @@ mod tests {
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         );
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
-        let controller_lifetime =
-            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -987,7 +985,7 @@ mod tests {
             scoped_producer_processes: Arc::new(Default::default()),
             qualification_workspace_custody: Arc::new(Default::default()),
         };
-        (tmpdir, state)
+        (tmpdir, store_owner, state)
     }
 
     /// Register `client_key` as an authorized principal via the
@@ -1161,7 +1159,7 @@ mod tests {
     /// passes (positive control).
     #[test]
     fn replay_guard_rejects_stale_timestamp() {
-        let (_tmp, state) = build_test_state();
+        let (_tmp, _store_owner, state) = build_test_state();
         let client_key = SigningKey::from_bytes(&[21u8; 32]);
         let fp = register_client_key(&state, &client_key);
         let audience = state.identity.principal_id();
@@ -1208,7 +1206,7 @@ mod tests {
     /// VALUE breaks the signature.
     #[test]
     fn signature_binds_query_param_order() {
-        let (_tmp, state) = build_test_state();
+        let (_tmp, _store_owner, state) = build_test_state();
         let client_key = SigningKey::from_bytes(&[22u8; 32]);
         let fp = register_client_key(&state, &client_key);
         let audience = state.identity.principal_id();
@@ -1256,7 +1254,7 @@ mod tests {
 
     #[test]
     fn remote_operator_requires_and_verifies_source_node_cosignature() {
-        let (_tmp, state) = build_test_state();
+        let (_tmp, _store_owner, state) = build_test_state();
         let operator_key = SigningKey::from_bytes(&[23u8; 32]);
         let forwarding_key = SigningKey::from_bytes(&[24u8; 32]);
         let site_id = "site:source";
@@ -1311,7 +1309,7 @@ mod tests {
 
     #[test]
     fn remote_operator_rejects_forwarding_proof_from_wrong_site() {
-        let (_tmp, state) = build_test_state();
+        let (_tmp, _store_owner, state) = build_test_state();
         let operator_key = SigningKey::from_bytes(&[25u8; 32]);
         let forwarding_key = SigningKey::from_bytes(&[26u8; 32]);
         let operator_fp =
@@ -1348,7 +1346,7 @@ mod tests {
 
     #[test]
     fn configured_operator_key_is_never_accepted_as_remote_node() {
-        let (_tmp, state) = build_test_state();
+        let (_tmp, _store_owner, state) = build_test_state();
         let operator_key = SigningKey::from_bytes(&[27u8; 32]);
         let pem = operator_key.to_pkcs8_pem(Default::default()).unwrap();
         std::fs::write(&state.config.operator_signing_key_path, pem.as_bytes()).unwrap();

@@ -2781,7 +2781,8 @@ mod tests {
         }
     }
 
-    fn test_state_store(root: &std::path::Path) -> ryeos_app::state_store::StateStore {
+    /// The owner dereferences to the Store and closes it when dropped.
+    fn test_state_store(root: &std::path::Path) -> ryeos_app::test_support::TestStateStore {
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
         let signer = std::sync::Arc::new(
@@ -2789,15 +2790,8 @@ mod tests {
         );
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.to_path_buf(),
-            root.join(".ai/state"),
-            root.join("runtime.sqlite3"),
-            signer,
-            ryeos_app::write_barrier::WriteBarrier::new(),
-            std::sync::Arc::new(trust),
-        )
-        .unwrap()
+        ryeos_app::test_support::TestStateStore::open(root, signer, std::sync::Arc::new(trust))
+            .unwrap()
     }
 
     #[test]
@@ -2948,8 +2942,6 @@ mod tests {
     #[test]
     fn exhausted_interrupted_job_folds_authoritative_receipt_without_acquisition() {
         let root = tempfile::tempdir().unwrap();
-        let runtime_state = root.path().join(".ai/state");
-        let runtime_db = root.path().join("runtime.sqlite3");
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
                 .unwrap();
@@ -2959,15 +2951,7 @@ mod tests {
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.path().to_path_buf(),
-            runtime_state,
-            runtime_db,
-            signer,
-            write_barrier.clone(),
-            std::sync::Arc::new(trust),
-        )
-        .unwrap();
+        let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(root.path(), signer, write_barrier.clone(), std::sync::Arc::new(trust)).unwrap();
 
         let state_authority = state_store.pinned_state_authority().unwrap();
         let guard = state_authority.acquire_shared_guard().unwrap();

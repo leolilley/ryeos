@@ -1197,6 +1197,36 @@ impl DaemonHarness {
         self.post_json("/execute", body).await
     }
 
+    /// Threads visible to this harness's signed principal, through
+    /// `service:threads/list`. A running daemon's projection is never opened
+    /// from the test process; threads requested by another principal are not
+    /// listed.
+    pub async fn list_threads(&self, limit: usize) -> anyhow::Result<Vec<ListedThread>> {
+        let (status, body) = self
+            .post_execute("service:threads/list", ".", serde_json::json!({ "limit": limit }))
+            .await?;
+        anyhow::ensure!(status.is_success(), "threads/list failed: {status} {body}");
+        let threads = body
+            .pointer("/result/threads")
+            .cloned()
+            .context("threads/list returned no thread array")?;
+        Ok(serde_json::from_value(threads)?)
+    }
+
+    /// One thread through `service:threads/get`: `None` when the daemon does
+    /// not know it, otherwise the `{thread, result, artifacts, facets}` view.
+    pub async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let (status, body) = self
+            .post_execute(
+                "service:threads/get",
+                ".",
+                serde_json::json!({ "thread_id": thread_id }),
+            )
+            .await?;
+        anyhow::ensure!(status.is_success(), "threads/get failed: {status} {body}");
+        Ok(body.get("result").filter(|value| !value.is_null()).cloned())
+    }
+
     /// POST JSON to an authenticated daemon route and return
     /// (status, json body). When the harness has fast-fixture keys, the
     /// request is signed for the exact route path.
@@ -1691,23 +1721,39 @@ pub async fn run_service_standalone(
     fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
     fast_fixture::register_standard_composition(&state_path, &fixture)?;
     fast_fixture::seal_initialized_state(&state_path)?;
-    drop(ryeos_app::runtime_db::RuntimeDb::open(
+    // Establish the current-schema Runtime store through the native gate.
+    drop(ryeos_app::test_support::TestRuntime::open(
         &state_path.join(".ai/state/runtime.sqlite3"),
-    )?);
-    let runtime_state_dir = state_path.join(".ai/state");
-    let scheduler_runtime = std::sync::Arc::new(
-        lillux::PinnedDirectory::open(&runtime_state_dir)?
-            .context("scheduler fixture runtime directory is absent")?,
-    );
-    let scheduler_db =
-        ryeos_scheduler::db::SchedulerDb::open_bound(std::sync::Arc::clone(&scheduler_runtime))
-            .map_err(anyhow::Error::new)?;
-    scheduler_db.require_runtime(&scheduler_runtime)?;
-    ryeos_scheduler::projection::rebuild_fires_from_dir(
-        &runtime_state_dir.join("schedules"),
-        &scheduler_db,
-    )?;
-    scheduler_db.close().map_err(anyhow::Error::new)?;
+    ));
+    // The scheduler store exists only in builds composed with scheduling.
+    #[cfg(feature = "scheduling")]
+    {
+        // Opened natively on this thread's shared test host; the store
+        // settles into the host's census before the host is released.
+        let runtime_state_dir = state_path.join(".ai/state");
+        let scheduler_runtime = lillux::PinnedDirectory::open(&runtime_state_dir)?
+            .context("scheduler fixture runtime directory is absent")?;
+        let scheduler_host = ryeos_scheduler::test_native::TestSchedulerHost::acquire();
+        let scheduler_db = match scheduler_host.open_at(&runtime_state_dir) {
+            Ok(db) => db,
+            Err(failure) => {
+                let error = anyhow::anyhow!("open fixture scheduler store: {failure}");
+                scheduler_host.settle_refusal(failure);
+                return Err(error);
+            }
+        };
+        let seeded = scheduler_db
+            .require_runtime(&scheduler_runtime)
+            .and_then(|()| {
+                ryeos_scheduler::projection::rebuild_fires_from_dir(
+                    &runtime_state_dir.join("schedules"),
+                    &scheduler_db,
+                )
+            });
+        scheduler_host.settle(scheduler_db);
+        drop(scheduler_host);
+        seeded?;
+    }
 
     let mut cmd = ryeosd_command();
     cmd.arg("--app-root")
@@ -1803,4 +1849,39 @@ pub fn build_signed_headers_for_bytes(
         ("x-ryeos-nonce".into(), nonce),
         ("x-ryeos-signature".into(), sig_b64),
     ]
+}
+
+/// One row of `service:threads/list`, as the requesting principal sees it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ListedThread {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub kind: String,
+    pub status: String,
+    pub item_ref: String,
+    pub upstream_thread_id: Option<String>,
+    pub successor_thread_id: Option<String>,
+    pub requested_by: Option<String>,
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+    pub admitted_launch_capsule_hash: Option<String>,
+}
+
+/// Open a stopped daemon's node Store through the native test gate, trusting
+/// only that node's own signing key. The daemon must already have exited.
+pub fn open_stopped_node_store(
+    state_path: &Path,
+) -> anyhow::Result<ryeos_app::test_support::TestStateStore> {
+    let identity_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/private_key.pem");
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&identity_path)
+        .with_context(|| format!("load node identity {}", identity_path.display()))?;
+    let signer = std::sync::Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+        &identity,
+    ));
+    let mut trust = ryeos_state::refs::TrustStore::new();
+    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+    ryeos_app::test_support::TestStateStore::open(state_path, signer, std::sync::Arc::new(trust))
 }

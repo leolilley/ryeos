@@ -1936,7 +1936,7 @@ mod tests {
     use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
-    use ryeos_app::state_store::{NewThreadRecord, StateStore};
+    use ryeos_app::state_store::NewThreadRecord;
     use ryeos_app::thread_lifecycle::{
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
@@ -2052,6 +2052,31 @@ mod tests {
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
 
     fn test_provenance(state: &AppState, path: &str) -> TestProvenance {
+        test_provenance_with_engine(state.engine.clone(), path)
+    }
+
+    /// A live-project provenance whose request engine carries the signed
+    /// kind schemas of the live Core and Standard bundles, so callback
+    /// capability enforcement derives each item's required capability from
+    /// its kind's signed admission policy.
+    fn test_provenance_with_live_kinds(path: &str) -> TestProvenance {
+        test_provenance_with_engine(
+            Arc::new(ryeos_engine::engine::Engine::new(
+                ryeos_engine::test_support::load_live_kind_registry(),
+                ryeos_engine::parsers::ParserDispatcher::new(
+                    ryeos_engine::parsers::ParserRegistry::empty(),
+                    Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+                ),
+                Vec::new(),
+            )),
+            path,
+        )
+    }
+
+    fn test_provenance_with_engine(
+        engine: Arc<ryeos_engine::engine::Engine>,
+        path: &str,
+    ) -> TestProvenance {
         let project_path = std::path::PathBuf::from(path);
         let authored_project_identity = format!("test:{path}");
         let authority_id = lillux::sha256_hex(
@@ -2078,7 +2103,7 @@ mod tests {
         };
         ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_path,
-            state.engine.clone(),
+            engine,
             authority,
         )
         .expect("synthetic UDS test live authority must be valid")
@@ -2177,11 +2202,14 @@ mod tests {
         )
     }
 
-    /// Build a minimal AppState for UDS dispatch tests.
-    pub(super) fn setup_app_state() -> (TempDir, AppState) {
+    /// Build a minimal AppState for UDS dispatch tests. The Store owner sits
+    /// between the directory and the application so destructuring drops the
+    /// application before the Store closes; it stays on the building thread.
+    pub(super) fn setup_app_state() -> (TempDir, ryeos_app::test_support::TestStateStore, AppState) {
         let tmpdir = TempDir::new().unwrap();
-        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+        let runtime_db_path =
+            ryeos_app::test_support::TestStateStore::runtime_state_dir(tmpdir.path())
+                .join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -2207,17 +2235,8 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = WriteBarrier::new();
-        let state_store = Arc::new(
-            StateStore::new_with_head_trust(
-                tmpdir.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier,
-                Arc::new(head_trust),
-            )
-            .unwrap(),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust)).unwrap();
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -2277,8 +2296,7 @@ mod tests {
         );
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
-        let controller_lifetime =
-            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -2355,12 +2373,12 @@ mod tests {
             qualification_workspace_custody: Arc::new(Default::default()),
         };
 
-        (tmpdir, state)
+        (tmpdir, store_owner, state)
     }
 
     #[test]
     fn lifecycle_identity_uses_composed_daemon_build() {
-        let (_tmp, mut state) = setup_app_state();
+        let (_tmp, _state_owner, mut state) = setup_app_state();
         state.daemon_build = ryeos_app::build_info::get_for_version("9.8.7");
 
         let response = ready_lifecycle_response(&state);
@@ -2369,9 +2387,13 @@ mod tests {
         assert_eq!(state.status().unwrap().version, "9.8.7");
     }
 
-    #[tokio::test]
-    async fn public_identity_advertises_composed_daemon_build() {
-        let (_tmp, mut state) = setup_app_state();
+    #[test]
+    fn public_identity_advertises_composed_daemon_build() {
+        on_daemon_worker_stack(public_identity_advertises_composed_daemon_build_body);
+    }
+
+    async fn public_identity_advertises_composed_daemon_build_body() {
+        let (_tmp, _state_owner, mut state) = setup_app_state();
         state.daemon_build = ryeos_app::build_info::get_for_version("9.8.7");
 
         let response = ryeos_api::handlers::identity_public_key::handle(
@@ -2489,7 +2511,7 @@ mod tests {
 
     #[test]
     fn poll_input_persists_and_delivers_each_staged_input_exactly_once() {
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let thread_id = "T-poll-once";
         create_running_test_thread(&state, thread_id);
         assert!(matches!(
@@ -2521,7 +2543,7 @@ mod tests {
 
     #[test]
     fn poll_input_preserves_fifo_in_response_and_durable_braid() {
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let thread_id = "T-poll-fifo";
         create_running_test_thread(&state, thread_id);
         for (content, intent, pending) in [
@@ -2560,7 +2582,7 @@ mod tests {
 
     #[test]
     fn poll_input_discards_staged_input_when_thread_finalized_before_poll() {
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let thread_id = "T-poll-terminal";
         create_running_test_thread(&state, thread_id);
         assert!(matches!(
@@ -2605,7 +2627,7 @@ mod tests {
 
     #[test]
     fn project_snapshot_callback_requires_a_running_thread() {
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let thread_id = "T-snapshot-running-fence";
         create_running_test_thread(&state, thread_id);
         let params = json!({"thread_id": thread_id});
@@ -2637,11 +2659,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn missing_process_interrupt_degrades_to_steer_and_poll_folds_once() {
+    #[test]
+    fn missing_process_interrupt_degrades_to_steer_and_poll_folds_once() {
+        on_daemon_worker_stack(
+            missing_process_interrupt_degrades_to_steer_and_poll_folds_once_body,
+        );
+    }
+
+    async fn missing_process_interrupt_degrades_to_steer_and_poll_folds_once_body() {
         use ryeos_app::handler_context::HandlerContext;
 
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let state = Arc::new(state);
         let thread_id = "T-directive-missing-process";
         create_running_directive_thread(&state, thread_id);
@@ -2692,6 +2720,37 @@ mod tests {
         );
     }
 
+    /// Runtime worker stack of a live daemon. Launch and recovery futures are
+    /// built for that floor; unoptimized builds exceed the 2 MiB default of
+    /// a test thread while driving them.
+    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+
+    /// Drive one test body to completion on a current-thread runtime owned by
+    /// a dedicated thread with the daemon's worker stack. The body is built
+    /// on that thread, so thread-bound test owners open and close there. Its
+    /// future lives on the heap, as a spawned daemon task does, rather than
+    /// in the worker's stack frame.
+    fn on_daemon_worker_stack<F, Fut>(body: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let worker = std::thread::Builder::new()
+            .name("daemon-worker-stack-test".to_owned())
+            .stack_size(DAEMON_WORKER_STACK_BYTES)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build test runtime")
+                    .block_on(Box::pin(body()))
+            })
+            .expect("spawn daemon worker stack test thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
         RpcRequest {
             request_id: 1,
@@ -2727,17 +2786,25 @@ mod tests {
 
     // ── system methods ──────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn system_health_returns_ok() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn system_health_returns_ok() {
+        on_daemon_worker_stack(system_health_returns_ok_body);
+    }
+
+    async fn system_health_returns_ok_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let resp = dispatch(rpc("system.health", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "ok");
     }
 
-    #[tokio::test]
-    async fn lifecycle_status_returns_readiness() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn lifecycle_status_returns_readiness() {
+        on_daemon_worker_stack(lifecycle_status_returns_readiness_body);
+    }
+
+    async fn lifecycle_status_returns_readiness_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let resp = dispatch(rpc("lifecycle.status", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "running");
@@ -2747,8 +2814,12 @@ mod tests {
         assert!(rpc_ok(&resp)["ready_at"].is_string());
     }
 
-    #[tokio::test]
-    async fn dynamic_bootstrap_serves_status_and_classified_not_ready() {
+    #[test]
+    fn dynamic_bootstrap_serves_status_and_classified_not_ready() {
+        on_daemon_worker_stack(dynamic_bootstrap_serves_status_and_classified_not_ready_body);
+    }
+
+    async fn dynamic_bootstrap_serves_status_and_classified_not_ready_body() {
         let tmp = TempDir::new().unwrap();
         let state = DynamicServerState::bootstrap(bootstrap_lifecycle(&tmp)).unwrap();
 
@@ -2773,7 +2844,7 @@ mod tests {
         // lands, token-gated recovery callbacks enter the runtime dispatcher
         // while ordinary external admission is still closed. A missing token
         // therefore fails at callback authentication, not at startup gating.
-        let (_app_tmp, app) = setup_app_state();
+        let (_app_tmp, app_owner, app) = setup_app_state();
         let app = Arc::new(app);
         let (mut barrier, _) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
         barrier.arm_from_app_generation(&app).unwrap();
@@ -2785,11 +2856,19 @@ mod tests {
         let callback_error = rpc_err(&callback);
         assert_eq!(callback_error.code, "request_failed");
         assert!(callback_error.message.contains("missing callback_token"));
+        // The published application and the barrier's registered generation
+        // both hold the Store. Like a daemon exit, the publication goes, the
+        // barrier closes and releases its generation, and only then does the
+        // sole owner close the Store into its census.
+        drop(state);
+        assert_eq!(barrier.close(), ryeos_executor::SelectedRootClose::Closed);
+        barrier.release_closed_store_generation().unwrap();
+        app_owner.close().unwrap();
     }
 
     #[test]
     fn captured_application_publication_refuses_installation_after_shutdown_close() {
-        let (_tmp, app) = setup_app_state();
+        let (_tmp, _app_owner, app) = setup_app_state();
         let app = Arc::new(app);
         let (mut barrier, _) = ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
         barrier.arm_from_app_generation(&app).unwrap();
@@ -2802,8 +2881,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dynamic_state_refuses_ready_before_application_publication() {
+    #[test]
+    fn dynamic_state_refuses_ready_before_application_publication() {
+        on_daemon_worker_stack(dynamic_state_refuses_ready_before_application_publication_body);
+    }
+
+    async fn dynamic_state_refuses_ready_before_application_publication_body() {
         let tmp = TempDir::new().unwrap();
         let starting = bootstrap_lifecycle(&tmp);
         let state = DynamicServerState::bootstrap(starting.clone()).unwrap();
@@ -2816,9 +2899,13 @@ mod tests {
         assert!(error.to_string().contains("before application state"));
     }
 
-    #[tokio::test]
-    async fn unknown_method_returns_error() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn unknown_method_returns_error() {
+        on_daemon_worker_stack(unknown_method_returns_error_body);
+    }
+
+    async fn unknown_method_returns_error_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let resp = dispatch(rpc("nonexistent.method", json!({})), &state).await;
         let err = rpc_err(&resp);
         assert_eq!(err.code, "unknown_method");
@@ -2826,9 +2913,13 @@ mod tests {
 
     // ── removed methods return unknown_method ──────────────────────
 
-    #[tokio::test]
-    async fn removed_methods_return_unknown() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn removed_methods_return_unknown() {
+        on_daemon_worker_stack(removed_methods_return_unknown_body);
+    }
+
+    async fn removed_methods_return_unknown_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         for method in [
             // V5.2 removed catalog methods
             "node.status",
@@ -2864,9 +2955,13 @@ mod tests {
     /// Assert that only health and local lifecycle control are ungated on the
     /// bare UDS surface. Every other method must go through token-gated
     /// `runtime.*` or be unknown.
-    #[tokio::test]
-    async fn only_health_and_lifecycle_control_are_ungated() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn only_health_and_lifecycle_control_are_ungated() {
+        on_daemon_worker_stack(only_health_and_lifecycle_control_are_ungated_body);
+    }
+
+    async fn only_health_and_lifecycle_control_are_ungated_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
 
         // system.health and lifecycle.status must work
         let resp = dispatch(rpc("system.health", json!({})), &state).await;
@@ -2927,9 +3022,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn runtime_finalize_thread_works() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_finalize_thread_works() {
+        on_daemon_worker_stack(runtime_finalize_thread_works_body);
+    }
+
+    async fn runtime_finalize_thread_works_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let params = make_create_params("T-1", "T-1");
 
         // threads.create is internal — call service directly
@@ -2989,7 +3088,7 @@ mod tests {
 
     #[test]
     fn terminal_project_generation_is_part_of_authoritative_finalize() {
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-project", "T-project"))
@@ -3394,7 +3493,9 @@ mod tests {
             })
             .with_admitted_artifact_identity(artifact_identity)
             .with_admitted_execution_closure(execution_closure)
+            .with_execution_realization_hash("e".repeat(64))
             .with_sealed_root_request(sealed.clone());
+        let launch_metadata = with_retained_execution_realization(&state, launch_metadata);
         state
             .threads
             .create_managed_root_for_test(&parent, &launch_metadata)
@@ -3411,6 +3512,97 @@ mod tests {
             .create_follow_resume_successor(&successor, "P", "P")
             .unwrap();
         state.threads.mark_running("S").unwrap();
+    }
+
+    /// The complete durable result of a successfully completed followed graph
+    /// child. Followed children in these fixtures run the sealed fixture's
+    /// graph item, so their terminal result is a GraphResult whose authored
+    /// return is empty.
+    fn completed_graph_child_result() -> serde_json::Value {
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        json!({
+            "success": true,
+            "graph_id": "test/storage-fixture",
+            "definition_ref": sealed.item_ref(),
+            "effective_definition_digest": "d".repeat(64),
+            "graph_run_id": "g",
+            "status": "completed",
+            "steps": 1,
+            "state": {"private_child_state": "never crosses to the parent"},
+        })
+    }
+
+    /// [`completed_graph_child_result`] with an authored graph return.
+    fn completed_graph_child_result_returning(authored: serde_json::Value) -> serde_json::Value {
+        let mut result = completed_graph_child_result();
+        result["result"] = authored;
+        result
+    }
+
+    /// Retain, in this node's CAS, an execution realization that admits
+    /// exactly `metadata`'s managed launch authority on this node's attested
+    /// execution substrate, and bind `metadata` to it. Thread birth verifies
+    /// the realization against the launch capsule and the node trust store.
+    /// `metadata` carries a placeholder realization hash only so its
+    /// provisional capsule can be built; the authority digest excludes it.
+    fn with_retained_execution_realization(
+        state: &AppState,
+        metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    ) -> ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+        use ryeos_state::objects::{
+            ADMITTED_EXECUTION_REALIZATION_KIND, AdmittedExecutionRealization,
+            AdmittedLaunchArtifactIdentity, EXECUTION_REALIZATION_SCHEMA_VERSION,
+        };
+        let provisional = metadata.admitted_launch_capsule().unwrap().unwrap();
+        let authority = provisional.launch_authority();
+        let AdmittedLaunchArtifactIdentity::ManagedRuntime {
+            runtime_ref,
+            runtime_content_hash,
+            runtime_signer_fingerprint: _,
+            protocol_ref: _,
+            protocol_content_hash: _,
+            protocol_signer_fingerprint: _,
+            executor_ref: _,
+            executor_content_hash: _,
+            executor_bundle_manifest_hash: _,
+            executor_bundle_signer_fingerprint: _,
+        } = &provisional.artifact_identity
+        else {
+            panic!("managed fixture launch has a managed artifact identity");
+        };
+        let substrate = ryeos_app::execution_identity_probe::boot_node_execution_identity(
+            &state.state_store,
+            &state.identity,
+            &ryeos_app::build_info::get(),
+        )
+        .unwrap();
+        let realization = AdmittedExecutionRealization {
+            schema: EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ADMITTED_EXECUTION_REALIZATION_KIND.into(),
+            substrate_identity_hash: substrate.identity_hash.clone(),
+            substrate_attestation_hash: substrate.attestation_hash.clone(),
+            launch_authority_digest: authority.digest().unwrap(),
+            effective_definition_digest: provisional.exact_program["effective_definition_digest"]
+                .as_str()
+                .unwrap()
+                .into(),
+            artifact_identity_digest: authority.artifact_identity_digest().unwrap(),
+            execution_closure_digest: authority.execution_closure_digest().unwrap(),
+            contract_ref: runtime_ref.clone(),
+            contract_digest: runtime_content_hash.clone(),
+            components: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+        };
+        let hash = state
+            .state_store
+            .pinned_state_authority()
+            .unwrap()
+            .cas_store()
+            .unwrap()
+            .store_object(&realization.to_value().unwrap())
+            .unwrap();
+        metadata.with_execution_realization_hash(hash)
     }
 
     /// Arm a `waiting` follow waiter (key `wk`) whose child chain is `child`.
@@ -3556,6 +3748,7 @@ mod tests {
                     executor_blob_hash: "c".repeat(64),
                 },
             )
+            .with_execution_realization_hash("e".repeat(64))
             .with_sealed_root_request(sealed);
         metadata.follow_parent_context = Some(PersistedParentExecutionContext {
             parent_thread_id: "P".to_string(),
@@ -3591,9 +3784,13 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
+        on_daemon_worker_stack(reconcile_follow_collects_ready_and_resuming_not_waiting_body);
+    }
+
+    async fn reconcile_follow_collects_ready_and_resuming_not_waiting_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         for child in ["T-CW", "T-CR", "T-CX"] {
             state
                 .threads
@@ -3618,7 +3815,7 @@ mod tests {
                     "success": true,
                     "child_thread_id": "T-CR",
                     "status": "completed",
-                    "result": null,
+                    "result": completed_graph_child_result(),
                     "outputs": null,
                     "warnings": [],
                     "cost": null,
@@ -3638,7 +3835,7 @@ mod tests {
                     "success": true,
                     "child_thread_id": "T-CX",
                     "status": "completed",
-                    "result": null,
+                    "result": completed_graph_child_result(),
                     "outputs": null,
                     "warnings": [],
                     "cost": null,
@@ -3674,13 +3871,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_relaunches_pre_launch_child() {
+    #[test]
+    fn reconcile_follow_relaunches_pre_launch_child() {
+        on_daemon_worker_stack(reconcile_follow_relaunches_pre_launch_child_body);
+    }
+
+    async fn reconcile_follow_relaunches_pre_launch_child_body() {
         // Crash in the pre-launch window: the waiter is durably `waiting` but the
         // detached child launch never ran, so the child row is still `created`.
         // reconcile_follow must collect a relaunch (reconcile() proper skips it
         // rather than finalize-failing it).
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_pending_follow_child_params("Cpre"))
@@ -3710,11 +3911,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_does_not_relaunch_child_with_attached_pgid() {
+    #[test]
+    fn reconcile_follow_does_not_relaunch_child_with_attached_pgid() {
+        on_daemon_worker_stack(reconcile_follow_does_not_relaunch_child_with_attached_pgid_body);
+    }
+
+    async fn reconcile_follow_does_not_relaunch_child_with_attached_pgid_body() {
         // A pgid attaches BEFORE the row flips created→running (launch in flight).
         // Such a child must NOT be relaunched — that would spawn a duplicate.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("Catt", "Catt"))
@@ -3757,11 +3962,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_does_not_relaunch_running_child() {
+    #[test]
+    fn reconcile_follow_does_not_relaunch_running_child() {
+        on_daemon_worker_stack(reconcile_follow_does_not_relaunch_running_child_body);
+    }
+
+    async fn reconcile_follow_does_not_relaunch_running_child_body() {
         // A running child is recovered by reconcile()'s native-resume path, not a
         // fresh follow relaunch.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("Crun", "Crun"))
@@ -3779,14 +3988,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn finalize_failed_and_kick_readies_follow_waiter() {
+    #[test]
+    fn finalize_failed_and_kick_readies_follow_waiter() {
+        on_daemon_worker_stack(finalize_failed_and_kick_readies_follow_waiter_body);
+    }
+
+    async fn finalize_failed_and_kick_readies_follow_waiter_body() {
         // Regression: BOTH launch error paths (fresh follow-child launch AND
         // native-resume relaunch) finalize a failed follow child through
         // finalize_failed_and_kick_follow. Its finalize half must flip a waiting
         // follow waiter to `ready` so the kick has something to drive — otherwise a
         // relaunch failure leaves the parent suspended until the next restart.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-Cnr", "T-Cnr"))
@@ -3832,14 +4045,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn continuation_successor_budget_failure_readies_follow_waiter() {
+    #[test]
+    fn continuation_successor_budget_failure_readies_follow_waiter() {
+        on_daemon_worker_stack(continuation_successor_budget_failure_readies_follow_waiter_body);
+    }
+
+    async fn continuation_successor_budget_failure_readies_follow_waiter_body() {
         // launch_successor_inner's budget-exhausted path must ready a followed
         // parent's waiter (via finalize_failed_and_kick_follow) — else a follow child
         // whose continuation successor can't relaunch strands the parent. Modeled
         // with a successor row awaited by a follow waiter; the finalize+kick code path
         // is identical whether or not it sits deeper in a chain.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-Ssucc", "T-Ssucc"))
@@ -3875,13 +4092,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_recovers_terminal_unrecorded_child() {
+    #[test]
+    fn reconcile_follow_recovers_terminal_unrecorded_child() {
+        on_daemon_worker_stack(reconcile_follow_recovers_terminal_unrecorded_child_body);
+    }
+
+    async fn reconcile_follow_recovers_terminal_unrecorded_child_body() {
         // Crash window: the child chain reached a terminal that was persisted, but
         // the waiter was never flipped (record_follow_child_terminal never ran).
         // reconcile() skips terminal threads, so reconcile_follow must recover it →
         // ready → resume, or the parent hangs forever.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-Cterm", "T-Cterm"))
@@ -3961,14 +4182,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cancelling_follow_child_resumes_parent_on_error() {
+    #[test]
+    fn cancelling_follow_child_resumes_parent_on_error() {
+        on_daemon_worker_stack(cancelling_follow_child_resumes_parent_on_error_body);
+    }
+
+    async fn cancelling_follow_child_resumes_parent_on_error_body() {
         // Cancellation contract for a suspended follow: cancelling the CHILD flips the
         // parent's waiter to ready with a VISIBLE failure envelope, so the parent
         // resumes into on_error (not a silent success). The parent itself is
         // `continued` and not cancellable; cancelling the resume successor instead
         // abandons the resume (handled in launch_follow_resume_successor).
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-Ccancel", "T-Ccancel"))
@@ -4005,15 +4230,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn auxiliary_thread_terminal_in_followed_chain_does_not_ready_the_waiter() {
+    #[test]
+    fn auxiliary_thread_terminal_in_followed_chain_does_not_ready_the_waiter() {
+        on_daemon_worker_stack(
+            auxiliary_thread_terminal_in_followed_chain_does_not_ready_the_waiter_body,
+        );
+    }
+
+    async fn auxiliary_thread_terminal_in_followed_chain_does_not_ready_the_waiter_body() {
         // A followed child's launch pipeline runs AUXILIARY threads in the
         // child's own chain (e.g. a launch-time knowledge composition). The
         // first of those completes in milliseconds; recording it would resume
         // the parent with the auxiliary's envelope while the child is still
         // launching. Only the child itself — or a continuation successor of
         // it — settles the follow.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-Cfollow", "T-Cfollow"))
@@ -4081,12 +4312,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_converges_reserved_with_child_and_successor() {
+    #[test]
+    fn reconcile_follow_converges_reserved_with_child_and_successor() {
+        on_daemon_worker_stack(reconcile_follow_converges_reserved_with_child_and_successor_body);
+    }
+
+    async fn reconcile_follow_converges_reserved_with_child_and_successor_body() {
         // Partial spawn: child + successor recorded (so the parent is continued), but
         // crashed before mark_follow_waiting → stuck `reserved`. Converge to waiting;
         // the still-created child then yields a relaunch.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_pending_follow_child_params("Cres"))
@@ -4144,11 +4379,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconcile_follow_leaves_reserved_when_parent_not_continued() {
+    #[test]
+    fn reconcile_follow_leaves_reserved_when_parent_not_continued() {
+        on_daemon_worker_stack(reconcile_follow_leaves_reserved_when_parent_not_continued_body);
+    }
+
+    async fn reconcile_follow_leaves_reserved_when_parent_not_continued_body() {
         // Reserved, child recorded, but no successor and parent not continued → the
         // parent's own native resume re-drives spawn_follow_child; leave it.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         ensure_test_root(&state, "Pnc");
         state
             .state_store
@@ -4184,12 +4423,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter() {
+    #[test]
+    fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter() {
+        on_daemon_worker_stack(
+            follow_resume_claim_held_by_advanced_marked_successor_clears_waiter_body,
+        );
+    }
+
+    async fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter_body() {
         // Blocker-1 recovery: a `resuming` waiter whose VALID follow-resume successor
         // was claimed + run by another launcher (e.g. a native-resume intent) must be
         // retired, not left `resuming` until a future restart.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         // "S" is a real marked follow-resume successor of "P", advanced to running.
         seed_marked_follow_successor(&state);
         arm_waiting_follow(&state, "wk-held", "T-C");
@@ -4203,7 +4448,7 @@ mod tests {
                     "success": true,
                     "child_thread_id": "T-C",
                     "status": "completed",
-                    "result": null,
+                    "result": completed_graph_child_result(),
                     "outputs": null,
                     "warnings": [],
                     "cost": null,
@@ -4238,12 +4483,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn follow_resume_claim_held_by_unmarked_successor_keeps_waiter() {
+    #[test]
+    fn follow_resume_claim_held_by_unmarked_successor_keeps_waiter() {
+        on_daemon_worker_stack(follow_resume_claim_held_by_unmarked_successor_keeps_waiter_body);
+    }
+
+    async fn follow_resume_claim_held_by_unmarked_successor_keeps_waiter_body() {
         // Blocker-1 fail-closed: a `resuming` waiter pointing at a claimed row that is
         // NOT this parent's graph-follow-resume successor must NOT be cleared — the
         // AlreadyClaimed cleanup validates upstream + marker before retiring.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         // A raw running "S" with no follow-resume marker (upstream None ≠ parent "P").
         state
             .threads
@@ -4261,7 +4510,7 @@ mod tests {
                     "success": true,
                     "child_thread_id": "T-C",
                     "status": "completed",
-                    "result": null,
+                    "result": completed_graph_child_result(),
                     "outputs": null,
                     "warnings": [],
                     "cost": null,
@@ -4298,12 +4547,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn follow_resume_refuses_successor_without_marker() {
+    #[test]
+    fn follow_resume_refuses_successor_without_marker() {
+        on_daemon_worker_stack(follow_resume_refuses_successor_without_marker_body);
+    }
+
+    async fn follow_resume_refuses_successor_without_marker_body() {
         // Blocker-2 guard: a waiter pointing at a row that is NOT the parent's
         // graph-follow-resume successor must not be spliced or launched, and the
         // waiter must be left intact (suspected corruption is for inspection).
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         // "S" links upstream to the parent "P" but carries NO follow-resume edge.
         ensure_test_root(&state, "P");
         let mut params = make_create_params("S", "P");
@@ -4340,7 +4593,7 @@ mod tests {
                     "success": true,
                     "child_thread_id": "T-C",
                     "status": "completed",
-                    "result": null,
+                    "result": completed_graph_child_result(),
                     "outputs": null,
                     "warnings": [],
                     "cost": null,
@@ -4373,9 +4626,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn finalize_thread_without_envelope_degrades_follow_waiter() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn finalize_thread_without_envelope_degrades_follow_waiter() {
+        on_daemon_worker_stack(finalize_thread_without_envelope_degrades_follow_waiter_body);
+    }
+
+    async fn finalize_thread_without_envelope_degrades_follow_waiter_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-C", "T-C"))
@@ -4407,9 +4664,15 @@ mod tests {
         assert_eq!(env["result"]["child_status"], json!("completed"));
     }
 
-    #[tokio::test]
-    async fn finalize_with_managed_envelope_preserves_outputs_on_follow_waiter() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn finalize_with_managed_envelope_preserves_outputs_on_follow_waiter() {
+        on_daemon_worker_stack(
+            finalize_with_managed_envelope_preserves_outputs_on_follow_waiter_body,
+        );
+    }
+
+    async fn finalize_with_managed_envelope_preserves_outputs_on_follow_waiter_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-C", "T-C"))
@@ -4417,14 +4680,18 @@ mod tests {
         state.threads.mark_running("T-C").unwrap();
         arm_waiting_follow(&state, "wk-mgd", "T-C");
 
-        // The executor-fallback path carries the canonical envelope: outputs +
-        // warnings survive to the follow waiter as a success.
+        // The executor-fallback path carries the canonical envelope. The
+        // followed child is a graph, so the waiter keeps only the graph's
+        // authored return and the cost; child state and warnings stay on the
+        // child thread.
+        let graph_result =
+            completed_graph_child_result_returning(json!({ "recommendations": ["x"] }));
         let envelope = json!({
             "success": true,
             "child_thread_id": "T-C",
             "status": "completed",
-            "result": "directive_return",
-            "outputs": { "recommendations": ["x"] },
+            "result": graph_result.clone(),
+            "outputs": null,
             "warnings": ["w1"],
             "cost": { "input_tokens": 5, "output_tokens": 1, "total_usd": "0.001" },
         });
@@ -4435,7 +4702,7 @@ mod tests {
                     thread_id: "T-C".to_string(),
                     status: "completed".to_string(),
                     outcome_code: Some("success".to_string()),
-                    result: Some(json!("directive_return")),
+                    result: Some(graph_result),
                     error: None,
                     metadata: None,
                     artifacts: vec![],
@@ -4466,13 +4733,18 @@ mod tests {
             .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["child_thread_id"], json!("T-C"));
-        assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
-        assert_eq!(env["warnings"], json!(["w1"]));
+        assert_eq!(env["result"], json!({ "recommendations": ["x"] }));
+        assert_eq!(env["cost"]["input_tokens"], json!(5));
+        assert!(env.get("outputs").is_none() && env.get("warnings").is_none());
     }
 
-    #[tokio::test]
-    async fn finalize_continued_does_not_flip_follow_waiter() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn finalize_continued_does_not_flip_follow_waiter() {
+        on_daemon_worker_stack(finalize_continued_does_not_flip_follow_waiter_body);
+    }
+
+    async fn finalize_continued_does_not_flip_follow_waiter_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-C", "T-C"))
@@ -4493,9 +4765,15 @@ mod tests {
         assert!(w.children[0].terminal_envelope.is_none());
     }
 
-    #[tokio::test]
-    async fn runtime_finalize_carries_outputs_and_warnings_to_follow_waiter() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_finalize_carries_projected_return_and_cost_to_follow_waiter() {
+        on_daemon_worker_stack(
+            runtime_finalize_carries_projected_return_and_cost_to_follow_waiter_body,
+        );
+    }
+
+    async fn runtime_finalize_carries_projected_return_and_cost_to_follow_waiter_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-C", "T-C"))
@@ -4504,8 +4782,9 @@ mod tests {
         arm_waiting_follow(&state, "wk-out", "T-C");
 
         // The child SELF-finalizes via the runtime callback wire (not the executor
-        // fallback), carrying a `directive_return`-style result plus its structured
-        // outputs + warnings.
+        // fallback). The followed child is a graph: its complete GraphResult and
+        // warnings stay on the child thread, and the waiter keeps only the
+        // authored return and the cost.
         let cbt = generate_test_callback(
             &state,
             "T-C",
@@ -4523,9 +4802,11 @@ mod tests {
                     "thread_id": "T-C",
                     "status": "completed",
                     "outcome_code": "success",
-                    "result": "directive_return",
+                    "result": completed_graph_child_result_returning(
+                        json!({ "recommendations": ["a", "b"] }),
+                    ),
                     "error": null,
-                    "outputs": { "recommendations": ["a", "b"] },
+                    "outputs": null,
                     "warnings": ["w1"],
                     "cost": { "input_tokens": 10, "output_tokens": 2, "total_usd": "0.01" },
                 }),
@@ -4535,8 +4816,8 @@ mod tests {
         .await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
 
-        // The stored follow envelope preserves outputs + warnings + raw cost — not
-        // the fabricated empty forms.
+        // The stored follow envelope preserves the authored return and the raw
+        // cost, not fabricated empty forms.
         let w = state
             .state_store
             .get_follow_waiter_by_key("wk-out")
@@ -4549,15 +4830,18 @@ mod tests {
             .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["child_thread_id"], json!("T-C"));
-        assert_eq!(env["result"], json!("directive_return"));
-        assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));
-        assert_eq!(env["warnings"], json!(["w1"]));
+        assert_eq!(env["result"], json!({ "recommendations": ["a", "b"] }));
+        assert!(env.get("outputs").is_none() && env.get("warnings").is_none());
         assert_eq!(env["cost"]["input_tokens"], json!(10));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_missing_thread_auth_token() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_missing_thread_auth_token() {
+        on_daemon_worker_stack(spawn_follow_child_rejects_missing_thread_auth_token_body);
+    }
+
+    async fn spawn_follow_child_rejects_missing_thread_auth_token_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
         let mut params = follow_params(&cbt, "unused", "tool:echo");
         params.as_object_mut().unwrap().remove("thread_auth_token");
@@ -4566,9 +4850,13 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_invalid_thread_auth_token() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_invalid_thread_auth_token() {
+        on_daemon_worker_stack(spawn_follow_child_rejects_invalid_thread_auth_token_body);
+    }
+
+    async fn spawn_follow_child_rejects_invalid_thread_auth_token_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
         let resp = dispatch(
             rpc(
@@ -4582,9 +4870,13 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_invalid_callback_token() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_invalid_callback_token() {
+        on_daemon_worker_stack(spawn_follow_child_rejects_invalid_callback_token_body);
+    }
+
+    async fn spawn_follow_child_rejects_invalid_callback_token_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let (_cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
         let resp = dispatch(
             rpc(
@@ -4598,9 +4890,13 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_chain_root_mismatch() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_chain_root_mismatch() {
+        on_daemon_worker_stack(spawn_follow_child_rejects_chain_root_mismatch_body);
+    }
+
+    async fn spawn_follow_child_rejects_chain_root_mismatch_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
         // Point the cap at a chain root other than the parent row's.
         assert!(state.callback_tokens.set_chain_root(&cbt, "OTHER-CHAIN"));
@@ -4616,9 +4912,15 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_missing_execute_cap_without_mutation() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_missing_execute_cap_without_mutation() {
+        on_daemon_worker_stack(
+            spawn_follow_child_rejects_missing_execute_cap_without_mutation_body,
+        );
+    }
+
+    async fn spawn_follow_child_rejects_missing_execute_cap_without_mutation_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         // Parent holds an unrelated cap, not execute over `tool:echo`.
         let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.other".into()]);
         let resp = dispatch(
@@ -4633,9 +4935,13 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_non_native_resume_parent() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_non_native_resume_parent() {
+        on_daemon_worker_stack(spawn_follow_child_rejects_non_native_resume_parent_body);
+    }
+
+    async fn spawn_follow_child_rejects_non_native_resume_parent_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         // Parent has full authority but is NOT native-resume (no launch metadata
         // seeded) → refused: follow needs a checkpoint-resumable parent.
         state
@@ -4676,9 +4982,13 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn spawn_follow_child_rejects_unmanaged_child_kind() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn spawn_follow_child_rejects_unmanaged_child_kind() {
+        on_daemon_worker_stack(spawn_follow_child_rejects_unmanaged_child_kind_body);
+    }
+
+    async fn spawn_follow_child_rejects_unmanaged_child_kind_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         // Parent HAS execute authority (wildcard), so admission passes the cap
         // gate; the empty test engine has no runtime for `tool`, so the managed-
         // runtime check rejects — and still no waiter is created.
@@ -4695,9 +5005,13 @@ mod tests {
         assert!(no_waiter(&state));
     }
 
-    #[tokio::test]
-    async fn finalize_publishes_terminal_event_to_live_subscriber() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn finalize_publishes_terminal_event_to_live_subscriber() {
+        on_daemon_worker_stack(finalize_publishes_terminal_event_to_live_subscriber_body);
+    }
+
+    async fn finalize_publishes_terminal_event_to_live_subscriber_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-pub", "T-pub"))
@@ -4727,16 +5041,24 @@ mod tests {
             .expect("receiver did not lag/close");
         assert_eq!(event.event_type, "thread_completed");
         assert_eq!(event.thread_id, "T-pub");
-        // Live subscribers must see the terminal result in the payload.
-        assert_eq!(event.payload.get("result"), Some(&json!("4")));
+        // A terminal event is a bounded lifecycle fact: live subscribers see
+        // that a result exists and its digest, while the result itself stays
+        // in the thread snapshot.
+        assert!(event.payload.get("result").is_none());
+        assert_eq!(event.payload.get("result_present"), Some(&json!(true)));
+        assert!(event.payload["result_digest"].is_string());
         assert_eq!(event.payload.get("outcome_code"), Some(&json!("success")));
     }
 
-    #[tokio::test]
-    async fn cancel_publishes_thread_cancelled_to_live_subscriber() {
+    #[test]
+    fn cancel_publishes_thread_cancelled_to_live_subscriber() {
+        on_daemon_worker_stack(cancel_publishes_thread_cancelled_to_live_subscriber_body);
+    }
+
+    async fn cancel_publishes_thread_cancelled_to_live_subscriber_body() {
         // Cancellation finalizes through the same publish path; a subscriber
         // attached after prior events still receives `thread_cancelled`.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-cancel", "T-cancel"))
@@ -4767,12 +5089,16 @@ mod tests {
         assert_eq!(event.thread_id, "T-cancel");
     }
 
-    #[tokio::test]
-    async fn append_thread_events_publishes_to_live_subscriber() {
+    #[test]
+    fn append_thread_events_publishes_to_live_subscriber() {
+        on_daemon_worker_stack(append_thread_events_publishes_to_live_subscriber_body);
+    }
+
+    async fn append_thread_events_publishes_to_live_subscriber_body() {
         // Seat braids append directly through the lifecycle service; a
         // `thread_events` subscriber attached before the append must receive
         // the seat event live, not only via replay.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-seat", "T-seat"))
@@ -4803,9 +5129,13 @@ mod tests {
         assert_eq!(event.thread_id, "T-seat");
     }
 
-    #[tokio::test]
-    async fn runtime_finalize_missing_token_returns_error() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_finalize_missing_token_returns_error() {
+        on_daemon_worker_stack(runtime_finalize_missing_token_returns_error_body);
+    }
+
+    async fn runtime_finalize_missing_token_returns_error_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-Bad", "T-Bad"))
@@ -4828,9 +5158,13 @@ mod tests {
 
     // ── events (via runtime.* token-gated) ──────────────────────────
 
-    #[tokio::test]
-    async fn runtime_finalize_revokes_callback_but_events_remain_replayable() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_finalize_revokes_callback_but_events_remain_replayable() {
+        on_daemon_worker_stack(runtime_finalize_revokes_callback_but_events_remain_replayable_body);
+    }
+
+    async fn runtime_finalize_revokes_callback_but_events_remain_replayable_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-events-1");
         let cbt = generate_test_callback(
             &state,
@@ -4908,13 +5242,17 @@ mod tests {
         assert!(types.contains(&"thread_completed"));
     }
 
-    #[tokio::test]
-    async fn append_event_bridges_to_event_stream_subscribers() {
+    #[test]
+    fn append_event_bridges_to_event_stream_subscribers() {
+        on_daemon_worker_stack(append_event_bridges_to_event_stream_subscribers_body);
+    }
+
+    async fn append_event_bridges_to_event_stream_subscribers_body() {
         // Persistence-first contract: a successful runtime.append_event
         // RPC must (a) record the event in the event store AND (b)
         // publish the same PersistedEventRecord into the per-thread
         // hub so SSE subscribers tail in real time.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-stream-1");
         let cbt = generate_test_callback(
             &state,
@@ -4960,9 +5298,13 @@ mod tests {
         assert_eq!(live.payload, json!({"turn": 1}));
     }
 
-    #[tokio::test]
-    async fn ephemeral_append_event_bridges_without_replay_persistence() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn ephemeral_append_event_bridges_without_replay_persistence() {
+        on_daemon_worker_stack(ephemeral_append_event_bridges_without_replay_persistence_body);
+    }
+
+    async fn ephemeral_append_event_bridges_without_replay_persistence_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-ephemeral-1");
         let cbt = generate_test_callback(
             &state,
@@ -5023,9 +5365,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn lifecycle_event_cannot_be_ephemeral() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn lifecycle_event_cannot_be_ephemeral() {
+        on_daemon_worker_stack(lifecycle_event_cannot_be_ephemeral_body);
+    }
+
+    async fn lifecycle_event_cannot_be_ephemeral_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-ephemeral-bad");
         let cbt = generate_test_callback(
             &state,
@@ -5061,12 +5407,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn append_events_batch_bridges_in_persisted_order() {
+    #[test]
+    fn append_events_batch_bridges_in_persisted_order() {
+        on_daemon_worker_stack(append_events_batch_bridges_in_persisted_order_body);
+    }
+
+    async fn append_events_batch_bridges_in_persisted_order_body() {
         // Bulk callback: each event lands in the broadcast in
         // persisted (chain_seq) order so SSE consumers reconstruct
         // the runtime's emission sequence verbatim.
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-stream-2");
         let cbt = generate_test_callback(
             &state,
@@ -5108,9 +5458,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn runtime_events_replay_missing_token_returns_error() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_events_replay_missing_token_returns_error() {
+        on_daemon_worker_stack(runtime_events_replay_missing_token_returns_error_body);
+    }
+
+    async fn runtime_events_replay_missing_token_returns_error_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let resp = dispatch(
             rpc(
                 "runtime.replay_events",
@@ -5124,9 +5478,13 @@ mod tests {
         assert!(resp.error.is_some());
     }
 
-    #[tokio::test]
-    async fn runtime_bundle_events_use_callback_bundle_identity_and_caps() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_bundle_events_use_callback_bundle_identity_and_caps() {
+        on_daemon_worker_stack(runtime_bundle_events_use_callback_bundle_identity_and_caps_body);
+    }
+
+    async fn runtime_bundle_events_use_callback_bundle_identity_and_caps_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join("models")).unwrap();
         std::fs::write(
@@ -5228,9 +5586,13 @@ mod tests {
         assert_eq!(rpc_ok(&scan)["events"][0]["event_hash"], event_hash);
     }
 
-    #[tokio::test]
-    async fn runtime_bundle_events_reject_bundle_id_input_and_missing_cap() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_bundle_events_reject_bundle_id_input_and_missing_cap() {
+        on_daemon_worker_stack(runtime_bundle_events_reject_bundle_id_input_and_missing_cap_body);
+    }
+
+    async fn runtime_bundle_events_reject_bundle_id_input_and_missing_cap_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-bundle-deny");
         create_running_test_thread(&state, "T-bundle-deny-2");
         let cbt = generate_test_callback_with_context(
@@ -5308,9 +5670,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
+        on_daemon_worker_stack(
+            runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps_body,
+        );
+    }
+
+    async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-vault-1");
         let cbt = generate_test_callback_with_context(
             &state,
@@ -5402,9 +5770,15 @@ mod tests {
         assert_eq!(rpc_ok(&delete)["deleted"], true);
     }
 
-    #[tokio::test]
-    async fn runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref() {
+        on_daemon_worker_stack(
+            runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref_body,
+        );
+    }
+
+    async fn runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-vault-deny");
         create_running_test_thread(&state, "T-vault-deny-2");
         create_running_test_thread(&state, "T-vault-deny-3");
@@ -5514,9 +5888,13 @@ mod tests {
 
     // ── commands (via runtime.* token-gated) ────────────────────────
 
-    #[tokio::test]
-    async fn runtime_commands_submit_and_claim() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_commands_submit_and_claim() {
+        on_daemon_worker_stack(runtime_commands_submit_and_claim_body);
+    }
+
+    async fn runtime_commands_submit_and_claim_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-cmd-1", "T-cmd-1"))
@@ -5598,9 +5976,13 @@ mod tests {
     //      no principal field; the only path to a principal is through
     //      `state.thread_auth.validate(...)`)
 
-    #[tokio::test]
-    async fn dispatch_action_without_thread_auth_token_is_rejected() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn dispatch_action_without_thread_auth_token_is_rejected() {
+        on_daemon_worker_stack(dispatch_action_without_thread_auth_token_is_rejected_body);
+    }
+
+    async fn dispatch_action_without_thread_auth_token_is_rejected_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-tat-missing", "T-tat-missing"))
@@ -5641,9 +6023,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_action_with_wrong_thread_auth_token_is_rejected() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn dispatch_action_with_wrong_thread_auth_token_is_rejected() {
+        on_daemon_worker_stack(dispatch_action_with_wrong_thread_auth_token_is_rejected_body);
+    }
+
+    async fn dispatch_action_with_wrong_thread_auth_token_is_rejected_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-tat-wrong", "T-tat-wrong"))
@@ -5682,9 +6068,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn exact_callback_method_surface_is_enforced_before_runtime_routing() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn exact_callback_method_surface_is_enforced_before_runtime_routing() {
+        on_daemon_worker_stack(
+            exact_callback_method_surface_is_enforced_before_runtime_routing_body,
+        );
+    }
+
+    async fn exact_callback_method_surface_is_enforced_before_runtime_routing_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-method-surface");
         let cbt = generate_test_callback(
             &state,
@@ -5727,17 +6119,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn internal_workload_callback_inherits_deadline_without_widening_settlement_authority() {
-        let (tmp, mut state) = setup_app_state();
+    #[test]
+    fn internal_workload_callback_inherits_deadline_without_widening_settlement_authority() {
+        on_daemon_worker_stack(
+            internal_workload_callback_inherits_deadline_without_widening_settlement_authority_body,
+        );
+    }
+
+    async fn internal_workload_callback_inherits_deadline_without_widening_settlement_authority_body() {
+        let (tmp, _state_owner, mut state) = setup_app_state();
         let thread_id = "T-workload-budget";
         create_running_test_thread(&state, thread_id);
-        let ledger = Arc::new(
-            ryeos_app::accounting_db::AccountingDb::open_default(
-                &tmp.path().join("workload-budget"),
-            )
-            .unwrap(),
-        );
+        let ledger_owner =
+            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("workload-budget")).unwrap();
+        let ledger = ledger_owner.shared();
         let execution_budget_id = "execution-workload-budget";
         ledger
             .create_execution_account_prepared(execution_budget_id, thread_id, None)
@@ -5876,11 +6271,19 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("no live accounting ledger"));
+        // The ledger closes into the census after every alias is gone.
+        drop(state);
+        drop(ledger);
+        ledger_owner.close().unwrap();
     }
 
-    #[tokio::test]
-    async fn dispatch_action_with_correct_token_uses_server_side_principal() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn dispatch_action_with_correct_token_uses_server_side_principal() {
+        on_daemon_worker_stack(dispatch_action_with_correct_token_uses_server_side_principal_body);
+    }
+
+    async fn dispatch_action_with_correct_token_uses_server_side_principal_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-tat-ok");
         let cbt = generate_test_callback(
             &state,
@@ -5957,6 +6360,7 @@ mod tests {
                         "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
+                        "product_selections": [],
                         "thread": "inline",
                     },
                 }),
@@ -5973,9 +6377,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
+        on_daemon_worker_stack(runtime_callback_with_empty_caps_is_denied_at_uds_boundary_body);
+    }
+
+    async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-caps-empty");
         let cbt = generate_test_callback(
             &state,
@@ -5983,7 +6391,7 @@ mod tests {
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             Vec::new(),
-            test_provenance(&state, "/p"),
+            test_provenance_with_live_kinds("/p"),
             "0".repeat(64),
         );
         let tat = state
@@ -6010,6 +6418,7 @@ mod tests {
                         "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
+                        "product_selections": [],
                         "thread": "inline",
                     },
                 }),
@@ -6027,9 +6436,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
+        on_daemon_worker_stack(
+            runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary_body,
+        );
+    }
+
+    async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-caps-wild");
         let cbt = generate_test_callback(
             &state,
@@ -6037,7 +6452,7 @@ mod tests {
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             vec!["ryeos.*".to_string()],
-            test_provenance(&state, "/p"),
+            test_provenance_with_live_kinds("/p"),
             "0".repeat(64),
         );
         let tat = state
@@ -6064,6 +6479,7 @@ mod tests {
                         "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
+                        "product_selections": [],
                         "thread": "inline",
                     },
                 }),
@@ -6084,7 +6500,7 @@ mod tests {
 
     #[test]
     fn runtime_dispatch_future_has_bounded_inline_size() {
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let params = json!({});
         let dispatch = dispatch_runtime_method(
             "runtime.dedicated_session_command_observation",
@@ -6099,9 +6515,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dedicated_session_command_observation_requires_exact_root_and_command_cap() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn dedicated_session_command_observation_requires_exact_root_and_command_cap() {
+        on_daemon_worker_stack(
+            dedicated_session_command_observation_requires_exact_root_and_command_cap_body,
+        );
+    }
+
+    async fn dedicated_session_command_observation_requires_exact_root_and_command_cap_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         for thread_id in ["T-observation", "T-other", "T-no-command-cap"] {
             create_running_test_thread(&state, thread_id);
         }
@@ -6187,9 +6609,13 @@ mod tests {
 
     // ── facets (via runtime.* token-gated) ─────────────────────────
 
-    #[tokio::test]
-    async fn runtime_get_facets_returns_empty_for_new_thread() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn runtime_get_facets_returns_empty_for_new_thread() {
+        on_daemon_worker_stack(runtime_get_facets_returns_empty_for_new_thread_body);
+    }
+
+    async fn runtime_get_facets_returns_empty_for_new_thread_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-facets-1", "T-facets-1"))
@@ -6252,9 +6678,13 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn successor_token_can_read_predecessor_in_chain() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn successor_token_can_read_predecessor_in_chain() {
+        on_daemon_worker_stack(successor_token_can_read_predecessor_in_chain_body);
+    }
+
+    async fn successor_token_can_read_predecessor_in_chain_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let succ = chain_with_successor(&state);
 
         // get_thread on the predecessor — a cross-thread read within the chain.
@@ -6281,9 +6711,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn successor_token_cannot_write_predecessor() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn successor_token_cannot_write_predecessor() {
+        on_daemon_worker_stack(successor_token_cannot_write_predecessor_body);
+    }
+
+    async fn successor_token_cannot_write_predecessor_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let succ = chain_with_successor(&state);
 
         // Writes/lifecycle stay exact-thread: the successor token must not
@@ -6317,9 +6751,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn token_cannot_read_another_chain() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn token_cannot_read_another_chain() {
+        on_daemon_worker_stack(token_cannot_read_another_chain_body);
+    }
+
+    async fn token_cannot_read_another_chain_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         let succ = chain_with_successor(&state);
 
         // A thread in a DIFFERENT chain.
@@ -6344,8 +6782,12 @@ mod tests {
 
     // ── threads/input handler response contract ─────────────────────
 
-    #[tokio::test]
-    async fn threads_input_refuses_follow_up_to_non_continuable_kind() {
+    #[test]
+    fn threads_input_refuses_follow_up_to_non_continuable_kind() {
+        on_daemon_worker_stack(threads_input_refuses_follow_up_to_non_continuable_kind_body);
+    }
+
+    async fn threads_input_refuses_follow_up_to_non_continuable_kind_body() {
         // A follow-up to a settled source whose KIND cannot chain-fold (here
         // `system_task`) is an EXPECTED, structured refusal at the API boundary
         // — delivery=refused, thread_id=null, and daemon-authored
@@ -6354,7 +6796,7 @@ mod tests {
         // as defense-in-depth for a stale/third-party client.
         use ryeos_app::handler_context::HandlerContext;
 
-        let (_tmp, state) = setup_app_state();
+        let (_tmp, _state_owner, state) = setup_app_state();
         let state = std::sync::Arc::new(state);
 
         // Completed `system_task` predecessor owned by `user:test`.
@@ -6470,9 +6912,13 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn thread_get_view_carries_execution_facts() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn thread_get_view_carries_execution_facts() {
+        on_daemon_worker_stack(thread_get_view_carries_execution_facts_body);
+    }
+
+    async fn thread_get_view_carries_execution_facts_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-1", "T-1"))
@@ -6492,9 +6938,13 @@ mod tests {
         assert_eq!(v["execution"]["supports_continuation"], false);
     }
 
-    #[tokio::test]
-    async fn thread_list_carries_execution_and_head_fields() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn thread_list_carries_execution_and_head_fields() {
+        on_daemon_worker_stack(thread_list_carries_execution_and_head_fields_body);
+    }
+
+    async fn thread_list_carries_execution_and_head_fields_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         pred_with_continuation_successor(&state);
 
         let listing = state.threads.list_threads_filtered(100, None).unwrap();
@@ -6520,9 +6970,13 @@ mod tests {
         assert!(succ["successor_thread_id"].is_null());
     }
 
-    #[tokio::test]
-    async fn thread_chain_decorates_every_row() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn thread_chain_decorates_every_row() {
+        on_daemon_worker_stack(thread_chain_decorates_every_row_body);
+    }
+
+    async fn thread_chain_decorates_every_row_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         pred_with_continuation_successor(&state);
 
         let chain = state
@@ -6544,9 +6998,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn thread_children_decorate_every_row() {
-        let (_tmp, state) = setup_app_state();
+    #[test]
+    fn thread_children_decorate_every_row() {
+        on_daemon_worker_stack(thread_children_decorate_every_row_body);
+    }
+
+    async fn thread_children_decorate_every_row_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
         state
             .threads
             .create_thread_for_test(&make_create_params("T-parent", "T-parent"))

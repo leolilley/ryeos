@@ -33,10 +33,8 @@ mod integration_tests {
         }
     }
 
-    fn setup_state_store() -> (TempDir, Arc<StateStore>) {
+    fn setup_state_store() -> (TempDir, ryeos_app::test_support::TestStateStore) {
         let tmpdir = TempDir::new().unwrap();
-        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
         let test_key_path = tmpdir.path().join("test_key.pem");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&test_key_path)
@@ -52,17 +50,10 @@ mod integration_tests {
 
         let write_barrier = WriteBarrier::new();
 
-        let store = StateStore::new_with_head_trust(
-            tmpdir.path().to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            Arc::new(head_trust),
-        )
-        .expect("StateStore creation should succeed");
+        let store = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust))
+            .expect("StateStore creation should succeed");
 
-        (tmpdir, Arc::new(store))
+        (tmpdir, store)
     }
 
     fn make_thread(

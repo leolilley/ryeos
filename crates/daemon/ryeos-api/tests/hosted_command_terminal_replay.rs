@@ -72,7 +72,9 @@ fn store_structured_session_capsule_with_schema(
             protocol_ref: "protocol:fixture/session".to_owned(),
             protocol_content_hash: "c".repeat(64),
             protocol_signer_fingerprint: "f".repeat(64),
-            execution_plan_hash: "d".repeat(64),
+            execution_plan_hash: lillux::sha256_hex(
+                lillux::canonical_json(&json!({})).unwrap().as_bytes(),
+            ),
             executable_identity: DirectExecutableIdentity::CapturedContent {
                 content_hash: executable_blob_hash.clone(),
             },
@@ -828,7 +830,7 @@ fn seed_nonworkload_child(state: &ryeos_app::state::AppState, root: &str, child_
 
 #[test]
 fn command_observation_projects_only_children_of_its_exact_turn() {
-    let (tmp, state) = test_state::build_test_state();
+    let (tmp, state_owner, state) = test_state::build_test_state();
     let root = "T-exact-turn-children";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
@@ -863,12 +865,15 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
     // normal admission path would refuse such a callback while this turn is
     // current, but observation must still exclude it if retained state ever
     // contains it.
-    let projection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    projection
-        .execute(
-            "UPDATE dedicated_session SET remote_thread_id='other-upstream', current_turn_id='other-turn' WHERE placement_thread_id=?1",
-            [root],
-        )
+    state
+        .state_store
+        .with_runtime_sql_for_test(|projection| {
+            projection.execute(
+                "UPDATE dedicated_session SET remote_thread_id='other-upstream', current_turn_id='other-turn' WHERE placement_thread_id=?1",
+                [root],
+            )?;
+            Ok(())
+        })
         .unwrap();
     seed_workload_child(
         &state,
@@ -880,13 +885,16 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
         "T-child-other-session",
         "fp:test-operator",
     );
-    projection
-        .execute(
-            "UPDATE dedicated_session SET remote_thread_id='upstream-thread', current_turn_id=?2 WHERE placement_thread_id=?1",
-            rusqlite::params![root, pending.turn_id],
-        )
+    state
+        .state_store
+        .with_runtime_sql_for_test(|projection| {
+            projection.execute(
+                "UPDATE dedicated_session SET remote_thread_id='upstream-thread', current_turn_id=?2 WHERE placement_thread_id=?1",
+                rusqlite::params![root, pending.turn_id],
+            )?;
+            Ok(())
+        })
         .unwrap();
-    drop(projection);
 
     let running_session = state.state_store.dedicated_session(root).unwrap().unwrap();
     let running_command = state
@@ -1005,7 +1013,9 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
     );
 
     drop(state);
-    let reopened = test_state::reopen_test_state(&tmp);
+    // Close the first Store and release its operator lock before reopening.
+    drop(state_owner);
+    let (_reopened_owner, reopened) = test_state::reopen_test_state(&tmp);
     let reconstructed = ryeos_app::dedicated_session_service::command_observation(
         &reopened,
         root,
@@ -1018,7 +1028,7 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
 
 #[test]
 fn command_observation_refuses_a_child_with_contradictory_owner() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-contradictory-child-owner";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
@@ -1053,7 +1063,7 @@ fn command_observation_refuses_a_child_with_contradictory_owner() {
 
 #[test]
 fn command_observation_refuses_a_child_with_contradictory_root() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-contradictory-child-root";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
@@ -1081,38 +1091,42 @@ fn command_observation_refuses_a_child_with_contradictory_root() {
 }
 
 #[tokio::test]
-async fn terminal_predecessor_command_history_is_preserved_without_replay() {
-    let (_tmp, state) = test_state::build_test_state();
+async fn terminal_predecessor_command_history_refuses_with_schema_cutover() {
     let root = "T-terminal-predecessor";
-    let pending = seed_pending_turn_fixture_with_schema(
-        &state,
-        root,
-        false,
-        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 1),
-    );
-    // Neither a live placement nor an unproved cleanup is historical authority.
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    state
-        .state_store
-        .settle_worker_process(&pending.worker_instance_id, root, 1, "unproved", "fixture")
-        .unwrap();
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    state
-        .state_store
-        .settle_worker_process(&pending.worker_instance_id, root, 1, "reaped", "fixture")
-        .unwrap();
-    // Use the normal terminal transition, then restart fencing is deliberately
-    // not sufficient: this still-attached terminal must not take the opaque path.
-    state
-        .state_store
-        .terminalize_dedicated_session(root, &pending.worker_instance_id, 1, "fixture")
-        .unwrap();
-    finalize_fixture_thread(&state, root);
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    // The process admits one live Store at a time: this first node closes
+    // before the separate placement below opens its own.
+    {
+        let (_tmp, _state_owner, state) = test_state::build_test_state();
+        let pending = seed_pending_turn_fixture_with_schema(
+            &state,
+            root,
+            false,
+            json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 1),
+        );
+        // Neither a live placement nor an unproved cleanup is historical authority.
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+        state
+            .state_store
+            .settle_worker_process(&pending.worker_instance_id, root, 1, "unproved", "fixture")
+            .unwrap();
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+        state
+            .state_store
+            .settle_worker_process(&pending.worker_instance_id, root, 1, "reaped", "fixture")
+            .unwrap();
+        // Use the normal terminal transition, then restart fencing is deliberately
+        // not sufficient: this still-attached terminal must not take the opaque path.
+        state
+            .state_store
+            .terminalize_dedicated_session(root, &pending.worker_instance_id, 1, "fixture")
+            .unwrap();
+        finalize_fixture_thread(&state, root);
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    }
 
     // A separate placement exercises the exact installed failure: its prior
     // worker was fenced and detached before the session/root became terminal.
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let pending = seed_pending_turn_fixture_with_schema(
         &state,
         root,
@@ -1136,9 +1150,17 @@ async fn terminal_predecessor_command_history_is_preserved_without_replay() {
             .unwrap(),
     )
     .unwrap();
+    // A predecessor capsule is not decoded as history: command recovery
+    // refuses, naming the schema cutover reset, and changes nothing.
     for _ in 0..2 {
-        ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
-        ryeos_app::dedicated_session_service::reconcile_observation_outboxes(&state).unwrap();
+        let error =
+            ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(
+                ryeos_app::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            ),
+            "{error:#}"
+        );
         assert_eq!(
             serde_json::to_value(state.state_store.dedicated_session(root).unwrap()).unwrap(),
             session_before
@@ -1172,70 +1194,6 @@ async fn terminal_predecessor_command_history_is_preserved_without_replay() {
             .is_err()
         );
     }
-    // Model an orphaned unproved boot not present in the detached slot. The
-    // existing indexed cleanup owner, not slot absence, must refuse retention.
-    let projection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    projection
-        .execute(
-            "UPDATE worker_process SET cleanup_state='unproved' WHERE worker_instance_id=?1",
-            [&pending.worker_instance_id],
-        )
-        .unwrap();
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    projection
-        .execute(
-            "UPDATE worker_process SET cleanup_state='reaped' WHERE worker_instance_id=?1",
-            [&pending.worker_instance_id],
-        )
-        .unwrap();
-    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
-
-    // A stale/corrupt session row may not select another old capsule to evade
-    // exact immutable command association checks.
-    let original_capsule = state
-        .state_store
-        .dedicated_session(root)
-        .unwrap()
-        .unwrap()
-        .admitted_capsule_hash;
-    let (other_capsule, _, _) = store_structured_session_capsule_with_schema(
-        &state,
-        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 2),
-    );
-    projection
-        .execute(
-            "UPDATE dedicated_session SET admitted_capsule_hash=?1 WHERE placement_thread_id=?2",
-            [&other_capsule, root],
-        )
-        .unwrap();
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    projection
-        .execute(
-            "UPDATE dedicated_session SET admitted_capsule_hash=?1 WHERE placement_thread_id=?2",
-            [&original_capsule, root],
-        )
-        .unwrap();
-    drop(projection);
-
-    // The old row must not stop current unrelated commands from being repaired.
-    let current = seed_pending_turn_fixture(&state, "T-current-alongside-history", false);
-    append_final_turn_batch(
-        &state,
-        "T-current-alongside-history",
-        current.sequence,
-        &current.request_digest,
-        &current.result,
-    );
-    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
-    assert_eq!(
-        state
-            .state_store
-            .dedicated_session_command("T-current-alongside-history", current.sequence)
-            .unwrap()
-            .unwrap()
-            .state,
-        "completed"
-    );
 }
 
 fn finalize_fixture_thread(state: &ryeos_app::state::AppState, root: &str) {
@@ -1284,7 +1242,7 @@ async fn terminal_history_does_not_hide_malformed_or_future_session_capsules() {
         json!(1.5),
         json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION + 1),
     ] {
-        let (_tmp, state) = test_state::build_test_state();
+        let (_tmp, _state_owner, state) = test_state::build_test_state();
         let root = "T-invalid-terminal-capsule";
         let pending = seed_pending_turn_fixture_with_schema(&state, root, false, schema);
         retire_fixture_session(&state, root, &pending);
@@ -1300,7 +1258,7 @@ async fn command_progress_recovery_preserves_the_exact_crash_frontier() {
         ("before-settlement", true, false, true),
         ("completion-before-settlement", true, true, true),
     ] {
-        let (_tmp, state) = test_state::build_test_state();
+        let (_tmp, _state_owner, state) = test_state::build_test_state();
         let root = format!("T-progress-{label}");
         let pending = seed_pending_turn_fixture(&state, &root, true);
         if projected {
@@ -1384,7 +1342,7 @@ async fn command_progress_recovery_preserves_the_exact_crash_frontier() {
 
 #[tokio::test]
 async fn command_progress_recovery_refuses_a_conflicting_final_start() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-progress-conflicting-final";
     let pending = seed_pending_turn_fixture(&state, root, true);
     project_turn_start(&state, root, &pending.turn_id);
@@ -1413,7 +1371,7 @@ async fn command_progress_recovery_refuses_a_conflicting_final_start() {
 
 #[tokio::test]
 async fn completed_command_retains_its_early_progress_start_authority() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-progress-completed-fence";
     let fixture = seed_completed_turn_fixture_with_progress(&state, root, true);
     let observed = ryeos_app::dedicated_session_service::command_observation(
@@ -1442,7 +1400,7 @@ async fn completed_command_retains_its_early_progress_start_authority() {
 
 #[tokio::test]
 async fn completed_termination_requires_the_exact_immutable_turn_fence_and_frontier() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-completed-fence";
     let fixture = seed_completed_turn_fixture(&state, root);
 
@@ -1684,7 +1642,7 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
 
 #[tokio::test]
 async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-terminal-hosted-replay";
     let owner = "fp:test-operator";
     let (capsule_hash, protocol_profile_hash, protocol_schema_hashes) =
