@@ -7610,6 +7610,16 @@ pub struct PreflightRootExecution {
 pub fn preflight_root_execution(
     params: ResolveRootExecutionParams<'_>,
 ) -> Result<PreflightRootExecution> {
+    // Root admission resolves and composes items, and composition runs a
+    // handler process. A thread that retains fork-sensitive descriptor
+    // authority, such as a CAS mutation guard, can never start that process,
+    // so refuse at this entry rather than deep inside a composer. Callers must
+    // resolve first and take their guard afterwards.
+    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+        bail!(
+            "root execution preflight refused: the calling thread retains fork-sensitive descriptor authority (such as a CAS mutation guard) and resolution must start handler processes"
+        );
+    }
     let ResolveRootExecutionParams {
         engine,
         plan_context,

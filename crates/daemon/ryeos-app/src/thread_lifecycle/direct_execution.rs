@@ -3232,6 +3232,11 @@ pub fn prepare_captured_item_plan(
 /// path. The qualification owner must authenticate its retained source,
 /// original purpose/attempt and generation before calling this compiler;
 /// returning a plan is neither native-input nor execution admission.
+///
+/// Plan assembly parses the captured root, and a parser cache miss starts a
+/// handler process, so the caller must not hold a CAS guard. Only the exact
+/// realization-member command capture, a state-only CAS read, runs under a
+/// short guard taken here.
 pub(crate) fn prepare_captured_external_member_plan(
     state: &crate::state::AppState,
     engine: &Engine,
@@ -3241,9 +3246,13 @@ pub(crate) fn prepare_captured_external_member_plan(
     sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
     enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     maximum_command_file_bytes: u64,
 ) -> Result<PreparedItemPlan> {
+    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+        bail!(
+            "captured external member plan preparation refused: the calling thread retains a CAS mutation guard or other fork-sensitive descriptor authority, and plan assembly may start handler processes; resolve before acquiring the guard"
+        );
+    }
     engine.with_checked_bundle_generation(|_| {
         let mut prepared = assemble_captured_item_plan(
             engine,
@@ -3254,13 +3263,17 @@ pub(crate) fn prepare_captured_external_member_plan(
             enclosing_filesystem_ceiling,
         )?;
         prepared.bind_finalized_execution_endpoint(state, engine, program.resolution())?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
         prepared.capture_external_realization_command_guarded(
             authority,
-            guard,
+            &guard,
             engine,
             program.resolution(),
             maximum_command_file_bytes,
         )?;
+        authority.ensure_guard(&guard)?;
+        drop(guard);
         Ok(prepared)
     })
 }
@@ -4344,25 +4357,20 @@ mod tests {
         }
     }
 
+    /// The Store owner dereferences to the Store; it closes the Store when
+    /// dropped and stays on the opening thread.
     pub(super) fn realization_identity_fixture(
         root: &Path,
-    ) -> (crate::state_store::StateStore, Engine) {
-        let state_dir = root.join(".ai/state");
+    ) -> (crate::state_store::test_native::TestStateStore, Engine) {
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let store = crate::state_store::StateStore::new_with_head_trust(
-            root.to_owned(),
-            state_dir.clone(),
-            state_dir.join("runtime.sqlite3"),
-            signer,
-            crate::write_barrier::WriteBarrier::new(),
-            Arc::new(trust),
-        )
-        .unwrap();
+        let store =
+            crate::state_store::test_native::TestStateStore::open(root, signer, Arc::new(trust))
+                .unwrap();
         // Qualify member verification against the exact current tool contract,
         // independently of the publisher-signing state of a dirty source tree.
         // This is not full live-registry or public-dispatch qualification.

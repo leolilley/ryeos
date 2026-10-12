@@ -719,7 +719,6 @@ fn replay_observation(
 pub(crate) fn qualification_scoped_attempt_proof(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    _guard: &ryeos_state::CasMutationGuard,
     owner: &LaunchOwner,
     purpose: &QualificationExecutionPurposeView<'_>,
     candidate: &ExecutionEvidenceCandidateScopedAttemptWire,
@@ -777,16 +776,25 @@ pub(crate) fn qualification_scoped_attempt_proof(
             && record.retirement_evidence_digest.is_some(),
         "projected scoped attempt differs from settled daemon journal"
     );
-    let value = authority
-        .cas_store()?
-        .get_object_bounded(
-            record
-                .observation_object_hash
-                .as_deref()
-                .context("settled scoped attempt has no retained observation")?,
-            MAX_OBSERVATION_RESPONSE_BYTES as u64,
-        )?
-        .context("settled scoped observation CAS object is missing")?;
+    // Producer recipe resolution above starts handler processes, so the
+    // caller holds no CAS guard. The retained observation is read under a
+    // short guard of its own that covers only this exact-hash CAS read.
+    let value = {
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object_bounded(
+                record
+                    .observation_object_hash
+                    .as_deref()
+                    .context("settled scoped attempt has no retained observation")?,
+                MAX_OBSERVATION_RESPONSE_BYTES as u64,
+            )?
+            .context("settled scoped observation CAS object is missing")?;
+        authority.ensure_guard(&guard)?;
+        value
+    };
     let observation: ScopedProducerObservation = serde_json::from_value(value)?;
     observation.validate_against(&record)?;
     match (&current.recipe.loopback_ingress, &observation.relay_handoff) {

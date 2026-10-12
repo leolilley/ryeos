@@ -314,7 +314,10 @@ fn authority_measure_handler(
                     == request.substrate_build_signer_fingerprint,
             "authority measurement coordinates differ from the authenticated calibration run"
         );
-        let guard = authority.acquire_shared_guard()?;
+        // Measurement re-resolves current verifiers, which starts handler
+        // processes, so no CAS guard is held here. Each measurement confines
+        // its own state reads to short guarded segments and re-reads its
+        // qualification as current at its end.
         let limits = state
             .node_policy
             .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
@@ -325,7 +328,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.portable_qualification_owner_principal,
             &request.portable_qualification_attestation_hash,
@@ -335,7 +337,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.native_qualification_owner_principal,
             &request.native_qualification_attestation_hash,
@@ -345,7 +346,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.substrate_qualification_owner_principal,
             &request.substrate_qualification_attestation_hash,
@@ -355,7 +355,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.core_seed_qualification_owner_principal,
             &request.core_seed_qualification_attestation_hash,
@@ -441,6 +440,10 @@ fn authority_measure_handler(
                     == substrate_measured.qualification_signer_fingerprint,
             "portable, native, Core seed, and substrate qualification must use one measured signer"
         );
+        // The remaining reads are state-only. Reacquire the guard for them
+        // now that no further resolution starts handler processes.
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
         let cas = authority.cas_store()?;
         for (
             measured,
@@ -1018,17 +1021,23 @@ fn verified_calibration_product(
     };
     selection.validate()?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let qualification_attestation = ryeos_state::objects::Attestation::from_value(
-        &authority
+    // Only this exact-hash read is guarded. Measurement below re-resolves the
+    // current verifier, which starts handler processes, and confines its own
+    // state reads to short guarded segments.
+    let qualification_attestation = {
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
             .cas_store()?
             .get_object(&selection.qualification_attestation_hash)?
-            .context("selected environment qualification is absent")?,
-    )?;
+            .context("selected environment qualification is absent")?;
+        authority.ensure_guard(&guard)?;
+        ryeos_state::objects::Attestation::from_value(&value)?
+    };
     let untrusted = ProductQualificationEvidence::from_value(&qualification_attestation.evidence)?;
     let owner_principal = untrusted.product_coordinate.owner_principal.clone();
     let qualification_project_context_resolver =
@@ -1037,7 +1046,6 @@ fn verified_calibration_product(
         state,
         context,
         &authority,
-        &guard,
         limits,
         &owner_principal,
         &selection.qualification_attestation_hash,

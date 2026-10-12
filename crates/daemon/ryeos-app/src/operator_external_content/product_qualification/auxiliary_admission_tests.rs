@@ -320,11 +320,9 @@ fn seed_auxiliary_qualification_in_context(
         (projectless_admission(fixture)?, None)
     };
     let authority = fixture.state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         &fixture.state,
         &authority,
-        &guard,
         &fixture.context,
         verifier_ref,
         &json!({}),
@@ -572,6 +570,9 @@ fn seed_auxiliary_qualification_in_context(
         .validate()
         .context("validate auxiliary qualification evidence")?;
     let attestation = evidence.sign_attestation(&signer, "2026-09-29T00:00:01Z".into(), None)?;
+    // Resolution and projection above start handler processes, so the guard
+    // is taken only for this state-only publication.
+    let guard = authority.acquire_shared_guard()?;
     let published = publish_qualification_witness(
         &authority,
         &QualificationCoordinate::from_evidence(&evidence)?,
@@ -587,11 +588,14 @@ fn seed_auxiliary_qualification_in_context(
     Ok((published.witness.attestation_hash, evidence))
 }
 
+/// Fields drop in declaration order: the application, then the owner that
+/// closes its Store, then the directory.
 struct Fixture {
-    directory: tempfile::TempDir,
     state: AppState,
     context: HandlerContext,
     manifest_hash: String,
+    _store_owner: crate::state_store::test_native::TestStateStore,
+    directory: tempfile::TempDir,
 }
 
 fn write_signed(path: &Path, source: &str, key: &SigningKey) -> Result<()> {
@@ -608,7 +612,7 @@ fn fixture() -> Result<Fixture> {
     let policy_schema =
         ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA;
     let directory = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(directory.path())?;
+    let (store_owner, mut state) = crate::state::test_support::build(directory.path())?;
     state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
         vec![
             Arc::new(NodeObjectClosurePolicy {
@@ -918,6 +922,7 @@ product_qualification_policy:
     })?;
     drop(guard);
     Ok(Fixture {
+        _store_owner: store_owner,
         directory,
         state,
         context,
@@ -1004,11 +1009,9 @@ fn signed_probe_dependency_capture_refuses_changed_tool_envelope() -> Result<()>
 fn signed_auxiliary_fixture_reconstructs_its_current_verifier() -> Result<()> {
     let fixture = fixture()?;
     let authority = fixture.state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         &fixture.state,
         &authority,
-        &guard,
         &fixture.context,
         AUX_VERIFIER,
         &json!({}),
@@ -1033,30 +1036,84 @@ fn signed_auxiliary_fixture_reconstructs_its_current_verifier() -> Result<()> {
     Ok(())
 }
 
+/// Resolution composes the verifier, and composition starts a handler
+/// process. Under a held CAS guard it must refuse at its own entry, naming
+/// the guard rather than the process-creation barrier; once the guard is
+/// released the same resolution succeeds, so qualification launches that
+/// resolve before guarding no longer refuse with fork custody.
+#[test]
+fn verifier_resolution_refuses_under_a_held_guard_and_succeeds_without_one() -> Result<()> {
+    let fixture = fixture()?;
+    let authority = fixture.state.state_store.pinned_state_authority()?;
+    let verifier_context = CurrentVerifierContext {
+        content: CurrentVerifierContent::Root(None),
+        logical_project_root: None,
+        binding_subject_authority: None,
+        sealed_request: None,
+        project_context_resolver: None,
+        pinned_admission: None,
+    };
+    let guard = authority.acquire_shared_guard()?;
+    assert!(lillux::current_thread_retains_fork_sensitive_descriptors());
+    let refused = resolve_current_bundle_verifier_identity_against_admitted(
+        &fixture.state,
+        &authority,
+        &fixture.context,
+        AUX_VERIFIER,
+        &json!({}),
+        verifier_context,
+        None,
+    )
+    .err()
+    .context("verifier resolution ran under a held CAS guard")?;
+    let refused = format!("{refused:#}");
+    assert!(
+        refused.contains("retains a CAS mutation guard") && !refused.contains("fork custody"),
+        "{refused}"
+    );
+    drop(guard);
+    assert!(!lillux::current_thread_retains_fork_sensitive_descriptors());
+    let current = resolve_current_bundle_verifier_identity_against_admitted(
+        &fixture.state,
+        &authority,
+        &fixture.context,
+        AUX_VERIFIER,
+        &json!({}),
+        verifier_context,
+        None,
+    )?;
+    assert!(!lillux::current_thread_retains_fork_sensitive_descriptors());
+    assert!(matches!(
+        current.artifact_identity,
+        AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. }
+    ));
+    Ok(())
+}
+
 #[test]
 fn published_auxiliary_fixture_passes_current_qualification_consumption() -> Result<()> {
     let fixture = fixture()?;
     let (hash, evidence) = seed_auxiliary_qualification(&fixture)?;
     let authority = fixture.state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = fixture
         .state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let proof = load_current_qualification(
-        &fixture.state,
-        &authority,
-        &guard,
-        limits,
-        &fixture.context.fingerprint,
-        &hash,
-    )?;
+    let proof = with_state_guard(&authority, |guard| {
+        load_current_qualification(
+            &fixture.state,
+            &authority,
+            guard,
+            limits,
+            &fixture.context.fingerprint,
+            &hash,
+        )
+    })?;
     assert_eq!(proof.evidence, evidence);
     let current = resolve_current_bundle_verifier_identity_for_evidence(
         &fixture.state,
         &authority,
-        &guard,
         limits,
         &fixture.context,
         AUX_VERIFIER,
@@ -1073,7 +1130,6 @@ fn published_auxiliary_fixture_passes_current_qualification_consumption() -> Res
     execution_evidence::verify_current(
         &fixture.state,
         &authority,
-        &guard,
         &fixture.context,
         &evidence,
         &current,
@@ -1429,11 +1485,9 @@ fn seal_complete_launch(
         &pinned.plan.subject_resolution_authority, &mut resolution, &selectors, Some(&pinned.snapshot),
     ).context("select complete inputs for sealing")?;
     let authority = fixture.state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         &fixture.state,
         &authority,
-        &guard,
         &fixture.context,
         &prepared.verifier_ref,
         &prepared.verifier_parameters,

@@ -122,25 +122,9 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-/// v11 additionally seals the optional ingress-authenticated handler context.
-/// Its absence is meaningful: node-internal execution must not manufacture a
-/// verified transport principal during recovery or callback dispatch.
-/// v12 carries flat exact node-history policy provenance instead of the
-/// predecessor tagged config wrapper. v13 binds remotely adopted execution
-/// to the exact target-node operator grant generation. v14 seals the optional
-/// daemon-authored scheduled-fire coordinate. v15 seals the narrow
-/// independently-evaluated-candidate purpose and its exact base/candidate
-/// authority.
-/// v16 combines candidate/scheduler authority with the current exact
-/// filesystem/network and realization-root execution contract.
-/// v17 seals fixed-parent live confinement and explicit namespace symlink
-/// semantics. Old path-mask claims cannot be decoded as this authority.
-/// v19 retains the exact invocation product selector map. Predecessor sealed
-/// requests cannot prove whether a selected witness was omitted during
-/// persistence, so they are classified before nested decoding.
-/// v20 requires the exact local-or-received product witness source proof.
-/// v21 seals the daemon-derived product-qualification launch purpose. Absent
-/// remains meaningful for ordinary execution; it cannot be inferred on replay.
+/// Exact sealed root execution request contract. Absent optional fields are
+/// meaningful and are never inferred on recovery; a stored request of any
+/// other version is refused before nested decoding.
 pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 22;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2409,6 +2393,7 @@ mod authority_tests {
                 "relationship_name": "runtime_to_worker"
             },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2486,6 +2471,7 @@ mod authority_tests {
                 "relationship_name": "runtime_to_worker"
             },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2708,6 +2694,7 @@ mod authority_tests {
                 "relationship_name": "runtime_to_qualified_runtime"
             },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),

@@ -27,7 +27,7 @@ fn compiled_direct_token_requires_exact_reservation_owner_tuple() {
     };
 
     let directory = tempfile::tempdir().unwrap();
-    let db = crate::runtime_db::RuntimeDb::open(&directory.path().join("runtime.sqlite3")).unwrap();
+    let db = crate::runtime_db::test_native::TestRuntime::open(&directory.path().join("runtime.sqlite3"));
     let mut reservation =
         crate::runtime_db::external_execution::tests::direct_owner_reservation(&db);
     let exact_program = Fixture::new().compile().unwrap();
@@ -190,7 +190,7 @@ struct Fixture {
 #[test]
 fn ordinary_direct_preflight_two_node_plan_reaches_endpoint_admission() {
     let root = tempfile::tempdir().unwrap();
-    let state = crate::state::test_support::build(root.path()).unwrap();
+    let (_state_owner, state) = crate::state::test_support::build(root.path()).unwrap();
     let fixture = Fixture::new();
     assert!(state.node_config.external_execution.is_empty());
     let prepared = super::super::PreparedItemPlan {

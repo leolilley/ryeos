@@ -82,6 +82,11 @@ const PRODUCER_RECIPE_FIELD: &str = "product_producer_recipe";
 
 /// Exact current identity reconstructed without publishing or launching a
 /// verifier. Execution mechanics come from its signed schema, not its kind name.
+///
+/// This value carries no CAS mutation guard. It is produced by unguarded
+/// resolution and holds only digests, identities and an Engine handle; any
+/// caller that needs a state fact to hold under a guard must re-read that fact
+/// by exact hash after acquiring its own guard.
 pub(super) struct CurrentBundleVerifierIdentity {
     /// Pre-realization identity of the exact signed Bundle verifier admitted
     /// while resolving the current policy/product relationship.
@@ -94,6 +99,54 @@ pub(super) struct CurrentBundleVerifierIdentity {
     _project_context_lease: Option<Box<dyn QualificationProjectContextLease>>,
     resolution: ResolutionOutput,
     realizations: ExternalContentRealizationSet,
+}
+
+/// Run one state-only segment under a fresh shared CAS mutation guard.
+///
+/// The guard owns a descriptor-backed lock and therefore a fork-sensitive
+/// descriptor lease. While any thread retains such a lease, process creation
+/// everywhere in the daemon waits, and process creation from the retaining
+/// thread is refused outright. Qualification interleaves state reads with
+/// Engine resolution, composition, parsing and evidence projection, all of
+/// which start handler processes. Each guard is therefore confined to a
+/// segment that only reads, verifies or stages state; the closure must not
+/// resolve, compose, parse or project anything.
+///
+/// A shared guard excludes only exclusive CAS owners: mark-and-sweep and
+/// maintenance such as execution-history reset or a binding-epoch change. It
+/// never serialized against ordinary publishers, which could always move
+/// their heads while a shared guard was held. Releasing the guard between
+/// segments therefore admits one new interleaving only: an exclusive owner
+/// running between two segments. Each segment reads by exact hash or
+/// re-authenticates the current head and refuses when the object is absent or
+/// different, and every caller that publishes or admits a result re-reads the
+/// facts that result names in a final guarded segment. Such a step can
+/// therefore make qualification fail, but cannot make it accept state that
+/// differs from what it names.
+pub(in crate::operator_external_content) fn with_state_guard<T>(
+    authority: &ryeos_state::PinnedStateAuthority,
+    segment: impl FnOnce(&ryeos_state::CasMutationGuard) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let value = segment(&guard)?;
+    authority.ensure_guard(&guard)?;
+    Ok(value)
+}
+
+/// Refuse to enter a phase that can start handler processes while this
+/// thread retains fork-sensitive descriptor authority, such as a CAS mutation
+/// guard. Process creation would refuse later anyway; refusing here names the
+/// owning phase instead of a composer or parser deep inside it.
+pub(in crate::operator_external_content) fn require_unguarded_resolution(
+    phase: &str,
+) -> anyhow::Result<()> {
+    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+        bail!(
+            "{phase} refused: the calling thread retains a CAS mutation guard or other fork-sensitive descriptor authority, and this phase starts handler processes; resolve before acquiring the guard"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,12 +324,14 @@ pub fn finalize_pinned_qualification_launch(
         .effective_definition_digest()?
         .as_str()
         .to_owned();
+    // Verifier resolution starts handler processes, so this caller holds no
+    // CAS guard across it. It keeps only the returned D1/D2 digests, which are
+    // compared with root admission here and sealed by the accepted-launch
+    // owner afterwards; no CAS object read here must survive past this call.
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         state,
         &authority,
-        &guard,
         context,
         &prepared.policy_source.policy.verifier_ref,
         &prepared.policy_source.policy.verifier_parameters,
@@ -306,7 +361,6 @@ pub fn finalize_pinned_qualification_launch(
     }
     prepared.verifier_admitted_definition_digest = Some(admitted_definition_digest);
     prepared.verifier_realized_definition_digest = Some(current.effective_definition_digest);
-    authority.ensure_guard(&guard)?;
     Ok(())
 }
 
@@ -426,17 +480,15 @@ fn prove_blocking(
     crate::operator_authority::require_admitted_operator(&state, &context)?;
     request.validate()?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    prove_with_guard(
+    prove_unguarded(
         &state,
         &context,
         &request,
         &authority,
-        &guard,
         limits,
         resolver.as_deref(),
     )
@@ -451,23 +503,30 @@ fn qualify_blocking(
     crate::operator_authority::require_admitted_operator(&state, &context)?;
     request.validate()?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let evidence = prove_with_guard(
+    let evidence = prove_unguarded(
         &state,
         &context,
         &request,
         &authority,
-        &guard,
         limits,
         resolver.as_deref(),
     )?;
     let coordinate = QualificationCoordinate::from_evidence(&evidence)?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let attestation = evidence.sign_attestation(&signer, lillux::time::iso8601_now(), None)?;
+    // Proof construction resolves current verifiers and projects evidence
+    // through handler processes, so it ran without a CAS guard. Publication is
+    // a separate guarded cut: re-authenticate every retained fact the
+    // evidence names against current state under this one guard, then
+    // publish under the same guard.
+    let guard = authority.acquire_shared_guard()?;
+    recheck_qualification_evidence_guarded(
+        &state, &context, &request, &authority, &guard, limits, &evidence,
+    )?;
     // Heavy source, capsule, result, realization and manifest checks are done
     // before admitting a writer. The permit covers only immutable publication.
     let _permit = state
@@ -491,16 +550,31 @@ fn qualify_blocking(
     })
 }
 
-fn prove_with_guard(
+/// Guarded admission half of qualification publication. Under this one
+/// guard it re-reads against current state:
+/// - the fresh product witness and its capture coordinate;
+/// - the root verifier terminal, with no successor, and its capsule;
+/// - every participant child terminal, with no successor, and its capsule;
+/// - the subordinate-attempt journal named by the execution proof, through
+///   [`recheck_execution_proof_journal_guarded`];
+/// - the complete retained verifier and participant realizations with their
+///   consumer and transcript closures.
+///
+/// Facts the proof derived from handler projection or current signed
+/// definitions are not re-derived here; they are bound into the evidence and
+/// the retained facts above are the state they were derived from. A step that
+/// changed any re-read fact after the proof read it refuses publication.
+fn recheck_qualification_evidence_guarded(
     state: &AppState,
     context: &HandlerContext,
     request: &ProductQualificationRequest,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
-    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
-) -> anyhow::Result<ProductQualificationEvidence> {
+    evidence: &ProductQualificationEvidence,
+) -> anyhow::Result<()> {
     authority.ensure_guard(guard)?;
+    evidence.validate()?;
     let product = super::product_receipt::load_product_source(
         state,
         authority,
@@ -511,6 +585,203 @@ fn prove_with_guard(
         &request.witness_source,
         super::product_receipt::ProductSourceVerification::Fresh,
     )?;
+    if product.attestation_hash != evidence.product_witness_hash
+        || request.witness_source != evidence.witness_source
+        || product.evidence.manifest_hash != evidence.verifier.subject_manifest_hash
+        || ProductCaptureCoordinate::from_evidence(&product.evidence)?
+            != evidence.product_coordinate
+    {
+        bail!("qualification product witness changed between proof and publication");
+    }
+    let root = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(&request.verifier_chain_root_id)?
+        .context("qualification verifier root disappeared before publication")?;
+    let (terminal, has_continuation, _) = state
+        .state_store
+        .get_authoritative_thread_snapshot_with_continuation_presence(
+            &request.verifier_chain_root_id,
+            &request.verifier_thread_id,
+        )?
+        .context("qualification verifier terminal disappeared before publication")?;
+    authorize_verifier_terminal(
+        &root,
+        &terminal,
+        has_continuation,
+        request,
+        &context.fingerprint,
+    )?;
+    if ryeos_state::objects::thread_snapshot::hash_snapshot(&terminal)?
+        != evidence.verifier.terminal_snapshot_hash
+        || terminal.admitted_launch_capsule_hash.as_deref()
+            != Some(evidence.verifier.admitted_launch_capsule_hash.as_str())
+    {
+        bail!("qualification verifier terminal changed between proof and publication");
+    }
+    recheck_execution_proof_journal_guarded(
+        state,
+        authority,
+        guard,
+        &terminal,
+        &evidence.verifier,
+        &evidence.execution_proof,
+    )?;
+    ryeos_state::external_content::products::qualification_publication::verify_retained_verifier_realization(
+        authority,
+        evidence,
+        limits,
+        guard,
+    )?;
+    authority.ensure_guard(guard)?;
+    Ok(())
+}
+
+/// Re-read, under the caller's publication guard, the journal facts an
+/// execution proof names beyond the root terminal:
+/// - each participant child terminal must still be the exact snapshot the
+///   proof names, with no continuation, and carry the same capsule;
+/// - with a subordinate attempt, the root's latest process settlement must
+///   still be the exact settlement the proof names;
+/// - a scoped-producer attempt row for that settlement's launch owner must
+///   still be the same retired attempt with the same observation;
+/// - a remote-consumer proof's verifier attempt must still be observed, and
+///   its termination row must still be terminal;
+/// - the remote proof's retained consumer input, the Q transport evidence it
+///   locates, and that transport's credential custody must still be present,
+///   with the custody released.
+///
+/// These are state reads only. Projection and current-definition joins stay
+/// in the unguarded proof.
+pub(super) fn recheck_execution_proof_journal_guarded(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    root_terminal: &ThreadSnapshot,
+    verifier: &ProductQualificationVerifier,
+    proof: &ryeos_state::external_content::products::qualification::ProductQualificationExecutionProof,
+) -> anyhow::Result<()> {
+    use ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof;
+    authority.ensure_guard(guard)?;
+    for participant in &proof.participants {
+        let (child, continued, _) = state
+            .state_store
+            .get_authoritative_thread_snapshot_with_continuation_presence(
+                &participant.verifier.chain_root_id,
+                &participant.verifier.thread_id,
+            )?
+            .context("qualification participant terminal disappeared before publication")?;
+        if continued
+            || ryeos_state::objects::thread_snapshot::hash_snapshot(&child)?
+                != participant.verifier.terminal_snapshot_hash
+            || child.admitted_launch_capsule_hash.as_deref()
+                != Some(participant.verifier.admitted_launch_capsule_hash.as_str())
+        {
+            bail!("qualification participant terminal changed between proof and publication");
+        }
+    }
+    let Some(subordinate) = &proof.subordinate_attempt else {
+        authority.ensure_guard(guard)?;
+        return Ok(());
+    };
+    let settlement = state
+        .state_store
+        .latest_thread_process_settlement(&root_terminal.thread_id)?
+        .context("qualification verifier settlement disappeared before publication")?;
+    if Some(settlement.digest()?.as_str()) != verifier.process_settlement_witness_digest.as_deref()
+    {
+        bail!("qualification verifier settlement changed between proof and publication");
+    }
+    match subordinate {
+        ProductQualificationSubordinateAttemptProof::ScopedProducer { proof } => {
+            let record = state
+                .state_store
+                .scoped_child_attempt_for_owner(&settlement.launch_owner)?
+                .context("scoped qualification attempt disappeared before publication")?;
+            if record.phase != crate::runtime_db::scoped_child_attempt::ScopedChildPhase::Retired
+                || record.initial.attempt_id != proof.attempt_id
+                || record.observation_object_hash.as_deref()
+                    != Some(proof.observation_object_hash.as_str())
+            {
+                bail!("scoped qualification attempt changed between proof and publication");
+            }
+        }
+        ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof } => {
+            use crate::runtime_db::restored_verifier_attempt::RestoredVerifierAttemptPhase;
+            use crate::runtime_db::runtime_snapshot_qualification_termination::QualificationTerminationPhase;
+            let attempt = state
+                .state_store
+                .restored_verifier_attempt(&proof.intent.operation_id)?
+                .context("remote qualification attempt disappeared before publication")?;
+            let termination = state
+                .state_store
+                .qualification_termination_operation(&proof.termination_intent.operation_id)?
+                .context("remote qualification termination disappeared before publication")?;
+            if attempt.phase != RestoredVerifierAttemptPhase::Observed
+                || termination.phase != QualificationTerminationPhase::Terminal
+            {
+                bail!("remote qualification journal changed between proof and publication");
+            }
+            let input_bytes = authority
+                .cas_store()?
+                .get_blob_bounded(
+                    &proof.consumer_input_blob_hash,
+                    ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+                )?
+                .context("remote qualification retained input disappeared before publication")?;
+            let input = ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
+                &input_bytes,
+            )?;
+            let transport = state
+                .state_store
+                .qualification_historical_transport_evidence_admitted(
+                    guard,
+                    &input.coordinate,
+                    &proof.intent.qualification_operation_id,
+                    &input.purpose.owner_fingerprint,
+                )?;
+            let local = state
+                .state_store
+                .qualification_local_start(&transport.placement_thread_id)?
+                .context("Q credential custody disappeared before publication")?;
+            if local
+                .credential_custody
+                .as_ref()
+                .is_none_or(|custody| custody.released_at_ms.is_none())
+            {
+                bail!("Q credential custody changed between proof and publication");
+            }
+        }
+    }
+    authority.ensure_guard(guard)?;
+    Ok(())
+}
+
+/// Construct qualification evidence without holding a CAS guard across any
+/// resolution or projection. State reads run in short guarded segments; the
+/// policy, current verifier and evidence projector run between them with no
+/// guard, because each starts handler processes. Publication rechecks the
+/// retained facts under its own guard before it banks this evidence.
+fn prove_unguarded(
+    state: &AppState,
+    context: &HandlerContext,
+    request: &ProductQualificationRequest,
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
+) -> anyhow::Result<ProductQualificationEvidence> {
+    require_unguarded_resolution("product qualification proof")?;
+    let product = with_state_guard(authority, |guard| {
+        super::product_receipt::load_product_source(
+            state,
+            authority,
+            guard,
+            limits,
+            &context.fingerprint,
+            &request.witness_hash,
+            &request.witness_source,
+            super::product_receipt::ProductSourceVerification::Fresh,
+        )
+    })?;
     let relationship = product
         .evidence
         .relationships
@@ -550,18 +821,21 @@ fn prove_with_guard(
         .admitted_launch_capsule_hash
         .as_deref()
         .expect("authorized verifier terminal has a capsule");
-    let cas = authority.cas_store()?;
-    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
+    let (capsule, realization) = with_state_guard(authority, |_guard| {
+        let cas = authority.cas_store()?;
+        let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
+                &cas,
+                capsule_hash,
+            )?,
+        )?;
+        let realization = capsule.verify_retained_execution_realization(
             &cas,
-            capsule_hash,
-        )?,
-    )?;
-    let realization = capsule.verify_retained_execution_realization(
-        &cas,
-        &authority.large_object_store()?,
-        authority.trust_store(),
-    )?;
+            &authority.large_object_store()?,
+            authority.trust_store(),
+        )?;
+        Ok((capsule, realization))
+    })?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
@@ -593,7 +867,9 @@ fn prove_with_guard(
         bail!("qualification verifier purpose differs from its accepted product launch");
     }
     if let Some(content) = &purpose.consumer_content {
-        require_retained_consumer_content_closure(authority, guard, limits, content)?;
+        with_state_guard(authority, |guard| {
+            require_retained_consumer_content_closure(authority, guard, limits, content)
+        })?;
         // Applied Q/native/provider facts are corroborated below from the
         // exact projected remote proof and its retained authenticated input.
     }
@@ -605,21 +881,22 @@ fn prove_with_guard(
         &policy_source.policy.subject_declaration_id,
     )?;
     if !root_selectors.is_empty() {
-        super::product_composition::verify_recovered_selections_guarded(
-            state,
-            authority,
-            guard,
-            limits,
-            &admitted_resolution,
-            sealed.resolution_subject_authority(),
-            &context.fingerprint,
-            &root_selectors,
-        )?;
+        with_state_guard(authority, |guard| {
+            super::product_composition::verify_recovered_selections_guarded(
+                state,
+                authority,
+                guard,
+                limits,
+                &admitted_resolution,
+                sealed.resolution_subject_authority(),
+                &context.fingerprint,
+                &root_selectors,
+            )
+        })?;
     }
     let current_verifier = resolve_current_bundle_verifier_identity_against_admitted(
         state,
         authority,
-        guard,
         context,
         &policy_source.policy.verifier_ref,
         &policy_source.policy.verifier_parameters,
@@ -711,7 +988,6 @@ fn prove_with_guard(
     let (projected_result, execution_proof, process_settlement) = execution_evidence::prove(
         state,
         authority,
-        guard,
         limits,
         context,
         &terminal,
@@ -973,12 +1249,13 @@ pub(crate) fn resolve_content_fixed_pin_verifier(
 ) -> anyhow::Result<(String, String)> {
     policy.validate()?;
     subject.validate()?;
+    // Resolution starts handler processes, so no guard is held across it.
+    // Only definition digests and the realization set leave this function;
+    // accepted-root admission re-derives and seals them under its own cut.
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         state,
         &authority,
-        &guard,
         context,
         &policy.policy.verifier_ref,
         &policy.policy.verifier_parameters,
@@ -1319,15 +1596,19 @@ impl PreparedBundleConsumerContentInputs {
     /// Align the direct probe with the signed external Worker route before
     /// verifier contact. This proves only executable-member identity, not
     /// hosted exec-server, placement, or candidate-lifecycle qualification.
+    ///
+    /// The subject manifest is read in its own guarded segment; producer
+    /// recipe resolution then runs unguarded because it starts handler
+    /// processes. The manifest is immutable and named by exact hash, so the
+    /// member digest derived from it cannot change after the segment ends.
     fn require_external_runtime_member_alignment(
         &mut self,
         state: &AppState,
         authority: &ryeos_state::PinnedStateAuthority,
-        guard: &ryeos_state::CasMutationGuard,
         limits: ryeos_state::object_closure::ObjectClosureLimits,
         subject_manifest_hash: &str,
     ) -> anyhow::Result<()> {
-        authority.ensure_guard(guard)?;
+        require_unguarded_resolution("external runtime member alignment")?;
         let context = self
             .policy_source
             .policy
@@ -1345,13 +1626,15 @@ impl PreparedBundleConsumerContentInputs {
         if self.policy_source.policy.producer_scenarios.is_empty() {
             bail!("external runtime qualification has no signed direct probe");
         }
-        let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
-            &authority.cas_store()?,
-            subject_manifest_hash,
-            limits
-                .max_object_bytes
-                .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
-        )?;
+        let manifest = with_state_guard(authority, |_guard| {
+            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+                &authority.cas_store()?,
+                subject_manifest_hash,
+                limits
+                    .max_object_bytes
+                    .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+            )
+        })?;
         let executable_hash = exact_runtime_member_hash(
             &manifest,
             &requirement.runtime_recipe.executable_relative_path,
@@ -1581,7 +1864,6 @@ pub(super) fn prepare_activated_bundle_consumer_content_inputs(
     }
     let mut result = prepare_bundle_consumer_content_from_worker(state, &prepared.policy, worker)?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
@@ -1589,7 +1871,6 @@ pub(super) fn prepare_activated_bundle_consumer_content_inputs(
     result.require_external_runtime_member_alignment(
         state,
         &authority,
-        &guard,
         limits,
         &prepared.subject.manifest_hash,
     )?;
@@ -1602,10 +1883,12 @@ pub(super) fn prepare_activated_bundle_consumer_content_inputs(
 /// Fresh selection must use today's signed consumer definitions and exact
 /// content, not merely trust the historical verifier capsule. This check does
 /// not grant a qualification claim; applied-runtime parity remains separate.
+///
+/// The retained closure is checked in a guarded segment; current consumer
+/// preparation then runs unguarded because it resolves signed definitions.
 pub(in crate::operator_external_content) fn require_current_consumer_content_for_selection(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     policy_source: &ProductQualificationPolicySource,
     relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
@@ -1616,7 +1899,9 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
         .consumer_content
         .as_ref()
         .context("consumer qualification evidence has no retained content")?;
-    require_retained_consumer_content_closure(authority, guard, limits, retained)?;
+    with_state_guard(authority, |guard| {
+        require_retained_consumer_content_closure(authority, guard, limits, retained)
+    })?;
     let mut current = prepare_current_bundle_consumer_content_inputs(
         state,
         policy_source,
@@ -1630,7 +1915,6 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
     current.require_external_runtime_member_alignment(
         state,
         authority,
-        guard,
         limits,
         subject_manifest_hash,
     )?;
@@ -2547,6 +2831,11 @@ pub fn prepare_external_qualification_root_for_invocation(
     if sealed.qualification_purpose() != Some(purpose) {
         bail!("qualification-only root changed its sealed purpose");
     }
+    // The retained reads above are complete. Current Worker definition
+    // resolution starts handler processes, so release the guard first; every
+    // later effect re-authenticates this invocation under its own guard.
+    authority.ensure_guard(&guard)?;
+    drop(guard);
     let (_, worker_launch_contract) =
         state.engine.with_checked_bundle_generation(|generation| {
             derive_qualification_worker_resolution(
@@ -2558,7 +2847,6 @@ pub fn prepare_external_qualification_root_for_invocation(
     let worker_execution_expiry = lillux::time::MonotonicDeadline::after(
         lillux::time::Duration::from_secs(worker_launch_contract.max_lifetime_seconds),
     );
-    authority.ensure_guard(&guard)?;
     Ok(PreparedExternalQualificationRoot {
         invocation: invocation.clone(),
         callback_expiry: admission.callback_expiry(),
@@ -3449,10 +3737,12 @@ impl CurrentBundleProducerRecipe {
 /// Retained root selections are application-authenticated before this helper;
 /// this owner rechecks their common current D0, current binding heads and full
 /// manifest closures before deriving D1 and the realized D2 identity.
+///
+/// Callers must not hold a CAS guard: the sealed capsule is read in its own
+/// guarded segment and resolution then runs unguarded.
 pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     context: &HandlerContext,
     verifier_ref: &str,
@@ -3461,13 +3751,15 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
 ) -> anyhow::Result<CurrentBundleVerifierIdentity> {
     evidence.validate()?;
-    let cas = authority.cas_store()?;
-    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
-            &cas,
-            &evidence.verifier.admitted_launch_capsule_hash,
-        )?,
-    )?;
+    require_unguarded_resolution("current qualification verifier resolution")?;
+    let capsule = with_state_guard(authority, |_guard| {
+        ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
+                &authority.cas_store()?,
+                &evidence.verifier.admitted_launch_capsule_hash,
+            )?,
+        )
+    })?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
@@ -3503,7 +3795,6 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     resolve_current_bundle_verifier_identity_against_admitted(
         state,
         authority,
-        guard,
         context,
         verifier_ref,
         verifier_parameters,
@@ -3552,24 +3843,47 @@ fn current_verifier_binding_subject_authority<'a>(
     admitted.unwrap_or(projectless)
 }
 
+/// Re-resolve the current verifier identity: the unguarded resolution phase.
+///
+/// Verifier re-resolution is split into two phases so that no CAS mutation
+/// guard is ever held while a handler process may start.
+///
+/// Resolution (this function) runs root preflight, composition, effective
+/// program preparation, validation and managed runtime selection with no
+/// guard held, because composition always starts a handler process and
+/// parsing does so on a cache miss. Its signature accepts no guard and it
+/// refuses to start when the calling thread already retains one. The only
+/// guarded work inside it is state-only: opening temporary staged CAS roots
+/// and reading the exact realization-member manifest for a direct artifact.
+/// Each takes its own short guard. The temporary publication keeps its staged
+/// roots durable without a held guard, and the ordinary admission helpers it
+/// is passed to acquire their own guard only around their CAS writes. The
+/// returned identity carries digests, identities and an Engine handle, never
+/// a guard.
+///
+/// Admission is the caller's guarded phase. A caller that needs any state
+/// fact to hold under a guard acquires the guard after this function returns
+/// and re-reads that fact by exact hash or re-authenticates the current head.
+/// That is why the gap between the phases is safe: a shared guard only ever
+/// excluded exclusive CAS owners, never ordinary publishers, and anything an
+/// exclusive owner removes or changes in the gap is refused by the caller's
+/// guarded re-read rather than accepted from this function's earlier view.
 #[allow(clippy::too_many_arguments)]
 fn resolve_current_bundle_verifier_identity_against_admitted(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     context: &HandlerContext,
     verifier_ref: &str,
     verifier_parameters: &serde_json::Value,
     verifier_context: CurrentVerifierContext<'_>,
     admitted_resolution: Option<&ResolutionOutput>,
 ) -> anyhow::Result<CurrentBundleVerifierIdentity> {
-    authority.ensure_guard(guard)?;
+    require_unguarded_resolution("current qualification verifier resolution")?;
     crate::operator_authority::require_admitted_operator(state, context)?;
     state.engine.with_checked_bundle_generation(|_| {
         resolve_current_bundle_verifier_identity_in_generation(
             state,
             authority,
-            guard,
             context,
             verifier_ref,
             verifier_parameters,
@@ -3583,7 +3897,6 @@ fn resolve_current_bundle_verifier_identity_against_admitted(
 fn resolve_current_bundle_verifier_identity_in_generation(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     context: &HandlerContext,
     verifier_ref: &str,
     verifier_parameters: &serde_json::Value,
@@ -3866,13 +4179,22 @@ fn resolve_current_bundle_verifier_identity_in_generation(
             );
         }
     }
-    let staged_roots = authority
-        .require_recovery()?
-        .begin_staged_cas_roots_admitted(guard, "qualification-verifier-recheck")?;
-    let mut publication = Some(ryeos_state::PendingCasPublication::new(
-        authority.try_clone()?,
-        staged_roots,
-    ));
+    // Opening the staged roots is a state-only guarded segment. The lease is
+    // handed to its publication owner in the same expression that opens it,
+    // so no later failure point in the segment (including its trailing guard
+    // check) can drop a bare lease; the publication's own drop discards the
+    // stage. The stage stays durable after the guard drops; source and
+    // realization admission below acquire their own guard only around their
+    // CAS writes.
+    let mut publication = Some(with_state_guard(authority, |guard| {
+        let publication_authority = authority.try_clone()?;
+        Ok(ryeos_state::PendingCasPublication::new(
+            publication_authority,
+            authority
+                .require_recovery()?
+                .begin_staged_cas_roots_admitted(guard, "qualification-verifier-recheck")?,
+        ))
+    })?);
     let source_contract = request_engine
         .kinds
         .get(&kind)
@@ -4017,7 +4339,6 @@ fn resolve_current_bundle_verifier_identity_in_generation(
             runtime_identity::reconstruct_current_direct_artifact_identity(
                 state,
                 authority,
-                guard,
                 context,
                 &request_engine,
                 &resolved_request,
@@ -4064,7 +4385,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     drop(admitted);
     drop(captured_source);
     drop(preselection_snapshots);
-    authority.ensure_guard(guard)?;
+    drop(publication);
     Ok(CurrentBundleVerifierIdentity {
         admitted_definition_digest,
         effective_definition_digest,
@@ -4209,26 +4530,32 @@ pub(crate) fn verify_current_external_runtime_qualification(
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
+    require_unguarded_resolution("external runtime qualification check")?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
-    let proof = load_current_qualification(
-        state,
-        &authority,
-        &guard,
-        limits,
-        &binding.owner_principal,
-        &binding.attestation_hash,
-    )?;
-    let product = super::product_receipt::load_product_source(
-        state,
-        &authority,
-        &guard,
-        limits,
-        &binding.owner_principal,
-        &proof.evidence.product_witness_hash,
-        &proof.evidence.witness_source,
-        super::product_receipt::ProductSourceVerification::Fresh,
-    )?;
+    // State-only segment: the published qualification and its fresh product.
+    // Policy and verifier resolution below run unguarded; the final segment
+    // re-authenticates both heads so the result is current at its end.
+    let (proof, product) = with_state_guard(&authority, |guard| {
+        let proof = load_current_qualification(
+            state,
+            &authority,
+            guard,
+            limits,
+            &binding.owner_principal,
+            &binding.attestation_hash,
+        )?;
+        let product = super::product_receipt::load_product_source(
+            state,
+            &authority,
+            guard,
+            limits,
+            &binding.owner_principal,
+            &proof.evidence.product_witness_hash,
+            &proof.evidence.witness_source,
+            super::product_receipt::ProductSourceVerification::Fresh,
+        )?;
+        Ok((proof, product))
+    })?;
     if proof.evidence.product_witness_hash != product.attestation_hash
         || proof.evidence.product_coordinate
             != ProductCaptureCoordinate::from_evidence(&product.evidence)?
@@ -4249,7 +4576,6 @@ pub(crate) fn verify_current_external_runtime_qualification(
     let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
         state,
         &authority,
-        &guard,
         limits,
         &context,
         &current_policy.policy.verifier_ref,
@@ -4268,23 +4594,79 @@ pub(crate) fn verify_current_external_runtime_qualification(
     execution_evidence::verify_current(
         state,
         &authority,
-        &guard,
         &context,
         &proof.evidence,
         &current_verifier,
         None,
     )?;
+    require_qualification_still_current(
+        state,
+        &authority,
+        limits,
+        &binding.owner_principal,
+        &proof,
+        Some(&product),
+    )?;
     Ok(proof)
+}
+
+/// Final guarded segment for read-only freshness checks whose resolution ran
+/// unguarded: the same qualification must still be the published, unexpired
+/// witness, and, when the caller relied on one, the same fresh product.
+pub(in crate::operator_external_content) fn require_qualification_still_current(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    owner_principal: &str,
+    proof: &VerifiedQualificationWitness,
+    product: Option<&ryeos_state::external_content::products::publication::VerifiedProductWitness>,
+) -> anyhow::Result<()> {
+    with_state_guard(authority, |guard| {
+        let current = load_current_qualification(
+            state,
+            authority,
+            guard,
+            limits,
+            owner_principal,
+            &proof.attestation_hash,
+        )?;
+        if current.attestation_hash != proof.attestation_hash
+            || current.evidence != proof.evidence
+        {
+            bail!("qualification witness changed while its current verifier was re-resolved");
+        }
+        if let Some(product) = product {
+            let fresh = super::product_receipt::load_product_source(
+                state,
+                authority,
+                guard,
+                limits,
+                owner_principal,
+                &proof.evidence.product_witness_hash,
+                &proof.evidence.witness_source,
+                super::product_receipt::ProductSourceVerification::Fresh,
+            )?;
+            if fresh.attestation_hash != product.attestation_hash
+                || fresh.evidence.manifest_hash != product.evidence.manifest_hash
+            {
+                bail!("qualified product witness changed while its verifier was re-resolved");
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Re-admit one retained qualification and return the exact current authority
 /// pins an operator must review before enabling bundle publication. This is a
 /// read-only measurement: it neither authors policy nor publishes CAS state.
+///
+/// Callers must not hold a CAS guard: this re-resolves the current verifier,
+/// which starts handler processes, and confines its own state reads to short
+/// guarded segments.
 pub fn measure_current_qualification_authority(
     state: &AppState,
     context: &HandlerContext,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     owner_principal: &str,
     qualification_hash: &str,
@@ -4293,7 +4675,6 @@ pub fn measure_current_qualification_authority(
         state,
         context,
         authority,
-        guard,
         limits,
         owner_principal,
         qualification_hash,
@@ -4305,20 +4686,22 @@ pub fn measure_current_qualification_authority_with_project_context_resolver(
     state: &AppState,
     context: &HandlerContext,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     owner_principal: &str,
     qualification_hash: &str,
     project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
 ) -> anyhow::Result<MeasuredQualificationAuthority> {
-    let proof = load_current_qualification(
-        state,
-        authority,
-        guard,
-        limits,
-        owner_principal,
-        qualification_hash,
-    )?;
+    require_unguarded_resolution("qualification authority measurement")?;
+    let proof = with_state_guard(authority, |guard| {
+        load_current_qualification(
+            state,
+            authority,
+            guard,
+            limits,
+            owner_principal,
+            qualification_hash,
+        )
+    })?;
     let current_policy = resolve_current_bundle_qualification_policy(
         state,
         &proof.evidence.policy_source.canonical_ref,
@@ -4326,7 +4709,6 @@ pub fn measure_current_qualification_authority_with_project_context_resolver(
     let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
         state,
         authority,
-        guard,
         limits,
         context,
         &current_policy.policy.verifier_ref,
@@ -4342,6 +4724,7 @@ pub fn measure_current_qualification_authority_with_project_context_resolver(
     proof
         .evidence
         .validate_current_artifact(&current_verifier.artifact_identity)?;
+    require_qualification_still_current(state, authority, limits, owner_principal, &proof, None)?;
     Ok(MeasuredQualificationAuthority {
         qualified_product_witness_hash: proof.evidence.product_witness_hash.clone(),
         qualified_product_owner_principal: proof

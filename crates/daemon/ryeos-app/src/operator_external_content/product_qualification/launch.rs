@@ -344,22 +344,30 @@ pub fn prepare_after_reservation(
 ) -> Result<PreparedProductQualificationLaunch> {
     crate::operator_authority::require_admitted_operator(state, context)?;
     request.validate()?;
+    // Policy, consumer and verifier resolution below start handler processes,
+    // so no CAS guard spans this preparation. The fresh product witness and
+    // the subject manifest are each read in their own guarded segment. This
+    // function returns only data, never a guard, so no guarantee held by a
+    // guard ever outlived it; proof and publication re-authenticate the
+    // witness and terminal against current state under their own guards.
+    super::require_unguarded_resolution("product qualification launch preparation")?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let product = super::super::product_receipt::load_product_source(
-        state,
-        &authority,
-        &guard,
-        limits,
-        &context.fingerprint,
-        &request.witness_hash,
-        &request.witness_source,
-        super::super::product_receipt::ProductSourceVerification::Fresh,
-    )?;
+    let product = super::with_state_guard(&authority, |guard| {
+        super::super::product_receipt::load_product_source(
+            state,
+            &authority,
+            guard,
+            limits,
+            &context.fingerprint,
+            &request.witness_hash,
+            &request.witness_source,
+            super::super::product_receipt::ProductSourceVerification::Fresh,
+        )
+    })?;
     let relationship = product
         .evidence
         .relationships
@@ -392,7 +400,6 @@ pub fn prepare_after_reservation(
             prepared.require_external_runtime_member_alignment(
                 state,
                 &authority,
-                &guard,
                 limits,
                 &product.evidence.manifest_hash,
             )?;
@@ -435,7 +442,6 @@ pub fn prepare_after_reservation(
         let current_verifier = super::resolve_current_bundle_verifier_identity_against_admitted(
             state,
             &authority,
-            &guard,
             context,
             &policy_source.policy.verifier_ref,
             &policy_source.policy.verifier_parameters,

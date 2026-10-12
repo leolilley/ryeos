@@ -275,18 +275,21 @@ pub fn prepare_after_reservation(
         "content qualification source is not an exact large-content runtime tree"
     );
     let authority = state.state_store.pinned_state_authority()?;
-    let _guard = authority.acquire_shared_guard()?;
-    let cas = authority.cas_store()?;
     let limits = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
-        &cas,
-        &component.expected_manifest_hash,
-        (ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64)
-            .min(limits.max_object_bytes),
-    )?;
+    // Only this exact-hash manifest read is guarded. Source preparation below
+    // resolves the verifier and starts handler processes, so it must run after
+    // the guard drops; it re-derives everything it relies on itself.
+    let value = super::product_qualification::with_state_guard(&authority, |_guard| {
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &authority.cas_store()?,
+            &component.expected_manifest_hash,
+            (ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64)
+                .min(limits.max_object_bytes),
+        )
+    })?;
     let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
     let realization = ExternalContentRealization {
         id: request.declaration_id.clone(),

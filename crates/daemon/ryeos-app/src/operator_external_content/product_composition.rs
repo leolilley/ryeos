@@ -329,21 +329,27 @@ fn select_products_verified(
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
+    // Relationship, policy and verifier resolution start handler processes,
+    // so no CAS guard spans the batch. Each witness, manifest-bound and
+    // qualification read runs in its own guarded segment, and a qualified
+    // selection is re-read as current after its verifier is re-resolved.
+    super::product_qualification::require_unguarded_resolution("product selection")?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let mut proofs = BTreeMap::new();
     let mut witnesses = BTreeMap::new();
     for selector in selectors {
-        let witness = super::product_receipt::load_product_source(
-            state,
-            &authority,
-            &guard,
-            limits,
-            &context.fingerprint,
-            &selector.witness_hash,
-            &selector.witness_source,
-            super::product_receipt::ProductSourceVerification::Fresh,
-        )?;
+        let witness = super::product_qualification::with_state_guard(&authority, |guard| {
+            super::product_receipt::load_product_source(
+                state,
+                &authority,
+                guard,
+                limits,
+                &context.fingerprint,
+                &selector.witness_hash,
+                &selector.witness_source,
+                super::product_receipt::ProductSourceVerification::Fresh,
+            )
+        })?;
         let selection = select_verified_product(
             state,
             context,
@@ -353,7 +359,6 @@ fn select_products_verified(
             resolution,
             selector,
             &authority,
-            &guard,
             &witness,
             limits,
             project_context_resolver,
@@ -491,7 +496,6 @@ fn select_verified_product(
     resolution: &ResolutionOutput,
     selector: &ProductSelection,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     witness: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
     closure_limits: ryeos_state::object_closure::ObjectClosureLimits,
     project_context_resolver: Option<
@@ -499,7 +503,6 @@ fn select_verified_product(
     >,
 ) -> anyhow::Result<ResolvedExternalProductSelection> {
     selector.validate()?;
-    authority.ensure_guard(guard)?;
     if witness.attestation_hash != selector.witness_hash
         || witness.evidence.owner_principal != context.fingerprint
     {
@@ -569,20 +572,21 @@ fn select_verified_product(
         state,
         context,
         authority,
-        guard,
         closure_limits,
         selector,
         &relationship,
         witness,
         project_context_resolver,
     )?;
-    ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
-        authority,
-        evidence,
-        &relationship.required_product.bounds,
-        closure_limits,
-        guard,
-    )?;
+    super::product_qualification::with_state_guard(authority, |guard| {
+        ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
+            authority,
+            evidence,
+            &relationship.required_product.bounds,
+            closure_limits,
+            guard,
+        )
+    })?;
     let selection = ResolvedExternalProductSelection {
         schema: ryeos_state::external_content::products::composition::RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA.to_owned(),
         declaration_id: slot.id.clone(),
@@ -614,7 +618,6 @@ fn admit_selected_qualification(
     state: &AppState,
     context: &HandlerContext,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     selector: &ProductSelection,
     relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
@@ -635,14 +638,16 @@ fn admit_selected_qualification(
         (Some(policy), Some(hash)) => (policy, hash),
         _ => bail!("product selection must provide exactly its declared qualification proof"),
     };
-    let proof = qualification::load_current_qualification(
-        state,
-        authority,
-        guard,
-        limits,
-        &context.fingerprint,
-        hash,
-    )?;
+    let proof = qualification::with_state_guard(authority, |guard| {
+        qualification::load_current_qualification(
+            state,
+            authority,
+            guard,
+            limits,
+            &context.fingerprint,
+            hash,
+        )
+    })?;
     if proof.evidence.product_witness_hash != product.attestation_hash
         || proof.evidence.product_coordinate
             != ProductCaptureCoordinate::from_evidence(&product.evidence)?
@@ -657,7 +662,6 @@ fn admit_selected_qualification(
         qualification::require_current_consumer_content_for_selection(
             state,
             authority,
-            guard,
             limits,
             &current_policy,
             relationship,
@@ -670,7 +674,6 @@ fn admit_selected_qualification(
     let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
         state,
         authority,
-        guard,
         limits,
         context,
         &current_policy.policy.verifier_ref,
@@ -689,11 +692,20 @@ fn admit_selected_qualification(
     qualification::execution_evidence::verify_current(
         state,
         authority,
-        guard,
         context,
         &proof.evidence,
         &current_verifier,
         project_context_resolver,
+    )?;
+    // Verifier re-resolution ran unguarded; the accepted proof must still be
+    // the published, unexpired qualification at the end of this admission.
+    qualification::require_qualification_still_current(
+        state,
+        authority,
+        limits,
+        &context.fingerprint,
+        &proof,
+        None,
     )?;
     Ok(Some(AdmittedProductQualification {
         attestation_hash: proof.attestation_hash,

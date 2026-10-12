@@ -21,7 +21,7 @@ use super::{
 #[test]
 fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(root.path())?;
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
     let core = ryeos_engine::test_support::core_bundle_root();
     let standard = ryeos_engine::test_support::standard_bundle_root();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
@@ -317,7 +317,7 @@ product_qualification_policy:
 #[test]
 fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(root.path())?;
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
     state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
         vec![Arc::new(
             ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {

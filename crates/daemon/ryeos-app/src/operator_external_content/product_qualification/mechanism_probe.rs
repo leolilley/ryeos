@@ -456,7 +456,10 @@ impl CapturedMechanismProbeSource {
                     .context("mechanism realization has no retained CAS publication")?
                     .authority()
                     .try_clone()?;
-                let guard = authority.acquire_shared_guard()?;
+                // Plan assembly may start a parser handler process, so it runs
+                // unguarded and takes its own short guard for the member
+                // command capture. The closure projection below is state-only
+                // and runs under a guard taken afterwards.
                 let plan = crate::thread_lifecycle::prepare_captured_external_member_plan(
                     state,
                     state.engine.as_ref(),
@@ -466,9 +469,9 @@ impl CapturedMechanismProbeSource {
                     None,
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
                     &authority,
-                    &guard,
                     state.isolation.verified_command_file_bytes(),
                 )?;
+                let guard = authority.acquire_shared_guard()?;
                 ensure!(
                     plan.execution_plan()
                         .executor_chain
