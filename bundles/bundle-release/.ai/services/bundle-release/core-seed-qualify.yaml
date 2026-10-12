@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-29T01:29:18Z:7e1b101b3610c19bb10d13fcfd948b76c56f99f46846291027ecf468d8a39716:S6ZcwYeuqDT8b+Npc/7JU9NCWhbt19GjpFhmAiGBZpZVsGY+XHhBl3vI2EgshqsWJwZxmXSdiAV7x+0Ls29lDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:e0c58443802e8f1fa087de31ae2383968cd75760b46a47b2c98267ae37ecf138:Knr8m/ZCmPt4gk/lKluBDCKNagdquwb2n9CXLfS5g8igdVMBEC5zo2hg3B8dH+uqTfdtIW76Wt2cL8dEkUglDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-qualify
 version: "1.1.0"
 description: Independently qualify the exact signed Core seed before substrate assembly.
-endpoint: bundle_release.core_seed_qualify
+endpoint: bundle-release.core-seed-qualify
 ui_read_only: false
 state_access: read_write
 record_thread: true

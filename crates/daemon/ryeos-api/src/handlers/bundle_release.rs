@@ -4102,21 +4102,21 @@ macro_rules! descriptor {
 
 pub const INPUT_INSPECT: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/input-inspect",
-    endpoint: "bundle_release.input_inspect",
+    endpoint: "bundle-release.input-inspect",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/input-inspect"],
     handler: input_inspect_handler,
 };
 pub const AUTHORITY_MEASURE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/authority-measure",
-    endpoint: "bundle_release.authority_measure",
+    endpoint: "bundle-release.authority-measure",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/authority-measure"],
     handler: authority_measure_handler,
 };
 pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/authority-calibrate",
-    endpoint: "bundle_release.authority_calibrate",
+    endpoint: "bundle-release.authority-calibrate",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/core-seed-build-products",
@@ -4148,7 +4148,7 @@ pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
 };
 pub const GENERATION_BUILD: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-build",
-    endpoint: "bundle_release.generation_build",
+    endpoint: "bundle-release.generation-build",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4163,7 +4163,7 @@ pub const GENERATION_BUILD: ServiceDescriptor = ServiceDescriptor {
 };
 pub const CORE_SEED_BUILD: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-build",
-    endpoint: "bundle_release.core_seed_build",
+    endpoint: "bundle-release.core-seed-build",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/core-seed-build-products",
@@ -4176,14 +4176,14 @@ pub const CORE_SEED_BUILD: ServiceDescriptor = ServiceDescriptor {
 };
 pub const CORE_SEED_INSPECT: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-inspect",
-    endpoint: "bundle_release.core_seed_inspect",
+    endpoint: "bundle-release.core-seed-inspect",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/core-seed-inspect"],
     handler: core_seed_inspect_handler,
 };
 pub const CORE_SEED_CAPTURE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-capture",
-    endpoint: "bundle_release.core_seed_capture",
+    endpoint: "bundle-release.core-seed-capture",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/core-seed-capture-products",
@@ -4196,7 +4196,7 @@ pub const CORE_SEED_CAPTURE: ServiceDescriptor = ServiceDescriptor {
 };
 pub const CORE_SEED_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-qualify",
-    endpoint: "bundle_release.core_seed_qualify",
+    endpoint: "bundle-release.core-seed-qualify",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4209,14 +4209,14 @@ pub const CORE_SEED_QUALIFY: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     REQUEST_TREE_SIGNING,
     "service:bundle-release/request-tree-signing",
-    "bundle_release.request_tree_signing",
+    "bundle-release.request-tree-signing",
     "ryeos.execute.service.bundle-release/request-tree-signing",
     RequestTreeSigningRequest,
     BundleReleaseOperation::RequestTreeSigning
 );
 pub const GENERATION_CAPTURE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-capture",
-    endpoint: "bundle_release.generation_capture",
+    endpoint: "bundle-release.generation-capture",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4231,7 +4231,7 @@ pub const GENERATION_CAPTURE: ServiceDescriptor = ServiceDescriptor {
 };
 pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-qualify",
-    endpoint: "bundle_release.generation_qualify",
+    endpoint: "bundle-release.generation-qualify",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4246,14 +4246,14 @@ pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
 };
 pub const GENERATION_FINALIZE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-finalize",
-    endpoint: "bundle_release.generation_finalize",
+    endpoint: "bundle-release.generation-finalize",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/generation-finalize"],
     handler: generation_finalize_handler,
 };
 pub const SUBSTRATE_BUILD: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/substrate-build",
-    endpoint: "bundle_release.substrate_build",
+    endpoint: "bundle-release.substrate-build",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4266,7 +4266,7 @@ pub const SUBSTRATE_BUILD: ServiceDescriptor = ServiceDescriptor {
 };
 pub const SUBSTRATE_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/substrate-qualify",
-    endpoint: "bundle_release.substrate_qualify",
+    endpoint: "bundle-release.substrate-qualify",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4279,7 +4279,7 @@ pub const SUBSTRATE_QUALIFY: ServiceDescriptor = ServiceDescriptor {
 };
 pub const SUBSTRATE_RELEASE_FINALIZE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/substrate-release-finalize",
-    endpoint: "bundle_release.substrate_release_finalize",
+    endpoint: "bundle-release.substrate-release-finalize",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/substrate-release-finalize"],
     handler: substrate_release_finalize_handler,
@@ -4287,7 +4287,7 @@ pub const SUBSTRATE_RELEASE_FINALIZE: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     SUBSTRATE_RELEASE_AUTHORIZATION,
     "service:bundle-release/substrate-release-authorization",
-    "bundle_release.substrate_release_authorization",
+    "bundle-release.substrate-release-authorization",
     "ryeos.execute.service.bundle-release/substrate-release-authorization",
     SubstrateReleaseAuthorizationRequest,
     BundleReleaseOperation::SubstrateReleaseAuthorization
@@ -4295,21 +4295,21 @@ descriptor!(
 descriptor!(
     REQUEST_AUTHORIZATION,
     "service:bundle-release/request-authorization",
-    "bundle_release.request_authorization",
+    "bundle-release.request-authorization",
     "ryeos.execute.service.bundle-release/request-authorization",
     RequestAuthorizationRequest,
     BundleReleaseOperation::RequestAuthorization
 );
 pub const SET_COMPOSE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/set-compose",
-    endpoint: "bundle_release.set_compose",
+    endpoint: "bundle-release.set-compose",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/set-compose"],
     handler: set_compose_handler,
 };
 pub const GENESIS_SET_COMPOSE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/genesis-set-compose",
-    endpoint: "bundle_release.genesis_set_compose",
+    endpoint: "bundle-release.genesis-set-compose",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/genesis-set-compose"],
     handler: genesis_set_compose_handler,
@@ -4317,14 +4317,14 @@ pub const GENESIS_SET_COMPOSE: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     CATALOG_REQUEST_PUBLICATION,
     "service:bundle-release/catalog-request-publication",
-    "bundle_release.catalog_request_publication",
+    "bundle-release.catalog-request-publication",
     "ryeos.execute.service.bundle-release/catalog-request-publication",
     CatalogRequestPublicationRequest,
     BundleReleaseOperation::CatalogRequestPublication
 );
 pub const CATALOG_REMOTE_PUBLISH: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/catalog-remote-publish",
-    endpoint: "bundle_release.catalog_remote_publish",
+    endpoint: "bundle-release.catalog-remote-publish",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/catalog-remote-publish"],
     handler: |params, context, state| {
@@ -4333,7 +4333,7 @@ pub const CATALOG_REMOTE_PUBLISH: ServiceDescriptor = ServiceDescriptor {
 };
 pub const SUBMIT: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/submit",
-    endpoint: "bundle_release.submit",
+    endpoint: "bundle-release.submit",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/submit"],
     handler: submit_handler,
@@ -4341,7 +4341,7 @@ pub const SUBMIT: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     STATUS,
     "service:bundle-release/status",
-    "bundle_release.status",
+    "bundle-release.status",
     "ryeos.execute.service.bundle-release/status",
     StatusRequest,
     BundleReleaseOperation::Status

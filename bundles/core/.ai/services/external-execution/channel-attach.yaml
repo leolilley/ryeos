@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-20T10:28:26Z:42b4d8587d3be0bc557466352f93327eccbcbf53ebd3a5a440d23d2bd00833fb:YSCKGCz3KisasIoY9exBRnynyCbmOaLaq474F+M0gxoel7JId++6oa8/4etgyAUACmDdRt64XmMhuzfeXWz0DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:c63f2c39fdea8cc1170e9708916eec14d9e7df611a3c4306698d017c88c7026c:CLN0X2Ry+68J1lWrvzW2BHodrcrygvEdCryM+iNIR3RJQp06QzrReiAIA/ILC4TE53qco7cS72BZFYZH2an9Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
-endpoint: external_execution.channel_attach
+endpoint: external-execution.channel-attach
 availability: daemon_only
 record_thread: false
 required_caps: []

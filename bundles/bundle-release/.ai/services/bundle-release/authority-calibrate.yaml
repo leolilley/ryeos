@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-30T00:54:19Z:f27588a319615398bc4e8d8d116854e13c3fba4654f4f995f3f3a73abe668e2e:gs8XZe27lJ8tASYXWTJ8kFvL4kHEFcS+2q6JmJOYrBy9dnO4tYXj7iANYzqem/uGI0V1IsAbbErbeJ1/ipHsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:cbc5701aedc1200678903e99d4a27c57302db4f60fc0fbfdcd2b5316740f7f3f:JesjQXf3q7U3tkXLk5yaa/GSFchjrNk1xR9qddVe14xqqPlE+CsUIgtcON3SKCnwLEhLrJEvc1sBaI8jOhRGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-calibrate
 version: "1.1.0"
 description: Execute the fixed, operator-only portable, native, Core seed, and substrate calibration lanes and retain one node-authenticated calibration run; this service cannot finalize, authorize, compose, or publish a release.
-endpoint: bundle_release.authority_calibrate
+endpoint: bundle-release.authority-calibrate
 ui_read_only: false
 state_access: read_write
 record_thread: true
