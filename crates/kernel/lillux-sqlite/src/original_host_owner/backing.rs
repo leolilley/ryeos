@@ -11,6 +11,8 @@ pub struct HostStorage {
     resident: AtomicBool,
     locked: AtomicBool,
     residency_started: AtomicBool,
+    // Which proof kept this mapping resident, set once residency completes.
+    residency: std::sync::OnceLock<lillux::process_control::ResidencyProof>,
     unlocked: bool,
     unmapped: bool,
 }
@@ -87,12 +89,17 @@ impl HostStorage {
                 libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1, 0) };
             if address == libc::MAP_FAILED { return Err("host backing mapping refused"); }
-            Ok(Self { release_generation: None, process: std::process::id(), unlocked: false, unmapped: false, address: address as usize, length: layout.length, resident: AtomicBool::new(false), locked: AtomicBool::new(false), residency_started: AtomicBool::new(false) })
+            Ok(Self { release_generation: None, process: std::process::id(), unlocked: false, unmapped: false, address: address as usize, length: layout.length, resident: AtomicBool::new(false), locked: AtomicBool::new(false), residency_started: AtomicBool::new(false), residency: std::sync::OnceLock::new() })
         }
     }
 
     /// The caller retains the mapped owner before this fallible physical
     /// residency effect. A refusal cannot discard a partially backed mapping.
+    ///
+    /// Residency is proven by locking the pages when this process may lock
+    /// them, or otherwise by touching every page while no swap is reachable
+    /// for this process. If neither can be proven this refuses with the
+    /// observed limits; it never keeps an unproven mapping as resident.
     /// # Safety
     /// This same genuine outside issuer prepaid the complete mlock/page-touch
     /// work once from its original counter and retains mapping/debit custody.
@@ -102,9 +109,9 @@ impl HostStorage {
         &self,
         layout: &HostStorageLayout,
         mut checkpoint: impl FnMut() -> Result<(), &'static str>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<lillux::process_control::ResidencyProof, String> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = (layout, checkpoint); return Err("host residency requires Linux"); }
+        { let _ = (layout, checkpoint); return Err("host residency requires Linux".to_owned()); }
         #[cfg(target_os = "linux")]
         {
             // Check the cached process before changing inherited state or
@@ -113,18 +120,56 @@ impl HostStorage {
             if self.process != std::process::id() || self.unlocked || self.unmapped
                 || self.resident.load(Ordering::Acquire)
                 || self.address == 0 || self.length != layout.length {
-                return Err("host residency requires the original empty mapping");
+                return Err("host residency requires the original empty mapping".to_owned());
             }
             self.residency_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| "original host residency already attempted; no replay")?;
             checkpoint()?;
-            if unsafe { libc::mlock(self.address as *const libc::c_void, self.length) } != 0 {
-                return Err("host physical residency refused; original mapping retained");
-            }
-            // Retain this irreversible completion before a page checkpoint can
-            // refuse. A failed mlock is still conservatively munlocked over the
-            // entire actual span; false here never certifies partial absence.
-            self.locked.store(true, Ordering::Release);
+            let length = u64::try_from(self.length).map_err(|_| "host residency size overflow")?;
+            let planned = lillux::process_control::ResidencyProof::plan(length)
+                .map_err(|reason| format!("host physical residency refused: {reason}; original mapping retained"))?;
+            let proof = match planned {
+                lillux::process_control::ResidencyProof::Locked { basis } => {
+                    if unsafe { libc::mlock(self.address as *const libc::c_void, self.length) } == 0 {
+                        // Retain this irreversible completion before a page
+                        // checkpoint can refuse. A failed mlock is still
+                        // conservatively munlocked over the entire actual
+                        // span; false here never certifies partial absence.
+                        self.locked.store(true, Ordering::Release);
+                        lillux::process_control::ResidencyProof::Locked { basis }
+                    } else {
+                        let error = std::io::Error::last_os_error();
+                        // The limits looked sufficient but the kernel refused
+                        // the lock for lack of lockable memory or privilege.
+                        // The swap proof is an equal alternative, observed
+                        // afresh; any other failure refuses outright.
+                        if !matches!(error.raw_os_error(), Some(libc::ENOMEM) | Some(libc::EPERM)) {
+                            return Err(format!(
+                                "host physical residency refused: mlock of {} bytes failed ({error}) although {basis}; original mapping retained",
+                                self.length
+                            ));
+                        }
+                        lillux::process_control::ResidencyProof::plan_without_lock(length).map_err(|swap| {
+                            format!(
+                                "host physical residency refused: mlock of {} bytes failed ({error}) although {basis}, and {swap}; original mapping retained",
+                                self.length
+                            )
+                        })?
+                    }
+                }
+                lillux::process_control::ResidencyProof::SwapUnreachable { basis } => {
+                    let proof = lillux::process_control::ResidencyProof::SwapUnreachable { basis };
+                    // Observed again right before the touch: the pages stay
+                    // resident only while nothing can page them out.
+                    proof.confirm_swap_unreachable().map_err(|reason| {
+                        format!("host physical residency refused: {reason}; original mapping retained")
+                    })?;
+                    proof
+                }
+                lillux::process_control::ResidencyProof::Unknown(_) => {
+                    return Err("host physical residency refused: unknown residency method; original mapping retained".to_owned());
+                }
+            };
             // Touch each page before publishing slots. Every page was prepaid;
             // the original authority is checked at each bounded page effect.
             for offset in (0..self.length).step_by(layout.page) {
@@ -132,9 +177,31 @@ impl HostStorage {
                 unsafe { (self.address as *mut u8).add(offset).write_volatile(0); }
             }
             checkpoint()?;
+            self.residency.set(proof.clone()).map_err(|_| "host residency proof already recorded")?;
             self.resident.store(true, Ordering::Release);
-            Ok(())
+            Ok(proof)
         }
+    }
+
+    /// The proof that keeps this mapping resident, once residency completed.
+    pub fn residency_proof(&self) -> Option<&lillux::process_control::ResidencyProof> {
+        if self.process != std::process::id() { return None; }
+        self.residency.get()
+    }
+
+    /// Re-check, before new native work is admitted against this region,
+    /// that its residency proof still holds. A lock holds for the mapping's
+    /// life; a swap-unreachable proof is observed again, since swap enabled
+    /// after startup would let the kernel page the region out.
+    pub fn confirm_residency(&self) -> Result<(), String> {
+        if self.process != std::process::id() || self.unmapped || !self.resident.load(Ordering::Acquire) {
+            return Err("host storage has no completed physical residency".to_owned());
+        }
+        self.residency
+            .get()
+            .ok_or_else(|| "host residency proof is absent".to_owned())?
+            .confirm_swap_unreachable()
+            .map_err(|reason| format!("native residency no longer holds: {reason}"))
     }
 
     /// Supply only the complete concrete SQLite region, never a generic slot

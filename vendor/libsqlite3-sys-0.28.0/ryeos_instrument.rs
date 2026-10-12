@@ -26,7 +26,7 @@ pub fn prepare(manifest_dir: &Path, out_dir: &Path) -> io::Result<PathBuf> {
     let mut s = String::from_utf8(bytes).map_err(io::Error::other)?;
     // Original native admission precedes any automatic SQLite initialization.
     // These definitions live in the SAME pinned translation unit below.
-    s.insert_str(0, "static void *ryeosNativeMalloc(int);\nstatic void ryeosNativeFree(void*);\nstatic void *ryeosNativeRealloc(void*,int);\nstatic int ryeosNativeSize(void*);\nstatic int ryeosNativeRoundup(int);\nstatic int ryeosNativeInit(void*);\nstatic void ryeosNativeShutdown(void*);\nstatic int ryeosNativeInitGate(void);\nstatic int ryeosNativeShutdownGate(void);\nstatic int ryeosNativeOpenGate(void);\nstatic int ryeosNativeConfigGate(int);\n");
+    s.insert_str(0, "static void *ryeosNativeMalloc(int);\nstatic void ryeosNativeFree(void*);\nstatic void *ryeosNativeRealloc(void*,int);\nstatic int ryeosNativeSize(void*);\nstatic int ryeosNativeRoundup(int);\nstatic int ryeosNativeInit(void*);\nstatic void ryeosNativeShutdown(void*);\nstatic int ryeosNativeInitGate(void);\nstatic int ryeosNativeShutdownGate(void);\nstatic int ryeosNativeOpenGate(void);\nstatic int ryeosNativeConfigGate(int);\nstruct sqlite3;\nstatic int ryeosNativeCommitGate(struct sqlite3*);\nstatic int ryeosNativeBackupGate(void);\nstatic int ryeosNativeInGateActive(void);\n");
     replace(
         &mut s,
         "SQLITE_PRIVATE void sqlite3MemSetDefault(void){\n  static const sqlite3_mem_methods defaultMethods = {\n     sqlite3MemMalloc,\n     sqlite3MemFree,\n     sqlite3MemRealloc,\n     sqlite3MemSize,\n     sqlite3MemRoundup,\n     sqlite3MemInit,\n     sqlite3MemShutdown,\n     0\n  };\n  sqlite3_config(SQLITE_CONFIG_MALLOC, &defaultMethods);\n}\n\n#endif /* SQLITE_SYSTEM_MALLOC */",
@@ -209,6 +209,33 @@ pub fn prepare(manifest_dir: &Path, out_dir: &Path) -> io::Result<PathBuf> {
         &mut s,
         "shmpage_out:\n  if( pShmNode->nRegion>iRegion ){\n    *pp = pShmNode->apRegion[iRegion];\n  }else{\n    *pp = 0;\n  }\n  if( pShmNode->isReadonly && rc==SQLITE_OK ) rc = SQLITE_READONLY;",
         "shmpage_out:\n  { int originalEnd=ryeosNativeShmEnd(pShmNode);\n    if(rc==SQLITE_OK && originalEnd!=SQLITE_OK) rc=originalEnd; }\n  if( iRegion>=0 && pShmNode->nRegion>iRegion ){\n    *pp = pShmNode->apRegion[iRegion];\n  }else{\n    *pp = 0;\n  }\n  if( pShmNode->isReadonly && rc==SQLITE_OK ) rc = SQLITE_READONLY;",
+    )?;
+    // Every write-transaction commit on a native connection passes the
+    // compiled verifier immediately before pager commit I/O. A refusal takes
+    // the commit-hook veto path, which rolls the whole transaction back.
+    replace(
+        &mut s,
+        "  /* If there are any write-transactions at all, invoke the commit hook */\n  if( needXcommit && db->xCommitCallback ){",
+        "  if( needXcommit && !ryeosNativeCommitGate(db) ){\n    return SQLITE_CONSTRAINT_COMMITHOOK;\n  }\n\n  /* If there are any write-transactions at all, invoke the commit hook */\n  if( needXcommit && db->xCommitCallback ){",
+    )?;
+    // While the commit verifier runs on this thread, no opcode is admitted.
+    replace(
+        &mut s,
+        "    if( db->xProgress!=0 && db->nProgressOps==1 ){\n      if( db->xProgress(db->pProgressArg) ){",
+        "    if( db->xProgress!=0 && db->nProgressOps==1 ){\n      if( ryeosNativeInGateActive() || db->xProgress(db->pProgressArg) ){",
+    )?;
+    // Online backup copies pages around the commit path; it refuses while
+    // the native arena exists.
+    replace(
+        &mut s,
+        "SQLITE_API sqlite3_backup *sqlite3_backup_init(\n  sqlite3* pDestDb,                     /* Database to write to */\n  const char *zDestDb,                  /* Name of database within pDestDb */\n  sqlite3* pSrcDb,                      /* Database connection to read from */\n  const char *zSrcDb                    /* Name of database within pSrcDb */\n){\n  sqlite3_backup *p;                    /* Value to return */\n",
+        "SQLITE_API sqlite3_backup *sqlite3_backup_init(\n  sqlite3* pDestDb,                     /* Database to write to */\n  const char *zDestDb,                  /* Name of database within pDestDb */\n  sqlite3* pSrcDb,                      /* Database connection to read from */\n  const char *zSrcDb                    /* Name of database within pSrcDb */\n){\n  sqlite3_backup *p;                    /* Value to return */\n  if( !ryeosNativeBackupGate() ){ (void)SQLITE_MISUSE_BKPT; return 0; }\n",
+    )?;
+    // A database without a journal could not roll back a refused commit.
+    replace(
+        &mut s,
+        "case OP_JournalMode: {    /* out2 */\n  Btree *pBt;                     /* Btree to change journal mode of */\n  Pager *pPager;                  /* Pager associated with pBt */\n  int eNew;                       /* New journal mode */\n  int eOld;                       /* The old journal mode */\n#ifndef SQLITE_OMIT_WAL\n  const char *zFilename;          /* Name of database file for pPager */\n#endif\n\n  pOut = out2Prerelease(p, pOp);\n  eNew = pOp->p3;\n",
+        "case OP_JournalMode: {    /* out2 */\n  Btree *pBt;                     /* Btree to change journal mode of */\n  Pager *pPager;                  /* Pager associated with pBt */\n  int eNew;                       /* New journal mode */\n  int eOld;                       /* The old journal mode */\n#ifndef SQLITE_OMIT_WAL\n  const char *zFilename;          /* Name of database file for pPager */\n#endif\n\n  pOut = out2Prerelease(p, pOp);\n  eNew = pOp->p3;\n#if defined(__linux__) && SQLITE_OS_UNIX && !defined(SQLITE_OMIT_WAL)\n  if( eNew==PAGER_JOURNALMODE_OFF ){ rc = SQLITE_MISUSE_BKPT; goto abort_due_to_error; }\n#endif\n",
     )?;
     s.push_str("\n#include \"ryeos_binding.c\"\n");
     let output = out_dir.join("ryeos_sqlite.c");

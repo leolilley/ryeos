@@ -95,8 +95,34 @@ impl OfflineNativeAuthority for TestAuthority {
 pub struct TestNativeHost {
     envelope: TestNativeEnvelope,
     live: Option<OfflineNativeHost>,
+    /// Retirements to run against the finished backend terminal before the
+    /// host releases, such as closed generation leases.
+    after_backend: std::cell::RefCell<Vec<AfterBackend>>,
     _serial: MutexGuard<'static, ()>,
     _thread: PhantomData<*const ()>,
+}
+
+/// One retirement run against the finished backend terminal.
+pub type AfterBackend = Box<dyn FnOnce(&crate::OriginalNativeTerminal) -> Result<()>>;
+
+/// Finish the backend, run every after-backend retirement against its
+/// terminal, then release. A refusal keeps the host.
+fn finish_with(
+    mut live: OfflineNativeHost,
+    after_backend: Vec<AfterBackend>,
+) -> std::result::Result<crate::offline_host::OfflineNativeReleased, crate::offline_host::OfflineNativeRetained> {
+    let backend = match live.finish_backend() {
+        Ok(backend) => backend,
+        Err(error) => return Err(crate::offline_host::OfflineNativeRetained { host: live, error }),
+    };
+    for retire in after_backend {
+        if let Err(error) = retire(&backend) {
+            drop(backend);
+            return Err(crate::offline_host::OfflineNativeRetained { host: live, error });
+        }
+    }
+    drop(backend);
+    live.release()
 }
 
 fn install(envelope: TestNativeEnvelope) -> std::result::Result<OfflineNativeHost, String> {
@@ -204,6 +230,173 @@ pub fn issue_offline_host(
     }
 }
 
+/// Environment variable naming the one test a re-executed child runs.
+const ISOLATED_TEST: &str = "LILLUX_SQLITE_ISOLATED_TEST";
+/// Stdout prefix of the outcome line an isolated child reports.
+const ISOLATED_OUTCOME: &str = "lillux-sqlite isolated outcome: ";
+
+/// The harness name of `test`, given as `concat!(module_path!(), "::name")`:
+/// the harness names tests without the crate segment.
+fn harness_test_name(test: &str) -> &str {
+    test.split_once("::").map_or(test, |(_, name)| name)
+}
+
+/// Whether this process is the isolated child [`run_isolated`] started for
+/// `test`.
+pub fn is_isolated_child(test: &str) -> bool {
+    std::env::var_os(ISOLATED_TEST)
+        .is_some_and(|running| running.as_os_str() == OsStr::new(harness_test_name(test)))
+}
+
+/// Run `test` alone in a re-executed child of this test binary and return
+/// the outcome it reported through [`end_isolated_process`]. For a scenario
+/// that leaves a native owner no close can settle, such as a keeper poisoned
+/// by a replaced database: that owner ends with the child's process, as it
+/// ends with a supervisor's, and this process's arena never holds it. Call
+/// it while holding no host. Panics if the child fails or reports nothing.
+pub fn run_isolated(test: &str) -> String {
+    let name = harness_test_name(test);
+    let binary = std::env::current_exe().expect("isolated test binary path");
+    let output = std::process::Command::new(binary)
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(ISOLATED_TEST, name)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn isolated test child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "isolated test {name} failed ({}):\n{stdout}\n{stderr}",
+        output.status
+    );
+    // The harness exits successfully when its filter matches nothing, so an
+    // outcome line is the proof that the scenario ran.
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(ISOLATED_OUTCOME))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("isolated test {name} reported no outcome:\n{stdout}\n{stderr}"))
+}
+
+/// Report `outcome` and end this isolated child's process with `retained`
+/// still owned: the host, and every native owner whose close was refused.
+/// Process exit is the only end such an owner has; nothing here closes,
+/// drops or forgets it. Panics in any process [`run_isolated`] did not start,
+/// so an ordinary test can never end the shared test binary.
+pub fn end_isolated_process<R>(retained: R, outcome: &str) -> ! {
+    assert!(
+        std::env::var_os(ISOLATED_TEST).is_some(),
+        "only a child started by run_isolated may end its process"
+    );
+    let mut stdout = std::io::stdout().lock();
+    std::io::Write::write_all(
+        &mut stdout,
+        // The harness has already printed this test's name without a line
+        // break; start a fresh line so the outcome is a line of its own.
+        format!("\n{ISOLATED_OUTCOME}{}\n", outcome.replace('\n', " ")).as_bytes(),
+    )
+    .and_then(|()| std::io::Write::flush(&mut stdout))
+    .expect("report isolated outcome");
+    let _retained = retained;
+    std::process::exit(0)
+}
+
+/// Stdout prefix of the line an isolated peer prints once it holds what
+/// its parent waits on.
+const ISOLATED_READY: &str = "lillux-sqlite isolated peer ready";
+
+/// A re-executed child of this test binary that runs `test` alone beside
+/// its parent: started by [`spawn_isolated_peer`], it holds something the
+/// parent tests against, such as a database writer lock, until the parent
+/// lets it go through [`IsolatedPeer::finish`].
+pub struct IsolatedPeer {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+/// Start `test` in a re-executed child, hand it `argument` as its first
+/// stdin line, and return once it reports ready through
+/// [`isolated_peer_ready`]. Panics if the child exits before it is ready.
+pub fn spawn_isolated_peer(test: &str, argument: &str) -> IsolatedPeer {
+    use std::io::{BufRead, Write};
+    let name = harness_test_name(test);
+    let binary = std::env::current_exe().expect("isolated peer binary path");
+    let mut child = std::process::Command::new(binary)
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(ISOLATED_TEST, name)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn isolated peer");
+    let mut stdin = child.stdin.take().expect("isolated peer stdin");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("isolated peer stdout"));
+    writeln!(stdin, "{}", argument.replace('\n', " ")).and_then(|()| stdin.flush()).expect("hand the isolated peer its argument");
+    let mut seen = String::new();
+    loop {
+        let mut line = String::new();
+        let read = stdout.read_line(&mut line).expect("read isolated peer stdout");
+        if read == 0 {
+            let status = child.wait().expect("wait for isolated peer");
+            panic!("isolated peer {name} exited ({status}) before it was ready:\n{seen}");
+        }
+        if line.trim_end().ends_with(ISOLATED_READY) {
+            return IsolatedPeer { child, stdin, stdout };
+        }
+        seen.push_str(&line);
+    }
+}
+
+impl IsolatedPeer {
+    /// Let the peer go: close its stdin, then return the outcome it reported
+    /// through [`isolated_peer_outcome`] once it exits. Panics if the peer
+    /// fails or reports nothing.
+    pub fn finish(self) -> String {
+        use std::io::Read;
+        let Self { mut child, stdin, mut stdout } = self;
+        drop(stdin);
+        let mut rest = String::new();
+        stdout.read_to_string(&mut rest).expect("read isolated peer stdout");
+        let status = child.wait().expect("wait for isolated peer");
+        assert!(status.success(), "isolated peer failed ({status}):\n{rest}");
+        rest.lines()
+            .find_map(|line| line.strip_prefix(ISOLATED_OUTCOME))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("isolated peer reported no outcome:\n{rest}"))
+    }
+}
+
+/// The argument [`spawn_isolated_peer`] handed this peer.
+pub fn isolated_peer_argument() -> String {
+    assert!(std::env::var_os(ISOLATED_TEST).is_some(), "only an isolated peer reads a peer argument");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).expect("read isolated peer argument");
+    line.trim_end_matches('\n').to_owned()
+}
+
+/// Report this peer ready, then wait until its parent lets it go.
+pub fn isolated_peer_ready() {
+    use std::io::{Read, Write};
+    assert!(std::env::var_os(ISOLATED_TEST).is_some(), "only an isolated peer reports ready");
+    let mut stdout = std::io::stdout().lock();
+    // The harness has already printed this test's name without a line break.
+    write!(stdout, "\n{ISOLATED_READY}\n").and_then(|()| stdout.flush()).expect("report isolated peer ready");
+    drop(stdout);
+    let mut rest = Vec::new();
+    std::io::stdin().read_to_end(&mut rest).expect("wait for the isolated peer's release");
+}
+
+/// Report this peer's outcome; the test then returns normally.
+pub fn isolated_peer_outcome(outcome: &str) {
+    use std::io::Write;
+    assert!(std::env::var_os(ISOLATED_TEST).is_some(), "only an isolated peer reports a peer outcome");
+    let mut stdout = std::io::stdout().lock();
+    write!(stdout, "\n{ISOLATED_OUTCOME}{}\n", outcome.replace('\n', " "))
+        .and_then(|()| stdout.flush())
+        .expect("report isolated peer outcome");
+}
+
 impl TestNativeHost {
     /// Default envelope: 16 MiB storage, 64 tickets, 10^9 allocator steps.
     pub fn acquire() -> Self {
@@ -222,7 +415,13 @@ impl TestNativeHost {
                 panic!("TestNativeHost {census}");
             }
         };
-        Self { envelope, live: Some(live), _serial: serial, _thread: PhantomData }
+        Self {
+            envelope,
+            live: Some(live),
+            after_backend: std::cell::RefCell::new(Vec::new()),
+            _serial: serial,
+            _thread: PhantomData,
+        }
     }
 
 
@@ -311,6 +510,18 @@ impl TestNativeHost {
         result.unwrap_or_else(|error| panic!("test bound SQL refused: {error:#}"))
     }
 
+    /// Native work that owns no ticket of its own, such as a stopped store's
+    /// observations and role mutations, inside an allocator scope of this
+    /// host's arena.
+    pub fn scope<T>(&self, work: impl FnOnce() -> T) -> T {
+        self.factory().raw_scope_for_test(work).expect("raw test allocator scope")
+    }
+    /// Native cleanup work, such as stopped intake, in a cleanup scope of
+    /// this host's arena, the way a node runs it inside its original
+    /// cleanup scope.
+    pub fn cleanup_scope<T>(&self, work: impl FnOnce() -> T) -> T {
+        self.factory().raw_cleanup_scope_for_test(work).expect("raw test cleanup scope")
+    }
     /// Close a connection and record its terminal in this host's census.
     pub fn close(&self, connection: OriginalNativeConnection) {
         let closed = match connection.close() {
@@ -345,6 +556,13 @@ impl TestNativeHost {
         }
     }
 
+    /// Run `retire` against the finished backend terminal when this host
+    /// finishes, before it releases. A refusal leaks the host like any other
+    /// refused teardown.
+    pub fn after_backend(&self, retire: AfterBackend) {
+        self.after_backend.borrow_mut().push(retire);
+    }
+
     /// Issued ticket count and recorded terminals plus leases.
     pub fn ticket_census(&self) -> (u32, usize) {
         self.live().ticket_census().unwrap_or((u32::MAX, 0))
@@ -354,7 +572,7 @@ impl TestNativeHost {
     /// plain facts and the region release fact.
     pub fn release(mut self) -> crate::offline_host::OfflineNativeReleased {
         let live = self.live.take().expect("live test host present");
-        let finished = live.finish();
+        let finished = finish_with(live, self.after_backend.take());
         *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
         match finished {
             Ok(released) => released,
@@ -369,7 +587,7 @@ impl TestNativeHost {
     /// guard, for suites that need more than one envelope of tickets.
     pub fn cycle(&mut self) {
         let live = self.live.take().expect("live test host present");
-        if let Err(retained) = live.finish() {
+        if let Err(retained) = finish_with(live, self.after_backend.take()) {
             let census = retain_leaked(retained);
             panic!("TestNativeHost cycle leaked its arena: {census}");
         }
@@ -386,7 +604,7 @@ impl TestNativeHost {
 impl Drop for TestNativeHost {
     fn drop(&mut self) {
         let Some(live) = self.live.take() else { return };
-        let finished = live.finish();
+        let finished = finish_with(live, self.after_backend.take());
         *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
         if let Err(retained) = finished {
             let census = retain_leaked(retained);
@@ -407,16 +625,11 @@ impl TestNativeHost {
         self.live.as_mut().expect("live test host present outside teardown")
     }
     /// Arm one ticket around a raw open in this crate's tests.
-    pub(crate) fn armed<T>(&self, open: impl FnOnce() -> T) -> (T, crate::native::RawTestTicket) {
-        self.factory().arm_raw_for_test(open).expect("armed raw test ticket")
-    }
-    /// Raw SQLite work inside an allocator scope of this host's arena.
-    pub(crate) fn scope<T>(&self, work: impl FnOnce() -> T) -> T {
-        self.factory().raw_scope_for_test(work).expect("raw test allocator scope")
-    }
-    /// Raw native cleanup work, such as stopped intake, in a cleanup scope.
-    pub(crate) fn cleanup_scope<T>(&self, work: impl FnOnce() -> T) -> T {
-        self.factory().raw_cleanup_scope_for_test(work).expect("raw test cleanup scope")
+    pub(crate) fn armed<T: crate::native::RawTestConnection>(
+        &self,
+        open: impl FnOnce() -> T,
+    ) -> (T, crate::native::RawTestTicket) {
+        self.factory().arm_raw_for_test(self.destination(), open).expect("armed raw test ticket")
     }
     /// Recorded shared-mapping bytes and nonempty ledger slots.
     pub(crate) fn shared_census(&self) -> (u64, u32) {
@@ -1266,7 +1479,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("aliased.sqlite3");
         let (connection, ticket) = factory
-            .arm_raw_for_test(|| rusqlite::Connection::open(&path).unwrap())
+            .arm_raw_for_test(host.destination().unwrap(), || rusqlite::Connection::open(&path).unwrap())
             .unwrap();
         factory
             .raw_scope_for_test(|| connection.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);").unwrap())

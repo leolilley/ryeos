@@ -76,6 +76,22 @@ impl NativeHostRegion {
         self.release_credit = Some(unsafe { HostReleaseCredit::prepaid(release_steps) });
         checkpoint()
     }
+    /// Re-check, before new native work is admitted against this region,
+    /// that its backing's physical residency still holds.
+    pub fn confirm_backing_residency(&self) -> Result<()> {
+        self.require_process()?;
+        self.backing
+            .as_ref()
+            .context("native host backing absent")?
+            .confirm_residency()
+            .map_err(anyhow::Error::msg)
+    }
+    /// The proof that keeps this region's backing resident, once residency
+    /// completed. An admission keeps a copy to re-check without a back-edge
+    /// to this controller.
+    pub fn backing_residency_proof(&self) -> Option<lillux::process_control::ResidencyProof> {
+        self.backing.as_ref().and_then(|backing| backing.residency_proof().cloned())
+    }
     /// Further pre-map debits against the retained raw counter.
     pub fn debit_raw(&self, steps: u64, cleanup: bool) -> Result<()> {
         self.require_process()?;

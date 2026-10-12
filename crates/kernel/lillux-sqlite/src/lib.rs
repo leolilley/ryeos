@@ -191,6 +191,20 @@ impl SqliteInspectionProductionPermit {
         }
         self.control.control().checkpoint()
     }
+    /// The callback owner, for a weak reference held by the commit gate.
+    pub(crate) fn control_owner(&self) -> &Arc<dyn SqliteInspectionProductionControl> {
+        match &self.control {
+            ProductionControlOwner::Shared(control) => control,
+            ProductionControlOwner::Region { control, core: _ } => control,
+        }
+    }
+    /// The resident producer cell index, copied; grants no admission.
+    pub(crate) fn region_cell(&self) -> Option<OriginalNativeProducerCellIndex> {
+        match &self.control {
+            ProductionControlOwner::Shared(_) => None,
+            ProductionControlOwner::Region { control: _, core } => Some(core.index()),
+        }
+    }
     /// Only synchronous creation/copy intervals use this handoff. Native
     /// intervals acknowledge exclusively through actual Closed/Released proof.
     pub fn acknowledge_synchronous(&self) -> Result<()> {
@@ -1318,14 +1332,9 @@ pub fn install_inspection_sql_work(
     work.checkpoint()?;
     work.debit_vm_steps(1)?;
     connection.busy_timeout(std::time::Duration::ZERO)?;
-    // A debit panic is caught by the SQLite callback trampoline; the shared
-    // work owner remains authoritative and refuses the next step.
-    let work = std::panic::AssertUnwindSafe(work);
-    connection.progress_handler(1, Some(move || {
-        // Borrow the whole wrapper so the closure does not capture the inner field.
-        let work = &work;
-        work.0.debit_vm_steps(1).is_err()
-    }));
+    // The step hook catches a debit panic and interrupts the statement; a
+    // panicking opcode is never run uncharged.
+    connection.progress_handler(1, Some(native::native_step_hook(move || work.debit_vm_steps(1), None, None)));
     Ok(())
 }
 
@@ -4276,14 +4285,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn guarded_evidence_read_rejects_live_sqlite_role_aliases() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime.clone(), OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        owner.establish_wal_binding().unwrap();
+        let (owner, ticket) = armed_bound(&host, &runtime);
+        host.scope(|| owner.establish_wal_binding().unwrap());
         for (index, role) in [
             "scheduler.sqlite3",
             "scheduler.sqlite3-wal",
@@ -4298,21 +4305,19 @@ mod tests {
                 read_regular_without_sqlite_alias(&runtime, OsStr::new(&name), 65_536).is_err()
             );
         }
-        owner.require_binding().unwrap();
-        owner.close().unwrap();
+        host.scope(|| owner.require_binding().unwrap());
+        close_bound(&host, owner, ticket);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn guarded_evidence_read_uses_pin_after_path_is_replaced_by_sqlite_alias() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime.clone(), OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        owner.establish_wal_binding().unwrap();
+        let (owner, ticket) = armed_bound(&host, &runtime);
+        host.scope(|| owner.establish_wal_binding().unwrap());
         std::fs::write(tmp.path().join("record"), b"original").unwrap();
         let pin = runtime
             .open_mount_entry(OsStr::new("record"))
@@ -4327,8 +4332,8 @@ mod tests {
         assert_eq!(binding::read_unbound_regular(&pin, 8).unwrap(), b"original");
         assert!(ensure_guarded_read_name(&runtime, OsStr::new("record"), &pin).is_err());
         assert!(read_regular_without_sqlite_alias(&runtime, OsStr::new("record"), 65_536).is_err());
-        owner.require_binding().unwrap();
-        owner.close().unwrap();
+        host.scope(|| owner.require_binding().unwrap());
+        close_bound(&host, owner, ticket);
     }
 
     use super::*;
@@ -4635,26 +4640,28 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn retirement_reader_probe_child() {
-        let _serial = crate::test_host::serial_guard();
         let Some(path) = std::env::var_os("LILLUX_SQLITE_RETIREMENT_READER") else {
             return;
         };
+        let host = crate::test_host::TestNativeHost::acquire();
         let ready = std::env::var_os("LILLUX_SQLITE_RETIREMENT_READY").unwrap();
-        let connection = Connection::open(path).unwrap();
-        connection.busy_timeout(std::time::Duration::ZERO).unwrap();
-        connection
-            .execute_batch("BEGIN; SELECT value FROM custody;")
-            .unwrap();
+        let (connection, ticket) = armed_stock(&host, std::path::Path::new(&path));
+        host.scope(|| {
+            connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+            connection
+                .execute_batch("BEGIN; SELECT value FROM custody;")
+                .unwrap();
+        });
         std::fs::write(ready, b"reader holds actual SQLite transaction").unwrap();
         // Bounded fallback even if supervising parent crashes.
         std::thread::sleep(std::time::Duration::from_secs(20));
-        connection.execute_batch("ROLLBACK;").unwrap();
-        connection.close().unwrap();
+        host.scope(|| connection.execute_batch("ROLLBACK;").unwrap());
+        close_armed(&host, connection, ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn external_reader_holds_drain_without_role_effect_then_same_owner_retries() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         struct Supervised(std::process::Child);
         impl Drop for Supervised {
             fn drop(&mut self) {
@@ -4663,11 +4670,10 @@ mod tests {
             }
         }
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap();
-        owner.establish_wal_binding().unwrap();
+        let (owner, ticket) = armed_bound(&host, &runtime);
+        host.scope(|| owner.establish_wal_binding().unwrap());
         let ready = tmp.path().join("reader-ready");
         let mut child = Supervised(
             std::process::Command::new(std::env::current_exe().unwrap())
@@ -4696,12 +4702,14 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let captured = owner.capture_projection_retirement([0x71; 16]).unwrap();
+        let captured = host.scope(|| owner.capture_projection_retirement([0x71; 16]).unwrap());
         let coordinates = captured.captured_roles().clone();
-        let failure = captured
-            .drain_sql()
-            .err()
-            .expect("external SHM read lock holds retirement");
+        let failure = host.scope(|| {
+            captured
+                .drain_sql()
+                .err()
+                .expect("external SHM read lock holds retirement")
+        });
         assert!(matches!(
             failure.error(),
             SqliteProjectionRetirementError::Barrier(_)
@@ -4717,62 +4725,95 @@ mod tests {
         }
         child.0.kill().unwrap();
         child.0.wait().unwrap();
-        let drained = failure.retry_drain().unwrap();
+        let drained = host.scope(|| failure.retry_drain().unwrap());
+        // The drain closed the SQL connection this ticket opened.
+        host.retire_raw(ticket);
         assert_eq!(drained.role_facts().generation, [0x71; 16]);
         assert_external_write_busy(&tmp.path().join("scheduler.sqlite3"));
         drained.abort().unwrap();
     }
     #[test]
     #[cfg(target_os = "linux")]
-    fn preexisting_stock_peer_refuses_capture_until_actual_close() {
-        let _serial = crate::test_host::serial_guard();
+    fn stock_peer_descriptor_parked_by_live_owner_refuses_capture_until_owner_closes() {
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owner =
-            BoundSqliteConnection::open_existing(runtime, OsStr::new("scheduler.sqlite3")).unwrap();
-        owner.establish_wal_binding().unwrap();
-        let peer = Connection::open(tmp.path().join("scheduler.sqlite3")).unwrap();
-        peer.execute_batch("BEGIN; SELECT value FROM custody;")
-            .unwrap();
-        let failure = owner
-            .capture_projection_retirement([0x61; 16])
-            .err()
-            .expect("physical peer refuses capture");
+        let (owner, ticket) = armed_bound(&host, &runtime);
+        host.scope(|| owner.establish_wal_binding().unwrap());
+        // 1. A live in-process stock peer on the main role refuses capture.
+        let (peer, peer_ticket) = armed_stock(&host, &tmp.path().join("scheduler.sqlite3"));
+        host.scope(|| peer.execute_batch("BEGIN; SELECT value FROM custody;").unwrap());
+        let failure = host.scope(|| {
+            owner
+                .capture_projection_retirement([0x61; 16])
+                .err()
+                .expect("physical peer refuses capture")
+        });
         assert!(matches!(
             failure.owner(),
             SqliteProjectionRetirementOwner::Uncaptured(_)
         ));
-        peer.execute_batch("ROLLBACK;").unwrap();
-        peer.close().unwrap();
-        failure
-            .retry_capture([0x61; 16])
-            .unwrap()
-            .drain_sql()
-            .unwrap()
-            .abort()
-            .unwrap();
+        host.scope(|| peer.execute_batch("ROLLBACK;").unwrap());
+        close_armed(&host, peer, peer_ticket);
+        // 2. Closing the peer does not close its main-role descriptor. A WAL
+        // connection keeps a SHARED lock on its main file for its whole life,
+        // so the live owner holds a POSIX lock on the main inode. POSIX locks
+        // belong to the process and any close() of that inode drops them, so
+        // SQLite's unixClose parks the peer's main descriptor on the inode's
+        // pending list instead of closing it, until the inode's last lock is
+        // released. The gate still tracks that open descriptor as a foreign
+        // descriptor on the role, and capture fails closed while it exists.
+        let failure = match host.scope(|| failure.retry_capture([0x61; 16])) {
+            Ok(_) => panic!("capture admitted while the peer's main descriptor is parked"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure.error(),
+            SqliteProjectionRetirementError::Capture(_)
+        ));
+        // 3. Closing the owner releases its lock, and SQLite closes the parked
+        // descriptor with it. A fresh owner then captures, drains and aborts
+        // the role cleanly.
+        let SqliteProjectionRetirementFailure {
+            owner: SqliteProjectionRetirementOwner::Uncaptured(owner),
+            ..
+        } = failure
+        else {
+            panic!("refused capture keeps the uncaptured owner");
+        };
+        close_bound(&host, owner, ticket);
+        let (owner, ticket) = armed_bound(&host, &runtime);
+        host.scope(|| owner.establish_wal_binding().unwrap());
+        let drained = host.scope(|| {
+            owner
+                .capture_projection_retirement([0x62; 16])
+                .unwrap()
+                .drain_sql()
+                .unwrap()
+        });
+        // The drain closed the SQL connection this ticket opened.
+        host.retire_raw(ticket);
+        drained.abort().unwrap();
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn absent_main_refuses_without_creating_database_or_sidecars() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        assert!(
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).is_err()
-        );
+        armed_bound_refusal(&host, &pin, "scheduler.sqlite3");
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn journal_sources_refuse_without_mutation() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"retained source").unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3-journal"), b"recovery").unwrap();
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        assert!(
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).is_err()
-        );
+        armed_bound_refusal(&host, &pin, "scheduler.sqlite3");
         assert_eq!(
             std::fs::read(tmp.path().join("scheduler.sqlite3")).unwrap(),
             b"retained source"
@@ -5309,7 +5350,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_q_u_r_sources_move_to_new_q_without_canonical_sql_open() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         for source in [
             StoppedSqliteRoleSource::Quarantine {
                 generation: [1; 16],
@@ -5323,7 +5364,7 @@ mod tests {
             },
         ] {
             let tmp = tempfile::tempdir().unwrap();
-            seed_wal(tmp.path());
+            seed_wal_on(&host, tmp.path());
             let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
             let mut skeleton = stopped_plan_fixture(
                 &runtime,
@@ -5350,9 +5391,10 @@ mod tests {
                     StoppedSqliteRoleSource::Absent,
                 ],
             );
-            let mut owner =
-                DrainedSqliteProjection::capture_stopped_projection(runtime, plan.clone()).unwrap();
-            let observed = owner.observe_stopped_projection().unwrap();
+            let mut owner = host.cleanup_scope(|| {
+                DrainedSqliteProjection::capture_stopped_projection(runtime, plan.clone()).unwrap()
+            });
+            let observed = host.scope(|| owner.observe_stopped_projection().unwrap());
             assert!(observed.ready);
             assert_eq!(observed.plan, plan);
             assert_eq!(observed.coordinates.len(), 100);
@@ -5366,7 +5408,7 @@ mod tests {
             );
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
             assert!(tmp.path().join(&selected).exists());
-            owner.quarantine_role(SqliteRole::Main).unwrap();
+            host.scope(|| owner.quarantine_role(SqliteRole::Main).unwrap());
             assert!(!tmp.path().join(&selected).exists());
             assert!(
                 tmp.path()
@@ -5374,8 +5416,10 @@ mod tests {
                     .exists()
             );
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
-            owner.purge_role(SqliteRole::Main).unwrap();
-            owner.release().unwrap();
+            host.scope(|| {
+                owner.purge_role(SqliteRole::Main).unwrap();
+                owner.release().unwrap();
+            });
         }
     }
     #[test]
@@ -5444,7 +5488,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_independent_sidecars_and_all_absent_never_construct_main() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         for present in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
             let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
@@ -5468,15 +5512,18 @@ mod tests {
                 [StoppedSqliteRoleSource::Absent; 3]
             };
             let plan = stopped_plan_fixture(&runtime, tmp.path(), sources);
-            let mut owner =
-                DrainedSqliteProjection::capture_stopped_projection(runtime, plan).unwrap();
+            let mut owner = host.cleanup_scope(|| {
+                DrainedSqliteProjection::capture_stopped_projection(runtime, plan).unwrap()
+            });
             assert!(owner.role_facts().roles[0].original.is_none());
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
-            for role in SqliteRole::all() {
-                owner.quarantine_role(role).unwrap();
-                owner.purge_role(role).unwrap();
-            }
-            owner.release().unwrap();
+            host.scope(|| {
+                for role in SqliteRole::all() {
+                    owner.quarantine_role(role).unwrap();
+                    owner.purge_role(role).unwrap();
+                }
+                owner.release().unwrap();
+            });
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
         }
     }
@@ -5577,9 +5624,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_partial_pin_replacement_refuses_retry_and_cleanup_preserves_foreign() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let plan = stopped_plan_fixture(
             &runtime,
@@ -5591,22 +5638,23 @@ mod tests {
             ],
         );
         FAIL_STOPPED_AFTER_ACQUIRE.with(|flag| flag.set(true));
-        let failure =
-            DrainedSqliteProjection::capture_stopped_projection(runtime, plan.clone()).unwrap_err();
-        let failure = failure.retry_release().unwrap_err(); // pending normal release refuses
+        let failure = host.cleanup_scope(|| {
+            DrainedSqliteProjection::capture_stopped_projection(runtime, plan.clone()).unwrap_err()
+        });
+        let failure = host.scope(|| failure.retry_release().unwrap_err()); // pending normal release refuses
         std::fs::rename(
             tmp.path().join("scheduler.sqlite3"),
             tmp.path().join("retained-original.fixture"),
         )
         .unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"foreign replacement").unwrap();
-        let failure = failure.retry_stopped_projection(&plan).unwrap_err();
-        let observed = match failure.owner() {
+        let failure = host.scope(|| failure.retry_stopped_projection(&plan).unwrap_err());
+        let observed = host.scope(|| match failure.owner() {
             SqliteProjectionRetirementOwner::Drained(owner) => {
                 owner.observe_stopped_projection().unwrap()
             }
             _ => panic!("same context"),
-        };
+        });
         assert!(!observed.ready);
         assert_eq!(
             observed.roles[0].as_ref().unwrap().inode,
@@ -5622,7 +5670,7 @@ mod tests {
                         SqliteRoleCoordinateObservation::ForeignRegular { .. }
                     ))
         );
-        failure.abort().unwrap();
+        host.scope(|| failure.abort().unwrap());
         assert_eq!(
             std::fs::read(tmp.path().join("scheduler.sqlite3")).unwrap(),
             b"foreign replacement"
@@ -5631,9 +5679,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_duplicate_candidates_digest_mismatch_and_generation_exhaustion_hold_unchanged() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let plan = stopped_plan_fixture(
             &runtime,
@@ -5650,35 +5698,40 @@ mod tests {
             .path()
             .join("scheduler-retirement.role.01010101010101010101010101010101.main.quarantine");
         std::fs::hard_link(&canonical, &duplicate).unwrap();
-        let failure =
+        let failure = host.cleanup_scope(|| {
             DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
-                .unwrap_err();
-        failure.abort().unwrap();
+                .unwrap_err()
+        });
+        host.scope(|| failure.abort().unwrap());
         assert_eq!(std::fs::read(&duplicate).unwrap(), before);
         std::fs::remove_file(duplicate).unwrap();
         let mut exhausted = plan.clone();
         exhausted.generations.push([5; 16]);
-        let failure =
+        let failure = host.cleanup_scope(|| {
             DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), exhausted)
-                .unwrap_err();
+                .unwrap_err()
+        });
         assert!(matches!(
             failure.owner(),
             SqliteProjectionRetirementOwner::UnacquiredStopped { .. }
         ));
-        failure.abort().unwrap();
+        host.scope(|| failure.abort().unwrap());
         let mut wrong = plan.clone();
         wrong.roles[0].current.as_mut().unwrap().content_sha256 = Some("0".repeat(64));
-        let failure = DrainedSqliteProjection::capture_stopped_projection(runtime, wrong.clone())
-            .unwrap_err();
+        let failure = host.cleanup_scope(|| {
+            DrainedSqliteProjection::capture_stopped_projection(runtime, wrong.clone()).unwrap_err()
+        });
         assert!(matches!(
             failure.owner(),
             SqliteProjectionRetirementOwner::Drained(_)
         ));
         // Digest refusal occurs AFTER actual barrier acquisition; same wrong
         // plan retries that owner at native phase2, never a constructor.
-        let failure = failure.retry_stopped_projection(&wrong).unwrap_err();
-        let failure = failure.retry_stopped_projection(&plan).unwrap_err(); // changed plan cannot substitute authority
-        failure.abort().unwrap();
+        host.scope(|| {
+            let failure = failure.retry_stopped_projection(&wrong).unwrap_err();
+            let failure = failure.retry_stopped_projection(&plan).unwrap_err(); // changed plan cannot substitute authority
+            failure.abort().unwrap();
+        });
         assert_eq!(std::fs::read(canonical).unwrap(), before);
     }
     #[cfg(target_os = "linux")]
@@ -5723,14 +5776,14 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn stopped_relative_temp_and_xaccess_child() {
-        let _serial = crate::test_host::serial_guard();
         if std::env::var_os("RYEOS_STOPPED_RELATIVE_TEMP_PROBE").is_none() {
             return;
         }
+        let host = crate::test_host::TestNativeHost::acquire();
         assert_eq!(std::env::var("SQLITE_TMPDIR").unwrap(), "relative-temp");
         assert_eq!(std::env::var("TMPDIR").unwrap(), "relative-temp");
         let tmp = tempfile::tempdir().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
         let plan = stopped_plan_fixture(
             &runtime,
@@ -5741,10 +5794,14 @@ mod tests {
                 StoppedSqliteRoleSource::Absent,
             ],
         );
-        let owner = DrainedSqliteProjection::capture_stopped_projection(runtime, plan).unwrap();
-        assert_eq!(stock_vfs_exists(c"."), 1);
-        assert_eq!(stock_vfs_exists(c"relative-temp"), 1);
-        unsafe {
+        let owner = host.cleanup_scope(|| {
+            DrainedSqliteProjection::capture_stopped_projection(runtime, plan).unwrap()
+        });
+        host.scope(|| {
+            assert_eq!(stock_vfs_exists(c"."), 1);
+            assert_eq!(stock_vfs_exists(c"relative-temp"), 1);
+        });
+        host.scope(|| unsafe {
             let vfs = libsqlite3_sys::sqlite3_vfs_find(c"unix".as_ptr());
             assert!(!vfs.is_null());
             // Child isolation keeps the configured syscall override out of
@@ -5789,12 +5846,12 @@ mod tests {
                 libsqlite3_sys::SQLITE_OK
             );
             std::alloc::dealloc(storage, layout);
-        }
+        });
         assert!(
             TEMP_PROBE_SAW_RELATIVE.with(|flag| flag.get()),
             "SQLite must use configured relative temp directory while retirement claim is active"
         );
-        owner.abort().unwrap();
+        host.scope(|| owner.abort().unwrap());
     }
     #[test]
     #[cfg(target_os = "linux")]
@@ -5830,10 +5887,51 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-    fn seed_wal(root: &std::path::Path) {
-        let connection = Connection::open(root.join("scheduler.sqlite3")).unwrap();
-        connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
-        connection.close().unwrap();
+    /// Bound owner of `scheduler.sqlite3` beneath `runtime` on one armed
+    /// ticket; close it with `close_bound`.
+    #[cfg(target_os = "linux")]
+    pub(super) fn armed_bound(
+        host: &crate::test_host::TestNativeHost,
+        runtime: &Arc<PinnedDirectory>,
+    ) -> (BoundSqliteConnection, crate::native::RawTestTicket) {
+        host.armed(|| {
+            BoundSqliteConnection::open_existing(runtime.clone(), OsStr::new("scheduler.sqlite3"))
+                .unwrap()
+        })
+    }
+    /// Bound open of `name` beneath `runtime` on one armed ticket that the
+    /// binding itself must refuse, never the unarmed gate. The refused open's
+    /// retained owner is released and the ticket retired before returning.
+    #[cfg(target_os = "linux")]
+    fn armed_bound_refusal(
+        host: &crate::test_host::TestNativeHost,
+        runtime: &Arc<PinnedDirectory>,
+        name: &str,
+    ) -> String {
+        let (opened, ticket) =
+            host.armed(|| BoundSqliteConnection::open_existing(runtime.clone(), OsStr::new(name)));
+        let failure = match opened {
+            Ok(owner) => {
+                close_bound(host, owner, ticket);
+                panic!("armed bound open of {name} was admitted");
+            }
+            Err(failure) => failure,
+        };
+        let error = failure.error().to_string();
+        failure.retry_close().unwrap();
+        host.retire_raw(ticket);
+        assert_ne!(error, "bound SQLite acquisition refused (21)",
+            "armed bound open reached the unarmed gate");
+        error
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn close_bound(
+        host: &crate::test_host::TestNativeHost,
+        owner: BoundSqliteConnection,
+        ticket: crate::native::RawTestTicket,
+    ) {
+        host.scope(|| owner.close().unwrap());
+        host.retire_raw(ticket);
     }
     /// The binding's refusal of a stock open that would alias a held role.
     #[cfg(target_os = "linux")]
@@ -5867,74 +5965,59 @@ mod tests {
     }
     /// Stock connection on one armed ticket; close it with `close_armed`.
     #[cfg(target_os = "linux")]
-    fn armed_stock(host: &crate::test_host::TestNativeHost, path: &std::path::Path)
+    pub(super) fn armed_stock(host: &crate::test_host::TestNativeHost, path: &std::path::Path)
         -> (Connection, crate::native::RawTestTicket) {
         host.armed(|| Connection::open(path).unwrap())
     }
     #[cfg(target_os = "linux")]
-    fn close_armed(host: &crate::test_host::TestNativeHost, connection: Connection, ticket: crate::native::RawTestTicket) {
+    pub(super) fn close_armed(host: &crate::test_host::TestNativeHost, connection: Connection, ticket: crate::native::RawTestTicket) {
         host.scope(|| connection.close().unwrap());
         host.retire_raw(ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn owned_wal_connection_has_all_three_bindings() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owned =
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).unwrap();
-        owned.establish_wal_binding().unwrap();
-        owned.require_binding().unwrap();
-        owned
-            .connection()
-            .execute("UPDATE custody SET value=2", [])
-            .unwrap();
-        owned.require_binding().unwrap();
+        let (owned, ticket) = armed_bound(&host, &pin);
+        host.scope(|| {
+            owned.establish_wal_binding().unwrap();
+            owned.require_binding().unwrap();
+            owned
+                .connection()
+                .execute("UPDATE custody SET value=2", [])
+                .unwrap();
+            owned.require_binding().unwrap();
+        });
+        close_bound(&host, owned, ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn replacement_main_refuses_before_foreign_write() {
-        let _serial = crate::test_host::serial_guard();
+        const TEST: &str =
+            concat!(module_path!(), "::replacement_main_refuses_before_foreign_write");
+        // A replaced main poisons the owner's native keeper, which no close
+        // may settle; the scenario runs and ends in its own child process.
+        if !crate::test_host::is_isolated_child(TEST) {
+            let outcome = crate::test_host::run_isolated(TEST);
+            assert!(outcome.contains("foreign main preserved"), "{outcome}");
+            return;
+        }
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owned =
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).unwrap();
-        owned.establish_wal_binding().unwrap();
+        let (owned, ticket) = armed_bound(&host, &pin);
+        host.scope(|| owned.establish_wal_binding().unwrap());
         std::fs::rename(
             tmp.path().join("scheduler.sqlite3"),
             tmp.path().join("retained-main"),
         )
         .unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"foreign main").unwrap();
-        assert!(
-            owned
-                .connection()
-                .execute("UPDATE custody SET value=3", [])
-                .is_err()
-        );
-        assert!(owned.require_binding().is_err());
-        assert_eq!(
-            std::fs::read(tmp.path().join("scheduler.sqlite3")).unwrap(),
-            b"foreign main"
-        );
-    }
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn replacement_sidecars_refuse_mutation_and_survive_close() {
-        let _serial = crate::test_host::serial_guard();
-        for suffix in ["-wal", "-shm"] {
-            let tmp = tempfile::TempDir::new().unwrap();
-            seed_wal(tmp.path());
-            let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-            let owned =
-                BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).unwrap();
-            owned.establish_wal_binding().unwrap();
-            let child = tmp.path().join(format!("scheduler.sqlite3{suffix}"));
-            std::fs::rename(&child, tmp.path().join("retained-sidecar")).unwrap();
-            std::fs::write(&child, b"foreign sidecar").unwrap();
+        host.scope(|| {
             assert!(
                 owned
                     .connection()
@@ -5942,21 +6025,93 @@ mod tests {
                     .is_err()
             );
             assert!(owned.require_binding().is_err());
-            drop(owned);
-            assert_eq!(std::fs::read(child).unwrap(), b"foreign sidecar");
+        });
+        assert_eq!(
+            std::fs::read(tmp.path().join("scheduler.sqlite3")).unwrap(),
+            b"foreign main"
+        );
+        let closed = host.scope(|| owned.close());
+        assert_eq!(
+            std::fs::read(tmp.path().join("scheduler.sqlite3")).unwrap(),
+            b"foreign main"
+        );
+        match closed {
+            Ok(()) => {
+                host.retire_raw(ticket);
+                host.release();
+                crate::test_host::end_isolated_process(tmp, "closed; foreign main preserved")
+            }
+            Err(failure) => {
+                let outcome = format!("close retained: {:?}; foreign main preserved", failure.error());
+                crate::test_host::end_isolated_process((failure, ticket, host, tmp), &outcome)
+            }
         }
     }
     #[test]
     #[cfg(target_os = "linux")]
+    fn replacement_sidecars_refuse_mutation_and_survive_close() {
+        const TEST: &str =
+            concat!(module_path!(), "::replacement_sidecars_refuse_mutation_and_survive_close");
+        // A replaced sidecar poisons the owner's native keeper, which no
+        // close may settle; the scenario runs and ends in its own child.
+        if !crate::test_host::is_isolated_child(TEST) {
+            let outcome = crate::test_host::run_isolated(TEST);
+            assert!(outcome.contains("-wal: foreign sidecar preserved"), "{outcome}");
+            assert!(outcome.contains("-shm: foreign sidecar preserved"), "{outcome}");
+            return;
+        }
+        let host = crate::test_host::TestNativeHost::acquire();
+        let mut retained = Vec::new();
+        let mut directories = Vec::new();
+        let mut outcome = String::new();
+        for suffix in ["-wal", "-shm"] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            seed_wal_on(&host, tmp.path());
+            let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+            let (owned, ticket) = armed_bound(&host, &pin);
+            host.scope(|| owned.establish_wal_binding().unwrap());
+            let child = tmp.path().join(format!("scheduler.sqlite3{suffix}"));
+            std::fs::rename(&child, tmp.path().join("retained-sidecar")).unwrap();
+            std::fs::write(&child, b"foreign sidecar").unwrap();
+            host.scope(|| {
+                assert!(
+                    owned
+                        .connection()
+                        .execute("UPDATE custody SET value=3", [])
+                        .is_err()
+                );
+                assert!(owned.require_binding().is_err());
+            });
+            let closed = host.scope(|| owned.close());
+            assert_eq!(std::fs::read(&child).unwrap(), b"foreign sidecar");
+            match closed {
+                Ok(()) => {
+                    host.retire_raw(ticket);
+                    outcome.push_str(&format!("{suffix}: closed; "));
+                }
+                Err(failure) => {
+                    outcome.push_str(&format!("{suffix}: close retained {:?}; ", failure.error()));
+                    retained.push((failure, ticket));
+                }
+            }
+            outcome.push_str(&format!("{suffix}: foreign sidecar preserved; "));
+            directories.push(tmp);
+        }
+        if retained.is_empty() {
+            host.release();
+            crate::test_host::end_isolated_process(directories, &outcome)
+        }
+        crate::test_host::end_isolated_process((retained, host, directories), &outcome)
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
     fn symlink_main_refuses_without_touching_target() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("foreign"), b"foreign").unwrap();
         std::os::unix::fs::symlink("foreign", tmp.path().join("scheduler.sqlite3")).unwrap();
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        assert!(
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).is_err()
-        );
+        armed_bound_refusal(&host, &pin, "scheduler.sqlite3");
         assert_eq!(
             std::fs::read(tmp.path().join("foreign")).unwrap(),
             b"foreign"
@@ -6014,31 +6169,34 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn closing_second_owner_preserves_first_owners_process_locks() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let first =
-            BoundSqliteConnection::open_existing(pin.clone(), OsStr::new("scheduler.sqlite3"))
+        let (first, first_ticket) = armed_bound(&host, &pin);
+        host.scope(|| {
+            first.establish_wal_binding().unwrap();
+            first
+                .connection()
+                .execute_batch("BEGIN IMMEDIATE;")
                 .unwrap();
-        first.establish_wal_binding().unwrap();
-        first
-            .connection()
-            .execute_batch("BEGIN IMMEDIATE;")
-            .unwrap();
-        let second =
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).unwrap();
+        });
+        let (second, second_ticket) = armed_bound(&host, &pin);
         drop(second);
+        host.retire_raw(second_ticket);
         // A separate process observes kernel locks, unlike a same-process
         // SQLite bookkeeping assertion which can miss POSIX close unlocks.
         assert_external_write_busy(&tmp.path().join("scheduler.sqlite3"));
-        first.connection().execute_batch("ROLLBACK;").unwrap();
-        first.require_binding().unwrap();
+        host.scope(|| {
+            first.connection().execute_batch("ROLLBACK;").unwrap();
+            first.require_binding().unwrap();
+        });
+        close_bound(&host, first, first_ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn hardlinked_shm_refusal_preserves_other_nodes_bytes_and_kernel_locks() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         use std::os::unix::fs::FileExt;
         fn snapshot(observer: &std::fs::File) -> Vec<u8> {
             let length = observer.metadata().unwrap().len();
@@ -6052,25 +6210,25 @@ mod tests {
         }
         let first_root = tempfile::TempDir::new().unwrap();
         let second_root = tempfile::TempDir::new().unwrap();
-        seed_wal(first_root.path());
-        seed_wal(second_root.path());
+        seed_wal_on(&host, first_root.path());
+        seed_wal_on(&host, second_root.path());
         // Declaration order also closes the SQL owner before this observer
         // on control unwind, avoiding fixture-induced POSIX lock release.
         let observer: std::fs::File;
         let first_pin = Arc::new(PinnedDirectory::open(first_root.path()).unwrap().unwrap());
-        let first =
-            BoundSqliteConnection::open_existing(first_pin, OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        first.establish_wal_binding().unwrap();
+        let (first, first_ticket) = armed_bound(&host, &first_pin);
+        host.scope(|| first.establish_wal_binding().unwrap());
         let source_shm = first_root.path().join("scheduler.sqlite3-shm");
         // An observer must not open/close SHM while process locks are live:
         // closing any same-inode FD releases POSIX locks. Retain this exact
         // observer through explicit final native close; snapshots use pread.
         observer = std::fs::File::open(&source_shm).unwrap();
-        first
-            .connection()
-            .execute_batch("BEGIN IMMEDIATE;")
-            .unwrap();
+        host.scope(|| {
+            first
+                .connection()
+                .execute_batch("BEGIN IMMEDIATE;")
+                .unwrap()
+        });
         assert_external_write_busy(&first_root.path().join("scheduler.sqlite3"));
         std::fs::hard_link(
             &source_shm,
@@ -6081,18 +6239,20 @@ mod tests {
         let second_pin = Arc::new(PinnedDirectory::open(second_root.path()).unwrap().unwrap());
         let mut retained_open = None;
         let mut retained_close = None;
+        let (second, second_ticket) = host.armed(|| {
+            BoundSqliteConnection::open_existing(second_pin, OsStr::new("scheduler.sqlite3"))
+        });
         let refusal_code =
-            match BoundSqliteConnection::open_existing(second_pin, OsStr::new("scheduler.sqlite3"))
-            {
+            match second {
                 Ok(second) => {
-                    let refusal = second.establish_wal_binding().unwrap_err();
+                    let refusal = host.scope(|| second.establish_wal_binding().unwrap_err());
                     let code = refusal
                         .downcast_ref::<rusqlite::Error>()
                         .and_then(|e| match e {
                             rusqlite::Error::SqliteFailure(code, _) => Some(code.extended_code),
                             _ => None,
                         });
-                    retained_close = second.close().err();
+                    retained_close = host.scope(|| second.close().err());
                     code
                 }
                 Err(refusal) => {
@@ -6110,24 +6270,25 @@ mod tests {
         assert_eq!(refusal_code, Some(libsqlite3_sys::SQLITE_IOERR_SHMOPEN));
         assert_eq!(snapshot(&observer), before);
         assert_external_write_busy(&first_root.path().join("scheduler.sqlite3"));
-        first.connection().execute_batch("ROLLBACK;").unwrap();
-        first.close().unwrap();
+        host.scope(|| first.connection().execute_batch("ROLLBACK;").unwrap());
+        close_bound(&host, first, first_ticket);
         if let Some(failure) = retained_open {
-            failure.retry_close().unwrap();
+            host.scope(|| failure.retry_close().unwrap());
         }
         if let Some(failure) = retained_close {
-            failure.retry().unwrap();
+            host.scope(|| failure.retry().unwrap());
         }
+        host.retire_raw(second_ticket);
         drop(observer);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn hardlinked_main_sidecar_roles_refuse_before_bytes_or_metadata_change() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         use std::os::unix::fs::MetadataExt;
         for suffix in ["-wal", "-shm"] {
             let tmp = tempfile::TempDir::new().unwrap();
-            seed_wal(tmp.path());
+            seed_wal_on(&host, tmp.path());
             let main = tmp.path().join("scheduler.sqlite3");
             std::fs::hard_link(&main, tmp.path().join(format!("scheduler.sqlite3{suffix}")))
                 .unwrap();
@@ -6145,9 +6306,7 @@ mod tests {
                 metadata.ctime_nsec(),
             );
             let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-            assert!(
-                BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).is_err()
-            );
+            armed_bound_refusal(&host, &pin, "scheduler.sqlite3");
             assert_eq!(std::fs::read(&main).unwrap(), before);
             let after = std::fs::metadata(&main).unwrap();
             assert_eq!(
@@ -6169,19 +6328,18 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn supervised_close_returns_same_busy_owner_and_can_retry() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let owned =
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).unwrap();
-        owned.establish_wal_binding().unwrap();
+        let (owned, ticket) = armed_bound(&host, &pin);
+        host.scope(|| owned.establish_wal_binding().unwrap());
         let sql = std::ffi::CString::new("SELECT value FROM custody").unwrap();
         let mut statement = std::ptr::null_mut();
         // SAFETY: owner remains live and SQL is NUL terminated; retain the
         // statement deliberately to exercise SQLITE_BUSY connection close.
         let handle = unsafe { owned.connection().handle() };
-        let status = unsafe {
+        let status = host.scope(|| unsafe {
             libsqlite3_sys::sqlite3_prepare_v2(
                 handle,
                 sql.as_ptr(),
@@ -6189,9 +6347,9 @@ mod tests {
                 &mut statement,
                 std::ptr::null_mut(),
             )
-        };
+        });
         assert_eq!(status, libsqlite3_sys::SQLITE_OK);
-        let failure = owned.close().unwrap_err();
+        let failure = host.scope(|| owned.close().unwrap_err());
         let BoundSqliteCloseOwner::Live(live) = failure.owner() else {
             panic!("busy close lost live phase");
         };
@@ -6202,15 +6360,16 @@ mod tests {
         // SAFETY: failed close retained the exact connection; finalize its
         // outstanding statement before the explicit retry.
         assert_eq!(
-            unsafe { libsqlite3_sys::sqlite3_finalize(statement) },
+            host.scope(|| unsafe { libsqlite3_sys::sqlite3_finalize(statement) }),
             libsqlite3_sys::SQLITE_OK
         );
-        failure.retry().unwrap();
+        host.scope(|| failure.retry().unwrap());
+        host.retire_raw(ticket);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn nonregular_fifo_and_directory_refuse_before_data_open() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         use std::os::unix::ffi::OsStrExt;
         unsafe extern "C" {
             fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
@@ -6221,38 +6380,32 @@ mod tests {
         // SAFETY: valid NUL-terminated temporary path; creates only this test's FIFO.
         assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        assert!(
-            BoundSqliteConnection::open_existing(pin.clone(), OsStr::new("scheduler.sqlite3"))
-                .is_err()
-        );
+        armed_bound_refusal(&host, &pin, "scheduler.sqlite3");
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
         std::fs::remove_file(&child).unwrap();
         std::fs::create_dir(&child).unwrap();
-        assert!(
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).is_err()
-        );
+        armed_bound_refusal(&host, &pin, "scheduler.sqlite3");
         assert_eq!(std::fs::read_dir(&child).unwrap().count(), 0);
     }
     #[test]
     #[cfg(target_os = "linux")]
     fn native_pending_returns_same_retiring_owner_until_actual_release() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::TempDir::new().unwrap();
-        seed_wal(tmp.path());
+        seed_wal_on(&host, tmp.path());
         let pin = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
-        let first =
-            BoundSqliteConnection::open_existing(pin.clone(), OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        first.establish_wal_binding().unwrap();
+        let (first, first_ticket) = armed_bound(&host, &pin);
+        host.scope(|| first.establish_wal_binding().unwrap());
         let original_runtime = first.runtime() as *const PinnedDirectory;
-        let second =
-            BoundSqliteConnection::open_existing(pin, OsStr::new("scheduler.sqlite3")).unwrap();
-        second.establish_wal_binding().unwrap();
-        second
-            .connection()
-            .execute_batch("BEGIN IMMEDIATE;")
-            .unwrap();
-        let pending = first.close().unwrap_err();
+        let (second, second_ticket) = armed_bound(&host, &pin);
+        host.scope(|| {
+            second.establish_wal_binding().unwrap();
+            second
+                .connection()
+                .execute_batch("BEGIN IMMEDIATE;")
+                .unwrap();
+        });
+        let pending = host.scope(|| first.close().unwrap_err());
         assert!(matches!(
             pending.error(),
             BoundSqliteCloseError::NativeCustody(NativeRetentionReason::TrackedPeer)
@@ -6265,11 +6418,12 @@ mod tests {
             original_runtime
         );
         assert_external_write_busy(&tmp.path().join("scheduler.sqlite3"));
-        second.connection().execute_batch("ROLLBACK;").unwrap();
-        second.close().unwrap();
+        host.scope(|| second.connection().execute_batch("ROLLBACK;").unwrap());
+        close_bound(&host, second, second_ticket);
         // This retries the original context after automatic FD progress; no
         // connection accessor or reopen exists on the retirement type.
-        pending.retry().unwrap();
+        host.scope(|| pending.retry().unwrap());
+        host.retire_raw(first_ticket);
     }
     #[cfg(target_os = "linux")]
     fn retained_snapshot(file: &std::fs::File) -> Vec<u8> {
@@ -6285,7 +6439,7 @@ mod tests {
     /// remain open until its SQL owner closes; no same-inode observer close
     /// can erase locks while a source connection is live.
     #[cfg(target_os = "linux")]
-    fn readonly_wal_fixture() -> Arc<tempfile::TempDir> {
+    fn readonly_wal_fixture(host: &crate::test_host::TestNativeHost) -> Arc<tempfile::TempDir> {
         let source = tempfile::tempdir().unwrap();
         let main = std::fs::OpenOptions::new()
             .read(true)
@@ -6296,20 +6450,24 @@ mod tests {
         let mut observers = Vec::with_capacity(3);
         observers.push(main);
         // Declare SQL owner after observers: unwind closes SQL first.
-        let connection = Connection::open(source.path().join("scheduler.sqlite3")).unwrap();
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
-        let (busy, frames, checkpointed): (i64, i64, i64) = connection
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .unwrap();
+        let (connection, ticket) = armed_stock(host, &source.path().join("scheduler.sqlite3"));
+        let (busy, frames, checkpointed): (i64, i64, i64) = host.scope(|| {
+            connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
+            connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap()
+        });
         assert_eq!((busy, frames, checkpointed), (0, 0, 0));
         observers.push(std::fs::File::open(source.path().join("scheduler.sqlite3-wal")).unwrap());
         observers.push(std::fs::File::open(source.path().join("scheduler.sqlite3-shm")).unwrap());
         let main_before = retained_snapshot(&observers[0]);
-        connection
-            .execute("UPDATE custody SET value=42", [])
-            .unwrap();
+        host.scope(|| {
+            connection
+                .execute("UPDATE custody SET value=42", [])
+                .unwrap()
+        });
         assert_eq!(
             retained_snapshot(&observers[0]),
             main_before,
@@ -6323,16 +6481,32 @@ mod tests {
         ] {
             std::fs::write(snapshot.path().join(name), retained_snapshot(file)).unwrap();
         }
-        connection.close().unwrap();
+        close_armed(host, connection, ticket);
         drop(observers);
         snapshot
+    }
+
+    /// Readonly copy of `name` beneath `runtime` on one armed ticket, with
+    /// the standalone mechanism SQL work unless `work` is given.
+    #[cfg(target_os = "linux")]
+    fn armed_copy(
+        host: &crate::test_host::TestNativeHost,
+        runtime: Arc<PinnedDirectory>,
+        name: &str,
+        lease: SqliteCopyLease,
+        work: Arc<dyn SqliteInspectionSqlWork>,
+    ) -> (
+        std::result::Result<ReadonlySqliteCopy, ReadonlySqliteOpenFailure>,
+        crate::native::RawTestTicket,
+    ) {
+        host.armed(|| ReadonlySqliteCopy::open(runtime, OsStr::new(name), lease, work))
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn named_readonly_copy_reads_its_wal_history_and_refuses_main_mutation() {
-        let _serial = crate::test_host::serial_guard();
-        let snapshot = readonly_wal_fixture();
+        let host = crate::test_host::TestNativeHost::acquire();
+        let snapshot = readonly_wal_fixture(&host);
         for suffix in ["", "-wal", "-shm"] {
             std::fs::rename(
                 snapshot.path().join(format!("scheduler.sqlite3{suffix}")),
@@ -6345,26 +6519,26 @@ mod tests {
         let pin = Arc::new(PinnedDirectory::open(snapshot.path()).unwrap().unwrap());
         let lease: SqliteCopyLease = snapshot.clone();
         let work = mechanism_sql_work();
-        let copy = ReadonlySqliteCopy::open(
-            pin.clone(),
-            OsStr::new("runtime.sqlite3"),
-            lease.clone(),
-            work.clone(),
-        )
-        .unwrap();
-        let value: i64 = copy
-            .connection()
-            .query_row("SELECT value FROM custody", [], |row| row.get(0))
-            .unwrap();
+        let (copy, ticket) =
+            armed_copy(&host, pin.clone(), "runtime.sqlite3", lease.clone(), work.clone());
+        let copy = copy.unwrap();
+        let (value, refusal) = host.scope(|| {
+            let value: i64 = copy
+                .connection()
+                .query_row("SELECT value FROM custody", [], |row| row.get(0))
+                .unwrap();
+            let refusal = copy
+                .connection()
+                .execute("UPDATE custody SET value=99", [])
+                .unwrap_err();
+            (value, refusal)
+        });
         assert_eq!(value, 42);
-        let refusal = copy
-            .connection()
-            .execute("UPDATE custody SET value=99", [])
-            .unwrap_err();
         assert!(
             matches!(refusal, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::ReadOnly)
         );
-        let proof = copy.close().unwrap();
+        let proof = host.scope(|| copy.close().unwrap());
+        host.retire_raw(ticket);
         proof
             .require_original(&pin, OsStr::new("runtime.sqlite3"), &lease, &work)
             .unwrap();
@@ -6406,7 +6580,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn readonly_copy_journal_refusal_preserves_source_and_copy() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("scheduler.sqlite3"), b"original main").unwrap();
         std::fs::write(
@@ -6419,15 +6593,13 @@ mod tests {
             std::fs::copy(source.path().join(name), snapshot.path().join(name)).unwrap();
         }
         let pin = Arc::new(PinnedDirectory::open(snapshot.path()).unwrap().unwrap());
-        let failure = ReadonlySqliteCopy::open(
-            pin,
-            OsStr::new("scheduler.sqlite3"),
-            snapshot.clone(),
-            mechanism_sql_work(),
-        )
-        .err()
-        .expect("journal must refuse");
+        let (opened, ticket) =
+            armed_copy(&host, pin, "scheduler.sqlite3", snapshot.clone(), mechanism_sql_work());
+        let failure = opened.err().expect("journal must refuse");
+        assert_ne!(failure.error().to_string(), "bound SQLite acquisition refused (21)",
+            "armed copy open reached the unarmed gate");
         failure.retry_close().unwrap();
+        host.retire_raw(ticket);
         for (name, expected) in [
             ("scheduler.sqlite3", b"original main".as_slice()),
             (
@@ -6460,7 +6632,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn copy_lease_survives_partial_native_acquisition_failure() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
         std::fs::write(snapshot.path().join("scheduler.sqlite3"), b"retained main").unwrap();
         std::fs::create_dir(snapshot.path().join("scheduler.sqlite3-wal")).unwrap();
@@ -6469,14 +6641,8 @@ mod tests {
         let pin = Arc::new(PinnedDirectory::open(&path).unwrap().unwrap());
         let lease: SqliteCopyLease = snapshot.clone();
         drop(snapshot);
-        let failure = ReadonlySqliteCopy::open(
-            pin,
-            OsStr::new("scheduler.sqlite3"),
-            lease,
-            mechanism_sql_work(),
-        )
-        .err()
-        .expect("nonregular WAL refuses");
+        let (opened, ticket) = armed_copy(&host, pin, "scheduler.sqlite3", lease, mechanism_sql_work());
+        let failure = opened.err().expect("nonregular WAL refuses");
         assert!(matches!(
             failure.owner(),
             Some(BoundSqliteCloseOwner::Retiring(_))
@@ -6486,6 +6652,7 @@ mod tests {
             "partial context must retain original guard"
         );
         let released = failure.retry_close().unwrap();
+        host.retire_raw(ticket);
         assert!(
             weak.upgrade().is_some(),
             "partial release retains original cleanup obligation"
@@ -6499,30 +6666,25 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn readonly_copy_pending_close_keeps_guard_until_original_retry() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
-        seed_wal(snapshot.path());
+        seed_wal_on(&host, snapshot.path());
         let weak = Arc::downgrade(&snapshot);
         let path = snapshot.path().to_owned();
         let pin = Arc::new(PinnedDirectory::open(&path).unwrap().unwrap());
-        let peer =
-            BoundSqliteConnection::open_existing(pin.clone(), OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        peer.establish_wal_binding().unwrap();
-        let copy = ReadonlySqliteCopy::open(
-            pin,
-            OsStr::new("scheduler.sqlite3"),
-            snapshot.clone(),
-            mechanism_sql_work(),
-        )
-        .unwrap();
-        let _: i64 = copy
-            .connection()
-            .query_row("SELECT value FROM custody", [], |row| row.get(0))
-            .unwrap();
+        let (peer, peer_ticket) = armed_bound(&host, &pin);
+        host.scope(|| peer.establish_wal_binding().unwrap());
+        let (copy, copy_ticket) =
+            armed_copy(&host, pin, "scheduler.sqlite3", snapshot.clone(), mechanism_sql_work());
+        let copy = copy.unwrap();
+        let _: i64 = host.scope(|| {
+            copy.connection()
+                .query_row("SELECT value FROM custody", [], |row| row.get(0))
+                .unwrap()
+        });
         drop(snapshot);
-        peer.connection().execute_batch("BEGIN IMMEDIATE;").unwrap();
-        let failure = copy.close().unwrap_err();
+        host.scope(|| peer.connection().execute_batch("BEGIN IMMEDIATE;").unwrap());
+        let failure = host.scope(|| copy.close().unwrap_err());
         assert!(matches!(
             failure.error(),
             BoundSqliteCloseError::NativeCustody(NativeRetentionReason::TrackedPeer)
@@ -6533,15 +6695,16 @@ mod tests {
         ));
         assert!(weak.upgrade().is_some());
         assert_external_write_busy(&path.join("scheduler.sqlite3"));
-        let failure = failure.retry_close().unwrap_err();
+        let failure = host.scope(|| failure.retry_close().unwrap_err());
         assert!(weak.upgrade().is_some());
-        peer.connection().execute_batch("ROLLBACK;").unwrap();
-        peer.close().unwrap();
+        host.scope(|| peer.connection().execute_batch("ROLLBACK;").unwrap());
+        close_bound(&host, peer, peer_ticket);
         assert!(
             weak.upgrade().is_some(),
             "caller-held retirement must still own guard"
         );
-        let closed = failure.retry_close().unwrap();
+        let closed = host.scope(|| failure.retry_close().unwrap());
+        host.retire_raw(copy_ticket);
         assert!(
             weak.upgrade().is_some(),
             "closed proof retains original cleanup obligation"
@@ -6555,34 +6718,31 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn readonly_copy_fallback_reaper_keeps_guard_through_peer_release() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
-        seed_wal(snapshot.path());
+        seed_wal_on(&host, snapshot.path());
         let weak = Arc::downgrade(&snapshot);
         let path = snapshot.path().to_owned();
         let pin = Arc::new(PinnedDirectory::open(&path).unwrap().unwrap());
-        let peer =
-            BoundSqliteConnection::open_existing(pin.clone(), OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        peer.establish_wal_binding().unwrap();
-        let copy = ReadonlySqliteCopy::open(
-            pin,
-            OsStr::new("scheduler.sqlite3"),
-            snapshot.clone(),
-            mechanism_sql_work(),
-        )
-        .unwrap();
-        let _: i64 = copy
-            .connection()
-            .query_row("SELECT value FROM custody", [], |row| row.get(0))
-            .unwrap();
+        let (peer, peer_ticket) = armed_bound(&host, &pin);
+        host.scope(|| peer.establish_wal_binding().unwrap());
+        let (copy, copy_ticket) =
+            armed_copy(&host, pin, "scheduler.sqlite3", snapshot.clone(), mechanism_sql_work());
+        let copy = copy.unwrap();
+        let _: i64 = host.scope(|| {
+            copy.connection()
+                .query_row("SELECT value FROM custody", [], |row| row.get(0))
+                .unwrap()
+        });
         drop(snapshot);
-        peer.connection().execute_batch("BEGIN IMMEDIATE;").unwrap();
+        host.scope(|| peer.connection().execute_batch("BEGIN IMMEDIATE;").unwrap());
         drop(copy);
+        host.retire_raw(copy_ticket);
         assert!(weak.upgrade().is_some());
         assert_external_write_busy(&path.join("scheduler.sqlite3"));
-        peer.connection().execute_batch("ROLLBACK;").unwrap();
-        peer.close().unwrap(); // outside-mutex host drain destroys ready lease
+        host.scope(|| peer.connection().execute_batch("ROLLBACK;").unwrap());
+        // Outside-mutex host drain destroys the ready lease.
+        close_bound(&host, peer, peer_ticket);
         assert!(weak.upgrade().is_none());
         assert!(!path.exists());
     }
@@ -6590,25 +6750,31 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn abandoned_busy_copy_keeps_native_database_and_original_guard() {
-        let _serial = crate::test_host::serial_guard();
+        const TEST: &str =
+            concat!(module_path!(), "::abandoned_busy_copy_keeps_native_database_and_original_guard");
+        // The abandoned database and its context stay in native custody for
+        // the life of the process, so no arena may release under them: the
+        // scenario runs and ends in its own child process.
+        if !crate::test_host::is_isolated_child(TEST) {
+            let outcome = crate::test_host::run_isolated(TEST);
+            assert!(outcome.contains("abandoned copy retained with its guard"), "{outcome}");
+            return;
+        }
+        let host = crate::test_host::TestNativeHost::acquire();
         let snapshot = Arc::new(tempfile::tempdir().unwrap());
-        seed_wal(snapshot.path());
+        seed_wal_on(&host, snapshot.path());
         let weak = Arc::downgrade(&snapshot);
         let path = snapshot.path().to_owned();
         let pin = Arc::new(PinnedDirectory::open(&path).unwrap().unwrap());
-        let copy = ReadonlySqliteCopy::open(
-            pin,
-            OsStr::new("scheduler.sqlite3"),
-            snapshot.clone(),
-            mechanism_sql_work(),
-        )
-        .unwrap();
+        let (copy, ticket) =
+            armed_copy(&host, pin, "scheduler.sqlite3", snapshot.clone(), mechanism_sql_work());
+        let copy = copy.unwrap();
         drop(snapshot);
         let sql = std::ffi::CString::new("SELECT value FROM custody").unwrap();
         let handle = unsafe { copy.connection().handle() };
         let mut statement = std::ptr::null_mut();
         assert_eq!(
-            unsafe {
+            host.scope(|| unsafe {
                 libsqlite3_sys::sqlite3_prepare_v2(
                     handle,
                     sql.as_ptr(),
@@ -6616,17 +6782,17 @@ mod tests {
                     &mut statement,
                     std::ptr::null_mut(),
                 )
-            },
+            }),
             libsqlite3_sys::SQLITE_OK
         );
-        let failure = copy.close().unwrap_err();
+        let failure = host.scope(|| copy.close().unwrap_err());
         let BoundSqliteCloseOwner::Live(live) = failure.owner() else {
             panic!("busy copy must preserve live owner");
         };
         assert_eq!(unsafe { live.connection().handle() }, handle);
         drop(failure); // reachable native abandon custody; not settlement
         assert_eq!(
-            unsafe { libsqlite3_sys::sqlite3_finalize(statement) },
+            host.scope(|| unsafe { libsqlite3_sys::sqlite3_finalize(statement) }),
             libsqlite3_sys::SQLITE_OK
         );
         // Finalizing the statement does not authorize automatic SQL close or
@@ -6634,6 +6800,10 @@ mod tests {
         // intentionally retained in native custody for the process lifetime.
         assert!(weak.upgrade().is_some());
         assert!(path.exists());
+        crate::test_host::end_isolated_process(
+            (ticket, host, path),
+            "abandoned copy retained with its guard",
+        )
     }
 }
 
@@ -6727,6 +6897,7 @@ fn mechanism_sql_work() -> Arc<dyn SqliteInspectionSqlWork> {
 #[cfg(all(test, target_os = "linux"))]
 mod guarded_inspection_copy_controls {
     use super::*;
+    use super::tests::{armed_stock, close_armed, close_bound};
     use anyhow::Context;
     use std::os::unix::fs::MetadataExt;
 
@@ -6991,13 +7162,11 @@ mod guarded_inspection_copy_controls {
     // Actual ordinary witness mechanics; this fixture has no platform authority.
     #[test]
     fn original_witness_removal_proof_and_alias_retirement_preserve_foreign_owner() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let root = pin(tmp.path());
-        Connection::open(tmp.path().join("initialize.sqlite3"))
-            .unwrap()
-            .close()
-            .unwrap();
+        let (initialize, ticket) = armed_stock(&host, &tmp.path().join("initialize.sqlite3"));
+        close_armed(&host, initialize, ticket);
         let name = OsStr::new("created.original");
         let owner = Arc::new(RetainedOriginalWitnessFile::created(
             root.atomic_create_regular(
@@ -7054,30 +7223,36 @@ mod guarded_inspection_copy_controls {
     }
     #[test]
     fn native_production_requires_genuine_terminal_acknowledgement() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let name = OsStr::new("runtime.sqlite3");
-        let source = Connection::open(tmp.path().join(name)).unwrap();
-        source
-            .execute_batch("CREATE TABLE original(value INTEGER); INSERT INTO original VALUES(11)")
-            .unwrap();
-        source.close().unwrap();
+        let (source, source_ticket) = armed_stock(&host, &tmp.path().join(name));
+        host.scope(|| {
+            source
+                .execute_batch("CREATE TABLE original(value INTEGER); INSERT INTO original VALUES(11)")
+                .unwrap()
+        });
+        close_armed(&host, source, source_ticket);
         let root = Arc::new(pin(tmp.path()));
         let lease: SqliteCopyLease = Arc::new(());
         let work = mechanism_sql_work();
-        let owner =
-            ReadonlySqliteCopy::open(root.clone(), name, lease.clone(), work.clone()).unwrap();
+        let (owner, ticket) = host.armed(|| {
+            ReadonlySqliteCopy::open(root.clone(), name, lease.clone(), work.clone()).unwrap()
+        });
         let permit = owner.context.production.as_ref().unwrap();
         permit.checkpoint().unwrap();
         assert!(permit.acknowledge_synchronous().is_err());
         assert_eq!(
-            owner
-                .connection()
-                .query_row("SELECT value FROM original", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
+            host.scope(|| {
+                owner
+                    .connection()
+                    .query_row("SELECT value FROM original", [], |row| row.get::<_, i64>(0))
+                    .unwrap()
+            }),
             11
         );
-        let closed = owner.close().unwrap();
+        let closed = host.scope(|| owner.close().unwrap());
+        host.retire_raw(ticket);
         closed.acknowledge_producer_terminal().unwrap();
         closed.acknowledge_producer_terminal().unwrap();
         assert!(
@@ -7095,14 +7270,16 @@ mod guarded_inspection_copy_controls {
     // Native mechanism controls only. These do not mint disposal authority.
     #[test]
     fn native_output_close_refuses_linked_inode_and_live_stock_alias() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         use std::os::fd::AsRawFd;
         let tmp = tempfile::tempdir().unwrap();
         let root = pin(tmp.path());
         let name = OsStr::new("original.sqlite3");
-        let peer = Connection::open(tmp.path().join(name)).unwrap();
-        peer.execute_batch("CREATE TABLE original(value INTEGER); INSERT INTO original VALUES(7)")
-            .unwrap();
+        let (peer, peer_ticket) = armed_stock(&host, &tmp.path().join(name));
+        host.scope(|| {
+            peer.execute_batch("CREATE TABLE original(value INTEGER); INSERT INTO original VALUES(7)")
+                .unwrap()
+        });
         let owner = Arc::new(RetainedSqliteDestinationRole::created(
             root.open_regular(name, false).unwrap().unwrap(),
             root.identity().unwrap(),
@@ -7137,21 +7314,24 @@ mod guarded_inspection_copy_controls {
         assert_ne!(live.code, libsqlite3_sys::SQLITE_OK);
         assert_eq!(alias.metadata_original().unwrap().ino(), identity.ino());
         assert_eq!(
-            peer.query_row("SELECT value FROM original", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
+            host.scope(|| {
+                peer.query_row("SELECT value FROM original", [], |row| row.get::<_, i64>(0))
+                    .unwrap()
+            }),
             7
         );
-        peer.close().unwrap();
+        close_armed(&host, peer, peer_ticket);
         // Last-drop preserves the original; this fixture grants no settlement.
     }
 
     #[test]
     fn native_output_close_consumes_only_original_unlinked_coordinate() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         use std::os::fd::{AsRawFd, IntoRawFd};
         let tmp = tempfile::tempdir().unwrap();
         // An unrelated live inode makes a one-check scan insufficient.
-        let unrelated = Connection::open(tmp.path().join("initialize.sqlite3")).unwrap();
+        let (unrelated, unrelated_ticket) =
+            armed_stock(&host, &tmp.path().join("initialize.sqlite3"));
         let root = pin(tmp.path());
         let name = OsStr::new("output");
         let owner = Arc::new(RetainedSqliteDestinationRole::created(
@@ -7214,21 +7394,23 @@ mod guarded_inspection_copy_controls {
         *state = DestinationRoleState::Retired;
         drop(state);
         assert!(alias.metadata_original().is_err());
-        unrelated.close().unwrap();
+        close_armed(&host, unrelated, unrelated_ticket);
         // No public retirement proof is constructed by this native-layer control.
     }
 
     #[test]
     fn actual_copy_sql_fixture_attests_original_copy_work_and_closed_context() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let name = OsStr::new("runtime.sqlite3");
-        let original = Connection::open(source_dir.path().join(name)).unwrap();
-        original
-            .execute_batch("CREATE TABLE evidence(value INTEGER); INSERT INTO evidence VALUES(9)")
-            .unwrap();
-        original.close().unwrap();
+        let (original, original_ticket) = armed_stock(&host, &source_dir.path().join(name));
+        host.scope(|| {
+            original
+                .execute_batch("CREATE TABLE evidence(value INTEGER); INSERT INTO evidence VALUES(9)")
+                .unwrap()
+        });
+        close_armed(&host, original, original_ticket);
         let source = pin(source_dir.path());
         let root = Arc::new(pin(output_dir.path()));
         let work = Arc::new(MechanismCopyWork::default());
@@ -7244,16 +7426,20 @@ mod guarded_inspection_copy_controls {
         let foreign: Arc<dyn SqliteInspectionCopyWork> = Arc::new(MechanismCopyWork::default());
         assert!(sql.require_copy_work(&foreign).is_err());
         let lease: SqliteCopyLease = Arc::new(());
-        let inspection =
-            ReadonlySqliteCopy::open(root.clone(), name, lease.clone(), sql.clone()).unwrap();
+        let (inspection, ticket) = host.armed(|| {
+            ReadonlySqliteCopy::open(root.clone(), name, lease.clone(), sql.clone()).unwrap()
+        });
         assert_eq!(
-            inspection
-                .connection()
-                .query_row("SELECT value FROM evidence", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
+            host.scope(|| {
+                inspection
+                    .connection()
+                    .query_row("SELECT value FROM evidence", [], |row| row.get::<_, i64>(0))
+                    .unwrap()
+            }),
             9
         );
-        let closed = inspection.close().unwrap();
+        let closed = host.scope(|| inspection.close().unwrap());
+        host.retire_raw(ticket);
         closed.require_original(&root, name, &lease, &sql).unwrap();
         assert!(work.remaining_cleanup_steps().unwrap() == 1024);
         work.debit_destination_retirement(3).unwrap();
@@ -7638,14 +7824,20 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn copy_refuses_live_sqlite_alias_before_destination_creation() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let source_dir = tempfile::tempdir().unwrap();
         let runtime = Arc::new(pin(source_dir.path()));
-        let owner =
+        let (owner, ticket) = host.armed(|| {
             BoundSqliteConnection::open_or_create(runtime.clone(), OsStr::new("scheduler.sqlite3"))
-                .unwrap();
-        owner.connection().execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE copy_probe(value INTEGER); INSERT INTO copy_probe VALUES(7);").unwrap();
-        owner.establish_wal_binding().unwrap();
+                .unwrap()
+        });
+        host.scope(|| {
+            // The bound VFS admits no rollback journal, so the created main
+            // enters WAL through an in-memory journal, as the original bound
+            // open stages it.
+            owner.connection().execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA journal_mode=WAL; CREATE TABLE copy_probe(value INTEGER); INSERT INTO copy_probe VALUES(7);").unwrap();
+            owner.establish_wal_binding().unwrap();
+        });
         for (index, role) in [
             "scheduler.sqlite3",
             "scheduler.sqlite3-wal",
@@ -7670,14 +7862,16 @@ mod guarded_inspection_copy_controls {
                 .is_err()
             );
             assert!(!output_dir.path().join(&alias).exists());
-            owner.require_binding().unwrap();
-            let value: i64 = owner
-                .connection()
-                .query_row("SELECT value FROM copy_probe", [], |row| row.get(0))
-                .unwrap();
+            let value: i64 = host.scope(|| {
+                owner.require_binding().unwrap();
+                owner
+                    .connection()
+                    .query_row("SELECT value FROM copy_probe", [], |row| row.get(0))
+                    .unwrap()
+            });
             assert_eq!(value, 7);
         }
-        owner.close().unwrap();
+        close_bound(&host, owner, ticket);
     }
 
     #[test]
@@ -7727,26 +7921,31 @@ mod guarded_inspection_copy_controls {
 
     #[test]
     fn next_chunk_refuses_stock_sqlite_adoption_and_keeps_caller_copy_directory() {
-        let _serial = crate::test_host::serial_guard();
+        let host = std::rc::Rc::new(crate::test_host::TestNativeHost::acquire());
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let source = pin(source_dir.path());
         let destination = pin(output_dir.path());
         let path = source_dir.path().join("source");
         // A real SQLite file larger than one chunk, fully closed before copying.
-        let seed = Connection::open(&path).unwrap();
-        seed.execute_batch(
-            "CREATE TABLE payload(value BLOB); INSERT INTO payload VALUES(zeroblob(200000));",
-        )
-        .unwrap();
-        seed.close().unwrap();
-        let peer = std::rc::Rc::new(std::cell::RefCell::new(None::<Connection>));
+        let (seed, seed_ticket) = armed_stock(&host, &path);
+        host.scope(|| {
+            seed.execute_batch(
+                "CREATE TABLE payload(value BLOB); INSERT INTO payload VALUES(zeroblob(200000));",
+            )
+            .unwrap()
+        });
+        close_armed(&host, seed, seed_ticket);
+        let peer = std::rc::Rc::new(std::cell::RefCell::new(
+            None::<(Connection, crate::native::RawTestTicket)>,
+        ));
         let retained_peer = peer.clone();
+        let hook_host = host.clone();
         COPY_AFTER_FIRST_CHUNK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let connection = Connection::open(&path).unwrap();
-                connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
-                *retained_peer.borrow_mut() = Some(connection);
+                let (connection, ticket) = armed_stock(&hook_host, &path);
+                hook_host.scope(|| connection.execute_batch("BEGIN IMMEDIATE;").unwrap());
+                *retained_peer.borrow_mut() = Some((connection, ticket));
             }))
         });
         assert!(
@@ -7760,13 +7959,15 @@ mod guarded_inspection_copy_controls {
             .is_err()
         );
         assert!(output_dir.path().join("source").exists());
-        let connection = peer.borrow_mut().take().unwrap();
-        let length: i64 = connection
-            .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))
-            .unwrap();
+        let (connection, ticket) = peer.borrow_mut().take().unwrap();
+        let length: i64 = host.scope(|| {
+            connection
+                .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))
+                .unwrap()
+        });
         assert_eq!(length, 200000);
-        connection.execute_batch("ROLLBACK;").unwrap();
-        connection.close().unwrap();
+        host.scope(|| connection.execute_batch("ROLLBACK;").unwrap());
+        close_armed(&host, connection, ticket);
         // The caller still owns its original directory lease and partial file;
         // this function never unlinks it or substitutes a cleanup authority.
         assert!(output_dir.path().join("source").exists());
@@ -7919,59 +8120,86 @@ mod inspection_sql_controls {
         })
     }
     // Mechanical SQL controls: these bounded fixtures are not issued platform authority.
+    /// In-memory stock connection on one armed ticket of `host`.
+    fn armed_memory(
+        host: &crate::test_host::TestNativeHost,
+    ) -> (Connection, crate::native::RawTestTicket) {
+        host.armed(|| Connection::open_in_memory().unwrap())
+    }
+    fn close_memory(
+        host: &crate::test_host::TestNativeHost,
+        connection: Connection,
+        ticket: crate::native::RawTestTicket,
+    ) {
+        host.scope(|| connection.close().unwrap());
+        host.retire_raw(ticket);
+    }
     #[test]
     fn recursive_and_short_statements_share_irreversible_vm_budget() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let root = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let work = fixture();
-        let first = Connection::open_in_memory().unwrap();
-        install_inspection_sql_work(&first, &root, work.clone()).unwrap();
-        let mut successes = 0;
-        loop {
-            match first.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
-                Ok(1) => successes += 1,
-                Ok(_) => panic!("wrong scalar"),
-                Err(_) => break,
+        let (first, first_ticket) = armed_memory(&host);
+        host.scope(|| {
+            install_inspection_sql_work(&first, &root, work.clone()).unwrap();
+            let mut successes = 0;
+            loop {
+                match first.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
+                    Ok(1) => successes += 1,
+                    Ok(_) => panic!("wrong scalar"),
+                    Err(_) => break,
+                }
+                assert!(successes < 128, "short statements cannot escape metering");
             }
-            assert!(successes < 128, "short statements cannot escape metering");
-        }
-        assert!(successes > 0);
+            assert!(successes > 0);
+        });
         assert_eq!(work.steps.load(Ordering::SeqCst), 128);
-        drop(first);
-        let next = Connection::open_in_memory().unwrap();
-        assert!(install_inspection_sql_work(&next, &root, work.clone()).is_err());
+        close_memory(&host, first, first_ticket);
+        let (next, next_ticket) = armed_memory(&host);
+        host.scope(|| {
+            assert!(install_inspection_sql_work(&next, &root, work.clone()).is_err());
+        });
         assert_eq!(work.steps.load(Ordering::SeqCst), 128);
         let recursive_work = fixture();
-        install_inspection_sql_work(&next, &root, recursive_work.clone()).unwrap();
-        assert!(next.query_row("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT SUM(x) FROM n", [], |r| r.get::<_, i64>(0)).is_err());
+        host.scope(|| {
+            install_inspection_sql_work(&next, &root, recursive_work.clone()).unwrap();
+            assert!(next.query_row("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT SUM(x) FROM n", [], |r| r.get::<_, i64>(0)).is_err());
+        });
         assert_eq!(recursive_work.steps.load(Ordering::SeqCst), 128);
+        close_memory(&host, next, next_ticket);
     }
     #[test]
     fn refused_first_opcode_executes_zero_vm_steps() {
-        let _serial = crate::test_host::serial_guard();
-        let conn = Connection::open_in_memory().unwrap();
-        // Prepare BEFORE installing refusal, to distinguish prospective opcode
-        // admission from prepare-time or retrospective loop/end callbacks.
-        let mut statement = conn.prepare("SELECT 1").unwrap();
-        conn.progress_handler(1, Some(|| true));
-        assert!(statement.query_row([], |r| r.get::<_, i64>(0)).is_err());
-        assert_eq!(statement.get_status(rusqlite::StatementStatus::VmStep), 0);
+        let host = crate::test_host::TestNativeHost::acquire();
+        let (conn, ticket) = armed_memory(&host);
+        host.scope(|| {
+            // Prepare BEFORE installing refusal, to distinguish prospective opcode
+            // admission from prepare-time or retrospective loop/end callbacks.
+            let mut statement = conn.prepare("SELECT 1").unwrap();
+            conn.progress_handler(1, Some(|| true));
+            assert!(statement.query_row([], |r| r.get::<_, i64>(0)).is_err());
+            assert_eq!(statement.get_status(rusqlite::StatementStatus::VmStep), 0);
+        });
+        close_memory(&host, conn, ticket);
     }
 
     #[test]
     fn original_expiry_interrupts_installed_connection_without_renewal() {
-        let _serial = crate::test_host::serial_guard();
+        let host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let root = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let work = fixture();
-        let conn = Connection::open_in_memory().unwrap();
-        install_inspection_sql_work(&conn, &root, work.clone()).unwrap();
+        let (conn, ticket) = armed_memory(&host);
+        host.scope(|| install_inspection_sql_work(&conn, &root, work.clone()).unwrap());
         work.expired.store(true, Ordering::SeqCst);
-        assert!(
-            conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
-                .is_err()
-        );
-        assert!(install_inspection_sql_work(&conn, &root, work).is_err());
+        host.scope(|| {
+            assert!(
+                conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                    .is_err()
+            );
+            assert!(install_inspection_sql_work(&conn, &root, work).is_err());
+        });
+        close_memory(&host, conn, ticket);
     }
 }

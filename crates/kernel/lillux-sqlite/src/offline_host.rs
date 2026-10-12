@@ -328,6 +328,9 @@ impl OfflineNativeHost {
         let authority = self.authority.clone();
         self.region.enter(raw, OFFLINE_NATIVE_RELEASE_STEPS, || authority.checkpoint(false))?;
         self.region.map_resident(|| authority.checkpoint(false))?;
+        self.region.confirm_backing_residency()?;
+        let residency = self.region.backing_residency_proof()
+            .context("offline native region has no residency proof")?;
         let generation = next_resident_generation()?;
         // SAFETY: `issue`'s contract: `raw` was minted once for this host
         // under the caller's exclusive stopped-node authority, which
@@ -343,6 +346,8 @@ impl OfflineNativeHost {
             closed: self.closed.clone(),
             authority: self.authority.clone(),
             ticketed: Mutex::new(Vec::new()),
+            refusal: AtomicBool::new(false),
+            residency,
         });
         self.admission = Some(admission.clone());
         self.authority.checkpoint(false)?;
@@ -658,6 +663,13 @@ struct OfflineAdmission {
     /// Producer preparations refused after their ticket was debited. Each
     /// keeps its cell until finish turns it into a released terminal.
     ticketed: Mutex<Vec<OfflineTicketedPreparation>>,
+    /// Service-refusal latch of this one offline factory. Every service check
+    /// and VM step reads it; cleanup never does. Never cleared.
+    refusal: AtomicBool,
+    /// The residency proof of this host's region, copied when residency
+    /// completed. Every new ticket re-checks it; the region stays mapped
+    /// while the admission lives.
+    residency: lillux::process_control::ResidencyProof,
 }
 
 /// A debited ticket whose producer never published: either its bind was
@@ -679,6 +691,10 @@ impl OfflineAdmission {
 
     fn begin_ticket(&self, kind: SqliteInspectionProductionKind) -> Result<(u32, SqliteInspectionProductionPermit)> {
         self.require_original(false)?;
+        // A new ticket is new native work against the resident region.
+        self.residency
+            .confirm_swap_unreachable()
+            .map_err(|reason| anyhow::anyhow!("native residency no longer holds: {reason}"))?;
         ensure!(self.original.strong_count() > 0, "offline admission no longer retained");
         let core = self.region.claim_producer_control(kind)?;
         let ticket = match self.budget.debit_connection_ticket() {
@@ -765,8 +781,17 @@ impl OfflineAdmission {
 
 impl OriginalNativeAdmissionAuthority for OfflineAdmission {
     fn require_original(&self, cleanup: bool) -> Result<()> {
+        if !cleanup {
+            ensure!(!self.refusal.load(Ordering::SeqCst), "offline native service refused");
+        }
         ensure!(cleanup || !self.closed.load(Ordering::Acquire), "offline native admission closed");
-        self.authority.checkpoint(cleanup)
+        let checked = self.authority.checkpoint(cleanup);
+        if let Err(error) = &checked {
+            if crate::native_refusal_is_fact(error) {
+                self.refuse_service();
+            }
+        }
+        checked
     }
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {
         self.require_original(false)?;
@@ -777,8 +802,12 @@ impl OriginalNativeAdmissionAuthority for OfflineAdmission {
         self.budget.clone()
     }
     fn debit_sql_vm_steps(&self, steps: u64) -> Result<()> {
+        ensure!(!self.refusal.load(Ordering::SeqCst), "offline native service refused");
         self.authority.charge_sql_vm_steps(steps)?;
         self.budget.debit_steps(steps, false)
+    }
+    fn refuse_service(&self) {
+        self.refusal.store(true, Ordering::SeqCst);
     }
     fn begin_connection(&self) -> Result<OriginalNativeConnectionAdmission> {
         let (ticket, permit) = self.begin_ticket(SqliteInspectionProductionKind::Native)?;

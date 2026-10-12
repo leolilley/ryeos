@@ -227,6 +227,12 @@ fn read_unbound(
             &mut written,
         )
     };
+    if code == libsqlite3_sys::SQLITE_BUSY {
+        // Another owner holds the file's locks: this read is refused, but
+        // no admission fact failed, so service refusal does not latch.
+        return Err(anyhow::Error::new(crate::NativeCheckContended)
+            .context(format!("guarded SQLite evidence read refused ({code})")));
+    }
     ensure!(
         code == libsqlite3_sys::SQLITE_OK,
         "guarded SQLite evidence read refused ({code})"

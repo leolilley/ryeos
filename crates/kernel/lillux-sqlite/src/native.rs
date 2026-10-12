@@ -28,6 +28,236 @@ fn require_current_native_process() -> Result<()> {
     Ok(())
 }
 
+/// A native admission check refused only because another thread momentarily
+/// held a lock the check needs. It refuses the contended call alone; it is not
+/// a fact refusal and never latches service refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCheckContended;
+impl std::fmt::Display for NativeCheckContended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native admission check contended; this call refused without latching")
+    }
+}
+impl std::error::Error for NativeCheckContended {}
+
+/// A native admission check could not observe the fact it checks because of
+/// a momentary host condition, such as being out of descriptors while
+/// reading its own process identity. It refuses this call alone; it is not a
+/// fact refusal and never latches service refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCheckUnobservable;
+impl std::fmt::Display for NativeCheckUnobservable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native admission check could not observe its fact; this call refused without latching")
+    }
+}
+impl std::error::Error for NativeCheckUnobservable {}
+
+/// The planned service-window edge ended service SQL. The authority latches
+/// its own distinct edge bit; a boundary does not record it as a fact refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeServiceEdgeReached;
+impl std::fmt::Display for NativeServiceEdgeReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native service window edge reached; service SQL ended")
+    }
+}
+impl std::error::Error for NativeServiceEdgeReached {}
+
+/// Whether a refusal is a fact refusal: neither momentary contention, nor
+/// the planned service edge, nor a momentary shortage or interruption of
+/// host resources (descriptors, memory, an interrupted call or a device I/O
+/// error) anywhere in its cause chain. A non-fact refusal still refuses its
+/// call; it only does not latch a permanent service stop, so a later call
+/// re-checks the durable facts.
+pub fn native_refusal_is_fact(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<NativeCheckContended>().is_none()
+        && error.downcast_ref::<NativeCheckUnobservable>().is_none()
+        && error.downcast_ref::<NativeServiceEdgeReached>().is_none()
+        && !error.chain().any(cause_is_transient_resource)
+}
+
+fn cause_is_transient_resource(cause: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+        return lillux::platform::io_error_is_transient_resource(io);
+    }
+    matches!(
+        cause.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::OutOfMemory
+    )
+}
+
+/// The result of one scoped SQL operation. A step or commit refused inside
+/// the scope fails the operation even when the operation swallowed that
+/// error and reported success: a refused commit never reads as Ok.
+fn sql_scope_outcome<T>(result: Result<T>, post: Result<()>, step_refused: bool) -> Result<T> {
+    match (result, post) {
+        (Err(original), Err(post)) => Err(original.context(post)),
+        (Err(original), Ok(())) => Err(original),
+        (Ok(_), Err(post)) => Err(post),
+        (Ok(_), Ok(())) if step_refused => Err(anyhow::anyhow!(
+            "a step or commit of this SQL operation was refused although the operation reported \
+             success; its result is withheld"
+        )),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
+#[cfg(test)]
+mod refusal_class_tests {
+    use anyhow::Context as _;
+
+    #[test]
+    fn transient_resource_refusals_are_not_facts() {
+        let emfile = Err::<(), _>(std::io::Error::from_raw_os_error(libc::EMFILE))
+            .context("read exact retained record")
+            .context("original capacity debit check")
+            .unwrap_err();
+        assert!(!super::native_refusal_is_fact(&emfile));
+        let eintr = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EINTR));
+        assert!(!super::native_refusal_is_fact(&eintr));
+        let nomem = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOMEM),
+            None,
+        ));
+        assert!(!super::native_refusal_is_fact(&nomem));
+        let unobservable = anyhow::anyhow!("proc unreadable").context(super::NativeCheckUnobservable);
+        assert!(!super::native_refusal_is_fact(&unobservable));
+        assert!(!super::native_refusal_is_fact(&anyhow::Error::new(super::NativeCheckContended)));
+
+        // Facts still latch, including an I/O failure about the file itself.
+        assert!(super::native_refusal_is_fact(&anyhow::anyhow!(
+            "original capacity debit no longer matches durable account/redo"
+        )));
+        let missing = Err::<(), _>(std::io::Error::from_raw_os_error(libc::ENOENT))
+            .context("open account")
+            .unwrap_err();
+        assert!(super::native_refusal_is_fact(&missing));
+        let corrupt = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        ));
+        assert!(super::native_refusal_is_fact(&corrupt));
+    }
+
+    #[test]
+    fn a_swallowed_step_refusal_never_returns_ok() {
+        assert_eq!(super::sql_scope_outcome(Ok(7), Ok(()), false).unwrap(), 7);
+        let swallowed = super::sql_scope_outcome(Ok(7), Ok(()), true).unwrap_err().to_string();
+        assert!(swallowed.contains("refused"), "{swallowed}");
+        assert!(super::sql_scope_outcome::<u8>(Err(anyhow::anyhow!("own")), Ok(()), true).is_err());
+        assert!(super::sql_scope_outcome(Ok(7), Err(anyhow::anyhow!("boundary")), false).is_err());
+    }
+}
+
+/// One step-hook body for every native and inspection connection. Each VM
+/// opcode runs the C process check, the caller's per-operation deadline and
+/// one exact step debit, which checks only in-memory facts. A panic while
+/// checking refuses the opcode: SQLite's callback trampoline would otherwise
+/// treat it as "continue" and run the opcode uncharged.
+pub(crate) fn native_step_hook(
+    debit: impl Fn() -> Result<()> + Send + 'static,
+    deadline: Option<lillux::time::MonotonicDeadline>,
+    refused: Option<Arc<AtomicBool>>,
+) -> impl FnMut() -> bool + Send + std::panic::RefUnwindSafe + 'static {
+    let debit = std::panic::AssertUnwindSafe(debit);
+    move || {
+        // Borrow the whole wrapper so the closure captures the asserted
+        // wrapper itself, not its inner callback field.
+        let debit = &debit;
+        // A caught panic refuses the opcode, so no state a panic could leave
+        // half-updated is observed afterwards: the whole check is asserted
+        // unwind-safe rather than only the callback field.
+        let refuse = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            require_current_native_process().is_err()
+                || deadline.is_some_and(|deadline| deadline.has_elapsed())
+                || (debit.0)().is_err()
+        }))
+        .unwrap_or(true);
+        if refuse {
+            if let Some(refused) = &refused {
+                refused.store(true, Ordering::SeqCst);
+            }
+        }
+        refuse
+    }
+}
+
+/// Refusal observation of one scoped SQL operation on one connection. The
+/// flag is cleared for this scope and an enclosing scope's observation is
+/// restored on return or unwind, so a nested scope never hides a refusal
+/// the enclosing scope already saw; a refusal inside the nested scope stays
+/// visible to the enclosing one.
+struct StepRefusalScope {
+    flag: Arc<AtomicBool>,
+    enclosing: bool,
+}
+impl StepRefusalScope {
+    fn enter(flag: Arc<AtomicBool>) -> Self {
+        let enclosing = flag.swap(false, Ordering::SeqCst);
+        Self { flag, enclosing }
+    }
+    fn refused(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+impl Drop for StepRefusalScope {
+    fn drop(&mut self) {
+        if self.enclosing {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NativeBoundaryFrame {
+    authority: *const (),
+    cleanup: bool,
+    verified: bool,
+}
+thread_local! {
+    static NATIVE_BOUNDARY: std::cell::Cell<Option<NativeBoundaryFrame>> =
+        const { std::cell::Cell::new(None) };
+}
+// Records, for the running boundary on this thread only, that the authority's
+// durable reads passed once. Restores the enclosing frame on return or unwind.
+struct NativeBoundaryScope {
+    previous: Option<NativeBoundaryFrame>,
+}
+impl NativeBoundaryScope {
+    fn enter(authority: *const (), cleanup: bool) -> Self {
+        let previous = NATIVE_BOUNDARY.with(|frame| frame.replace(Some(NativeBoundaryFrame {
+            authority, cleanup, verified: false,
+        })));
+        Self { previous }
+    }
+    fn verified(&self) {
+        NATIVE_BOUNDARY.with(|frame| {
+            if let Some(mut current) = frame.get() {
+                current.verified = true;
+                frame.set(Some(current));
+            }
+        });
+    }
+}
+impl Drop for NativeBoundaryScope {
+    fn drop(&mut self) {
+        NATIVE_BOUNDARY.with(|frame| frame.set(self.previous));
+    }
+}
+
+/// Within one running native boundary on this thread, whether `authority`
+/// already passed its durable reads in the same mode. A nested check may then
+/// skip only those reads; it must still re-read the service latch and the
+/// process. Nothing is reused across boundaries or threads.
+pub fn native_boundary_reuses_durable_check<T: ?Sized>(authority: &T, cleanup: bool) -> bool {
+    let authority = authority as *const T as *const ();
+    NATIVE_BOUNDARY.with(|frame| frame.get().is_some_and(|frame| {
+        frame.verified && frame.cleanup == cleanup && std::ptr::eq(frame.authority, authority)
+    }))
+}
+
 /// Fixed connection-ticket capacity of one native arena.
 pub const MAX_NATIVE_CONNECTIONS: usize = 64;
 /// Storage an arena reserves for its own control block; a funded envelope
@@ -161,6 +391,13 @@ pub enum OriginalNativeDomain {
     NodeProjectionInspection,
     OperationalSyncJobSchemaReference,
     OperationalReplaySchemaReference,
+    /// An external candidate supervisor's own occurrence journal.
+    ExternalSupervisorJournal,
+    /// The guest journal an external candidate supervisor keeps for one
+    /// launched occurrence.
+    ExternalGuestJournal,
+    ExternalSupervisorJournalSchemaReference,
+    ExternalGuestJournalSchemaReference,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginalNativeBoundMode {
@@ -175,10 +412,18 @@ pub enum OriginalNativeBoundMode {
 
 /// Trusted host integration, not a user-supplied quota/identity constructor.
 pub trait OriginalNativeAdmissionAuthority: Send + Sync {
+    /// Durable admission facts. Service mode also reads the service latch on
+    /// every call; cleanup mode never reads it. A fact refusal latches.
     fn require_original(&self, cleanup: bool) -> Result<()>;
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()>;
     fn budget(&self) -> Arc<OriginalNativeBudgetOwner>;
+    /// Charge exactly `steps` VM steps. Runs once per opcode, so it checks
+    /// in-memory facts only (service latch, fixed service edge, budget): no
+    /// file, procfs, mutex or digest work. Durable facts run at boundaries.
     fn debit_sql_vm_steps(&self, steps: u64) -> Result<()>;
+    /// Latch this incarnation's service refusal. Every later service check
+    /// and VM step refuses; cleanup never reads the latch. Never cleared.
+    fn refuse_service(&self);
     fn begin_connection(&self) -> Result<OriginalNativeConnectionAdmission>;
     fn begin_projection_lease(&self) -> Result<OriginalNativeProjectionLeaseAdmission>;
 }
@@ -1221,6 +1466,10 @@ impl OriginalNativeTransientInputs {
     /// namespace owner, same initialized paid factory, original funding and
     /// node/process/clock custody. It may build only the declared ledger
     /// schema; it grants no ledger rows or admission authority.
+    /// ExternalSupervisorJournalSchemaReference and
+    /// ExternalGuestJournalSchemaReference must retain the supervisor's
+    /// pinned journal directory, its occurrence-funded host factory and the
+    /// occurrence process; each may build only its declared journal schema.
     /// No domain enum or path DTO may substitute for these genuine owners.
     pub unsafe fn issued(
         domain: OriginalNativeDomain,
@@ -1238,6 +1487,8 @@ impl OriginalNativeTransientInputs {
                     | OriginalNativeDomain::NodeProjectionSchemaReference
                     | OriginalNativeDomain::NodeSchedulerSchemaReference
                     | OriginalNativeDomain::NodeAccountingSchemaReference
+                    | OriginalNativeDomain::ExternalSupervisorJournalSchemaReference
+                    | OriginalNativeDomain::ExternalGuestJournalSchemaReference
             ),
             "invalid transient native domain"
         );
@@ -1390,6 +1641,8 @@ impl OriginalNativeBoundInputs {
                         | Domain::NodeProjectionSchemaReference
                         | Domain::NodeSchedulerSchemaReference
                         | Domain::NodeAccountingSchemaReference
+                        | Domain::ExternalSupervisorJournalSchemaReference
+                        | Domain::ExternalGuestJournalSchemaReference
                 ),
                 "transient domain cannot acquire a bound store"
             );
@@ -1444,6 +1697,10 @@ unsafe extern "C" {
         ticket: u32,
     ) -> c_int;
     fn ryeos_native_connection_closed(arena: *mut c_void, ticket: u32) -> c_int;
+    fn ryeos_native_commit_verifier_install(
+        arena: *mut c_void,
+        verifier: extern "C" fn(std::ffi::c_uint) -> c_int,
+    ) -> c_int;
     fn ryeos_native_arena_reclaim(arena: *mut c_void) -> c_int;
     fn ryeos_native_arena_release(arena: *mut c_void) -> c_int;
 }
@@ -1498,6 +1755,68 @@ pub struct OriginalNativeFactory {
     budget: Arc<OriginalNativeBudgetOwner>,
     producer: Mutex<Option<SqliteInspectionProductionPermit>>,
     budget_c_lease: OnceLock<OriginalNativeRegionCBorrow>,
+    // Heap-owned by this facade, never resident in the mapped region.
+    commit_table: Arc<NativeCommitTable>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoundaryMode {
+    Service,
+    CommitGate,
+    Cleanup,
+}
+
+/// Boundary inputs of one enrolled connection, read by the compiled commit
+/// gate. Only weak or copied references: no strong factory, destination or
+/// producer owner and no counted region handle, so closing every connection
+/// returns the factory to its sole owner.
+struct NativeCommitSlot {
+    factory: Weak<OriginalNativeFactory>,
+    destination: Weak<dyn OriginalNativeDestinationAuthority>,
+    control: Weak<dyn crate::SqliteInspectionProductionControl>,
+    cell: Option<OriginalNativeProducerCellIndex>,
+    refused: Arc<AtomicBool>,
+}
+struct NativeCommitTable {
+    // Tickets are never reused, so each slot is written once.
+    slots: [OnceLock<NativeCommitSlot>; MAX_NATIVE_CONNECTIONS],
+}
+// The arena is a process singleton, so one table is current at a time. Set and
+// cleared together with the C verifier pointer; holds only a weak reference.
+static NATIVE_COMMIT_TABLE: std::sync::RwLock<Option<Weak<NativeCommitTable>>> =
+    std::sync::RwLock::new(None);
+
+extern "C" fn native_commit_verifier(ticket: std::ffi::c_uint) -> c_int {
+    std::panic::catch_unwind(|| verify_native_commit(ticket).is_ok())
+        .map_or(0, |verified| c_int::from(verified))
+}
+fn verify_native_commit(ticket: u32) -> Result<()> {
+    let table = NATIVE_COMMIT_TABLE
+        .read()
+        .map_err(|_| anyhow!("native commit table poisoned"))?
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .context("native commit table absent")?;
+    let index = usize::try_from(ticket)?.checked_sub(1).context("native commit ticket zero")?;
+    let slot = table.slots.get(index).and_then(OnceLock::get)
+        .context("native commit on an unenrolled ticket")?;
+    let verified = match slot.factory.upgrade() {
+        Some(factory) => factory.boundary(BoundaryMode::CommitGate, || {
+            if let Some(cell) = slot.cell {
+                producer_cell_checkpoint(&factory.region, cell)?;
+            }
+            slot.control.upgrade().context("native commit producer owner vanished")?.checkpoint()?;
+            slot.destination
+                .upgrade()
+                .context("native commit destination owner vanished")?
+                .require_original(&factory)
+        }),
+        None => Err(anyhow!("native commit factory owner vanished")),
+    };
+    if verified.is_err() {
+        slot.refused.store(true, Ordering::SeqCst);
+    }
+    verified
 }
 /// No authority wrappers or region-owning backedges live inside the mapping.
 /// Fixed kernel control state and actual terminal observation are resident.
@@ -1539,7 +1858,8 @@ impl OriginalNativeFactory {
     ) -> std::result::Result<Arc<Self>, OriginalNativeFactoryFailure> {
         let budget = authority.budget();
         let factory = Arc::new(Self { original_process: std::process::id(), region, authority, budget,
-            producer: Mutex::new(Some(producer)), budget_c_lease: OnceLock::new() });
+            producer: Mutex::new(Some(producer)), budget_c_lease: OnceLock::new(),
+            commit_table: Arc::new(NativeCommitTable { slots: std::array::from_fn(|_| OnceLock::new()) }) });
         let result = (|| -> Result<()> {
             factory.require_original(false)?;
             ensure!(factory.budget.same_region(&factory.region)?, "foreign resident budget region");
@@ -1759,6 +2079,34 @@ impl OriginalNativeFactory {
         );
         Ok(())
     }
+    /// One native operation boundary. Every mode checks the process and the
+    /// authority's durable facts; service and commit-gate boundaries also
+    /// check the producer and destination through `service`. Within the
+    /// boundary the authority's durable reads run once; nested checks still
+    /// re-read the latch and the process. A fact refusal latches service
+    /// refusal; contention, the planned edge and a foreign process do not.
+    fn boundary(&self, mode: BoundaryMode, service: impl FnOnce() -> Result<()>) -> Result<()> {
+        let cleanup = mode == BoundaryMode::Cleanup;
+        let checked = {
+            let scope = NativeBoundaryScope::enter(Arc::as_ptr(&self.authority) as *const (), cleanup);
+            (|| -> Result<()> {
+                self.require_process()?;
+                self.require_original(cleanup)?;
+                scope.verified();
+                if !cleanup {
+                    service()?;
+                }
+                Ok(())
+            })()
+        };
+        checked.map_err(|error| {
+            // A forked child never writes the parent's latch.
+            if self.require_process().is_ok() && native_refusal_is_fact(&error) {
+                self.authority.refuse_service();
+            }
+            error
+        })
+    }
     fn retain_error(self: &Arc<Self>, error: anyhow::Error) -> OriginalNativeFactoryFailure {
         OriginalNativeFactoryFailure {
             error,
@@ -1892,6 +2240,13 @@ impl OriginalNativeFactory {
                 );
             }
             let arena = self.arena()?;
+            ensure!(
+                unsafe { ryeos_native_commit_verifier_install(arena.0.as_ptr(), native_commit_verifier) }
+                    == libsqlite3_sys::SQLITE_OK,
+                "original native commit verifier installation refused"
+            );
+            *NATIVE_COMMIT_TABLE.write().map_err(|_| anyhow!("native commit table poisoned"))? =
+                Some(Arc::downgrade(&self.commit_table));
             let _scope = arena.scope(false, 0)?;
             let code = unsafe { libsqlite3_sys::sqlite3_initialize() };
             ensure!(
@@ -1966,6 +2321,7 @@ impl OriginalNativeFactory {
         let mut producer = None;
         let mut admission_failure = None;
         let mut acquired = None;
+        let step_refused = Arc::new(AtomicBool::new(false));
         let opened = (|| -> Result<()> {
             self.require_original(false)?;
             let _effect = self.enter_effect()?;
@@ -1982,6 +2338,8 @@ impl OriginalNativeFactory {
                             | OriginalNativeDomain::NodeProjectionSchemaReference
                     | OriginalNativeDomain::NodeSchedulerSchemaReference
                     | OriginalNativeDomain::NodeAccountingSchemaReference
+                    | OriginalNativeDomain::ExternalSupervisorJournalSchemaReference
+                    | OriginalNativeDomain::ExternalGuestJournalSchemaReference
                     ),
                 "only admitted State domain may open transient SQLite"
             );
@@ -2059,20 +2417,27 @@ impl OriginalNativeFactory {
                 unreachable!()
             };
             let db = unsafe { body.connection().handle() };
+            // The commit slot is filled before enrollment, so open-time
+            // staging commits pass the same gate.
+            let permit = producer.as_ref().context("native producer missing")?;
+            self.commit_table.slots[original_ticket as usize - 1]
+                .set(NativeCommitSlot {
+                    factory: Arc::downgrade(self),
+                    destination: Arc::downgrade(destination.authority()),
+                    control: Arc::downgrade(permit.control_owner()),
+                    cell: permit.region_cell(),
+                    refused: Arc::clone(&step_refused),
+                })
+                .map_err(|_| anyhow!("original native commit slot already filled"))?;
             ensure!(
                 unsafe { ryeos_native_connection_enroll(arena.0.as_ptr(), db, original_ticket) }
                     == libsqlite3_sys::SQLITE_OK,
                 "original native connection enrollment refused"
             );
-            // The SQLite progress hook crosses rusqlite's unwind boundary; the
-            // admission authority holds no state a caught unwind could expose.
-            let authority = std::panic::AssertUnwindSafe(self.authority.clone());
+            let authority = self.authority.clone();
             body.connection().progress_handler(
                 1,
-                Some(move || {
-                    require_current_native_process().is_err()
-                        || authority.debit_sql_vm_steps(1).is_err()
-                }),
+                Some(native_step_hook(move || authority.debit_sql_vm_steps(1), None, Some(Arc::clone(&step_refused)))),
             );
             body.connection().busy_timeout(std::time::Duration::ZERO)?;
             body.connection().pragma_update(None, "mmap_size", 0)?;
@@ -2109,7 +2474,10 @@ impl OriginalNativeFactory {
                     ensure!(staged == "memory" && mode == "wal", "empty bound database did not enter WAL");
                 }
             }
-            self.require_original(false)?;
+            self.boundary(BoundaryMode::Service, || {
+                producer.as_ref().context("native producer missing")?.checkpoint()?;
+                destination.authority().require_original(self)
+            })?;
             Ok(())
         })();
         match opened {
@@ -2125,6 +2493,8 @@ impl OriginalNativeFactory {
                     deadline_active: std::cell::Cell::new(false),
                     deadline_anchor: std::cell::Cell::new(None),
                     hook_refused: std::cell::Cell::new(false),
+                    transaction_retained: std::cell::Cell::new(false),
+                    step_refused,
                     body: Some(body),
                     destination: Some(destination),
                 })
@@ -2457,6 +2827,13 @@ impl OriginalNativeFactory {
                 "original native arena release pending"
             );
             self.storage()?.arena_released.store(true, Ordering::Release);
+            {
+                let mut current = NATIVE_COMMIT_TABLE.write()
+                    .map_err(|_| anyhow!("native commit table poisoned"))?;
+                if current.as_ref().is_some_and(|table| std::ptr::eq(table.as_ptr(), Arc::as_ptr(&self.commit_table))) {
+                    *current = None;
+                }
+            }
             // Store irreversible actual release before any later clock/memo
             // check; retries return SAME body and never touch unmapped arena.
             let body = OriginalNativeTerminalBody {
@@ -2579,14 +2956,11 @@ impl NativeOriginalDeadlineScope<'_> {
             return Ok(());
         }
         self.installed = false;
-        // Same unwind-boundary hook as acquisition; see the enrollment path.
-        let authority = std::panic::AssertUnwindSafe(self.owner.factory.authority.clone());
+        let authority = self.owner.factory.authority.clone();
         self.connection.progress_handler(
             1,
-            Some(move || {
-                require_current_native_process().is_err()
-                    || authority.debit_sql_vm_steps(1).is_err()
-            }),
+            Some(native_step_hook(move || authority.debit_sql_vm_steps(1), None,
+                Some(Arc::clone(&self.owner.step_refused)))),
         );
         let restored = self.connection.busy_timeout(self.prior_busy);
         self.owner.deadline_active.set(false);
@@ -2752,6 +3126,11 @@ pub struct OriginalNativeConnection {
     deadline_active: std::cell::Cell<bool>,
     deadline_anchor: std::cell::Cell<Option<lillux::time::MonotonicDeadline>>,
     hook_refused: std::cell::Cell<bool>,
+    // A scope that ended in refusal with a transaction still open. The owner
+    // must close this connection; no later service scope runs on it.
+    transaction_retained: std::cell::Cell<bool>,
+    // Set by this connection's step hook or commit gate when they refuse.
+    step_refused: Arc<AtomicBool>,
     factory: Arc<OriginalNativeFactory>,
     ticket: u32,
     domain: OriginalNativeDomain,
@@ -2799,8 +3178,7 @@ impl OriginalNativeConnection {
                 ensure!(busy == 0 && log == 0 && checkpointed == 0,
                     "live initialization checkpoint incomplete ({busy}, {log}, {checkpointed})");
                 outcome.checkpoint_completed = true;
-                self.factory.require_original(false)?;
-                inputs.authority.require_original(&self.factory)?;
+                self.service_boundary()?;
                 let NativeConnectionBody::Bound(owner) = self.body.as_ref().context("live body absent")? else {
                     anyhow::bail!("live initialization owner is not Bound")
                 };
@@ -2814,13 +3192,11 @@ impl OriginalNativeConnection {
                 ensure!(synced.code == libsqlite3_sys::SQLITE_OK
                     && synced.wal_synced && synced.main_synced,
                     "live Bound initialization sync refused ({})", synced.code);
-                self.factory.require_original(false)?;
-                inputs.authority.require_original(&self.factory)?;
+                self.service_boundary()?;
                 self.factory.budget.debit_steps(1, false)?;
                 inputs.root.sync()?;
                 outcome.directory_synced = true;
-                self.factory.require_original(false)?;
-                inputs.authority.require_original(&self.factory)
+                self.service_boundary()
             })?;
             self.factory.require_ready()?;
             bound_identity.context("live initialization Bound identity absent")
@@ -2850,11 +3226,21 @@ impl OriginalNativeConnection {
     pub fn sql_owner_refused(&self) -> bool {
         self.hook_refused.get()
     }
+    /// A scope on this connection ended in refusal with its transaction
+    /// still open. No later service scope runs; the owner closes it, which
+    /// rolls the open transaction back.
+    pub fn transaction_retained(&self) -> bool {
+        self.transaction_retained.get()
+    }
     fn require_sql_owner(&self) -> Result<()> {
         require_current_native_process()?;
         ensure!(
             !self.hook_refused.get(),
             "original native hook/busy restoration refused; SQL owner retained"
+        );
+        ensure!(
+            !self.transaction_retained.get(),
+            "original native transaction retained after refusal; connection must close"
         );
         if let Some(deadline) = self.deadline_anchor.get() {
             ensure!(
@@ -2864,8 +3250,10 @@ impl OriginalNativeConnection {
         }
         Ok(())
     }
-    /// Only this same-original offline RuntimeMutation or live NodeRuntime
-    /// claim/connection. No default clock, inspection hook replacement or deadline renewal.
+    /// Only this same-original offline RuntimeMutation owner. The deadline
+    /// becomes a connection-wide anchor: once it elapses the offline
+    /// operation is over and the owner serves no further SQL. No default
+    /// clock, inspection hook replacement or deadline renewal.
     pub fn with_sql_deadline<T>(
         &self,
         deadline: lillux::time::MonotonicDeadline,
@@ -2873,11 +3261,8 @@ impl OriginalNativeConnection {
     ) -> Result<T> {
         require_current_native_process()?;
         ensure!(
-            matches!(
-                self.domain,
-                OriginalNativeDomain::RuntimeMutation | OriginalNativeDomain::NodeRuntime
-            ),
-            "original Runtime deadline requires offline RuntimeMutation or live NodeRuntime owner"
+            self.domain == OriginalNativeDomain::RuntimeMutation,
+            "original anchored Runtime deadline requires the offline RuntimeMutation owner"
         );
         ensure!(
             !self.deadline_active.get(),
@@ -2910,13 +3295,11 @@ impl OriginalNativeConnection {
                 prior_busy,
                 installed: true,
             };
-            // Same unwind-boundary hook as acquisition; see the enrollment path.
-            let authority = std::panic::AssertUnwindSafe(self.factory.authority.clone());
+            let authority = self.factory.authority.clone();
             connection.progress_handler(
                 1,
-                Some(move || {
-                    require_current_native_process().is_err() || effective.has_elapsed() || authority.debit_sql_vm_steps(1).is_err()
-                }),
+                Some(native_step_hook(move || authority.debit_sql_vm_steps(1), Some(effective),
+                    Some(Arc::clone(&self.step_refused)))),
             );
             let result = if effective.has_elapsed() {
                 Err(anyhow::anyhow!("original native deadline expired before operation"))
@@ -2941,11 +3324,13 @@ impl OriginalNativeConnection {
             }
         })
     }
-    /// Per-operation absolute deadline for the live accounting ledger owner.
-    /// The deadline check is installed together with this connection's VM-step
-    /// debit, and the debit-only hook is restored afterwards. Unlike
-    /// `with_sql_deadline`, the deadline is not retained as a connection-wide
-    /// anchor: each ledger operation carries its own original funding deadline.
+    /// Per-operation absolute deadline for a live daemon owner: the
+    /// accounting ledger or the Runtime store. The deadline check is
+    /// installed together with this connection's VM-step debit, and the
+    /// debit-only hook is restored afterwards. Unlike `with_sql_deadline`,
+    /// the deadline is not retained as a connection-wide anchor: an elapsed
+    /// deadline ends only its own operation, and the live connection keeps
+    /// serving later operations under their own deadlines.
     pub fn with_sql_until<T>(
         &self,
         deadline: lillux::time::MonotonicDeadline,
@@ -2953,8 +3338,11 @@ impl OriginalNativeConnection {
     ) -> Result<T> {
         require_current_native_process()?;
         ensure!(
-            self.domain == OriginalNativeDomain::NodeAccounting,
-            "original per-operation deadline requires the live NodeAccounting owner"
+            matches!(
+                self.domain,
+                OriginalNativeDomain::NodeAccounting | OriginalNativeDomain::NodeRuntime
+            ),
+            "original per-operation deadline requires a live NodeAccounting or NodeRuntime owner"
         );
         ensure!(
             !self.deadline_active.get(),
@@ -2982,15 +3370,11 @@ impl OriginalNativeConnection {
                 prior_busy,
                 installed: true,
             };
-            // Same unwind-boundary hook as acquisition; see the enrollment path.
-            let authority = std::panic::AssertUnwindSafe(self.factory.authority.clone());
+            let authority = self.factory.authority.clone();
             connection.progress_handler(
                 1,
-                Some(move || {
-                    require_current_native_process().is_err()
-                        || deadline.has_elapsed()
-                        || authority.debit_sql_vm_steps(1).is_err()
-                }),
+                Some(native_step_hook(move || authority.debit_sql_vm_steps(1), Some(deadline),
+                    Some(Arc::clone(&self.step_refused)))),
             );
             let result = if deadline.has_elapsed() {
                 Err(anyhow::anyhow!("original native deadline expired before operation"))
@@ -3087,9 +3471,54 @@ impl OriginalNativeConnection {
                 .as_ref()
                 .context("original Bound keeper missing")?;
             self.factory.budget.debit_steps(1, false)?;
-            binding.validate(connection, false)?;
+            // The keeper's own inode, observed before validation: a refused
+            // validation poisons the keeper, which then reports no identity.
+            let keeper = binding.main_identity()?;
+            if let Err(refusal) = binding.validate(connection, false) {
+                // Name what the bound name now resolves to when that explains
+                // the refusal; the keeper stays poisoned either way.
+                let named = binding
+                    .path()
+                    .ok()
+                    .and_then(|path| std::path::Path::new(path).file_name().map(OsStr::to_os_string))
+                    .map(|name| owner.runtime().entry_no_follow(&name));
+                return Err(match named {
+                    Some(Ok(None)) => refusal
+                        .context("bound database was removed from its name while its keeper is live"),
+                    Some(Ok(Some(entry))) if (entry.containing_device, entry.inode) != keeper => refusal
+                        .context("bound database was replaced: its name resolves to a different file than the live keeper"),
+                    _ => refusal,
+                });
+            }
             binding.main_identity()
         })
+    }
+    /// Service boundary of one scoped SQL operation: process, durable
+    /// authority facts, producer and destination.
+    fn service_boundary(&self) -> Result<()> {
+        self.factory.boundary(BoundaryMode::Service, || {
+            self.producer
+                .as_ref()
+                .context("original native producer missing")?
+                .checkpoint()?;
+            if let Some(destination) = &self.destination {
+                destination.authority().require_original(&self.factory)?;
+            }
+            Ok(())
+        })
+    }
+    /// Exit of one scoped SQL operation. A scope that ended in a boundary,
+    /// step-hook or commit-gate refusal with a transaction still open retains
+    /// that transaction for close; the owner's own SQL errors do not.
+    fn finish_sql_scope<T>(&self, result: Result<T>, autocommit: bool,
+        refusal: &StepRefusalScope) -> Result<T> {
+        let post = self.service_boundary();
+        let step_refused = refusal.refused();
+        if (post.is_err() || step_refused) && !autocommit {
+            self.transaction_retained.set(true);
+        }
+        let post = post.and_then(|()| self.require_sql_owner());
+        sql_scope_outcome(result, post, step_refused)
     }
     pub fn with_sql<T>(
         &self,
@@ -3097,31 +3526,18 @@ impl OriginalNativeConnection {
     ) -> Result<T> {
         require_current_native_process()?;
         self.require_sql_owner()?;
-        self.factory.require_original(false)?;
-        self.producer
+        self.service_boundary()?;
+        let connection = self
+            .body
             .as_ref()
-            .context("original native producer missing")?
-            .checkpoint()?;
-        if let Some(destination) = &self.destination {
-            destination.authority().require_original(&self.factory)?;
-        }
-        let _scope = self.factory.arena()?.scope(false, 0)?;
-        let result = operation(
-            self.body
-                .as_ref()
-                .context("original SQL connection closed")?
-                .connection(),
-        );
-        let post = self
-            .factory
-            .require_original(false)
-            .and_then(|()| self.require_sql_owner());
-        match (result, post) {
-            (Err(original), Err(post)) => Err(original.context(post)),
-            (Err(original), _) => Err(original),
-            (Ok(_), Err(post)) => Err(post),
-            (Ok(value), Ok(())) => Ok(value),
-        }
+            .context("original SQL connection closed")?
+            .connection();
+        let refusal = StepRefusalScope::enter(Arc::clone(&self.step_refused));
+        let result = {
+            let _scope = self.factory.arena()?.scope(false, 0)?;
+            operation(connection)
+        };
+        self.finish_sql_scope(result, connection.is_autocommit(), &refusal)
     }
     pub fn with_sql_mut<T>(
         &mut self,
@@ -3129,31 +3545,19 @@ impl OriginalNativeConnection {
     ) -> Result<T> {
         require_current_native_process()?;
         self.require_sql_owner()?;
-        self.factory.require_original(false)?;
-        self.producer
-            .as_ref()
-            .context("original native producer missing")?
-            .checkpoint()?;
-        if let Some(destination) = &self.destination {
-            destination.authority().require_original(&self.factory)?;
-        }
-        let _scope = self.factory.arena()?.scope(false, 0)?;
-        let result = operation(
-            self.body
+        self.service_boundary()?;
+        let refusal = StepRefusalScope::enter(Arc::clone(&self.step_refused));
+        let (result, autocommit) = {
+            let _scope = self.factory.arena()?.scope(false, 0)?;
+            let connection = self
+                .body
                 .as_mut()
                 .context("original SQL connection closed")?
-                .connection_mut(),
-        );
-        let post = self
-            .factory
-            .require_original(false)
-            .and_then(|()| self.require_sql_owner());
-        match (result, post) {
-            (Err(original), Err(post)) => Err(original.context(post)),
-            (Err(original), _) => Err(original),
-            (Ok(_), Err(post)) => Err(post),
-            (Ok(value), Ok(())) => Ok(value),
-        }
+                .connection_mut();
+            let result = operation(connection);
+            (result, connection.is_autocommit())
+        };
+        self.finish_sql_scope(result, autocommit, &refusal)
     }
     pub fn close(
         mut self,
@@ -3966,7 +4370,7 @@ impl OriginalNativeCloseFailure {
     }
     pub fn retry(mut self) -> std::result::Result<Arc<ClosedOriginalNativeConnection>, Self> {
         let result = (|| -> Result<ClosedNativeBody> {
-            self.factory.require_original(true)?;
+            self.factory.boundary(BoundaryMode::Cleanup, || Ok(()))?;
             let _scope = self.factory.arena()?.scope(true, 0)?;
             // Snapshot from the genuine live Bound keeper before taking it.
             // Failed metadata validation retains the actual Live owner.
@@ -5586,6 +5990,14 @@ impl NativeResidentState {
 pub struct OriginalNativeProducerCellIndex(u16);
 /// Ordinary reference wrapper over one nonrecycled concrete resident cell.
 pub struct OriginalNativeProducerControl { region: OriginalNativeRegionHandle, index: OriginalNativeProducerCellIndex }
+/// Producer-cell check rebuilt from the factory's own counted region and a
+/// copied cell index; it takes no new counted region handle.
+fn producer_cell_checkpoint(region: &OriginalNativeRegionHandle, index: OriginalNativeProducerCellIndex)
+    -> std::result::Result<(), FixedHostRefusal> {
+    let cell = region.state_ref()?.controls.get(index.0 as usize).ok_or(FixedHostRefusal::Provenance)?;
+    if cell.phase.load(Ordering::Acquire) != 1 { return Err(FixedHostRefusal::Closed); }
+    Ok(())
+}
 impl OriginalNativeProducerControl {
     pub fn try_clone(&self) -> std::result::Result<Self, FixedHostRefusal> {
         Ok(Self { region: self.region.try_clone()?, index: self.index })
@@ -5735,26 +6147,104 @@ fn producer_kind_requires_region(factory: &OriginalNativeFactory) -> Result<()> 
 pub(crate) struct RawTestTicket {
     ticket: u32,
     producer: SqliteInspectionProductionPermit,
+    // Keeps the commit slot's weak destination alive while the ticket lives.
+    _destination: Arc<dyn OriginalNativeDestinationAuthority>,
+}
+
+/// A raw test open whose SQLite handle can be enrolled, so its write
+/// commits pass the compiled commit gate like any native connection.
+#[cfg(test)]
+pub(crate) trait RawTestConnection {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3>;
+}
+#[cfg(test)]
+impl RawTestConnection for Connection {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
+        // SAFETY: the handle is only enrolled, never used after close.
+        Some(unsafe { self.handle() })
+    }
+}
+#[cfg(test)]
+impl<E> RawTestConnection for std::result::Result<Connection, E> {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
+        self.as_ref().ok().and_then(RawTestConnection::raw_test_handle)
+    }
+}
+#[cfg(test)]
+impl RawTestConnection for crate::BoundSqliteConnection {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
+        self.connection.as_ref().and_then(RawTestConnection::raw_test_handle)
+    }
+}
+#[cfg(test)]
+impl<E> RawTestConnection for std::result::Result<crate::BoundSqliteConnection, E> {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
+        self.as_ref().ok().and_then(RawTestConnection::raw_test_handle)
+    }
+}
+#[cfg(test)]
+impl RawTestConnection for crate::ReadonlySqliteCopy {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
+        self.owner.raw_test_handle()
+    }
+}
+#[cfg(test)]
+impl<E> RawTestConnection for std::result::Result<crate::ReadonlySqliteCopy, E> {
+    fn raw_test_handle(&self) -> Option<*mut libsqlite3_sys::sqlite3> {
+        self.as_ref().ok().and_then(RawTestConnection::raw_test_handle)
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl OriginalNativeFactory {
+    /// Run raw SQLite work inside an unticketed allocator scope.
+    pub(crate) fn raw_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
+        let _scope = self.arena()?.scope(false, 0)?;
+        Ok(work())
+    }
+    /// Run raw native cleanup work inside a cleanup allocator scope.
+    pub(crate) fn raw_cleanup_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
+        let _scope = self.arena()?.scope(true, 0)?;
+        Ok(work())
+    }
 }
 #[cfg(test)]
 impl OriginalNativeFactory {
     /// Arm one fresh ticket around `open` on this thread. The open gate
     /// consumes the ticket at the first SQLite open inside `open`.
-    pub(crate) fn arm_raw_for_test<T>(self: &Arc<Self>, open: impl FnOnce() -> T) -> Result<(T, RawTestTicket)> {
+    /// The opened connection is enrolled with a commit slot over the
+    /// ticket's producer and `destination`, so its commits pass the gate.
+    pub(crate) fn arm_raw_for_test<T: RawTestConnection>(
+        self: &Arc<Self>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        open: impl FnOnce() -> T,
+    ) -> Result<(T, RawTestTicket)> {
         let admission = self.ticket()?;
         let ticket = admission.ticket;
         self.storage()?.tickets[ticket as usize - 1].store(1, Ordering::Release);
-        let raw = RawTestTicket { ticket, producer: admission.producer };
         let value = {
-            let _scope = self.arena()?.scope(false, ticket)?;
-            open()
+            let arena = self.arena()?;
+            let _scope = arena.scope(false, ticket)?;
+            let value = open();
+            if let Some(db) = value.raw_test_handle() {
+                self.commit_table.slots[ticket as usize - 1]
+                    .set(NativeCommitSlot {
+                        factory: Arc::downgrade(self),
+                        destination: Arc::downgrade(&destination),
+                        control: Arc::downgrade(admission.producer.control_owner()),
+                        cell: admission.producer.region_cell(),
+                        refused: Arc::new(AtomicBool::new(false)),
+                    })
+                    .map_err(|_| anyhow!("raw test commit slot already filled"))?;
+                ensure!(
+                    unsafe { ryeos_native_connection_enroll(arena.0.as_ptr(), db, ticket) }
+                        == libsqlite3_sys::SQLITE_OK,
+                    "raw test connection enrollment refused"
+                );
+            }
+            value
         };
+        let raw = RawTestTicket { ticket, producer: admission.producer, _destination: destination };
         Ok((value, raw))
-    }
-    /// Run raw SQLite work inside an unticketed allocator scope.
-    pub(crate) fn raw_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
-        let _scope = self.arena()?.scope(false, 0)?;
-        Ok(work())
     }
     /// Recorded shared-mapping bytes and nonempty ledger slots.
     pub(crate) fn shared_census_for_test(&self) -> Result<(u64, u32)> {
@@ -5764,14 +6254,9 @@ impl OriginalNativeFactory {
         ensure!(rc == libsqlite3_sys::SQLITE_OK, "native shared census refused: {rc}");
         Ok((bytes, slots))
     }
-    /// Run raw native cleanup work inside a cleanup allocator scope.
-    pub(crate) fn raw_cleanup_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
-        let _scope = self.arena()?.scope(true, 0)?;
-        Ok(work())
-    }
     /// Close an armed ticket into a released terminal for the host census.
     pub(crate) fn retire_raw_for_test(self: &Arc<Self>, raw: RawTestTicket) -> Result<OriginalNativeConnectionTerminal> {
-        let RawTestTicket { ticket, producer } = raw;
+        let RawTestTicket { ticket, producer, _destination } = raw;
         self.budget.debit_steps(1, true)?;
         self.mark_closed(ticket, true)?;
         producer.acknowledge_native_terminal()?;

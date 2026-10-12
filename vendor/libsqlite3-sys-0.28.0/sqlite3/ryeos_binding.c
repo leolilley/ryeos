@@ -2,8 +2,12 @@
 #if defined(__linux__) && SQLITE_OS_UNIX && !defined(SQLITE_OMIT_WAL)
 #include <stdio.h>
 #include <stdatomic.h>
-/* Original signed native arena. No callback allocates host bookkeeping or
-   calls Rust. The shared counter pointer remains owned by original factory. */
+/* Original signed native arena. Allocator, VFS and shared-memory callbacks
+   allocate no host bookkeeping and never call Rust. The only call into Rust is
+   the installed commit verifier, made from the commit gate while this
+   connection's mutex and write lock are held; it re-enters no sqlite3_* or
+   ryeos_native_* entry point other than the lock-free process check. The
+   shared counter pointer remains owned by the original factory. */
 #include <sys/mman.h>
 #include <stdint.h>
 #include <limits.h>
@@ -50,6 +54,7 @@ typedef struct RyeosNativeMap {
   sqlite3_int64 offset;
   int state,unmapErrno;
 } RyeosNativeMap;
+typedef int (*RyeosNativeVerifier)(unsigned int);
 typedef struct RyeosNativeArena {
   uint64_t magic,mappingBytes,startOffset;
   RyeosNativeBudget *budget;
@@ -65,6 +70,9 @@ typedef struct RyeosNativeArena {
   _Atomic int poisoned,mutexReady,reclaimed;
   _Atomic(void*) connections[RYEOS_NATIVE_TICKETS];
   _Atomic unsigned char phases[RYEOS_NATIVE_TICKETS]; /* 0 never,1 attempted,2 enrolled,3 closed */
+  /* Commit verifier; in the wipe-on-fork control page, so a forked child
+     reads NULL and every commit there refuses. */
+  _Atomic(RyeosNativeVerifier) verifier;
 } RyeosNativeArena;
 #define RYEOS_LEASE_SCAN 4096
 #define RYEOS_LEASE_SERVICE (RYEOS_LEASE_SCAN+RYEOS_NATIVE_TICKETS+16)
@@ -77,6 +85,9 @@ static _Thread_local RyeosNativeArena *ryeosNativeScope=0;
 static _Thread_local unsigned int ryeosNativeDepth=0;
 static _Thread_local int ryeosNativeCleanup=0;
 static _Thread_local uint32_t ryeosNativeOpenTicket=0;
+/* Set only while the commit verifier runs on this thread. Scope entry, opens
+   and opcode admission refuse there, so a verifier cannot re-enter SQLite. */
+static _Thread_local int ryeosNativeInGate=0;
 _Static_assert(sizeof(RyeosNativeBudget)==56,"native budget ABI size differs");
 _Static_assert(offsetof(RyeosNativeBudget,serviceSteps)==32,"native budget ABI offset differs");
 _Static_assert(sizeof(RyeosNativeArena)<4096,"native control exceeds first page");
@@ -136,6 +147,31 @@ static int ryeosNativeContext(RyeosNativeArena *a){
   return a && a==atomic_load(&ryeosNativeOwner) && ryeosNativeScope==a
     && ryeosNativeDepth>0 && !atomic_load(&a->poisoned);
 }
+static int ryeosNativeInGateActive(void){ return ryeosNativeInGate; }
+/* Fails closed without an arena, outside service scope, without an enrolled
+   ticket for this exact connection, or without a verifier. Runs holding only
+   db->mutex and the transaction's write lock. */
+static int ryeosNativeCommitGate(sqlite3 *db){
+  RyeosNativeArena *a;RyeosNativeVerifier verifier;uint32_t i,n,ticket=0;int verified;
+  if(!ryeos_native_process_matches() || ryeosNativeInGate || !db) return 0;
+  a=atomic_load(&ryeosNativeOwner);
+  if(!ryeosNativeContext(a) || ryeosNativeCleanup) return 0;
+  n=a->budget->ticketLimit;
+  if(n>RYEOS_NATIVE_TICKETS) return 0;
+  for(i=0;i<n;i++){
+    if(atomic_load(&a->connections[i])==(void*)db && atomic_load(&a->phases[i])==2){ticket=i+1;break;}
+  }
+  if(!ticket) return 0;
+  verifier=atomic_load(&a->verifier);
+  if(!verifier) return 0;
+  ryeosNativeInGate=1;
+  verified=verifier(ticket);
+  ryeosNativeInGate=0;
+  return verified==1 && ryeos_native_process_matches();
+}
+/* Online backup copies pages outside the commit gate; refused while any
+   native arena exists. */
+static int ryeosNativeBackupGate(void){ return atomic_load(&ryeosNativeOwner)==0; }
 static int ryeosNativeInitGate(void){
   if(!ryeos_native_process_matches()){return 0;}
   RyeosNativeArena *a=atomic_load(&ryeosNativeOwner);
@@ -168,7 +204,7 @@ static int ryeosNativeShutdownGate(void){
   return 1;
 }
 static int ryeosNativeOpenGate(void){
-  if(!ryeos_native_process_matches()){return 0;}
+  if(!ryeos_native_process_matches() || ryeosNativeInGate){return 0;}
   RyeosNativeArena *a=atomic_load(&ryeosNativeOwner); uint32_t ticket=ryeosNativeOpenTicket;
   if(!ryeosNativeContext(a) || ryeosNativeCleanup || !ticket
       || ticket>a->budget->ticketLimit || ticket>RYEOS_NATIVE_TICKETS
@@ -408,6 +444,7 @@ SQLITE_API int ryeos_native_arena_create(const RyeosNativeBudget *budget,void **
 }
 SQLITE_API int ryeos_native_scope_enter(void *handle,int cleanup,uint32_t ticket){
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  if(ryeosNativeInGate) return SQLITE_BUSY;
   RyeosNativeArena *a=(RyeosNativeArena*)handle;int rc=SQLITE_MISUSE;
   if(pthread_mutex_trylock(&ryeosNativeOwnerMutex)!=0)return SQLITE_BUSY;
   /* Lookup/reference admission under owner gate BEFORE dereferencing mapping;
@@ -450,6 +487,17 @@ SQLITE_API int ryeos_native_connection_enroll(void *handle,sqlite3 *db,uint32_t 
   if(db->openFlags&SQLITE_OPEN_SHAREDCACHE) return SQLITE_MISUSE;
   db->aLimit[SQLITE_LIMIT_WORKER_THREADS]=0;
   a->connections[ticket-1]=db;a->phases[ticket-1]=2;return SQLITE_OK;
+}
+/* Install the commit verifier for this exact arena. Cleared with the arena. */
+SQLITE_API int ryeos_native_commit_verifier_install(void *handle,RyeosNativeVerifier verifier){
+  if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
+  RyeosNativeArena *a=(RyeosNativeArena*)handle;int rc=SQLITE_MISUSE;
+  if(!verifier) return SQLITE_MISUSE;
+  if(pthread_mutex_trylock(&ryeosNativeOwnerMutex)!=0)return SQLITE_BUSY;
+  if(a && a==atomic_load(&ryeosNativeOwner) && !atomic_load(&a->poisoned)){
+    atomic_store(&a->verifier,verifier);rc=SQLITE_OK;
+  }
+  pthread_mutex_unlock(&ryeosNativeOwnerMutex);return rc;
 }
 SQLITE_API int ryeos_native_connection_closed(void *handle,uint32_t ticket){
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
@@ -524,6 +572,7 @@ SQLITE_API int ryeos_native_arena_release(void *handle){
     atomic_store(&a->mutexReady,0); /* committed before munmap/late failure */
   }
   mapping=a->mappingBytes;
+  atomic_store(&a->verifier,(RyeosNativeVerifier)0);
   atomic_store(&ryeosNativeProcessClosing,1);
   if(atomic_load(&ryeosNativeProcessReaders)){
     atomic_store(&ryeosNativeProcessClosing,0);goto done;
@@ -2198,6 +2247,9 @@ static int ryeosNativeInitGate(void){return 0;}
 static int ryeosNativeShutdownGate(void){return 0;}
 static int ryeosNativeOpenGate(void){return 0;}
 static int ryeosNativeConfigGate(int op){(void)op;return 0;}
+static int ryeosNativeCommitGate(sqlite3 *db){(void)db;return 0;}
+static int ryeosNativeBackupGate(void){return 0;}
+static int ryeosNativeInGateActive(void){return 0;}
 #ifndef SQLITE_OMIT_WAL
 static int ryeosNativeShmReserve(unixShmNode*n,int r,int s,int g,int*q){(void)n;(void)r;(void)s;(void)g;if(q)*q=0;return SQLITE_NOTFOUND;}
 static void *ryeosNativeShmMap(unixShmNode*n,int b,int p,sqlite3_int64 o){(void)n;(void)b;(void)p;(void)o;return (void*)-1;}
@@ -2211,6 +2263,7 @@ SQLITE_API int ryeos_native_scope_leave(void*a){(void)a;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_arena_ready(void*a){(void)a;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_connection_enroll(void*a,sqlite3*d,unsigned int t){(void)a;(void)d;(void)t;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_connection_closed(void*a,unsigned int t){(void)a;(void)t;return SQLITE_NOTFOUND;}
+SQLITE_API int ryeos_native_commit_verifier_install(void*a,int(*v)(unsigned int)){(void)a;(void)v;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_arena_reclaim(void*a){(void)a;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_arena_release(void*a){(void)a;return SQLITE_NOTFOUND;}
 SQLITE_API int ryeos_native_shared_census(void*a,sqlite3_uint64*b,unsigned int*s){(void)a;(void)b;(void)s;return SQLITE_NOTFOUND;}

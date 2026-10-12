@@ -194,6 +194,7 @@ mod build_bundled {
         let sqlite_source = PathBuf::from(format!("{lib_name}/sqlite3.c"));
         cfg.file(sqlite_source)
             .flag("-DSQLITE_CORE")
+            .flag("-DSQLITE_MAX_ATTACHED=0")
             .flag("-DSQLITE_DEFAULT_FOREIGN_KEYS=1")
             .flag("-DSQLITE_ENABLE_API_ARMOR")
             .flag("-DSQLITE_ENABLE_COLUMN_METADATA")

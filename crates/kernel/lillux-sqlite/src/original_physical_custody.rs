@@ -1155,15 +1155,17 @@ mod tests {
         }
     }
 
+    /// Admits every recheck until the owner's descriptor is physically
+    /// closed, then refuses: the refusal lands only on the post-close
+    /// recheck, however many pre-close rechecks the retirement path makes.
     struct FixtureCloseLateRefusal {
         owner: Arc<RetainedOriginalFinalizerFile>,
-        require_calls: std::sync::atomic::AtomicUsize,
     }
     unsafe impl crate::OriginalOutsideFinalizerFileRetirementAuthority for FixtureCloseLateRefusal {
         fn require_original(&self, owner: &Arc<RetainedOriginalFinalizerFile>) -> Result<()> {
             ensure!(Arc::ptr_eq(owner, &self.owner), "fixture selected a foreign descriptor owner");
-            let call = self.require_calls.fetch_add(1, Ordering::SeqCst) + 1;
-            ensure!(call < 4, "fixture late authority refused after close");
+            ensure!(owner.completed_close_receipt()?.is_none(),
+                "fixture late authority refused after close");
             Ok(())
         }
         fn debit_original_steps(&self, _work: u64) -> Result<()> { Ok(()) }
@@ -1405,10 +1407,7 @@ mod tests {
                 &|_, _| Ok(()),
                 &|_, owner| {
                     issue_count.fetch_add(1, Ordering::SeqCst);
-                    let authority = Arc::new(FixtureCloseLateRefusal {
-                        owner: owner.clone(),
-                        require_calls: std::sync::atomic::AtomicUsize::new(0),
-                    });
+                    let authority = Arc::new(FixtureCloseLateRefusal { owner: owner.clone() });
                     let inputs = unsafe {
                         crate::OriginalOutsideFinalizerFileRetirementInputs::issued(owner, authority)?
                     };
@@ -1593,13 +1592,15 @@ mod tests {
                 .unwrap(),
         );
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
-        assert_eq!(registry.membership_work_bound(3, 1).unwrap(), OutsideWork { bytes: 0, steps: 8 });
+        // Three constant-time token checks at four steps each, plus the fixed
+        // four-step quote; the projected slot count is checked, never priced.
+        assert_eq!(registry.membership_work_bound(3, 1).unwrap(), OutsideWork { bytes: 0, steps: 16 });
         assert!(registry.membership_work_bound(0, 3).is_err());
 
         let binding = unsafe { registry.register_directory(original, &|_, _| Ok(())) }
             .unwrap_or_else(|_| panic!("fixture root must register"));
         assert!(registry.require_membership(&binding).is_ok());
-        assert_eq!(registry.membership_work_bound(3, 1).unwrap(), OutsideWork { bytes: 0, steps: 8 });
+        assert_eq!(registry.membership_work_bound(3, 1).unwrap(), OutsideWork { bytes: 0, steps: 16 });
         assert!(registry.membership_work_bound(0, 2).is_err());
         assert!(registry.membership_work_bound(u64::MAX, 0).is_err());
         assert_eq!(OriginalPhysicalRegistry::membership_work_quote(2, 3).unwrap().steps,

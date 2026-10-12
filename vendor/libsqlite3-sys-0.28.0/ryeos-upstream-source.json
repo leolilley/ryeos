@@ -38,7 +38,7 @@
     },
     "build.rs": {
       "upstream_sha256": "a3a0c7f409e20573d21448fb53c5a1f168fd04c5983af68671da126cc3bf9ff4",
-      "actual_sha256": "db25881cac2b00db603298ae5c580c10de32faf59c2e577252cec940cf4f5997"
+      "actual_sha256": "8061cc08d413c89dc8962aa3669f92deaa4123f4489d56206aa4bef9fe58c62f"
     },
     "sqlite3/sqlite3.c": {
       "upstream_sha256": "7956a38f236a6be6c0bb30c96ba4f85f19e5a69f6beb6d2c62c9d246972a6775",
@@ -46,8 +46,8 @@
     }
   },
   "ryeos_added_files": {
-    "ryeos_instrument.rs": "781414a161efd3439e00c7c36bc94e4c4e5a1efc25e7cb8e4f4574c74314506f",
-    "sqlite3/ryeos_binding.c": "0261ef3c62066f40708473c2bec14b3f654808866642e72141db085dc8c71c2d",
+    "ryeos_instrument.rs": "48fc33f6d886ed302a041c2b5ac463610fa3d45cf5ca439591cd506eee7ffdc0",
+    "sqlite3/ryeos_binding.c": "a24db77acfe112cdc83e1f09e93e69bfa551907d2ca97047e60bd3e2624006ee",
     "sqlite3/ryeos_binding.h": "08b83de3db9b8d33e27c063c7922dad826e4d94edd30db5cfbe1fcc3ca373f5d"
   },
   "files_sha256": {
@@ -60,8 +60,8 @@
     "Upgrade.md": "d151a67d4bbb1a5a300d084d210d6cd238d833a6d4bd5d958ae7469a9deccb36",
     "bindgen-bindings/bindgen_3.14.0.rs": "21074ddbc5ef6bb7fb7c04ef48c730a2b074b9d695c93c685cf01f870248844b",
     "bindgen-bindings/bindgen_3.14.0_ext.rs": "2988b5f0670d7862166d3820b8a176d3da329b6105567e66e45aafb17d736fa6",
-    "build.rs": "db25881cac2b00db603298ae5c580c10de32faf59c2e577252cec940cf4f5997",
-    "ryeos_instrument.rs": "781414a161efd3439e00c7c36bc94e4c4e5a1efc25e7cb8e4f4574c74314506f",
+    "build.rs": "8061cc08d413c89dc8962aa3669f92deaa4123f4489d56206aa4bef9fe58c62f",
+    "ryeos_instrument.rs": "48fc33f6d886ed302a041c2b5ac463610fa3d45cf5ca439591cd506eee7ffdc0",
     "sqlcipher/LICENSE": "ea4fcb309f14a22065e1ea45362d494d320012249ed865fe9c7c0946db754131",
     "sqlcipher/bindgen_bundled_version.rs": "b90cdb889a74ce82af24a78932979c59df4d9dbb31228d05e6574a2fd852d0ba",
     "sqlcipher/sqlite3.c": "2dc94cbc5f013078ad7e48b65fe1c63cb79b4d25aba9ccaef1699724ae6640f7",
@@ -69,7 +69,7 @@
     "sqlcipher/sqlite3ext.h": "7f9ae3bab94bbc62d909fbb0149861b4a0832299f12d7ccbfecc7f28a8d27aa2",
     "sqlite3/bindgen_bundled_version.rs": "3dda83bd41376847eb3e0fd9e4aa645e6f5b48ebdc5227df051c044ebdce177a",
     "sqlite3/bindgen_bundled_version_ext.rs": "73b54ea41acf310e13555ec925d5eaee6443d0787e6b1e4310f83647967a1a04",
-    "sqlite3/ryeos_binding.c": "0261ef3c62066f40708473c2bec14b3f654808866642e72141db085dc8c71c2d",
+    "sqlite3/ryeos_binding.c": "a24db77acfe112cdc83e1f09e93e69bfa551907d2ca97047e60bd3e2624006ee",
     "sqlite3/ryeos_binding.h": "08b83de3db9b8d33e27c063c7922dad826e4d94edd30db5cfbe1fcc3ca373f5d",
     "sqlite3/sqlite3.c": "beb670be019aac60c8b30804dcb1c2ec7a2b9028fca7acf9aec9da664543c7ad",
     "sqlite3/sqlite3.h": "0c207567adc631521a353e067cfbc5044ebf11868f3c3fbf3178d6990409740e",
@@ -83,5 +83,5 @@
     "wrapper_ext.h": "fa7a53fea99318ee29d75e6d5fab4d7ed26e9599803268e6a24396265f2a6f3a"
   },
   "wiring": "workspace Cargo.toml: exclude = [\"vendor/libsqlite3-sys-0.28.0\"]; [patch.crates-io] libsqlite3-sys = { path = \"vendor/libsqlite3-sys-0.28.0\" }",
-  "status": "Modified fork of upstream libsqlite3-sys 0.28.0. Three upstream files are patched (Cargo.toml, build.rs, sqlite3/sqlite3.c) and three RyeOS files are added (ryeos_instrument.rs, sqlite3/ryeos_binding.c, sqlite3/ryeos_binding.h), consumed by build.rs. The earlier 'exact upstream source extraction' claim was inaccurate for this tree and is withdrawn. files_sha256 records the actual bytes as of 2026-10-11. The tree is compiled by build.rs into every lillux-sqlite consumer and exercised by the lillux-sqlite tests and the daemon; the RyeOS delta has had targeted review of the native allocator and bound VFS but no complete independent audit against upstream."
+  "status": "Modified fork of upstream libsqlite3-sys 0.28.0. Three upstream files are patched (Cargo.toml, build.rs, sqlite3/sqlite3.c) and three RyeOS files are added (ryeos_instrument.rs, sqlite3/ryeos_binding.c, sqlite3/ryeos_binding.h), consumed by build.rs. The earlier 'exact upstream source extraction' claim was inaccurate for this tree and is withdrawn. files_sha256 records the actual bytes as of 2026-10-12. The RyeOS delta includes a compiled commit gate in vdbeCommit that calls the installed native verifier before every write-transaction commit, refusal of sqlite3_backup_init while the native arena exists, unconditional refusal of journal_mode=OFF in the bound-VFS build, opcode refusal while the verifier runs, and SQLITE_MAX_ATTACHED=0 (no ATTACH, VACUUM or VACUUM INTO). The tree is compiled by build.rs into every lillux-sqlite consumer and exercised by the lillux-sqlite tests and the daemon; the RyeOS delta has had targeted review of the native allocator and bound VFS but no complete independent audit against upstream."
 }
