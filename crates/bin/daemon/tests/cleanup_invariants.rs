@@ -58,7 +58,15 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, vec![bundle_root, standard_root])
+    // The descriptor table also serves the bundle catalog and bundle release
+    // services, whose signed items live in their own source bundles.
+    let bundle_roots = vec![
+        bundle_root,
+        standard_root,
+        workspace.join("bundles/bundle-source"),
+        workspace.join("bundles/bundle-release"),
+    ];
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
         .with_composers(composers)
@@ -98,7 +106,7 @@ fn service_refs() -> Vec<&'static str> {
     descriptors().iter().map(|d| d.service_ref).collect()
 }
 
-// ── Gate 1: All 17 service refs resolve + endpoint matches ────────────
+// ── Gate 1: Every service ref resolves + endpoint matches ────────────
 
 #[test]
 fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
@@ -135,7 +143,7 @@ fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
     }
 }
 
-// ── Gate 2: All 17 service refs resolve and verify trust chain ───────
+// ── Gate 2: Every service ref resolves and verifies trust chain ───────
 
 #[test]
 fn gate_02_all_service_refs_resolve_and_verify() {

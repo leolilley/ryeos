@@ -55,6 +55,12 @@ pub fn signed_sources(
     profile["auxiliary_configs"] = json!([]);
     profile["runtime_configs"] = json!([]);
     profile["external_candidate"] = Value::Null;
+    // The fixture workload reads no configuration outside its sealed inputs.
+    profile["configuration_absence"] = json!({
+        "absolute_paths": [],
+        "startup_ancestor_paths": [],
+        "route_ancestor_paths": []
+    });
     // Enrollment has no model turn, candidate environment or recovery route.
     profile["route_sets"] = json!({
         "enrollment": ["credential.account.read", "credential.login.start"]
