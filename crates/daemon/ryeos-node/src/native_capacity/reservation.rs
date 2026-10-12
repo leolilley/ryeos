@@ -421,6 +421,30 @@ fn require_finalizer_control_receipt(
     Ok(())
 }
 
+/// Sizing floor for the signed rollover drain margin: the sum of the bounded
+/// steps of the normal graceful stop that begins that margin before the
+/// service edge. It is a sizing heuristic, not a proof of completion. The
+/// bounded steps are the two listener settles, the external import drain, the
+/// persistent-session pool reap, the dedicated worker retirement, the attached
+/// kill and in-process handler wait (one shared deadline) and the accounting
+/// publisher stop. Steps with no bound of their own add nothing: the scheduler
+/// close and the in-process reservation audit.
+pub fn required_rollover_drain_margin() -> std::time::Duration {
+    let grace = std::time::Duration::from_secs(ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
+    ryeos_app::process::LISTENER_SHUTDOWN_BOUND * 2
+        + grace * 4
+        + ryeos_app::process::ACCOUNTING_PUBLISHER_STOP_BOUND
+}
+
+/// Floor for the cleanup allowance that follows the service edge: the
+/// latched remainder of the stop, bounded by the same steps as the normal
+/// drain, plus the cleanup chain. The cleanup chain has no bound of its own:
+/// an expired cleanup allowance refuses it and custody is retained, so it
+/// adds nothing here.
+pub fn required_cleanup_occupancy() -> std::time::Duration {
+    required_rollover_drain_margin()
+}
+
 /// Envelope-derived quantities `reserve` checks before any account effect.
 struct ReservationFloors {
     tickets: u32,
@@ -438,6 +462,18 @@ fn require_reservation_floors(
 ) -> Result<ReservationFloors> {
     let units = incarnation.units;
     let tickets = u32::try_from(units.connection_tickets)?;
+    let margin = std::time::Duration::from_millis(incarnation.rollover_drain_margin_ms);
+    ensure!(
+        margin >= required_rollover_drain_margin(),
+        "rollover drain margin {margin:?} is below the bounded normal-stop floor {:?}",
+        required_rollover_drain_margin()
+    );
+    let cleanup = std::time::Duration::from_millis(incarnation.cleanup_occupancy_ms);
+    ensure!(
+        cleanup >= required_cleanup_occupancy(),
+        "cleanup occupancy {cleanup:?} is below the latched-stop floor {:?}",
+        required_cleanup_occupancy()
+    );
     // Pure native layout quote: no arena mapping or SQLite initialization.
     // The actual host layout, rather than assumed source arithmetic, must
     // fit the signed cleanup reserve before the first reservation effect.
@@ -501,7 +537,9 @@ fn require_reservation_floors(
 
 pub struct LiveNativeCapacityReservation {
     pub(super) inputs: std::mem::ManuallyDrop<Arc<LiveNativeCapacityInputs>>,
-    account: Mutex<Option<RetainedCapacityAccount>>,
+    // Boundaries share the read lock; only settlement, recovery and the
+    // initial debit take it exclusively, and none of those overlaps service SQL.
+    account: std::sync::RwLock<Option<RetainedCapacityAccount>>,
     budget: OnceLock<Arc<OriginalNativeBudgetOwner>>,
     raw_budget: Mutex<Option<OriginalNativeBudget>>,
     region: Mutex<Option<OriginalNativeRegionOwner>>,
@@ -1942,7 +1980,7 @@ impl SettledLiveNative {
             ensure!(original.released.is_some() && original.seal_failure.is_none()
                 && original.budget.get().is_none(),
                 "settled reservation lacks its release receipt or retains a native owner");
-            ensure!(original.account.try_lock()
+            ensure!(original.account.try_read()
                     .map_err(|_| anyhow::anyhow!("settled account owner busy or poisoned"))?.is_none()
                 && original.raw_budget.try_lock()
                     .map_err(|_| anyhow::anyhow!("settled raw budget busy or poisoned"))?.is_none()
@@ -2091,7 +2129,7 @@ impl LiveNativeCapacityReservation {
         // This does not fund the remaining input/error/shared allocations.
         let mut original = Self {
             inputs: std::mem::ManuallyDrop::new(inputs),
-            account: Mutex::new(Some(account)),
+            account: std::sync::RwLock::new(Some(account)),
             budget: OnceLock::new(),
             raw_budget: Mutex::new(None),
             region: Mutex::new(None),
@@ -2108,7 +2146,7 @@ impl LiveNativeCapacityReservation {
         let result = (|| -> Result<()> {
             let mut account_guard = original
                 .account
-                .try_lock()
+                .try_write()
                 .map_err(|_| anyhow::anyhow!("original capacity account busy"))?;
             let account = account_guard
                 .as_mut()
@@ -2212,7 +2250,7 @@ impl LiveNativeCapacityReservation {
             .map_err(anyhow::Error::msg)?;
             let generation = original
                 .account
-                .try_lock()
+                .try_write()
                 .map_err(|_| anyhow::anyhow!("original capacity account busy"))?
                 .as_mut()
                 .context("original capacity account owner absent")?
@@ -2307,29 +2345,60 @@ impl LiveNativeCapacityReservation {
     pub(crate) fn require_original(&self, cleanup: bool) -> Result<()> {
         self.inputs.require_original(cleanup)?;
         self.account_for_check()?
-            .as_mut()
+            .as_ref()
             .context("original capacity account owner absent")?
             .require_original_debit(&self.inputs, cleanup)
     }
 
-    /// Native SQL on several threads checks this same account on every VM
-    /// step, each check holding the lock across short durable-account reads.
-    /// A bounded wait absorbs that ordinary cross-thread contention. A holder
-    /// that stays busy past the bound, including same-thread re-entrancy,
-    /// still refuses as before.
-    fn account_for_check(&self) -> Result<std::sync::MutexGuard<'_, Option<RetainedCapacityAccount>>> {
+    /// Re-check, before new native work is admitted against the resident
+    /// region, that its physical residency proof still holds.
+    pub(crate) fn confirm_residency(&self) -> Result<()> {
+        self.host_storage
+            .get()
+            .context("original host backing absent")?
+            .confirm_residency()
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// The proof that keeps the resident region in memory, once residency
+    /// completed.
+    pub fn residency_proof(&self) -> Option<lillux::process_control::ResidencyProof> {
+        self.host_storage.get().and_then(|storage| storage.residency_proof().cloned())
+    }
+
+    /// This incarnation's own process digest and the digest of the settled
+    /// incarnation its durable debit followed. Read from the retained account
+    /// after its debit; refuses before it or once settlement took the owner.
+    pub fn incarnation_lineage(&self) -> Result<([u8; 32], Option<[u8; 32]>)> {
+        self.inputs.require_original(true)?;
+        self.account_for_check()?
+            .as_ref()
+            .context("original capacity account owner absent")?
+            .incarnation_lineage()
+    }
+
+    /// Durable account verification runs at native operation boundaries,
+    /// never per VM step. Boundaries share the account read lock; only
+    /// settlement and recovery take it exclusively, and neither overlaps
+    /// service SQL. A bounded wait absorbs a momentary writer; past the bound
+    /// the check reports contention, which refuses this call without latching
+    /// service refusal. A poisoned lock is a fact refusal.
+    fn account_for_check(&self) -> Result<std::sync::RwLockReadGuard<'_, Option<RetainedCapacityAccount>>> {
         let mut deadline = None;
         loop {
-            match self.account.try_lock() {
+            match self.account.try_read() {
                 Ok(guard) => return Ok(guard),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     let deadline = *deadline.get_or_insert_with(||
                         lillux::time::MonotonicDeadline::after(ACCOUNT_CHECK_CONTENTION_WAIT));
-                    ensure!(!deadline.has_elapsed(), "original capacity account busy");
+                    if deadline.has_elapsed() {
+                        return Err(anyhow::Error::new(lillux_sqlite::NativeCheckContended)
+                            .context("original capacity account busy"));
+                    }
                     std::thread::yield_now();
                 }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
-                    anyhow::bail!("original capacity account busy")
+                    anyhow::bail!("original capacity account poisoned")
                 }
             }
         }
@@ -2620,27 +2689,27 @@ mod tests {
     #[test]
     fn provisional_registry_floor_includes_capacity_and_metadata_sources() {
         let (maximum, floor) = minimum_registry_cleanup(64).unwrap();
-        assert_eq!(maximum, 454);
-        assert_eq!(maximum_physical_registration_attempts(64).unwrap(), 454);
+        assert_eq!(maximum, 412);
+        assert_eq!(maximum_physical_registration_attempts(64).unwrap(), 412);
         let registration =
             lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::registration_quote(
-                454, 1_816,
+                412, 1_648,
             )
             .unwrap();
         let allocation =
-            lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::storage_quote(454)
+            lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::storage_quote(412)
                 .unwrap();
-        let late_owner = LateNativeControl::maximum_storage_quote(454).unwrap();
-        let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(454, 64).unwrap();
+        let late_owner = LateNativeControl::maximum_storage_quote(412).unwrap();
+        let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(412, 64).unwrap();
         let packet_pins = LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap();
         let state_pins = LateNativeControl::maximum_state_metadata_pin_retirement_quote(64).unwrap();
         assert!(state_pins.steps > 0 && state_pins.bytes > 0
             && retirement_inputs.steps >= state_pins.steps + packet_pins.steps);
-        assert_eq!(registration.bytes, 929_792);
-        assert_eq!(registration.steps, 838_992);
+        assert_eq!(registration.bytes, 843_776);
+        assert_eq!(registration.steps, 692_160);
         assert_eq!(floor, allocation.checked_add(registration).unwrap());
-        assert_eq!(floor.steps, 842_624);
-        assert_eq!(late_owner.steps, 455);
+        assert_eq!(floor.steps, 695_456);
+        assert_eq!(late_owner.steps, 413);
         assert!(packet_pins.steps > 0 && packet_pins.bytes > 0);
         assert!(retirement_inputs.steps > 47_600);
         assert_eq!(
@@ -2650,7 +2719,7 @@ mod tests {
                 .checked_add(retirement_inputs)
                 .unwrap()
                 .steps,
-            842_624 + 455 + retirement_inputs.steps
+            695_456 + 413 + retirement_inputs.steps
         );
         assert_eq!(
             quote_prepared_physical_registry_handoff(),
@@ -2667,7 +2736,7 @@ mod tests {
         assert_eq!(quote_finalization_store_exhaustion().unwrap(),
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 16 });
         let (maximum, required) = required_outside_cleanup(64).unwrap();
-        assert_eq!(maximum, 454);
+        assert_eq!(maximum, 412);
         assert!(required.steps > floor.steps + late_owner.steps + retirement_inputs.steps);
     }
 
@@ -2702,6 +2771,10 @@ mod tests {
                 path.display(), policy.incarnation.outside_cleanup_steps, required.steps);
             require_reservation_floors(&policy.incarnation)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+            eprintln!("{}: rollover_drain_margin_ms {} (floor {:?}), cleanup_occupancy_ms {} (floor {:?})",
+                path.display(), policy.incarnation.rollover_drain_margin_ms,
+                required_rollover_drain_margin(), policy.incarnation.cleanup_occupancy_ms,
+                required_cleanup_occupancy());
             checked += 1;
         }
         assert!(checked > 0, "no shipped profile declares native capacity");

@@ -36,6 +36,20 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Acquire)
 }
 
+static SERVICE_SQL_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// Record that this incarnation's service SQL is refused. Only an atomic
+/// store, so it is safe from the native latch wake. Never cleared.
+pub fn refuse_service_sql() {
+    SERVICE_SQL_REFUSED.store(true, Ordering::SeqCst);
+}
+
+/// Whether this incarnation's service SQL is refused. Service loops stop
+/// before attempting another write once it is.
+pub fn service_sql_refused() -> bool {
+    SERVICE_SQL_REFUSED.load(Ordering::SeqCst)
+}
+
 pub fn subscribe_shutdown() -> Option<tokio::sync::broadcast::Receiver<()>> {
     SHUTDOWN_TX.get().map(|tx| tx.subscribe())
 }

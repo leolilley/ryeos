@@ -1876,18 +1876,18 @@ impl IsolationRuntime {
     /// Node-owned control budget, distinct from a workload request deadline.
     pub fn process_scope_control_timeout(&self) -> Result<lillux::time::Duration, EngineError> {
         self.ensure_registered_generation_current()?;
-        for capability in [
-            lillux::ProcessScopeCapability::Quiescence,
-            lillux::ProcessScopeCapability::Termination,
-            lillux::ProcessScopeCapability::Recovery,
-        ] {
+        for name in &self.inspection.requires_capabilities {
+            let Some(capability) = lillux::ProcessScopeCapability::from_capability_name(name)
+            else {
+                continue;
+            };
             if !self
                 .inspection
                 .process_scope_capabilities
                 .contains(&capability)
             {
                 return Err(refused(format!(
-                    "node has not qualified required process-scope capability {capability:?}"
+                    "node policy requires {name}, but the process-scope provider has not qualified it"
                 )));
             }
         }
@@ -5332,6 +5332,7 @@ impl IsolationRuntime {
             };
         let process_scope_readiness = ProcessScopeReadiness::classify(
             policy.process_scopes.clone(),
+            policy.required_process_scope_capabilities(),
             policy.trusted_process_group_sessions,
             process_scope_authority_digest,
             process_scope_capabilities.clone(),
@@ -5343,6 +5344,8 @@ impl IsolationRuntime {
                 mode: policy.mode,
                 digest,
                 process_scopes: policy.process_scopes,
+                requires_capabilities: policy.requires_capabilities,
+                enclosure_inits: policy.enclosure_inits,
                 process_scope_capabilities,
                 process_scope_readiness,
                 backend: IsolationBackendInspection {
@@ -5991,8 +5994,77 @@ fn validate_descriptor_bound_command(
     }
 }
 
+/// The floor is canonical data: sorted, unique, well-formed names. A
+/// per-scope name needs a configured scope provider, and a configured
+/// provider's scopes cannot run without termination and recovery, so the
+/// floor must name both whenever scopes are required. Trusted enclosure
+/// inits are sorted, unique executable file names.
+fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError> {
+    let names = &policy.requires_capabilities;
+    if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(refused(
+            "isolation requires_capabilities must be sorted and unique".to_owned(),
+        ));
+    }
+    for name in names {
+        let well_formed = !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b':' | b'.')
+            });
+        if !well_formed {
+            return Err(refused(format!(
+                "isolation requires_capabilities names an invalid capability {name:?}"
+            )));
+        }
+    }
+    let inits = &policy.enclosure_inits;
+    if inits.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(refused("isolation enclosure_inits must be sorted and unique".to_owned()));
+    }
+    for init in inits {
+        let file_name = !init.is_empty()
+            && init.len() <= 255
+            && init != "."
+            && init != ".."
+            && init.bytes().all(|byte| byte.is_ascii_graphic() && byte != b'/');
+        if !file_name {
+            return Err(refused(format!(
+                "isolation enclosure_inits names {init:?}, which is not an executable file name"
+            )));
+        }
+    }
+    let scoped = policy.required_process_scope_capabilities();
+    match &policy.process_scopes {
+        IsolationProcessScopePolicy::Unconfigured {} if !scoped.is_empty() => Err(refused(format!(
+            "isolation requires per-scope capabilities {} but process scopes are unconfigured",
+            scoped
+                .iter()
+                .map(|capability| capability.capability_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        IsolationProcessScopePolicy::Required { .. } => {
+            for capability in [
+                lillux::ProcessScopeCapability::Termination,
+                lillux::ProcessScopeCapability::Recovery,
+            ] {
+                if !scoped.contains(&capability) {
+                    return Err(refused(format!(
+                        "required process scopes need {} in isolation requires_capabilities",
+                        capability.capability_name()
+                    )));
+                }
+            }
+            Ok(())
+        }
+        IsolationProcessScopePolicy::Unconfigured {} => Ok(()),
+    }
+}
+
 fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError> {
     network_inputs::validate(&policy.network)?;
+    validate_capability_floor(policy)?;
     policy
         .filesystem
         .live_project
@@ -10557,6 +10629,7 @@ mod tests {
             "nested_sandbox": false,
         }))
         .unwrap();
+        policy.requires_capabilities = vec!["recovery:scope".to_owned(), "termination:scope".to_owned()];
         let source = app_root.path().join("isolation.yaml");
         let digest = format!("sha256:{}", "a".repeat(64));
         let prospective = IsolationRuntime::resolve_compiled_policy_for_definition_validation(
@@ -10633,7 +10706,26 @@ mod tests {
             control_timeout_ms: 1_000,
             nested_sandbox: false,
         };
+        // Required scopes cannot run without termination and recovery, so
+        // the declared floor must name both; quiescence stays optional.
+        let error = IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap_err();
+        assert!(error.to_string().contains("need termination:scope"), "{error}");
+        scoped_without_sandbox.requires_capabilities =
+            vec!["recovery:scope".to_owned(), "termination:scope".to_owned()];
         IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap();
+        let mut unsorted = scoped_without_sandbox.clone();
+        unsorted.requires_capabilities.reverse();
+        assert!(IsolationRuntime::validate_policy(&unsorted).is_err());
+        let mut unconfigured_scope_floor = policy.clone();
+        unconfigured_scope_floor.requires_capabilities = vec!["termination:scope".to_owned()];
+        assert!(IsolationRuntime::validate_policy(&unconfigured_scope_floor).is_err());
+        let mut inits = scoped_without_sandbox.clone();
+        inits.enclosure_inits = vec!["catatonit".to_owned(), "dumb-init".to_owned(), "tini".to_owned()];
+        IsolationRuntime::validate_policy(&inits).unwrap();
+        inits.enclosure_inits.reverse();
+        assert!(IsolationRuntime::validate_policy(&inits).is_err());
+        inits.enclosure_inits = vec!["/usr/bin/tini".to_owned()];
+        assert!(IsolationRuntime::validate_policy(&inits).is_err());
         assert_eq!(scoped_without_sandbox.mode, IsolationMode::Disabled);
         assert!(matches!(
             scoped_without_sandbox.process_scopes,
@@ -10669,6 +10761,7 @@ mod tests {
             "nested authority must be explicit, not defaulted"
         );
         value["process_scopes"]["nested_sandbox"] = true.into();
+        value["requires_capabilities"] = serde_json::json!(["recovery:scope", "termination:scope"]);
         value["process_scopes"]["configuration"] = serde_json::json!({
             "version": 3,
             "backend": {

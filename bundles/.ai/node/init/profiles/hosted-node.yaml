@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-11T11:48:46Z:c1a7a7d785c7a613f11ee3a7d5005a56613268320c229d9ffe204d0e5f351aef:Ok9zHC0AabxIr3XySGvgTz6iffe6EOTZvU1R1KyfO5P8gkhq+Z0QghzeWofVvhciEGpVClAm3ITU34sONP3LBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T11:47:25Z:a517386aa24056424cabcdd6fe7743fcd36cb29dd5e2b7fd03de24efb47a5880:UaxsWXEkwJwfXQvT0poH9QRznoG2bpwn8JuwqHVBFx0Qyt4FbLtsq0uGu7nFpjjl6e1InOPJ4wvxYkkaTrhNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -30,6 +30,7 @@ policies:
         cleanup_steps: 1600000
       maximum_occupancy_ms: 7200000
       cleanup_occupancy_ms: 120000
+      rollover_drain_margin_ms: 90000
       # Finite syscall-attempt allowance; no cleanup-success guarantee.
       host_release_steps: 64
       # Explicit share of cleanup_steps; never duplicates the paid envelope.
@@ -164,6 +165,20 @@ policies:
         max_operation_millis: 300000
         max_cleanup_millis: 60000
         max_cleanup_steps: 400000
+      standalone-state:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 48
+        max_operation_millis: 3600000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+      external-supervisor-journal:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 16
+        max_operation_millis: 4860000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
     offline_reset:
       max_retained_operations: 4
       max_source_roles: 13
@@ -191,7 +206,15 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 7
+      version: 8
+      # Capabilities this node must prove on its host before it starts.
+      # `ryeos node doctor` shows what the host proves and what is missing.
+      requires_capabilities: [accounting, time]
+      # Inits trusted to exit when their only child exits. When the node's
+      # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
+      # to end its container, so a new container on the same boot proves
+      # the old one's jobs dead. A node that is pid 1 proves this itself.
+      enclosure_inits: [catatonit, dumb-init, tini]
       process_scopes:
         mode: unconfigured
       trusted_process_group_sessions: false

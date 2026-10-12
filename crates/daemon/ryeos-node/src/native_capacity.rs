@@ -35,8 +35,8 @@ pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 pub use account::NativeCapacityAccountBinding;
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
-pub use factory::{LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPublicationFailure, LiveNativeProducerPreparationFailure, LiveProducerControlCensus};
-pub use reservation::{FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure, SettledLiveNative, quote_operator_lock_handoff};
+pub use factory::{LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPublicationFailure, LiveNativeProducerPreparationFailure, LiveProducerControlCensus, ServiceRefusalLatch, ServiceRefusalWake, service_refusal};
+pub use reservation::{FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure, SettledLiveNative, quote_operator_lock_handoff, required_cleanup_occupancy, required_rollover_drain_margin};
 
 const MAX_COMPLETION_BYTES: u64 = 256 * 1024;
 
@@ -104,6 +104,9 @@ pub struct LiveNativeCapacityInputs {
     occupancy: lillux::time::OccupancyLimit,
     sql_deadline: lillux::time::MonotonicDeadline,
     cleanup_deadline: lillux::time::MonotonicDeadline,
+    // In-memory BOOTTIME edge of the same original service window, checked
+    // per native VM step; the full window observation runs at boundaries.
+    service_edge: lillux::time::OccupancyServiceEdge,
     process: lillux::process_control::ExactProcessIdentity,
 }
 
@@ -256,6 +259,10 @@ impl LiveNativeCapacityInputs {
             &occupancy,
             Duration::from_millis(policy.incarnation.cleanup_occupancy_ms),
         ).map_err(anyhow::Error::msg)?;
+        let service_edge = clock.service_edge(
+            &occupancy,
+            Duration::from_millis(policy.incarnation.cleanup_occupancy_ms),
+        ).map_err(anyhow::Error::msg)?;
         let process = lillux::process_control::capture_current_process_identity()
             .map_err(anyhow::Error::msg)?;
         let result = Arc::new(Self {
@@ -272,6 +279,7 @@ impl LiveNativeCapacityInputs {
             occupancy,
             sql_deadline,
             cleanup_deadline,
+            service_edge,
             process,
         });
         result.require_original(false)?;
@@ -321,7 +329,11 @@ impl LiveNativeCapacityInputs {
             return Err((self, error));
         }
 
-        let Self { root, runtime, exclusion, completion, policy_file, clock, .. } = self;
+        let Self {
+            root, runtime, exclusion, completion, policy_file, clock,
+            policy: _, snapshot: _, node_fingerprint: _, capacity_account: _, occupancy: _,
+            sql_deadline: _, cleanup_deadline: _, service_edge: _, process: _,
+        } = self;
         let (completion_parent, completion_file, completion_duplicate) = completion.into_finalization_parts();
         let (policy_parent, policy_file, policy_duplicate) = policy_file.into_finalization_parts();
         Ok(NativeCapacityInputFinalizationSources {
@@ -366,5 +378,11 @@ impl LiveNativeCapacityInputs {
     fn require_original_process(&self) -> Result<()> {
         lillux::process_control::require_current_process_identity_fixed(&self.process)
             .map_err(anyhow::Error::msg)
+    }
+
+    /// In-memory service-edge check for one native VM step: one BOOTTIME read,
+    /// no file, procfs or digest work.
+    pub(crate) fn require_service_edge(&self) -> Result<()> {
+        self.service_edge.require_service_fixed().map_err(anyhow::Error::msg)
     }
 }

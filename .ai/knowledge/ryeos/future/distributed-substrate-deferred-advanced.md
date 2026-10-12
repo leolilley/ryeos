@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T00:15:48Z:2edfbe049458a379e00cc796125d1ffc80c541b701746eeff26f502db156acb4:Z68m/4pTQrhlW3I7NZ9ki8JHX30IWvwOn3WagcBm/SKqndwO/mYjXPthOujGzLbwt2OwS16ePfsyXgtZ8RPgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-12T04:47:54Z:53908f91f682fa5a239875d8d3d1d8e803b481f2ec78699c3d6708a147b40815:/DmGFqBBKmSIHhf7+goo8chmX5qEhxMcC2izT/R8P+QLvc3HSlDv6uORT0ZuwynNdV3SsJjCQ/O3zXJjZW1BCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
@@ -487,6 +487,49 @@ The implementation order is:
    transferred successor head;
 9. worker attachment under a fresh boot epoch; and
 10. source settlement and cleanup after its authority has already ended.
+
+### Step 1 at single-node level: the signed node capability report
+
+The first half of step 1 now exists for one node. Each running daemon
+records a signed node capability report at startup, before any native
+reservation, and `ryeos node doctor` shows it. The report carries:
+
+- what the node contains: initialization profile, installed bundles, native
+  services compiled into the daemon, and the node policy generation;
+- what its host proves: raw host observations, and open capability names
+  (for example `accounting`, `termination:scope`, `limits:enclosure`,
+  `recovery:enclosure`), each with its proof source (measured,
+  provider-attested, peer-attested or trusted) and basis, plus the names it
+  cannot prove with a plain reason;
+- the node's declared capability floor from signed isolation policy, and
+  whether the host meets it; the node refuses to start when it does not;
+- room for later placement: the host generation (boot identity plus
+  container enclosure), a subject field that is node-wide today, and open
+  capacity budgets such as the enclosure memory ceiling.
+
+It is canonical JSON with a digest, signed by the node key under a schema
+domain. It is evidence, never authority: admission re-checks live facts, a
+report from another boot, enclosure or policy generation is stale, and
+provider or peer attestations never satisfy a local requirement.
+
+What placement still needs on top of it:
+
+- **publication:** an exchange that carries the report to peers, with
+  freshness, revocation and per-peer trust, so a site can rely on another
+  node's report without that node being local;
+- **workload requirements in the capsule:** per-workload required
+  capability names hashed into the admitted launch capsule (step 2), so a
+  target can re-run the same set match the source ran;
+- **peer-attested matching:** rules for when a peer's claim may satisfy a
+  requirement, since a local requirement accepts only local measurement;
+- **capacity and reservation:** live budgets beyond the static enclosure
+  ceiling (remaining incarnation allowance, device occupancy) and the
+  target-side reservation of step 5;
+- **per-principal qualifiers:** reports scoped to a principal or job where
+  guarantees differ by tenant;
+- **layered providers:** composing an outer provider's guarantee (a remote
+  lease or VM) with the node's own, without letting the outer claim stand in
+  for a local measurement.
 
 Placement scoring may prefer a node that already retains the required closure,
 model, or workspace cache, but locality is considered only after authority,

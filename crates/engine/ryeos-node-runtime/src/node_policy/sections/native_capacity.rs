@@ -89,6 +89,10 @@ pub struct NativeIncarnationEnvelope {
     pub units: NativeCapacityUnits,
     pub maximum_occupancy_ms: u64,
     pub cleanup_occupancy_ms: u64,
+    /// How long before the service-window edge the incarnation begins its
+    /// planned graceful stop, while service SQL is still admitted. Required:
+    /// greater than zero and shorter than the service window.
+    pub rollover_drain_margin_ms: u64,
     /// Original cleanup steps transferred to the outside mapping owner.
     /// Bounds syscall attempts, not a promise that cleanup always succeeds.
     pub host_release_steps: u64,
@@ -144,6 +148,7 @@ pub enum NativeCapacityPolicyRefusal {
     OccupancyOverflow,
     Allowance,
     Recovery,
+    RolloverMargin,
 }
 impl std::fmt::Display for NativeCapacityPolicyRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,6 +163,7 @@ impl std::fmt::Display for NativeCapacityPolicyRefusal {
                 Self::OccupancyOverflow => "native occupancy overflows nanoseconds",
                 Self::Allowance => "native account allowance cannot fund the incarnation",
                 Self::Recovery => "capacity recovery allowance is invalid or overflows",
+                Self::RolloverMargin => "native rollover drain margin must be positive and shorter than the service window",
                 Self::Units(_) => unreachable!(),
             }),
         }
@@ -186,6 +192,10 @@ impl NativeIncarnationEnvelope {
         }
         if self.maximum_occupancy_ms.checked_mul(1_000_000).is_none() {
             return Err(NativeCapacityPolicyRefusal::OccupancyOverflow);
+        }
+        if self.rollover_drain_margin_ms == 0
+            || self.rollover_drain_margin_ms >= self.maximum_occupancy_ms - self.cleanup_occupancy_ms {
+            return Err(NativeCapacityPolicyRefusal::RolloverMargin);
         }
         Ok(())
     }
@@ -257,6 +267,7 @@ mod outside_cleanup_tests {
             schema: 5, issuance_nonce: "a".repeat(32), allowance: units,
             incarnation: NativeIncarnationEnvelope {
                 units, maximum_occupancy_ms: 7_200_000, cleanup_occupancy_ms: 120_000,
+                rollover_drain_margin_ms: 90_000,
                 host_release_steps: 64, outside_cleanup_steps: 32_768,
             },
             recovery: NativeRecoveryEnvelope {

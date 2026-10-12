@@ -146,7 +146,13 @@ pub struct StartedPersistentSession {
     pub cleanup_observer: Option<PersistentSessionCleanupObserver>,
     /// Non-financial launch-authority settlement after checked process reap.
     /// Failure prevents successful retirement independently of resource accounting.
+    /// It writes durable rows, so a latched stop skips it and leaves it to
+    /// the next start's recovery.
     pub retirement_observer: Option<PersistentSessionCleanupObserver>,
+    /// Retirement settlement that touches only in-memory and OS state, such
+    /// as relay and mount reservations. It runs after checked reap in every
+    /// stop, latched or not, and is never left behind.
+    pub retirement_os_only: Option<PersistentSessionCleanupObserver>,
     /// Finite resource occupancy authority for this exact process occurrence.
     /// `None` is valid only for sessions without a financially bounded
     /// selected execution resource.
@@ -162,6 +168,86 @@ pub struct StartedPersistentSession {
 pub type PersistentSessionObservationSink =
     Arc<dyn Fn(Value) -> Result<Value> + Send + Sync + 'static>;
 pub type PersistentSessionCleanupObserver = Arc<dyn Fn() -> Result<()> + Send + Sync + 'static>;
+
+/// How a retirement settles its post-reap obligations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetirementMode {
+    /// Every obligation runs.
+    Normal,
+    /// Service SQL is refused for this incarnation: only obligations on
+    /// in-memory and OS state run. Durable-row obligations are left to the
+    /// next start's recovery, which reconciles them from durable state.
+    Latched,
+}
+
+/// Post-reap settlement obligations of one session owner, kept apart by what
+/// they touch.
+#[derive(Clone, Default)]
+pub struct RetirementObserverParts {
+    /// Obligations that write durable rows: resource settlement and the
+    /// launch-authority row settlement.
+    pub durable_rows: Option<PersistentSessionCleanupObserver>,
+    /// Obligations on in-memory and OS state only.
+    pub os_only: Option<PersistentSessionCleanupObserver>,
+}
+
+impl RetirementObserverParts {
+    fn from_started(
+        resource: Option<PersistentSessionCleanupObserver>,
+        retirement: Option<PersistentSessionCleanupObserver>,
+        os_only: Option<PersistentSessionCleanupObserver>,
+    ) -> Self {
+        Self { durable_rows: combine_retirement_observers(resource, retirement), os_only }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.durable_rows.is_none() && self.os_only.is_none()
+    }
+
+    fn owner_count(&self) -> usize {
+        usize::from(self.durable_rows.is_some()) + usize::from(self.os_only.is_some())
+    }
+
+    /// Run the parts `mode` selects. In normal mode both run, the second
+    /// attempted even when the first fails, and both errors are kept. A
+    /// panicking part is an error. Returns whether durable rows were left
+    /// for recovery.
+    fn settle(&self, mode: RetirementMode) -> Result<bool> {
+        fn run(observer: &PersistentSessionCleanupObserver) -> Result<()> {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer()))
+                .unwrap_or_else(|_| Err(anyhow!("retirement settlement observer panicked")))
+        }
+        let durable = match mode {
+            RetirementMode::Normal => self.durable_rows.as_ref().map(run),
+            RetirementMode::Latched => None,
+        };
+        let os_only = self.os_only.as_ref().map(run);
+        match (durable, os_only) {
+            (Some(Err(error)), Some(Err(os_only))) => Err(error.context(format!(
+                "in-memory retirement settlement also failed: {os_only:#}"
+            ))),
+            (Some(Err(error)), _) | (_, Some(Err(error))) => Err(error),
+            _ => Ok(mode == RetirementMode::Latched && self.durable_rows.is_some()),
+        }
+    }
+
+    /// Move every present part into `owners`, for quarantined custody.
+    fn retain_into(self, owners: &mut Vec<PersistentSessionCleanupObserver>) {
+        let Self { durable_rows, os_only } = self;
+        owners.extend(durable_rows);
+        owners.extend(os_only);
+    }
+}
+
+/// What a pool shutdown proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PersistentSessionShutdownReap {
+    /// Owners whose process death was proved and whose owner settled.
+    pub reaped: usize,
+    /// Of those, owners whose durable-row settlement a latched stop left
+    /// for the next start's recovery.
+    pub durable_rows_deferred: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistentSessionRelayFailure {
@@ -410,7 +496,7 @@ struct SessionProcess {
     /// Once ownership was consumed by an abort attempt whose reap proof
     /// failed, absence of `running` must never be reinterpreted as proof.
     cleanup_unproved: Mutex<Option<String>>,
-    cleanup_observer: Mutex<Option<PersistentSessionCleanupObserver>>,
+    cleanup_observer: Mutex<RetirementObserverParts>,
     relay_owner: Mutex<Option<Arc<dyn PersistentSessionRelayOwner>>>,
     relay_health: Option<PersistentSessionRelayHealthCell>,
     retirement: RetirementCoordinator,
@@ -721,6 +807,18 @@ impl SessionProcess {
     }
 
     fn retire(&self) -> Result<()> {
+        self.retire_in(RetirementMode::Normal).map(|_| ())
+    }
+
+    /// Retire with checked reap. Returns whether durable-row settlement was
+    /// left for recovery, which only a latched retirement does.
+    fn retire_in(&self, mode: RetirementMode) -> Result<bool> {
+        let mut durable_rows_deferred = false;
+        self.retire_recording(mode, &mut durable_rows_deferred)?;
+        Ok(durable_rows_deferred)
+    }
+
+    fn retire_recording(&self, mode: RetirementMode, durable_rows_deferred: &mut bool) -> Result<()> {
         let Some(attempt) = self.begin_retirement()? else {
             return Ok(());
         };
@@ -782,33 +880,33 @@ impl SessionProcess {
             .cleanup_observer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .cloned();
-        if let Some(observer) = cleanup_observer {
-            let settlement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer()));
-            match settlement {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
+            .clone();
+        if !cleanup_observer.is_empty() {
+            match cleanup_observer.settle(mode) {
+                Ok(deferred) => *durable_rows_deferred |= deferred,
+                Err(error) => {
                     return attempt.finish(Err(format!(
                         "persistent-session resource settlement remains unproved: {error:#}"
                     )));
                 }
-                Err(_) => {
-                    return attempt.finish(Err(
-                        "persistent-session resource settlement observer panicked".to_owned(),
-                    ));
-                }
             }
-            self.cleanup_observer
+            *self
+                .cleanup_observer
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = RetirementObserverParts::default();
         }
         if let Some(start) = &self.pooled_start {
-            if let Err(error) = start.prove_cleanup() {
-                return attempt.finish(Err(format!(
-                    "pooled persistent-session cleanup remains unproved: {error:#}"
-                )));
+            // The pooled owner's cleanup proof writes durable rows; a latched
+            // retirement leaves it to the next start's resource-owner recovery.
+            match mode {
+                RetirementMode::Normal => {
+                    if let Err(error) = start.prove_cleanup() {
+                        return attempt.finish(Err(format!(
+                            "pooled persistent-session cleanup remains unproved: {error:#}"
+                        )));
+                    }
+                }
+                RetirementMode::Latched => *durable_rows_deferred = true,
             }
         }
 
@@ -881,13 +979,12 @@ impl Drop for SessionProcess {
                 return;
             }
         }
-        if let Some(observer) = self
-            .cleanup_observer
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            && let Err(error) = observer()
-        {
+        let observer = std::mem::take(
+            self.cleanup_observer
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        if let Err(error) = observer.settle(RetirementMode::Normal) {
             tracing::error!(%error, "persistent-session resource settlement failed after drop reap");
             if let Some(start) = &self.pooled_start {
                 start.retain_unsettled();
@@ -2677,7 +2774,7 @@ struct ExclusiveUnprovedStartCustody {
     relay_health: Option<PersistentSessionRelayHealthCell>,
     relay_owner: Option<Arc<dyn PersistentSessionRelayOwner>>,
     lifelines: Vec<Box<dyn Send + Sync>>,
-    observer: Option<PersistentSessionCleanupObserver>,
+    observer: RetirementObserverParts,
 }
 
 enum ExclusiveQuarantinedOwner {
@@ -4504,6 +4601,19 @@ impl PersistentSessionPool {
     }
 
     pub fn shutdown_and_reap_all(&self, timeout: Duration) -> Result<usize> {
+        self.shutdown_and_reap_all_in(timeout, RetirementMode::Normal)
+            .map(|reap| reap.reaped)
+    }
+
+    /// Shut the pool down and reap every owned process. A latched shutdown
+    /// still proves every death and runs every in-memory and OS settlement,
+    /// but leaves durable-row settlement to the next start's recovery and
+    /// reports how many owners it left.
+    pub fn shutdown_and_reap_all_in(
+        &self,
+        timeout: Duration,
+        mode: RetirementMode,
+    ) -> Result<PersistentSessionShutdownReap> {
         self.inner.shutdown.store(true, Ordering::Release);
         self.inner.changed.notify_all();
 
@@ -4582,20 +4692,23 @@ impl PersistentSessionPool {
         };
 
         let mut reaped = 0usize;
+        let mut durable_rows_deferred = 0usize;
         let mut cleanup_errors = Vec::new();
         for (key, process) in pooled {
-            match process.retire() {
-                Ok(()) => {
+            match process.retire_in(mode) {
+                Ok(deferred) => {
                     reaped = reaped.saturating_add(1);
+                    durable_rows_deferred = durable_rows_deferred.saturating_add(usize::from(deferred));
                     self.remove(&key, &process);
                 }
                 Err(error) => cleanup_errors.push(error.to_string()),
             }
         }
         for (session_id, process) in exclusive {
-            match process.retire() {
-                Ok(()) => {
+            match process.retire_in(mode) {
+                Ok(deferred) => {
                     reaped = reaped.saturating_add(1);
+                    durable_rows_deferred = durable_rows_deferred.saturating_add(usize::from(deferred));
                     let mut state = self
                         .inner
                         .state
@@ -4645,7 +4758,7 @@ impl PersistentSessionPool {
             );
         }
         self.inner.changed.notify_all();
-        Ok(reaped)
+        Ok(PersistentSessionShutdownReap { reaped, durable_rows_deferred })
     }
 }
 
@@ -4664,6 +4777,7 @@ impl ExclusivePersistentSessionReservation {
                 relay_health,
                 cleanup_observer,
                 retirement_observer,
+                retirement_os_only,
                 lifelines,
                 ..
             } = started;
@@ -4671,7 +4785,11 @@ impl ExclusivePersistentSessionReservation {
                 relay_health,
                 relay_owner,
                 lifelines,
-                observer: combine_retirement_observers(cleanup_observer, retirement_observer),
+                observer: RetirementObserverParts::from_started(
+                    cleanup_observer,
+                    retirement_observer,
+                    retirement_os_only,
+                ),
             };
             let relay_join_error = safe_relay_join(custody.relay_owner.as_ref()).err();
             let reap_error = safe_checked_reap(running).err();
@@ -5003,7 +5121,7 @@ impl ExclusiveReservationEntry {
                     (if custody.relay_health.is_some() { 1 } else { 0 })
                         + (if custody.relay_owner.is_some() { 1 } else { 0 })
                         + custody.lifelines.len()
-                        + (if custody.observer.is_some() { 1 } else { 0 })
+                        + custody.observer.owner_count()
                 }
                 ExclusiveQuarantinedOwner::ReadyProcess(process) => {
                     if Arc::strong_count(process) > 0 { 1 } else { 0 }
@@ -5426,9 +5544,8 @@ fn ready_pooled_process(
                     if let Some(owner) = custody.relay_owner.take() {
                         retained.lifelines.push(Box::new(owner));
                     }
-                    if let Some(observer) = custody.observer.take() {
-                        retained.obligation_owners.push(observer);
-                    }
+                    std::mem::take(&mut custody.observer)
+                        .retain_into(&mut retained.obligation_owners);
                     retained.admission_refused = true;
                     retained.phase = PooledStartPhase::Unsettled;
                 }
@@ -5464,6 +5581,7 @@ fn ready_process_registered(
         observation_sink,
         cleanup_observer,
         retirement_observer,
+        retirement_os_only,
         resource_occupancy_limit,
         resource_cleanup_allowance_ms,
         resource_attribution_sink,
@@ -5475,7 +5593,11 @@ fn ready_process_registered(
             relay_health,
             relay_owner,
             lifelines,
-            observer: combine_retirement_observers(cleanup_observer, retirement_observer),
+            observer: RetirementObserverParts::from_started(
+                cleanup_observer,
+                retirement_observer,
+                retirement_os_only,
+            ),
         }),
         registration,
     };
@@ -5645,7 +5767,7 @@ fn ready_process_registered(
         reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
         cleanup_unproved: Mutex::new(None),
-        cleanup_observer: Mutex::new(custody.observer.take()),
+        cleanup_observer: Mutex::new(std::mem::take(&mut custody.observer)),
         relay_owner: Mutex::new(custody.relay_owner.take()),
         relay_health: custody.relay_health.take(),
         retirement: RetirementCoordinator::new(),
@@ -5667,13 +5789,9 @@ fn settle_ready_cleanup(
     error: anyhow::Error,
     mut custody: ExclusiveUnprovedStartCustody,
 ) -> ReadyProcessFailure {
-    let settlement = custody.observer.as_ref().map(|observer| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer()))
-    });
-    let settlement_error = match settlement {
-        Some(Ok(Ok(()))) | None => None,
-        Some(Ok(Err(error))) => Some(format!("{error:#}")),
-        Some(Err(_)) => Some("cleanup observer panicked".to_owned()),
+    let settlement_error = match custody.observer.settle(RetirementMode::Normal) {
+        Ok(_) => None,
+        Err(error) => Some(format!("{error:#}")),
     };
     if let Some(settlement_error) = settlement_error {
         return ReadyProcessFailure {
@@ -5682,7 +5800,7 @@ fn settle_ready_cleanup(
             custody: Some(custody),
         };
     }
-    custody.observer = None;
+    custody.observer = RetirementObserverParts::default();
     while !custody.lifelines.is_empty() {
         let lifeline = custody.lifelines.remove(0);
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(lifeline))).is_err() {
@@ -5754,7 +5872,7 @@ fn refuse_ready_process(
 
 /// Retain both original settlement obligations in one observer, attempting
 /// them in order and preserving both errors. This grants no resource authority.
-pub fn combine_retirement_observers(
+fn combine_retirement_observers(
     resource: Option<PersistentSessionCleanupObserver>,
     retirement: Option<PersistentSessionCleanupObserver>,
 ) -> Option<PersistentSessionCleanupObserver> {
@@ -6805,21 +6923,19 @@ mod tests {
         // Read actual durable rows for this exact original intent. Equality
         // proves no COMMITTED effect only, not absence of rolled-back attempts.
         let db = state.accounting.as_ref().unwrap();
-        let conn = rusqlite::Connection::open_with_flags(
-            db.path(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
         let original_id = intent.reservation_id().unwrap();
-        let gates = conn.query_row(
-            "SELECT COUNT(*) FROM resource_owner_accounting_gate WHERE original_reservation_id=?1",
-            [&original_id], |row| row.get(0),
-        ).unwrap();
-        let operations = conn.query_row(
-            "SELECT COUNT(*) FROM resource_financial_operation AS operation JOIN resource_owner_accounting_gate AS gate ON operation.owner_gate_id=gate.owner_gate_id WHERE gate.original_reservation_id=?1",
-            [&original_id], |row| row.get(0),
-        ).unwrap();
-        (gates, operations)
+        db.fixture_with_conn(|conn| {
+            let gates = conn.query_row(
+                "SELECT COUNT(*) FROM resource_owner_accounting_gate WHERE original_reservation_id=?1",
+                [&original_id], |row| row.get(0),
+            )?;
+            let operations = conn.query_row(
+                "SELECT COUNT(*) FROM resource_financial_operation AS operation JOIN resource_owner_accounting_gate AS gate ON operation.owner_gate_id=gate.owner_gate_id WHERE gate.original_reservation_id=?1",
+                [&original_id], |row| row.get(0),
+            )?;
+            Ok((gates, operations))
+        })
+        .unwrap()
     }
 
     #[cfg(target_os = "linux")]
@@ -6867,7 +6983,14 @@ mod tests {
             OriginalManifestPreparationPhase::Refused
         );
         let original = retained.original_manifest_restored.as_ref().unwrap();
-        original.require_same_state(&fixture.state).unwrap();
+        // The restored input keeps the original isolation expectation of this
+        // authoring State, which does not enforce isolation: restoring it never
+        // upgrades that expectation into an admitted one.
+        let unenforced = original.require_same_state(&fixture.state).unwrap_err();
+        assert!(
+            format!("{unenforced:#}").contains("requires enforced runtime"),
+            "{unenforced:#}"
+        );
         assert_eq!(original.capsule().content_hash().unwrap(), hash);
         assert!(Arc::ptr_eq(
             original.selected().devices().unwrap(),
@@ -7760,6 +7883,7 @@ while True:
             observation_sink,
             cleanup_observer: None,
             retirement_observer: None,
+            retirement_os_only: None,
             resource_occupancy_limit: None,
             resource_cleanup_allowance_ms: None,
             resource_attribution_sink: None,
@@ -7883,10 +8007,13 @@ while True:
                 relay_health: Some(PersistentSessionRelayHealthCell::new()),
                 relay_owner: Some(Arc::new(PanickingRelayOwner)),
                 lifelines: started.lifelines,
-                observer: Some(Arc::new(move || {
-                    observed_calls.fetch_add(1, Ordering::AcqRel);
-                    Ok(())
-                })),
+                observer: RetirementObserverParts {
+                    durable_rows: Some(Arc::new(move || {
+                        observed_calls.fetch_add(1, Ordering::AcqRel);
+                        Ok(())
+                    })),
+                    os_only: None,
+                },
             },
         );
         assert!(failure.cleanup_unproved);
@@ -7918,7 +8045,10 @@ while True:
                 relay_health: Some(PersistentSessionRelayHealthCell::new()),
                 relay_owner: Some(Arc::clone(&owner)),
                 lifelines: vec![Box::new(Arc::new(AtomicU64::new(0)))],
-                observer: Some(Arc::new(|| Ok(()))),
+                observer: RetirementObserverParts {
+                    durable_rows: Some(Arc::new(|| Ok(()))),
+                    os_only: None,
+                },
             },
             "injected unproved reap".to_owned(),
         );
@@ -7943,7 +8073,7 @@ while True:
                 relay_health: None,
                 relay_owner: None,
                 lifelines: vec![Box::new(Arc::new(AtomicU64::new(0)))],
-                observer: None,
+                observer: RetirementObserverParts::default(),
             }),
             registration: Some(ExclusiveCustodyRegistration {
                 inner: Arc::clone(&pool.inner),
@@ -9026,7 +9156,7 @@ while True:
             Arc::clone(&state.exclusive.get(id).unwrap().process)
         };
         assert!(Arc::ptr_eq(
-            retained.cleanup_observer.lock().unwrap().as_ref().unwrap(),
+            retained.cleanup_observer.lock().unwrap().durable_rows.as_ref().unwrap(),
             &observer,
         ));
         assert!(calls.lock().unwrap().is_empty());
@@ -9142,7 +9272,7 @@ while True:
             let state = pool.inner.state.lock().unwrap();
             Arc::clone(&state.exclusive.get(&id).unwrap().process)
         };
-        *retained.cleanup_observer.lock().unwrap() = Some(Arc::new(|| {
+        retained.cleanup_observer.lock().unwrap().durable_rows = Some(Arc::new(|| {
             anyhow::bail!("test resource settlement refused")
         }));
         retained.lifelines.lock().unwrap().push(Box::new(()));

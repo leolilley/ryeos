@@ -86,6 +86,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "allow-restart"],
+        summary: "Clear a node's restart inhibition after resolving why it stopped itself",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "reset", "execution-history"],
         summary: "Retire the local execution-history epoch",
         category: "maintenance",
@@ -190,6 +195,10 @@ pub async fn try_dispatch(
             run_node_doctor_command(&argv[2..], console)
                 .await
                 .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("allow-restart")) => {
+            run_node_allow_restart_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
@@ -514,7 +523,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
 #[command(
     name = "ryeos node reset replay-indexes",
     about = "Activate the current replay-index contract",
-    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. The immediate predecessor retires dispatch-effect rows only; skipped replay generations retire all replay-index rows, including provider-call rows. Current indexes are unchanged. Credentials, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
+    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. A stale epoch retires every replay-index row, including provider-call rows, so provider-call idempotence keys are discarded: an interrupted provider call is not recognized as already made. Run it only with no execution in flight; otherwise use the execution-history reset. Current indexes are unchanged. Credentials, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
     no_binary_name = true
 )]
 struct NodeReplayResetArgs {
@@ -577,9 +586,6 @@ fn replay_reset_summary(report: ryeos_state::operational::ReplayIndexResetReport
     use ryeos_state::operational::ReplayIndexResetScope;
     let scope = match report.scope {
         ReplayIndexResetScope::Unchanged => "unchanged",
-        ReplayIndexResetScope::DispatchEffects => {
-            "retire dispatch-effect rows; retain provider-call rows"
-        }
         ReplayIndexResetScope::AllReplayRecords => {
             "retire all replay rows, including provider-call rows"
         }
@@ -884,7 +890,7 @@ fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::
 #[command(
     name = "ryeos node reset execution-history",
     about = "Retire the local execution-history epoch while the daemon is stopped",
-    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, activate stale replay indexes, and publish an empty current thread projection. Replay activation retires dispatch-effect rows for the immediate predecessor, or all replay rows including provider-call rows for skipped generations. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
+    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, activate stale replay indexes, and publish an empty current thread projection. Replay activation of a stale epoch retires every replay row, including provider-call rows. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
     no_binary_name = true
 )]
 struct ExecutionHistoryResetArgs {
@@ -919,6 +925,14 @@ struct ExecutionHistoryResetArgs {
     /// Exact current runtime schema epoch for an idempotent hosted cut.
     #[arg(long = "schema-cut-to", requires = "schema_cut_from")]
     schema_cut_to: Option<u32>,
+
+    /// Attest that this host has rebooted since the Runtime store's process
+    /// scope lifetime fence was written. A fence this binary cannot read is
+    /// then discarded instead of refusing the reset; where its boot id is
+    /// still readable it must differ from the current boot. Recorded in the
+    /// report.
+    #[arg(long = "discard-unreadable-lifetime-fence-after-reboot")]
+    discard_unreadable_lifetime_fence_after_reboot: bool,
 }
 
 impl ExecutionHistoryResetArgs {
@@ -961,6 +975,7 @@ fn run_execution_history_reset_command(
                     to,
                 },
             ),
+        discard_unreadable_lifetime_fence_after_reboot: args.discard_unreadable_lifetime_fence_after_reboot,
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
@@ -1050,6 +1065,22 @@ fn run_execution_history_reset_command(
         crate::tty::Row::key_value(
             "old projection stores",
             report.projection.superseded_instances_deleted.to_string(),
+        ),
+        crate::tty::Row::key_value(
+            "unreadable lifetime fence",
+            match &report.lifetime_fence_discard {
+                None => "none".to_owned(),
+                Some(discard) => match (&discard.stored_boot_id, discard.boot_id_verified) {
+                    (Some(boot_id), true) => format!(
+                        "discarded after attested reboot; stored boot {boot_id} differs from the current boot ({})",
+                        discard.reason
+                    ),
+                    _ => format!(
+                        "discarded on the operator's reboot attestation alone; its boot id is unreadable ({})",
+                        discard.reason
+                    ),
+                },
+            },
         ),
         crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
         crate::tty::Row::key_value(
@@ -1417,6 +1448,67 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
     Ok(())
 }
 
+// ── ryeos node allow-restart ────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node allow-restart",
+    about = "Clear the restart inhibition a node records when it stops itself to avoid a \
+             restart loop. Resolve the cause first: `ryeos node doctor` shows it.",
+    no_binary_name = true
+)]
+struct NodeAllowRestartArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_allow_restart_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeAllowRestartArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let app_root = controller.config().app_root.clone();
+    // A running daemon holds the state lock, so the clear refuses while the
+    // node is up and cannot race a stop that is recording an inhibition.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+    )
+    .context("allow-restart requires the node to be stopped")?;
+    let cleared = ryeos_node::lifecycle_marker::clear_restart_inhibition(
+        &app_root,
+        &state_lock,
+        "ryeos node allow-restart",
+    )?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "cleared": cleared }))?;
+        return Ok(());
+    }
+    let status = match &cleared {
+        Some(record) => {
+            let mut banner =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RESTART ALLOWED");
+            banner.detail = Some(format!(
+                "cleared `{}` recorded at {}; the next start may proceed",
+                record.reason, record.recorded_at
+            ));
+            banner
+        }
+        None => {
+            let mut banner =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "NO RESTART INHIBITION");
+            banner.detail = Some(format!("{} has nothing to clear", app_root.display()));
+            banner
+        }
+    };
+    console.status(&status)?;
+    Ok(())
+}
+
 // ── ryeos node doctor ───────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
@@ -1633,6 +1725,48 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
             )),
         }
     }
+
+    // What the node contains and what its host proves, as recorded and
+    // signed by the daemon at its last start, beside a fresh view of the host
+    // from this shell. The shell's own limits (for example locked memory)
+    // can differ from the daemon's, so only the recorded report decides.
+    // A node that stopped itself to avoid a restart loop refuses every start
+    // until an operator clears this record.
+    match ryeos_node::lifecycle_marker::read_restart_inhibition(
+        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
+    ) {
+        Ok(None) => checks.push(check("restart_inhibit", OK, serde_json::json!({}))),
+        Ok(Some(record)) => checks.push(check(
+            "restart_inhibit",
+            FAIL,
+            serde_json::json!({
+                "record": record,
+                "message": record.refusal(),
+                "fix": "resolve the cause, then run: ryeos node allow-restart",
+            }),
+        )),
+        Err(error) => checks.push(check(
+            "restart_inhibit",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "fix": "the record is unreadable; ryeos node allow-restart removes it",
+            }),
+        )),
+    }
+
+    let capability_report = if initialized {
+        let (status, detail, report) = inspect_capability_report(&config.app_root);
+        checks.push(check("capabilities", status, detail));
+        report
+    } else {
+        checks.push(check(
+            "capabilities",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+        None
+    };
 
     // Use the same policy loader as daemon and offline execution. Disabled is
     // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
@@ -1919,6 +2053,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
             section
                 .rows
                 .push(crate::tty::Row::key_value(&c.name, &c.status).with_tone(tone));
+            if c.name == "capabilities" {
+                continue;
+            }
             if c.status != OK || c.name == "isolation" {
                 section.rows.push(
                     crate::tty::Row::text(format!("{}: {}", c.name, c.detail))
@@ -1929,6 +2066,10 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         let mut document =
             crate::tty::Document::titled(format!("NODE DOCTOR — {}", config.app_root.display()));
         document.sections.push(section);
+        document.sections.push(capability_section(
+            capability_report.as_ref(),
+            checks.iter().find(|c| c.name == "capabilities"),
+        ));
         console.document(&document)?;
         if ok {
             let mut summary =
@@ -1950,6 +2091,193 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     } else {
         Err(ReportedLocalFailure("node doctor found failing checks".to_string()).into())
     }
+}
+
+/// Recorded, signed capability report plus a fresh probe-free generation
+/// check. A refused floor fails the doctor; a missing or stale report warns.
+fn inspect_capability_report(
+    app_root: &std::path::Path,
+) -> (
+    &'static str,
+    serde_json::Value,
+    Option<ryeos_node::capability_report::SignedNodeCapabilityReport>,
+) {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    use ryeos_node::capability_report::SignedNodeCapabilityReport;
+
+    let shell = lillux::process_control::HostFacts::observe(
+        lillux_resident_quote().unwrap_or_default(),
+    );
+    let shell_view = shell.capabilities();
+    let shell_json = serde_json::json!({
+        "note": "observed from this shell, whose limits can differ from the daemon's",
+        "provided": shell_view.provided,
+        "missing": shell_view.missing,
+        "host": shell,
+    });
+    match SignedNodeCapabilityReport::read_verified(app_root) {
+        Ok(None) => (
+            WARN,
+            serde_json::json!({
+                "note": "no capability report recorded yet; the daemon writes one at each start",
+                "path": SignedNodeCapabilityReport::path(app_root),
+                "shell": shell_json,
+            }),
+            None,
+        ),
+        Err(error) => (
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": SignedNodeCapabilityReport::path(app_root),
+                "shell": shell_json,
+            }),
+            None,
+        ),
+        Ok(Some(signed)) => {
+            // The same policy generation digest the daemon recorded.
+            let policy_generation =
+                ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+                    .ok()
+                    .and_then(|runtime| runtime.digest().map(str::to_owned));
+            let staleness = signed
+                .staleness(policy_generation.as_deref())
+                .map_err(|error| format!("{error:#}"));
+            let status = match (&staleness, signed.report.floor.admitted) {
+                (_, false) => FAIL,
+                (Ok(None), true) => OK,
+                (Ok(Some(_)) | Err(_), true) => WARN,
+            };
+            let detail = serde_json::json!({
+                "path": SignedNodeCapabilityReport::path(app_root),
+                "digest": signed.digest,
+                "signer": signed.signer,
+                "generated_at": signed.report.generated_at,
+                "current": match &staleness {
+                    Ok(None) => serde_json::json!(true),
+                    Ok(Some(reason)) => serde_json::json!({ "stale": reason }),
+                    Err(error) => serde_json::json!({ "error": error }),
+                },
+                "composition": signed.report.composition,
+                "floor": signed.report.floor,
+                "provided": signed.report.provided,
+                "missing": signed.report.missing,
+                "capacity": signed.report.capacity,
+                "residency_planned": signed.report.host.residency,
+                "enclosure_exit": signed.report.host.enclosure_exit,
+                "enclosure_exit_refusal": signed.report.host.enclosure_exit_refusal,
+                "residency_established": signed.report.established_residency,
+                "report": signed.report,
+                "shell": shell_json,
+            });
+            (status, detail, Some(signed))
+        }
+    }
+}
+
+fn lillux_resident_quote() -> Option<u64> {
+    ryeos_node::capability_report::resident_region_bytes().ok()
+}
+
+fn capability_section(
+    report: Option<&ryeos_node::capability_report::SignedNodeCapabilityReport>,
+    check: Option<&ryeos_core_tools::actions::doctor::CheckResult>,
+) -> crate::tty::Section {
+    let mut section = crate::tty::Section::named("capabilities");
+    let Some(signed) = report else {
+        let note = check
+            .map(|check| check.detail.to_string())
+            .unwrap_or_else(|| "not inspected".to_owned());
+        section.rows.push(
+            crate::tty::Row::text(format!("no verified capability report: {note}"))
+                .with_tone(crate::tty::Tone::Warning),
+        );
+        return section;
+    };
+    let report = &signed.report;
+    let composition = &report.composition;
+    section.rows.push(crate::tty::Row::key_value(
+        "profile",
+        composition.profile.as_deref().unwrap_or("unrecorded"),
+    ));
+    section.rows.push(crate::tty::Row::key_value("bundles", &composition.bundles.join(", ")));
+    section.rows.push(crate::tty::Row::key_value(
+        "native services",
+        &if composition.native_services.is_empty() {
+            "none".to_owned()
+        } else {
+            composition.native_services.join(", ")
+        },
+    ));
+    let generation = match check.map(|check| &check.detail["current"]) {
+        Some(serde_json::Value::Bool(true)) => "current".to_owned(),
+        Some(serde_json::Value::Object(detail)) => match (detail.get("stale"), detail.get("error")) {
+            (Some(reason), _) => format!("stale: {}; start the node to refresh it", reason.as_str().unwrap_or("unknown")),
+            (None, Some(error)) => format!("unknown: {}", error.as_str().unwrap_or("unknown")),
+            (None, None) => "unknown".to_owned(),
+        },
+        _ => "unknown".to_owned(),
+    };
+    section.rows.push(crate::tty::Row::key_value("report", &format!("{} ({generation})", report.generated_at)));
+    let residency = match (&report.established_residency, &report.host.residency) {
+        (Some(proof), _) => format!("{} (established): {}", proof.method(), proof.basis()),
+        (None, Some(proof)) => format!("{} (planned before reservation): {}", proof.method(), proof.basis()),
+        (None, None) => report.host.residency_refusal.clone().unwrap_or_else(|| "not proven".to_owned()),
+    };
+    section.rows.push(crate::tty::Row::key_value("residency", &residency));
+    let host = &report.host;
+    let enclosure_exit = match (&host.enclosure_exit, &host.enclosure_exit_refusal) {
+        (Some(evidence), _) => format!("{}: {}", evidence.source.as_str(), evidence.basis),
+        (None, refusal) => format!(
+            "not proven: {}",
+            refusal.as_deref().unwrap_or("no reason recorded")
+        ),
+    };
+    section.rows.push(crate::tty::Row::key_value("enclosure exit", &enclosure_exit));
+    // What a restart-generation witness recorded by this node can decide.
+    let witness = match (report.generation.cgroup_enclosure, &host.enclosure_exit) {
+        (Some(inode), Some(evidence)) => format!(
+            "boot and container enclosure inode {inode} ({})",
+            evidence.source.as_str()
+        ),
+        (Some(_), None) => "boot only; an enclosure change on the same boot is undecided because \
+                            the node's exit is not proven to end its enclosure"
+            .to_owned(),
+        (None, _) => "boot only; the node is not the whole of a container enclosure".to_owned(),
+    };
+    section.rows.push(crate::tty::Row::key_value("generation witness", &witness));
+    let floor = &report.floor;
+    let floor_tone = if floor.admitted { crate::tty::Tone::Success } else { crate::tty::Tone::Failure };
+    section.rows.push(
+        crate::tty::Row::key_value(
+            "requires",
+            &format!(
+                "{} — {}",
+                floor.requires.join(", "),
+                if floor.admitted { "met" } else { "NOT met" }
+            ),
+        )
+        .with_tone(floor_tone),
+    );
+    for (name, reason) in &floor.unmet {
+        section.rows.push(
+            crate::tty::Row::text(format!("  unmet {name}: {reason}")).with_tone(crate::tty::Tone::Failure),
+        );
+    }
+    for (name, evidence) in &report.provided {
+        let source = evidence.source.as_str();
+        section.rows.push(
+            crate::tty::Row::text(format!("  proves {name} ({source}): {}", evidence.basis))
+                .with_tone(crate::tty::Tone::Secondary),
+        );
+    }
+    for (name, reason) in &report.missing {
+        section.rows.push(
+            crate::tty::Row::text(format!("  cannot prove {name}: {reason}"))
+                .with_tone(crate::tty::Tone::Secondary),
+        );
+    }
+    section
 }
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
@@ -2461,10 +2789,6 @@ mod tests {
         for (scope, expected) in [
             (ReplayIndexResetScope::Unchanged, "unchanged"),
             (
-                ReplayIndexResetScope::DispatchEffects,
-                "retain provider-call rows",
-            ),
-            (
                 ReplayIndexResetScope::AllReplayRecords,
                 "retire all replay rows, including provider-call rows",
             ),
@@ -2491,6 +2815,7 @@ mod tests {
             json: false,
             schema_cut_from: None,
             schema_cut_to: None,
+            discard_unreadable_lifetime_fence_after_reboot: false,
         }
     }
 

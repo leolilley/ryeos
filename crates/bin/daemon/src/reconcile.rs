@@ -1079,13 +1079,26 @@ fn dead_identity_safe_to_clear(
 /// callback before the UDS / HTTP server is bound would fail.
 #[tracing::instrument(name = "state:reconcile", skip(state))]
 pub async fn reconcile_active_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
-    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup).await
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup, None).await
+}
+
+/// Startup reconciliation that also applies the latched-drain facts of the
+/// previous incarnation's stop, already bound to this start. A listed thread
+/// whose row still holds exactly the identity that stop proved dead has its
+/// resume budget re-armed (reset to zero) before the ordinary resume
+/// decision, as the stop itself would have done had service SQL been
+/// admitted. Durable rows stay authoritative; the facts only select a reset.
+pub async fn reconcile_active_threads_after_latched_stop(
+    state: &AppState,
+    latched: Option<&ryeos_node::lifecycle_marker::LatchedDrainFacts>,
+) -> Result<ActiveThreadReconcileReport> {
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup, latched).await
 }
 
 /// Mid-life counterpart used by the supervised periodic recovery task. It
 /// never clears claims or stops a verified live process owned by this daemon.
 pub async fn reconcile_live_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
-    reconcile_active_threads_inner(state, ActiveReconcileMode::Live).await
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Live, None).await
 }
 
 /// Retire every predecessor qualification child before root recovery can
@@ -1168,6 +1181,7 @@ fn reconcile_predecessor_scoped_children(state: &AppState) -> Result<usize> {
 async fn reconcile_active_threads_inner(
     state: &AppState,
     mode: ActiveReconcileMode,
+    latched: Option<&ryeos_node::lifecycle_marker::LatchedDrainFacts>,
 ) -> Result<ActiveThreadReconcileReport> {
     // The startup half of the launch-claim contract: claims never expire by
     // wall clock, so every claim surviving from a previous daemon generation
@@ -1683,33 +1697,6 @@ async fn reconcile_active_threads_inner(
             &thread.thread_id,
         )?;
 
-        // Unsupported launch authority is history, not current recovery
-        // authority. The runtime DB inspected only its outer wire fields and
-        // deliberately did not deserialize the predecessor payload. Settle
-        // this thread alone after proving that no live owner remains; never
-        // let one old capsule abort reconciliation for unrelated threads.
-        if let Some(incompatible) = &thread.runtime.incompatible_launch_metadata {
-            state.state_store.clear_recovery_wait(&thread.thread_id)?;
-            finalize_dead(
-                state,
-                mode,
-                &thread.thread_id,
-                pgid,
-                &thread.status,
-                Some((
-                    "incompatible_admitted_launch_capsule_schema",
-                    json!({
-                        "stored_launch_metadata_schema": incompatible.schema_version,
-                        "stored_capsule_schema": incompatible.admitted_launch_capsule_schema,
-                        "current_launch_metadata_schema": ryeos_app::launch_metadata::LAUNCH_METADATA_SCHEMA_VERSION,
-                        "current_capsule_schema": ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
-                    }),
-                )),
-                &mut reconciled,
-            )?;
-            continue;
-        }
-
         let interrupted_spawn = pgid.is_none();
 
         if let Some(resume) = thread
@@ -2009,6 +1996,28 @@ async fn reconcile_active_threads_inner(
             continue;
         }
 
+        // A previous latched stop proved this exact group dead but could not
+        // re-arm its resume budget. Re-arm it only while the row still holds
+        // exactly the identity that stop proved, which this pass has just
+        // cleared; any other identity means a later attachment, and the
+        // ordinary crash accounting applies.
+        if let Some(proved) = latched
+            .and_then(|facts| facts.resume_attempts_reset_deferred.get(&thread.thread_id))
+        {
+            if identity == Some(proved) {
+                state
+                    .state_store
+                    .reset_resume_attempts(&thread.thread_id)
+                    .with_context(|| {
+                        format!("re-arm resume budget after latched stop for {}", thread.thread_id)
+                    })?;
+            } else {
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    "latched-stop resume re-arm ignored: attachment identity changed"
+                );
+            }
+        }
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
             Err(err) => {
@@ -2245,8 +2254,59 @@ fn reconcile_runtime_workspace_operations_before_thread_recovery(
 /// can conclude absence, but the exact durable epoch/profile fence is retained
 /// through every root-backed projection repair and detached only afterward.
 #[doc(hidden)]
+/// Settle every local qualification Worker row a previous daemon generation
+/// left `Attached`, for example when its stop could not write service SQL.
+/// Each exact group is proved absent first, killing it when still alive; a
+/// group whose death cannot be proved keeps its row attached and quarantined.
+/// Only the exact listed rows are settled.
+fn reconcile_qualification_worker_processes(state: &AppState) -> Result<usize> {
+    let mut settled = 0usize;
+    for (placement, identity) in state
+        .state_store
+        .prior_generation_attached_qualification_workers()?
+    {
+        let dead = match execution_group_liveness(&identity) {
+            IdentityLiveness::DeadOrStale => true,
+            IdentityLiveness::Alive => {
+                let killed = kill_by_action(&identity, ryeos_app::process::ShutdownAction::Hard);
+                killed.success
+                    && execution_group_liveness(&identity) == IdentityLiveness::DeadOrStale
+            }
+            IdentityLiveness::Unavailable => false,
+        };
+        if !dead {
+            tracing::error!(
+                placement_thread_id = %placement,
+                "local qualification Worker remains quarantined: process-group death is unproved"
+            );
+            continue;
+        }
+        if let Err(error) = ryeos_app::process::assert_reaped_process_group_absent(&identity) {
+            tracing::error!(
+                placement_thread_id = %placement,
+                error = %format!("{error:#}"),
+                "local qualification Worker remains quarantined: group absence is unproved"
+            );
+            continue;
+        }
+        ryeos_app::external_qualification_local::settle_qualification_worker_process(
+            state, &placement,
+        )
+        .with_context(|| format!("settle local qualification Worker row for {placement}"))?;
+        settled = settled.saturating_add(1);
+    }
+    Ok(settled)
+}
+
 pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> {
     reconcile_process_resource_reservations(state)?;
+    let settled_qualification_workers = reconcile_qualification_worker_processes(state)?;
+    if settled_qualification_workers != 0 {
+        tracing::info!(
+            settled_qualification_workers,
+            "settled local qualification Worker rows left attached by a previous daemon"
+        );
+    }
     reconcile_process_resource_owners(state)?;
     quiesce_unattached_worker_scopes(state)?;
     quiesce_dedicated_workers(state)?;
@@ -2901,16 +2961,6 @@ fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
             // Workspace-operation recovery owns cancellation/settlement. The
             // generic detached replay path must never relaunch a child while
             // its parent root remains fenced by the same durable intent.
-            continue;
-        }
-        if let Some(incompatible) = &intent.incompatible_launch_metadata {
-            tracing::warn!(
-                operation_id = %intent.operation_id,
-                child_thread_id = %intent.child_thread_id,
-                stored_launch_metadata_schema = incompatible.schema_version,
-                stored_capsule_schema = ?incompatible.admitted_launch_capsule_schema,
-                "sealed detached intent uses unsupported launch authority; preserving it as opaque history"
-            );
             continue;
         }
         let child = match state.state_store.get_thread(&intent.child_thread_id)? {
@@ -4262,7 +4312,6 @@ mod tests {
                 stop_requested_at_ms: None,
                 stop_intent: None,
                 launch_metadata: lm,
-                incompatible_launch_metadata: None,
                 recovery_wait: None,
             },
         }

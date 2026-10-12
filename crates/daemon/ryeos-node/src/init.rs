@@ -2382,11 +2382,7 @@ mod tests {
         let report = run_init(&opts).expect("init core + hosted-node");
         assert_eq!(
             report.bundles_installed,
-            vec![
-                "core".to_string(),
-                "central-auth".to_string(),
-                "hosted-node".to_string()
-            ]
+            vec!["core".to_string(), "hosted-node".to_string()]
         );
         assert!(state.join(".ai/bundles/core/.ai").is_dir());
         assert!(state.join(".ai/bundles/hosted-node/.ai").is_dir());

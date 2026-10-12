@@ -132,6 +132,16 @@ impl AccountRedo {
     }
 
     pub(super) fn target(&self) -> &CapacityRecord { &self.target }
+    /// Process digest of the incarnation this transition settled, when it is
+    /// a settlement; recovery charges keep the settlement they follow.
+    pub(super) fn settled_incarnation(&self) -> Option<[u8; 32]> {
+        match self.operation {
+            Operation::ReleaseSettlement | Operation::DeadIncarnationSettlement => {
+                self.before.outstanding.map(|debit| debit.process_digest)
+            }
+            Operation::Genesis | Operation::Debit => None,
+        }
+    }
     pub(super) fn recovery_process(&self) -> Option<&StoredProcess> { self.recovery_process.as_ref() }
     pub(super) fn recovery_attempts(&self) -> u64 { self.recovery_attempts }
 
@@ -272,6 +282,7 @@ pub(super) mod controls {
                 connection_tickets: 8, cleanup_steps: 40_000 },
             incarnation: NativeIncarnationEnvelope {
                 units, maximum_occupancy_ms: 60_000, cleanup_occupancy_ms: 10_000,
+                rollover_drain_margin_ms: 5_000,
                 host_release_steps: 64, outside_cleanup_steps: 1024,
             },
             recovery: NativeRecoveryEnvelope {

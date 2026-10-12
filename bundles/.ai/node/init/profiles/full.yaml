@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-11T11:48:46Z:c4bbd9ddb697b9747313e94408fd8fbb1133330276838e911244ed343ee05a01:0Z7TPFa67fArdzkiVBHua0uLG1wcIylnyIEWWKLzqgW7NARKge0zDg0pEHlAuLRG3Hc40IO/p2+DVliOqpd/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T11:47:25Z:dc05cc49faacd3583068eae47f0717291d7e504515ffaea0c9baf23d098fe466:+0nAB6WDZePPQemNDcpDnJssS8fYwpmNN6Nsa+VpoPsrd8FRMQzORYXaLn50jY64lOXp3H25KkJKOUHAV30+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -6,7 +6,6 @@ exact_bundles:
   - codex
   - core
   - hosted-node
-  - local-inference
   - opencode
   - render-sandbox
   - ryeos-ui
@@ -40,6 +39,7 @@ policies:
         cleanup_steps: 1600000
       maximum_occupancy_ms: 7200000
       cleanup_occupancy_ms: 120000
+      rollover_drain_margin_ms: 90000
       # Finite syscall-attempt allowance; no cleanup-success guarantee.
       host_release_steps: 64
       # Explicit share of cleanup_steps; never duplicates the paid envelope.
@@ -141,7 +141,6 @@ policies:
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
       hosted-node: []
-      local-inference: []
       render-sandbox: []
       ryeos-ui: []
       scheduling:
@@ -209,6 +208,20 @@ policies:
         max_operation_millis: 300000
         max_cleanup_millis: 60000
         max_cleanup_steps: 400000
+      standalone-state:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 48
+        max_operation_millis: 3600000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+      external-supervisor-journal:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 16
+        max_operation_millis: 4860000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
     offline_reset:
       max_retained_operations: 4
       max_source_roles: 13
@@ -259,7 +272,15 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 7
+      version: 8
+      # Capabilities this node must prove on its host before it starts.
+      # `ryeos node doctor` shows what the host proves and what is missing.
+      requires_capabilities: [accounting, limits:scope, recovery:scope, termination:scope, time]
+      # Inits trusted to exit when their only child exits. When the node's
+      # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
+      # to end its container, so a new container on the same boot proves
+      # the old one's jobs dead. A node that is pid 1 proves this itself.
+      enclosure_inits: [catatonit, dumb-init, tini]
       process_scopes:
         # Resource-bearing launches require a Lillux-owned durable scope even
         # when filesystem/network isolation is disabled.

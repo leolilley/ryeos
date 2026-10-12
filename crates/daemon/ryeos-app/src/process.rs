@@ -20,6 +20,13 @@ const POST_SIGKILL_WAIT_MS: u64 = 200;
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
 
+/// Bound on waiting for the accounting outbox publisher's in-flight blocking
+/// work when the daemon stops.
+pub const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = Duration::from_secs(30);
+
+/// Bound on settling each daemon listener when the daemon stops.
+pub const LISTENER_SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
+
 pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 6;
 
 /// Explicit retained settlement contract, independent of resource access.

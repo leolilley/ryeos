@@ -3080,7 +3080,10 @@ fn start_capsule_process(
         lifelines: held.lifelines,
         relay_health: held.relay_health,
         relay_owner: held.relay_owner,
-        retirement_observer: held.retirement_observer,
+        // The connector settlement retires the relay and the empty mount
+        // reservations; it is the session's in-memory and OS settlement.
+        retirement_observer: None,
+        retirement_os_only: held.retirement_observer,
         expected_boot_identity: None,
         observation_sink: None,
         cleanup_observer,
@@ -4532,7 +4535,10 @@ pub fn start_exclusive_capsule(
         lifelines: held.lifelines,
         relay_health: held.relay_health,
         relay_owner: held.relay_owner,
-        retirement_observer: held.retirement_observer,
+        // The connector settlement retires the relay and the empty mount
+        // reservations; it is the session's in-memory and OS settlement.
+        retirement_observer: None,
+        retirement_os_only: held.retirement_observer,
         expected_boot_identity: Some(identity.boot_identity_hash.clone()),
         observation_sink: Some(observation_sink),
         cleanup_observer,

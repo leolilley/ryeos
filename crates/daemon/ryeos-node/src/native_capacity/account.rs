@@ -119,6 +119,7 @@ impl NativeCapacityAccountBinding {
             host_release_steps: u64,
             maximum_occupancy_ms: u64,
             outside_cleanup_steps: u64,
+            rollover_drain_margin_ms: u64,
             units: Units,
         }
         #[derive(Serialize)]
@@ -167,6 +168,7 @@ impl NativeCapacityAccountBinding {
                     host_release_steps: self.policy.incarnation.host_release_steps,
                     outside_cleanup_steps: self.policy.incarnation.outside_cleanup_steps,
                     maximum_occupancy_ms: self.policy.incarnation.maximum_occupancy_ms,
+                    rollover_drain_margin_ms: self.policy.incarnation.rollover_drain_margin_ms,
                     units: self.policy.incarnation.units.into(),
                 },
                 issuance_nonce: &self.policy.issuance_nonce,
@@ -924,7 +926,9 @@ fn settlement_transition_bytes(current: &[u8; RECORD_BYTES], before: &[u8; RECOR
 }
 
 struct AccountControlBudget {
-    remaining: std::cell::Cell<u64>,
+    // Atomic so the retained account stays `Sync`: boundaries share it
+    // through a read lock while settlement holds it exclusively.
+    remaining: std::sync::atomic::AtomicU64,
     process: [u8; 32],
     clock: lillux::time::OccupancyLimit,
     deadline: lillux::time::MonotonicDeadline,
@@ -939,7 +943,7 @@ impl AccountControlBudget {
         let (deadline, _) = inputs.clock.original_local_deadlines(&clock, std::time::Duration::ZERO)
             .map_err(anyhow::Error::msg)?;
         Ok(Self {
-            remaining: std::cell::Cell::new(steps),
+            remaining: std::sync::atomic::AtomicU64::new(steps),
             process: inputs.process.incarnation_digest_bytes().map_err(anyhow::Error::msg)?,
             clock,
             deadline: deadline.min(inputs.cleanup_deadline),
@@ -953,8 +957,9 @@ impl AccountControlBudget {
         ensure!(matches!(inputs.clock.window_fixed(&self.clock, std::time::Duration::ZERO)
             .map_err(anyhow::Error::msg)?, lillux::time::OccupancyWindowState::Service { .. }),
             "original capacity control interval exhausted");
-        self.remaining.set(self.remaining.get().checked_sub(steps)
-            .context("original capacity control work exhausted")?);
+        self.remaining.fetch_update(std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst, |remaining| remaining.checked_sub(steps))
+            .map_err(|_| anyhow::anyhow!("original capacity control work exhausted"))?;
         Ok(())
     }
 }
@@ -990,6 +995,9 @@ pub(super) struct RetainedCapacityAccount {
     recovery_admission: Option<redo::AccountRedo>,
     cold_settlement: Option<redo::AccountRedo>,
     completed_recovery: Option<u64>,
+    // The incarnation whose settlement this account's own debit followed,
+    // captured from the durable anchor immediately before that debit.
+    predecessor: Option<[u8; 32]>,
 }
 
 /// Exact account and redo source pins after durable settlement. Every field is
@@ -1082,6 +1090,7 @@ impl RetainedCapacityAccount {
             original_incarnation: Self::incarnation(inputs)?, issuance: binding.issuance_digest()?,
             account, anchor, record: None, phase: AccountPhase::Opening, bootstrap,
             recovery: None, recovery_admission: None, cold_settlement: None, completed_recovery: None,
+            predecessor: None,
         })
     }
 
@@ -1221,6 +1230,7 @@ impl RetainedCapacityAccount {
         if matches!(self.phase, AccountPhase::Opening) { self.prepare_open(inputs)?; }
         ensure!(matches!(self.phase, AccountPhase::Ready), "capacity debit requires its retained opening owner");
         let before = self.record.context("capacity opening target absent")?;
+        self.predecessor = self.anchor.current()?.settled_incarnation();
         let (sequence, consumed) = before.prepare_debit(inputs.policy.allowance, inputs.policy.incarnation.units)?;
         let next = CapacityRecord { sequence, consumed, outstanding: Some(self.original_incarnation), ..before };
         let redo = self.anchor.current()?.successor(redo::Operation::Debit, next, &inputs.policy)?;
@@ -1364,7 +1374,14 @@ impl RetainedCapacityAccount {
         Ok(sequence)
     }
 
-    pub(super) fn require_original_debit(&mut self, inputs: &LiveNativeCapacityInputs, cleanup: bool) -> Result<()> {
+    /// This account's own incarnation digest and the digest of the settled
+    /// incarnation its debit followed, once the debit is durable.
+    pub(super) fn incarnation_lineage(&self) -> Result<([u8; 32], Option<[u8; 32]>)> {
+        ensure!(matches!(self.phase, AccountPhase::Debited), "original capacity debit is not durably active");
+        Ok((self.original_incarnation.process_digest, self.predecessor))
+    }
+
+    pub(super) fn require_original_debit(&self, inputs: &LiveNativeCapacityInputs, cleanup: bool) -> Result<()> {
         self.require_inputs(inputs, cleanup)?;
         ensure!(matches!(self.phase, AccountPhase::Debited), "original capacity debit is not durably active");
         let record = self.record.context("original native debit absent")?;
@@ -1453,7 +1470,8 @@ mod issuance_digest_tests {
                     issuance_nonce: "a".repeat(32),
                     allowance: units,
                     incarnation: ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope {
-                        units, maximum_occupancy_ms: 2, cleanup_occupancy_ms: 1, host_release_steps: 2, outside_cleanup_steps: 1,
+                        units, maximum_occupancy_ms: 3, cleanup_occupancy_ms: 1, rollover_drain_margin_ms: 1,
+                        host_release_steps: 2, outside_cleanup_steps: 1,
                     },
                     recovery: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRecoveryEnvelope {
                         maximum_attempts: 32, work_per_attempt: 65_536,

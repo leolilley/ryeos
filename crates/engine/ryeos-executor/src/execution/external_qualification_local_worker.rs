@@ -18,7 +18,6 @@ use ryeos_app::external_qualification_local::{
 use ryeos_app::persistent_session::{
     ExclusivePersistentSessionReservation, ExclusiveRetirementOutcome,
     PersistentSessionCleanupObserver, PersistentSessionObservationSink, StartedPersistentSession,
-    combine_retirement_observers,
 };
 use ryeos_app::qualification_workspace_custody::{
     QualificationWorkspaceCustody, QualificationWorkspaceCustodyCoordinate,
@@ -881,10 +880,10 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
         expected_boot_identity: Some(boot_identity.clone()),
         observation_sink: Some(observation_sink),
         cleanup_observer: None,
-        retirement_observer: combine_retirement_observers(
-            Some(process_settlement),
-            Some(connector_settlement),
-        ),
+        // The Q worker row settlement writes durable rows; the connector
+        // settlement retires the relay and mount reservations.
+        retirement_observer: Some(process_settlement),
+        retirement_os_only: Some(connector_settlement),
         resource_occupancy_limit: None,
         resource_cleanup_allowance_ms: None,
         resource_attribution_sink: None,

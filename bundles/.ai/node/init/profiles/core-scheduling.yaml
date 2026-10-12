@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-11T11:48:46Z:6f96bb9a6dc3bd510ea910a842dfed6f9517cc27f418ecfda5ddfe7eabf35c0b:eBRCgbTfvUnYjlKTg09pYiR0Ukiw+NandfOR+jZYP/TnVZufUKWVbBG6/iBELOwGHDZdFT/8LVXqJmvCI2x5CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T11:47:25Z:8944785013d4d0a5eee44a4e0e0090f42a4fcf4001efbe98973c8dab3792e7cc:GngdQ8ObwthxeG3BIO7Ld0nVkDZA+HARLae1eIn7mlj4mVHbabw22AwJKIyeYfJ9Kho2rzU+sMY+s5LHFHnADQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Source-only Core+scheduling profile; signing/admission/native qualification pending.
 schema: 1
 exact_bundles:
@@ -31,6 +31,7 @@ policies:
         cleanup_steps: 1600000
       maximum_occupancy_ms: 7200000
       cleanup_occupancy_ms: 120000
+      rollover_drain_margin_ms: 90000
       # Finite syscall-attempt allowance; no cleanup-success guarantee.
       host_release_steps: 64
       # Explicit share of cleanup_steps; never duplicates the paid envelope.
@@ -166,6 +167,20 @@ policies:
         max_operation_millis: 300000
         max_cleanup_millis: 60000
         max_cleanup_steps: 400000
+      standalone-state:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 48
+        max_operation_millis: 3600000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+      external-supervisor-journal:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 16
+        max_operation_millis: 4860000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
     offline_reset:
       max_retained_operations: 4
       max_source_roles: 13
@@ -195,7 +210,15 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 7
+      version: 8
+      # Capabilities this node must prove on its host before it starts.
+      # `ryeos node doctor` shows what the host proves and what is missing.
+      requires_capabilities: [accounting, isolation:namespaces, limits:scope, recovery:scope, termination:scope, time]
+      # Inits trusted to exit when their only child exits. When the node's
+      # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
+      # to end its container, so a new container on the same boot proves
+      # the old one's jobs dead. A node that is pid 1 proves this itself.
+      enclosure_inits: [catatonit, dumb-init, tini]
       process_scopes:
         # The protected host-runtime binding supplies the opaque qualified
         # Lillux provider. Policy never contains native cgroup coordinates.

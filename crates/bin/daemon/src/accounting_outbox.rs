@@ -47,7 +47,13 @@ pub async fn run_publisher(
     loop {
         // Native shutdown closes the ledger in place; its SQL admission never
         // reopens, so this publisher ends instead of retrying a closed owner.
-        if ledger.is_closed() || crate::shutdown_requested() || *stop.borrow() {
+        // Once service SQL is refused it attempts no further claim; the
+        // unpublished rows stay durable for the next incarnation's publisher.
+        if ledger.is_closed()
+            || crate::shutdown_requested()
+            || crate::service_sql_refused()
+            || *stop.borrow()
+        {
             tracing::info!("audit outbox publisher stopped for ledger close or daemon shutdown");
             return;
         }

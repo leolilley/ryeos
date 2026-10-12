@@ -33,8 +33,13 @@ mod maintenance_schedule;
 mod startup;
 
 const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
+/// Stack of the thread that runs native shutdown and settlement. Fixed by
+/// mechanism, not policy: the close and failed-start settlement chains keep
+/// several large owners on the stack at once, which can exceed a small
+/// process stack limit, especially in unoptimized builds.
+const NATIVE_SETTLEMENT_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// Bound on waiting for the audit publisher's in-flight blocking work.
-const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = Duration::from_secs(30);
+const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = process::ACCOUNTING_PUBLISHER_STOP_BOUND;
 const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
 const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
 
@@ -125,6 +130,28 @@ impl LifecycleExitGuard {
         };
         self.record(lifecycle_marker::FINALIZING_REASON, Some(&detail));
         self.provisional = true;
+    }
+
+    /// Record the provisional finalizing exit carrying a latched drain's
+    /// facts. Strict: on failure nothing is marked recorded. On success the
+    /// later staged provisional record is skipped, so it cannot replace them.
+    fn record_provisional_latched(
+        &mut self,
+        staged_reason: &str,
+        facts: &lifecycle_marker::LatchedDrainFacts,
+    ) -> Result<()> {
+        let detail = format!("staged reason: {staged_reason}");
+        lifecycle_marker::record_exit_with_latched_drain(
+            &self.state_dir,
+            lifecycle_marker::FINALIZING_REASON,
+            &self.started_at,
+            Some(&detail),
+            self.launch_route,
+            facts,
+        )?;
+        self.recorded = true;
+        self.provisional = true;
+        Ok(())
     }
 
     fn complete_provisional(&mut self, reason: &str, error: Option<&str>) {
@@ -354,6 +381,9 @@ struct DaemonSelectedComposition {
     // is filled from inside the startup future and ended before native
     // shutdown, so the consuming Store close sees no service owner.
     accounting_publisher: Arc<Mutex<Option<(tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<bool>)>>>,
+    // The incarnation's service latch, its planned-window wake and the
+    // outcome a latched or rollover stop records.
+    service_stop: ServiceStopState,
     #[cfg(feature = "scheduling")]
     scheduler_db_custody: Option<Arc<scheduler::db::SchedulerDb>>,
     #[cfg(feature = "scheduling")]
@@ -430,6 +460,7 @@ impl DaemonSelectedComposition {
             accounting_native_reference_parts: None,
             accounting_native_unused_reference: None,
             accounting_publisher: Arc::default(),
+            service_stop: ServiceStopState::default(),
             #[cfg(feature = "scheduling")]
             scheduler_db_custody: None,
             #[cfg(feature = "scheduling")]
@@ -919,18 +950,143 @@ impl DaemonSelectedComposition {
             }
         };
         self.native_reservation = Some(Arc::clone(&reservation));
+        // Bind the previous stop's unapplied facts as soon as this start's
+        // debit is durable, before any further preparation can fail or the
+        // process be killed: once the debit settles the carrier, only this
+        // start's binding keeps them acceptable to the next one.
+        self.bind_previous_latched_drain(&reservation)?;
         let factory = match ryeos_node::native_capacity::LiveNativeFactory::install(reservation) {
             Ok(factory) => factory,
             Err(error) => return Err(self.retain_native_failure(error)),
         };
         self.native_admission_fence.register_factory(&factory);
         self.native_factory = Some(Arc::clone(&factory));
+        if let Err(error) = self.arm_service_stop(&factory) {
+            return Err(self.retain_native_failure(error));
+        }
         if let Err(error) = factory.initialize() {
             return Err(self.retain_native_failure(error));
         }
         let ready = factory.ready_factory().map_err(|error| self.retain_native_failure(error))?;
         let deadline = factory.original_sql_deadline().map_err(|error| self.retain_native_failure(error))?;
         Ok((ready, deadline, exclusion))
+    }
+
+    /// Wire this incarnation's service latch and planned window to an orderly
+    /// stop. The latch wake and the margin wake only store an atomic and wake
+    /// a task, so they are safe from inside SQLite's commit path; the task
+    /// requests the ordinary graceful shutdown. When the task sees a fact
+    /// bit it records the restart inhibition at once, before the drain, so a
+    /// kill during the drain still leaves the next start refused.
+    fn arm_service_stop(
+        &mut self,
+        factory: &Arc<ryeos_node::native_capacity::LiveNativeFactory>,
+    ) -> Result<()> {
+        let state_dir = self
+            .lifecycle_exit
+            .as_ref()
+            .context("daemon lifecycle owner is absent")?
+            .state_dir
+            .clone();
+        let signal = Arc::clone(&self.service_stop.signal);
+        let latched = Arc::clone(&signal);
+        factory.register_service_refusal_wake(Box::new(move || {
+            ryeosd::refuse_service_sql();
+            latched.latched.store(true, std::sync::atomic::Ordering::SeqCst);
+            latched.notify.notify_one();
+        }))?;
+        let margin = Arc::clone(&signal);
+        factory.arm_service_window_timers(Box::new(move || {
+            margin.margin_reached.store(true, std::sync::atomic::Ordering::SeqCst);
+            margin.notify.notify_one();
+        }))?;
+        let latch = factory.service_refusal_latch();
+        self.service_stop.latch = Some(Arc::clone(&latch));
+        tokio::spawn(async move {
+            let mut stop_requested = false;
+            loop {
+                signal.notify.notified().await;
+                if !stop_requested {
+                    tracing::warn!(
+                        latched = signal.latched.load(std::sync::atomic::Ordering::SeqCst),
+                        margin_reached = signal.margin_reached.load(std::sync::atomic::Ordering::SeqCst),
+                        "native service latch or planned window requests an orderly stop"
+                    );
+                    ryeosd::request_shutdown();
+                    stop_requested = true;
+                }
+                if latch.bits() & ryeos_node::native_capacity::service_refusal::FACT != 0 {
+                    record_service_refusal_inhibition(&state_dir);
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Once this start's capacity debit is durable, bind the previous stop's
+    /// unapplied latched-drain facts to it. A refused marker write fails the
+    /// start closed and leaves the marker in place.
+    fn bind_previous_latched_drain(
+        &mut self,
+        reservation: &ryeos_node::native_capacity::LiveNativeCapacityReservation,
+    ) -> Result<()> {
+        let lifecycle = self
+            .lifecycle_exit
+            .as_ref()
+            .context("daemon lifecycle owner is absent")?;
+        let (state_dir, started_at) = (lifecycle.state_dir.clone(), lifecycle.started_at.clone());
+        let (own, predecessor) = reservation.incarnation_lineage()?;
+        self.service_stop.incarnation_digest = Some(own);
+        self.service_stop.pending_latched_drain = lifecycle_marker::bind_pending_latched_drain(
+            &state_dir,
+            &started_at,
+            &own,
+            predecessor.as_ref(),
+        )
+        .context("bind previous latched-drain facts to this start")?;
+        Ok(())
+    }
+
+    /// Drop the previous stop's latched-drain facts after reconciliation
+    /// applied them. The only write that removes them.
+
+    /// Durably record the facts a latched drain deferred to the next start,
+    /// as this run's provisional exit, before the cleanup chain. A refused
+    /// write holds: the resume re-arm cannot be deferred without it.
+    fn record_latched_drain_facts(&mut self, outcome: DrainOutcome) -> DrainOutcome {
+        let DrainOutcome::ProcessCleanRowsDeferred(deferred) = outcome else {
+            return outcome;
+        };
+        if deferred.resume_reset.is_empty() {
+            return DrainOutcome::ProcessCleanRowsDeferred(deferred);
+        }
+        let stop = self.service_stop.outcome().unwrap_or(ServiceStopOutcome::ServiceRefusalStop);
+        let written = (|| -> Result<()> {
+            let digest = self
+                .service_stop
+                .incarnation_digest
+                .context("latched drain has no bound incarnation digest")?;
+            let facts = lifecycle_marker::LatchedDrainFacts {
+                outcome: stop.marker_outcome(),
+                incarnation_digest: lifecycle_marker::incarnation_digest_hex(&digest),
+                resume_attempts_reset_deferred: deferred.resume_reset.clone(),
+            };
+            self.lifecycle_exit
+                .as_mut()
+                .context("daemon lifecycle owner is absent")?
+                .record_provisional_latched(stop.reason(), &facts)
+        })();
+        match written {
+            Ok(()) => DrainOutcome::ProcessCleanRowsDeferred(deferred),
+            Err(error) => {
+                tracing::error!(
+                    error = %format!("{error:#}"),
+                    "latched-drain facts were not recorded; resume re-arm is held"
+                );
+                DrainOutcome::Unproved
+            }
+        }
     }
 
     fn app_state_mut(&mut self) -> Option<&mut AppState> {
@@ -963,6 +1119,25 @@ impl DaemonSelectedComposition {
         // continues from this cached phase within the same attempt; every
         // refusal leaves the settled owner cached for the next attempt.
         self.advance_settled_native()
+    }
+
+    /// [`Self::advance_native_shutdown`] on a dedicated thread with an
+    /// explicit stack. The settlement chain holds several large owners on the
+    /// stack at once, and the calling thread's stack is whatever the process
+    /// was given (a container may set a small `ulimit -s`). The composition
+    /// is only borrowed, so a refused spawn or a panic leaves every owner in
+    /// it, retained for the ordinary retry or the custody exit.
+    fn advance_native_shutdown_on_settlement_stack(&mut self) -> Result<()> {
+        std::thread::scope(|scope| {
+            let settling = std::thread::Builder::new()
+                .name("ryeosd-native-settlement".to_owned())
+                .stack_size(NATIVE_SETTLEMENT_STACK_BYTES)
+                .spawn_scoped(scope, || self.advance_native_shutdown())
+                .context("start the native settlement thread; original custody retained")?;
+            settling.join().map_err(|_| {
+                anyhow::anyhow!("native settlement thread panicked; original custody retained")
+            })?
+        })
     }
 
     fn advance_native_shutdown(&mut self) -> Result<()> {
@@ -1686,7 +1861,7 @@ impl DaemonSelectedComposition {
             if !retry_authorized {
                 return Err(self.unresolved_native_custody());
             }
-            if self.advance_native_shutdown().is_err() {
+            if self.advance_native_shutdown_on_settlement_stack().is_err() {
                 tracing::debug!("original native recovery transition remains pending");
             }
             if self.has_unresolved_custody() {
@@ -1727,12 +1902,25 @@ impl DaemonSelectedComposition {
     /// A supervisor restarts any exit while its service is wanted up. After
     /// unresolved custody or a startup failure that may already have debited
     /// an incarnation, each restart would burn another incarnation and a
-    /// recovery attempt, so the placed controller sets its own service down
-    /// first, without signalling itself mid-exit. Recovery stays an explicit
-    /// operator start. Best-effort: the exit proceeds either way and the
-    /// outcome is logged. Unresolved custody can also end a graceful stop;
-    /// its operator already set the service down, so this repeats that state.
+    /// recovery attempt. The node first records a durable restart
+    /// inhibition that its own next start refuses on, which holds under any
+    /// supervisor or container restart policy. A placed runit controller
+    /// also sets its own service down, without signalling itself mid-exit,
+    /// so the supervisor stops retrying. Recovery stays an explicit operator
+    /// action. Best-effort: the exit proceeds either way and each outcome is
+    /// logged. Unresolved custody can also end a graceful stop; its operator
+    /// already set the service down, so this repeats that state.
     fn inhibit_supervised_restart(&mut self, reason: &str) {
+        match self.lifecycle_exit.as_ref() {
+            Some(lifecycle) => match lifecycle_marker::inhibit_restart(&lifecycle.state_dir, reason, None) {
+                Ok(()) => tracing::warn!(reason,
+                    "restart inhibited; the next start is refused until `ryeos node allow-restart`"),
+                Err(error) => tracing::error!(reason, error = %format!("{error:#}"),
+                    "could not record the restart inhibition; a restart policy may restart this node"),
+            },
+            None => tracing::error!(reason,
+                "no lifecycle state directory to record the restart inhibition in"),
+        }
         let Some(app_root) = self.supervised_app_root.take() else {
             return;
         };
@@ -1751,20 +1939,40 @@ impl DaemonSelectedComposition {
     }
 
     /// Native bootstrap claims its original attempt before the incarnation
-    /// debit, so any startup failure from that point on may have consumed it.
-    fn inhibit_supervised_restart_after_startup_failure(&mut self, reason: &str) {
-        if reason == "startup_failed" && self.native_bootstrap_entered {
+    /// debit, so a startup failure from that point on may have consumed it.
+    /// Only a fact refusal inhibits the restart: a fact bit on the service
+    /// latch, or a failure that is not momentary contention, the planned
+    /// edge or a transient shortage of host resources. A transient failure
+    /// is retried by the next start rather than stopping the node for good.
+    fn inhibit_supervised_restart_after_startup_failure(
+        &mut self,
+        reason: &str,
+        failure: Option<&anyhow::Error>,
+    ) {
+        if reason != "startup_failed" || !self.native_bootstrap_entered {
+            return;
+        }
+        let latched_fact = self.service_stop.latch.as_ref().is_some_and(|latch| {
+            latch.bits() & ryeos_node::native_capacity::service_refusal::FACT != 0
+        });
+        let refused_fact = failure.is_some_and(lillux_sqlite::native_refusal_is_fact);
+        if latched_fact || refused_fact {
             self.inhibit_supervised_restart(reason);
+        } else {
+            tracing::warn!(
+                reason,
+                "startup failed without a fact refusal; the restart is not inhibited"
+            );
         }
     }
 
     /// Some workers clear their parent-death signal, so exit 70 would leave
     /// them running once the exclusion releases. Kill the retained pool groups
-    /// and the durable attached execution groups through their exact owners.
-    /// Durable lookup runs on a detached thread with a bounded wait, so a
-    /// wedged store cannot block the exit. Nothing here is cleanup proof.
+    /// and every attached execution and live dedicated worker group through
+    /// the exact identities recorded in memory with their durable attach. No
+    /// database is read, so a wedged or refused store cannot block the exit.
+    /// Nothing here is cleanup proof.
     fn kill_retained_process_groups_before_exit(&self) -> String {
-        const DURABLE_KILL_LIMIT: Duration = Duration::from_secs(2);
         let pool = self
             .app_state_custody
             .as_ref()
@@ -1780,38 +1988,23 @@ impl DaemonSelectedComposition {
             .or_else(|| self.live_state_store_custody.clone());
         let mut execution_groups = Vec::new();
         if let Some(store) = store {
-            let (sender, receiver) = std::sync::mpsc::channel();
-            let spawned = std::thread::Builder::new()
-                .name("ryeosd-exit-group-kill".to_owned())
-                .spawn(move || {
-                    let Ok(thread_ids) = store.list_attached_thread_ids() else {
-                        return;
-                    };
-                    for thread_id in thread_ids {
-                        let Ok(Some(thread)) = store.get_thread(&thread_id) else {
-                            continue;
-                        };
-                        let Some(identity) = thread.runtime.process_identity else {
-                            continue;
-                        };
-                        let result =
-                            process::kill_by_action(&identity, process::ShutdownAction::Hard);
-                        if sender
-                            .send(format!("{}:{}", identity.pgid(), result.method))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                });
-            if spawned.is_ok() {
-                let deadline = Instant::now() + DURABLE_KILL_LIMIT;
-                while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-                    match receiver.recv_timeout(remaining) {
-                        Ok(entry) => execution_groups.push(entry),
-                        Err(_) => break,
-                    }
+            let attached = store
+                .attached_process_snapshot()
+                .into_iter()
+                .filter_map(|record| record.process_identity);
+            let workers = store
+                .live_worker_snapshot()
+                .into_iter()
+                .map(|worker| worker.process_identity);
+            // Bounded, so many groups cannot hold the exit open.
+            const EXIT_KILL_LIMIT: Duration = Duration::from_secs(2);
+            let deadline = Instant::now() + EXIT_KILL_LIMIT;
+            for identity in attached.chain(workers) {
+                if Instant::now() >= deadline {
+                    break;
                 }
+                let result = process::kill_by_action(&identity, process::ShutdownAction::Hard);
+                execution_groups.push(format!("{}:{}", identity.pgid(), result.method));
             }
         }
         let pool_pids = pool_pids
@@ -1896,7 +2089,9 @@ impl DaemonSelectedComposition {
         let _ = self.root.close();
     }
 
-    fn record_exit(&mut self, reason: &str, error: Option<&str>) {
+    /// `failure` is the error that ended the run, when there is one; it
+    /// decides whether a startup failure inhibits the restart.
+    fn record_exit(&mut self, reason: &str, error: Option<&str>, failure: Option<&anyhow::Error>) {
         // Root closure and Render drain are distinct: callers reach the normal
         // exit only after complete_shutdown_drain has returned, never on HOLD.
         self.close_after_run();
@@ -1909,7 +2104,7 @@ impl DaemonSelectedComposition {
                 lifecycle.complete_provisional(reason, error);
             }
         }
-        self.inhibit_supervised_restart_after_startup_failure(reason);
+        self.inhibit_supervised_restart_after_startup_failure(reason, failure);
     }
 }
 
@@ -1926,7 +2121,7 @@ impl Drop for DaemonSelectedComposition {
             && !lifecycle.recorded
         {
             lifecycle.record("startup_failed", None);
-            self.inhibit_supervised_restart_after_startup_failure("startup_failed");
+            self.inhibit_supervised_restart_after_startup_failure("startup_failed", None);
         }
         // Fields then drop root -> same exclusion -> lifecycle. No replacement
         // lock, native owner, or successful selected settlement is constructed.
@@ -1952,8 +2147,172 @@ fn record_staged_exit_before_operator_retirement(
     *entered = true;
 }
 
+/// Lifecycle outcome of a stop the native service latch or the planned
+/// service window caused. Each has its own log line, marker reason and exit
+/// status, distinct from a crash, a startup failure, an operator stop and
+/// each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceStopOutcome {
+    /// A durable admission fact was refused. Supervised restart is inhibited,
+    /// so no further incarnation is debited without an explicit start.
+    ServiceRefusalStop,
+    /// The planned service-window edge, or its drain margin, was reached.
+    /// Restart is not inhibited; the next incarnation is debited as usual.
+    ServiceWindowRollover,
+}
+
+impl ServiceStopOutcome {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ServiceRefusalStop => "service_refusal_stop",
+            Self::ServiceWindowRollover => "service_window_rollover",
+        }
+    }
+
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::ServiceRefusalStop => 76,
+            Self::ServiceWindowRollover => 75,
+        }
+    }
+
+    fn marker_outcome(self) -> lifecycle_marker::LatchedStopOutcome {
+        match self {
+            Self::ServiceRefusalStop => lifecycle_marker::LatchedStopOutcome::ServiceRefusalStop,
+            Self::ServiceWindowRollover => {
+                lifecycle_marker::LatchedStopOutcome::ServiceWindowRollover
+            }
+        }
+    }
+}
+
+/// Wake shared by the latch callback, the margin timer and the stop task.
+/// Writers only store an atomic and notify.
+#[derive(Default)]
+struct ServiceStopSignal {
+    latched: std::sync::atomic::AtomicBool,
+    margin_reached: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ServiceStopState {
+    signal: Arc<ServiceStopSignal>,
+    // The latch alone, never the factory: reading it keeps no native owner.
+    latch: Option<Arc<ryeos_node::native_capacity::ServiceRefusalLatch>>,
+    incarnation_digest: Option<[u8; 32]>,
+    // Previous stop's facts bound to this start and not yet applied.
+    pending_latched_drain: Option<lifecycle_marker::LatchedDrainFacts>,
+    // Recorded only when the process actually exits after its drain.
+    outcome: Option<ServiceStopOutcome>,
+}
+
+impl ServiceStopState {
+    fn drain_latch(&self) -> DrainLatch {
+        DrainLatch(self.latch.clone())
+    }
+
+    /// A fact bit wins over the planned window and over an operator stop.
+    fn outcome(&self) -> Option<ServiceStopOutcome> {
+        use ryeos_node::native_capacity::service_refusal;
+        let bits = self.latch.as_ref().map_or(0, |latch| latch.observe());
+        if bits & service_refusal::FACT != 0 {
+            Some(ServiceStopOutcome::ServiceRefusalStop)
+        } else if bits & service_refusal::WINDOW_EDGE != 0
+            || self.signal.margin_reached.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Some(ServiceStopOutcome::ServiceWindowRollover)
+        } else {
+            None
+        }
+    }
+}
+
+/// Record the restart inhibition for a fact refusal the service latch just
+/// reported. The first recorded cause is kept, so the stop's later record of
+/// the same refusal changes nothing.
+fn record_service_refusal_inhibition(state_dir: &std::path::Path) {
+    match lifecycle_marker::inhibit_restart(
+        state_dir,
+        ServiceStopOutcome::ServiceRefusalStop.reason(),
+        Some("native service refused a durable admission fact"),
+    ) {
+        Ok(()) => tracing::warn!(
+            "restart inhibited before the drain; the next start is refused until `ryeos node allow-restart`"
+        ),
+        Err(error) => tracing::error!(
+            error = %format!("{error:#}"),
+            "could not record the restart inhibition before the drain; the stop records it again after"
+        ),
+    }
+}
+
+/// How a drain step disposes of work: `Normal` writes its durable rows;
+/// `Latched` writes no service SQL, proves process death from in-memory
+/// identity records and defers only obligations next-start recovery
+/// reconciles from durable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainMode {
+    Normal,
+    Latched,
+}
+
+/// The service latch as one stop reads it. Any bit, fact or planned edge,
+/// switches the remaining steps to `Latched`; the switch never reverses.
+#[derive(Clone, Default)]
+struct DrainLatch(Option<Arc<ryeos_node::native_capacity::ServiceRefusalLatch>>);
+
+impl DrainLatch {
+    fn mode(&self) -> DrainMode {
+        match &self.0 {
+            Some(latch) if latch.observe() != 0 => DrainMode::Latched,
+            _ => DrainMode::Normal,
+        }
+    }
+
+    fn refresh(&self, mode: &mut DrainMode) -> DrainMode {
+        if *mode == DrainMode::Normal && self.mode() == DrainMode::Latched {
+            tracing::warn!("service latch set during the stop; remaining drain steps write no service SQL");
+            *mode = DrainMode::Latched;
+        }
+        *mode
+    }
+}
+
+/// Obligations a latched drain left to next-start recovery, one list per
+/// kind. Every listed process was proved dead in this drain.
+#[derive(Debug, Default)]
+struct DeferredRows {
+    /// Attached-process settlement (rows reconciled by active-thread
+    /// recovery), with the identity proved dead.
+    attached: std::collections::BTreeMap<String, process::ExecutionProcessIdentity>,
+    /// Resume-budget re-arm, with the identity proved dead; carried by the
+    /// lifecycle marker to the next start.
+    resume_reset: std::collections::BTreeMap<String, process::ExecutionProcessIdentity>,
+    /// Dedicated worker fence and resource-owner proof (worker recovery).
+    workers: Vec<String>,
+    /// Pool owners whose durable settlement was left (resource-owner and
+    /// qualification Worker recovery).
+    pooled_owners: usize,
+    /// The ownerless in-process reservation audit was skipped.
+    in_process_audit_skipped: bool,
+    /// In-process handlers whose owner ended without a confirmed terminal.
+    in_process_owner_lost: Vec<String>,
+}
+
+/// Result of the shutdown drain.
+#[derive(Debug)]
+enum DrainOutcome {
+    Clean,
+    Unproved,
+    ProcessCleanRowsDeferred(DeferredRows),
+}
+
 enum ShutdownDrainDisposition {
     Drained,
+    ProcessCleanRowsDeferred {
+        deferred: DeferredRows,
+    },
     HoldUnproved {
         drain_error: String,
         prior_daemon_error: Option<String>,
@@ -1961,13 +2320,13 @@ enum ShutdownDrainDisposition {
 }
 
 fn map_shutdown_drain_join(
-    joined: std::result::Result<bool, tokio::task::JoinError>,
-) -> std::result::Result<bool, String> {
+    joined: std::result::Result<DrainOutcome, tokio::task::JoinError>,
+) -> std::result::Result<DrainOutcome, String> {
     joined.map_err(|error| format!("{error}"))
 }
 
 fn shutdown_drain_disposition(
-    drain: std::result::Result<bool, String>,
+    drain: std::result::Result<DrainOutcome, String>,
     prior_daemon_result: &Result<()>,
 ) -> ShutdownDrainDisposition {
     let prior_daemon_error = prior_daemon_result
@@ -1975,8 +2334,11 @@ fn shutdown_drain_disposition(
         .err()
         .map(|error| format!("{error:#}"));
     match drain {
-        Ok(true) => ShutdownDrainDisposition::Drained,
-        Ok(false) => ShutdownDrainDisposition::HoldUnproved {
+        Ok(DrainOutcome::Clean) => ShutdownDrainDisposition::Drained,
+        Ok(DrainOutcome::ProcessCleanRowsDeferred(deferred)) => {
+            ShutdownDrainDisposition::ProcessCleanRowsDeferred { deferred }
+        }
+        Ok(DrainOutcome::Unproved) => ShutdownDrainDisposition::HoldUnproved {
             drain_error: "shutdown coordinator reported unresolved process custody".to_owned(),
             prior_daemon_error,
         },
@@ -1996,12 +2358,35 @@ async fn hold_shutdown_owners<T>(owners: T) -> ! {
 }
 
 async fn complete_shutdown_drain<T>(
-    drain: std::result::Result<bool, String>,
+    drain: std::result::Result<DrainOutcome, String>,
     prior_daemon_result: &Result<()>,
     custody: &mut Option<T>,
 ) {
     match shutdown_drain_disposition(drain, prior_daemon_result) {
         ShutdownDrainDisposition::Drained => {
+            drop(custody.take());
+        }
+        ShutdownDrainDisposition::ProcessCleanRowsDeferred { deferred } => {
+            // Every process was proved dead; the listed rows are reconciled
+            // by the next start's recovery, so the cleanup chain continues.
+            let DeferredRows {
+                attached,
+                resume_reset,
+                workers,
+                pooled_owners,
+                in_process_audit_skipped,
+                in_process_owner_lost,
+            } = deferred;
+            tracing::warn!(
+                shutdown_outcome = "process_clean_rows_deferred",
+                attached = ?attached.keys().collect::<Vec<_>>(),
+                resume_reset = ?resume_reset.keys().collect::<Vec<_>>(),
+                workers = ?workers,
+                pooled_owners,
+                in_process_audit_skipped,
+                in_process_owner_lost = ?in_process_owner_lost,
+                "latched drain proved every process dead and deferred its durable rows to next-start recovery"
+            );
             drop(custody.take());
         }
         ShutdownDrainDisposition::HoldUnproved {
@@ -2405,10 +2790,17 @@ fn main() -> Result<()> {
     // Any admitted blocking placement mutator retains a lease on this exact
     // lock and continues excluding replacement controllers until it actually
     // stops; shutdown_timeout is not treated as proof of cancellation.
-    match result {
+    let result = match result {
         Ok(result) => result,
         Err(payload) => std::panic::resume_unwind(payload),
+    };
+    // A latched or rollover stop that completed exits with its own status,
+    // after every composition owner has been released in order.
+    if let (Ok(()), Some(outcome)) = (&result, composition.service_stop.outcome) {
+        drop(composition);
+        std::process::exit(outcome.exit_code());
     }
+    result
 }
 
 #[cfg(feature = "handoff-test-support")]
@@ -2521,12 +2913,6 @@ async fn run(
         runtime.binding().account.require_current_process()?;
         runtime.binding().validate(&selected_app_root)?;
     }
-    let launch_route = if host_service.is_some() || external_host_runtime.is_some() {
-        lifecycle_marker::LaunchRoute::Supervised
-    } else {
-        lifecycle_marker::LaunchRoute::Direct
-    };
-    composition.launch_route = Some(launch_route);
     ryeosd::init_shutdown_channel();
 
     // Verify operator-owned node initialization before any local repairs
@@ -2575,6 +2961,19 @@ async fn run(
         service.binding.runtime.require_current_process_placed()?;
         composition.supervised_app_root = Some(selected_app_root.clone());
     }
+    if let Some(runtime) = &external_host_runtime {
+        // An inherited launch document is association, not placement either:
+        // the external supervisor must have put this process in the bound
+        // controller leaf before the node may claim the supervised route.
+        runtime.binding().require_current_process_placed()?;
+    }
+    // Recorded only after placement was proved above, never from a binding.
+    let launch_route = if host_service.is_some() || external_host_runtime.is_some() {
+        lifecycle_marker::LaunchRoute::Supervised
+    } else {
+        lifecycle_marker::LaunchRoute::Direct
+    };
+    composition.launch_route = Some(launch_route);
 
     // Acquire the daemon state lock BEFORE unlinking any sockets or
     // writing runtime state. This prevents a second `ryeosd` (or
@@ -2601,9 +3000,19 @@ async fn run(
     // becomes bounded node-owned failure testimony instead of an invisible
     // supervisor restart loop.
     let state_dir = ryeos_engine::roots::RuntimeRoot::new(selected_app_root.clone()).state();
+    // A node that stopped itself to avoid a restart loop refuses here, before
+    // the running marker, any recovery or any native debit, until an operator
+    // clears the inhibition. This holds whatever restarted the process.
+    lifecycle_marker::require_restart_allowed(&state_dir)?;
     lifecycle_marker::report_previous_exit(&state_dir);
     lifecycle_marker::check_disk_space(&state_dir);
-    let lifecycle_started_at = lifecycle_marker::record_running(&state_dir, launch_route);
+    // An unreadable marker may carry latched-drain facts that recovery must
+    // apply, so the start is refused and the marker left for the operator.
+    let _previous_exit = lifecycle_marker::take_previous_exit(&state_dir)
+        .context("previous lifecycle marker is unreadable; start refused and marker retained")?;
+    // Fatal before any native debit: a start without its own running record
+    // could not bind the previous stop's unapplied facts.
+    let lifecycle_started_at = lifecycle_marker::record_running(&state_dir, launch_route)?;
     composition.lifecycle_exit = Some(LifecycleExitGuard::new(
         state_dir,
         lifecycle_started_at,
@@ -2614,7 +3023,7 @@ async fn run(
         Ok(config) => config,
         Err(error) => {
             let detail = format!("load node bootstrap configuration: {error:#}");
-            composition.record_exit("startup_failed", Some(&detail));
+            composition.record_exit("startup_failed", Some(&detail), None);
             return Err(error).context("load node bootstrap configuration");
         }
     };
@@ -2624,7 +3033,7 @@ async fn run(
             config.app_root.display(),
             selected_app_root.display()
         );
-        composition.record_exit("startup_failed", Some(&detail));
+        composition.record_exit("startup_failed", Some(&detail), None);
         anyhow::bail!(detail);
     }
     composition
@@ -2702,7 +3111,7 @@ async fn run(
         Ok(value) => value,
         Err(error) => {
             let detail = format!("{error:#}");
-            composition.record_exit("startup_failed", Some(&detail));
+            composition.record_exit("startup_failed", Some(&detail), None);
             return Err(error);
         }
     };
@@ -3039,6 +3448,18 @@ async fn run(
                 Arc::new(startup.clone());
             let (native_factory, native_deadline, native_exclusion) =
                 composition.prepare_live_native(&config, &identity, &node_policy_snapshot)?;
+            // Record how the resident region was kept in memory, in the signed
+            // capability report, once the incarnation established it.
+            let reservation_proof = composition
+                .native_reservation
+                .as_ref()
+                .and_then(|reservation| reservation.residency_proof());
+            if let Some(proof) = reservation_proof
+                && let Some(signed) =
+                    ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(&config.app_root)?
+            {
+                signed.with_established_residency(proof, identity.signing_key())?.write(&config.app_root)?;
+            }
             let native_lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
                 composition.native_factory.as_ref().context("actual native issuer absent before State startup")?.clone();
             // Retained Bundle executors are revalidated against the same node
@@ -3451,6 +3872,14 @@ async fn run(
                 .arm_retained_app_generation()
                 .context("register actual App generation in empty selected composition")?;
             let accounting_publisher_slot = Arc::clone(&composition.accounting_publisher);
+            // Applied latched-drain facts are read once here. The durable
+            // marker stays the record until reconcile succeeds, so a failed
+            // start rebinds them on the next one.
+            let latched_drain = composition.service_stop.pending_latched_drain.take();
+            let latched_state_dir = composition
+                .lifecycle_exit
+                .as_ref()
+                .map(|exit| (exit.state_dir.clone(), exit.started_at.clone()));
             let app_state = composition
                 .app_state_mut()
                 .context("actual AppState custody disappeared after generation arm")?;
@@ -3602,7 +4031,18 @@ async fn run(
             ))
             .await
             .context("reconcile hosted candidate publications")?;
-            let active_reconcile = reconcile::reconcile_active_threads(&app_state).await?;
+            let active_reconcile = reconcile::reconcile_active_threads_after_latched_stop(
+                &app_state,
+                latched_drain.as_ref(),
+            )
+            .await?;
+            if latched_drain.is_some() {
+                let (state_dir, started_at) = latched_state_dir
+                    .as_ref()
+                    .context("daemon lifecycle owner is absent")?;
+                lifecycle_marker::clear_pending_latched_drain(state_dir, started_at)
+                    .context("clear applied latched-drain facts")?;
+            }
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);
             })?;
@@ -3979,8 +4419,14 @@ async fn run(
             // awaited task. A panic/cancellation drops only task clones.
             let drain_state = state.clone();
             let held_state = drain_state.clone();
-            let drain_task = tokio::spawn(async move { drain_running_threads(&drain_state).await });
-            let drain_result = map_shutdown_drain_join(drain_task.await);
+            // The drain mode is chosen from the latch, after any planned
+            // window point a suspended host crossed has been observed.
+            let drain_latch = composition.service_stop.drain_latch();
+            let drain_task = tokio::spawn(async move {
+                drain_running_threads(&drain_state, &drain_latch).await
+            });
+            let drain_result = map_shutdown_drain_join(drain_task.await)
+                .map(|outcome| composition.record_latched_drain_facts(outcome));
             let mut custody = Some((held_state, &*composition));
             complete_shutdown_drain(drain_result, &result, &mut custody).await;
             drop(custody);
@@ -4064,10 +4510,15 @@ async fn run(
     // The settled finalizer records this as a provisional finalizing marker
     // before it retires the operator target. Only this run's own provisional
     // marker is later replaced, by compare-and-write, with the proved reason.
-    composition.staged_exit_record = Some((exit_reason(&daemon_result),
+    let staged_reason = composition
+        .service_stop
+        .outcome()
+        .map(ServiceStopOutcome::reason)
+        .unwrap_or_else(|| exit_reason(&daemon_result));
+    composition.staged_exit_record = Some((staged_reason,
         daemon_result.as_ref().err().map(|error| format!("{error:#}"))));
     composition.stop_accounting_publisher().await;
-    let native_result = composition.advance_native_shutdown();
+    let native_result = composition.advance_native_shutdown_on_settlement_stack();
     if composition.has_unresolved_custody() {
         // The custody exit below does not return, so name both causes first.
         if let Err(error) = &daemon_result {
@@ -4089,12 +4540,34 @@ async fn run(
         }
     }
 
-    let exit_reason = exit_reason(&daemon_result);
+    // A fact latch at any point of the stop, including cleanup, makes this
+    // the fact-refusal outcome; otherwise a reached window is a rollover.
+    let service_outcome = composition.service_stop.outcome();
+    composition.service_stop.outcome = service_outcome;
+    let exit_reason = service_outcome
+        .map(ServiceStopOutcome::reason)
+        .unwrap_or_else(|| exit_reason(&daemon_result));
     let exit_detail = daemon_result
         .as_ref()
         .err()
         .map(|error| format!("{error:#}"));
-    composition.record_exit(exit_reason, exit_detail.as_deref());
+    composition.record_exit(exit_reason, exit_detail.as_deref(), daemon_result.as_ref().err());
+    match service_outcome {
+        Some(ServiceStopOutcome::ServiceRefusalStop) => {
+            tracing::error!(
+                shutdown_outcome = "service_refusal_stop",
+                "native service refused a durable admission fact; orderly stop complete and supervised restart inhibited"
+            );
+            composition.inhibit_supervised_restart("service_refusal_stop");
+        }
+        Some(ServiceStopOutcome::ServiceWindowRollover) => {
+            tracing::warn!(
+                shutdown_outcome = "service_window_rollover",
+                "native service window rolled over; orderly stop complete and the next incarnation may start"
+            );
+        }
+        None => {}
+    }
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
         Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
@@ -4128,7 +4601,7 @@ fn classify_uds_listener_exit(
     }
 }
 
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const LISTENER_SHUTDOWN_TIMEOUT: Duration = process::LISTENER_SHUTDOWN_BOUND;
 
 async fn settle_http_listener(
     task: &mut tokio::task::JoinHandle<std::io::Result<()>>,
@@ -5326,45 +5799,69 @@ fn settle_shutdown_process(
     }
 }
 
-async fn drain_running_threads(state: &AppState) -> bool {
-    // Serialize shutdown against every future UDS/internal attachment. An
-    // attach that committed first appears below; one that arrives later is
-    // rejected and its spawn owner aborts the exact process.
-    if let Err(error) = state.state_store.close_process_attachment_admission() {
-        tracing::error!(error = %error, "failed to close process attachment admission");
-        return false;
-    }
+/// One attached process as the stop drains it.
+struct DrainAttached {
+    thread_id: String,
+    // `None` when the stop could not read the thread row (latched snapshot).
+    status: Option<String>,
+    identity: process::ExecutionProcessIdentity,
+    action: process::ShutdownAction,
+}
 
-    // Snapshot every root attachment before retiring independent hosted
-    // workers. Retiring a worker can make its root controller exit and
-    // compare-clear itself immediately; the shutdown coordinator must still
-    // retain the exact old identity so it can prove absence and re-arm that
-    // root's consumed restart budget.
-    let attached_ids = match state.state_store.list_attached_thread_ids() {
-        Ok(ids) => ids,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to list attached threads during shutdown");
-            return false;
-        }
-    };
-    let mut attached_snapshot_clean = true;
+/// Attached processes from the in-memory attachment records, without SQL.
+/// A record with no identity can never be proved dead, so the snapshot is
+/// then unclean.
+fn latched_attached_snapshot(state: &AppState) -> (Vec<DrainAttached>, bool) {
+    let mut clean = true;
+    let mut attached = Vec::new();
+    for record in state.state_store.attached_process_snapshot() {
+        let ryeos_app::state_store::AttachedProcess {
+            thread_id,
+            process_identity,
+            cancellation_mode,
+        } = record;
+        let Some(identity) = process_identity else {
+            clean = false;
+            tracing::warn!(thread_id, "attached record has no process identity to prove dead");
+            continue;
+        };
+        attached.push(DrainAttached {
+            thread_id,
+            status: None,
+            identity,
+            action: process::resolve_shutdown_action(cancellation_mode),
+        });
+    }
+    (attached, clean)
+}
+
+/// Attached processes read from their durable rows. Returns the snapshot,
+/// whether it is clean, and whether any row read failed.
+fn normal_attached_snapshot(state: &AppState) -> Result<(Vec<DrainAttached>, bool, bool)> {
+    let attached_ids = state
+        .state_store
+        .list_attached_thread_ids()
+        .context("list attached threads during shutdown")?;
+    let mut clean = true;
+    let mut read_failed = false;
     let mut attached = Vec::with_capacity(attached_ids.len());
     for thread_id in attached_ids {
         let thread = match state.state_store.get_thread(&thread_id) {
             Ok(Some(thread)) => thread,
             Ok(None) => {
-                attached_snapshot_clean = false;
+                clean = false;
                 tracing::warn!(thread_id, "attached runtime row has no thread");
                 continue;
             }
             Err(error) => {
-                attached_snapshot_clean = false;
+                clean = false;
+                read_failed = true;
                 tracing::warn!(thread_id, error = %error, "failed to load attached thread");
                 continue;
             }
         };
         let Some(identity) = thread.runtime.process_identity.clone() else {
-            attached_snapshot_clean = false;
+            clean = false;
             tracing::warn!(thread_id, "attached row lost its durable process identity");
             continue;
         };
@@ -5375,22 +5872,123 @@ async fn drain_running_threads(state: &AppState) -> bool {
                 .as_ref()
                 .and_then(|metadata| metadata.cancellation_mode),
         );
-        attached.push((thread_id, thread.status, identity, action));
+        attached.push(DrainAttached {
+            thread_id,
+            status: Some(thread.status),
+            identity,
+            action,
+        });
     }
+    Ok((attached, clean, read_failed))
+}
+
+/// Normal-mode settlement of one attached process already proved dead.
+/// `Ok(false)` keeps the exact authority for cold recovery.
+fn settle_attached_normal(
+    state: &AppState,
+    thread_id: &str,
+    identity: &process::ExecutionProcessIdentity,
+) -> Result<bool> {
+    if settle_shutdown_process(state, thread_id, identity)? {
+        return Ok(true);
+    }
+    match state.state_store.get_thread(thread_id)? {
+        Some(current) if current.runtime.process_identity.is_none() => {
+            // A concurrent clear is settlement only when it also released
+            // membership. Old NULL-PID borrowers stay fenced.
+            Ok(state.state_store.thread_workspace_binding(thread_id)?.is_none())
+        }
+        Some(_) => {
+            tracing::warn!(
+                thread_id,
+                "shutdown retains exact process authority for unsettled workspace recovery or a changed attachment"
+            );
+            Ok(false)
+        }
+        None => Ok(true),
+    }
+}
+
+/// Record one attached process proved dead whose rows the latched drain
+/// leaves to recovery: its settlement, and the resume re-arm unless its
+/// thread is known terminal (recovery ignores entries for terminal rows).
+fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
+    deferred
+        .attached
+        .insert(item.thread_id.clone(), item.identity.clone());
+    if !item
+        .status
+        .as_deref()
+        .is_some_and(ryeos_app::state_store::is_terminal_status)
+    {
+        deferred
+            .resume_reset
+            .insert(item.thread_id.clone(), item.identity.clone());
+    }
+}
+
+/// Prove one exact process group dead from its identity alone, killing it
+/// when it is still alive. Reads no database.
+fn kill_and_prove_group_dead(identity: &process::ExecutionProcessIdentity) -> bool {
+    match process::execution_group_liveness(identity) {
+        process::IdentityLiveness::DeadOrStale => true,
+        process::IdentityLiveness::Alive => {
+            let killed = process::kill_by_action(identity, process::ShutdownAction::Hard);
+            killed.success
+                && process::execution_group_liveness(identity)
+                    == process::IdentityLiveness::DeadOrStale
+        }
+        process::IdentityLiveness::Unavailable => false,
+    }
+}
+
+async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOutcome {
+    let mut mode = latch.mode();
+    let mut deferred = DeferredRows::default();
+    // Serialize shutdown against every future UDS/internal attachment. An
+    // attach that committed first appears below; one that arrives later is
+    // rejected and its spawn owner aborts the exact process.
+    if let Err(error) = state.state_store.close_process_attachment_admission() {
+        tracing::error!(error = %error, "failed to close process attachment admission");
+        return DrainOutcome::Unproved;
+    }
+
+    // Snapshot every root attachment before retiring independent hosted
+    // workers. Retiring a worker can make its root controller exit and
+    // compare-clear itself immediately; the shutdown coordinator must still
+    // retain the exact old identity so it can prove absence and re-arm that
+    // root's consumed restart budget. A latched stop reads the in-memory
+    // attachment records, which carry the same committed identities.
+    let (attached, mut attached_snapshot_clean) = match latch.refresh(&mut mode) {
+        DrainMode::Latched => latched_attached_snapshot(state),
+        DrainMode::Normal => match normal_attached_snapshot(state) {
+            Ok((_, _, true)) if latch.refresh(&mut mode) == DrainMode::Latched => {
+                latched_attached_snapshot(state)
+            }
+            Ok((attached, clean, _)) => (attached, clean),
+            Err(error) => {
+                tracing::error!(error = %format!("{error:#}"), "failed to snapshot attached threads during shutdown");
+                return DrainOutcome::Unproved;
+            }
+        },
+    };
 
     // Close the generic persistent-session pool first. Pooled request workers
     // have no durable per-process row, so the pool itself is their only exact
     // shutdown owner. Exclusive workers are reaped through the same boundary,
     // then their durable identities are fenced below.
     let external_candidate_imports_drained = drain_external_candidate_imports(state).await;
-    let persistent_session_pool_drained = drain_persistent_session_pool(state).await;
+    let pool_mode = latch.refresh(&mut mode);
+    let persistent_session_pool_drained =
+        drain_persistent_session_pool(state, pool_mode, &mut deferred).await;
 
     // Exclusive persistent-session workers are independent process groups,
     // not descendants represented by `thread_runtime`. Durably fence those
     // exact worker epochs before draining their root controllers. This
     // releases the workspace/profile lease only after process death is proved
     // and leaves the session in the ordinary restart-recovery state.
-    let persistent_session_workers_drained = drain_persistent_session_workers(state).await;
+    let persistent_session_workers_drained =
+        drain_persistent_session_workers(state, latch, &mut mode, &mut deferred).await;
 
     let drain_deadline = Instant::now()
         .checked_add(Duration::from_secs(
@@ -5404,7 +6002,7 @@ async fn drain_running_threads(state: &AppState) -> bool {
                 error = %error,
                 "failed to list in-process handlers during shutdown"
             );
-            return false;
+            return DrainOutcome::Unproved;
         }
     };
     if !attached.is_empty() {
@@ -5416,8 +6014,9 @@ async fn drain_running_threads(state: &AppState) -> bool {
 
     const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
     let mut pending = Vec::with_capacity(attached.len());
-    for (thread_id, status, identity, action) in attached {
-        let kill_identity = identity.clone();
+    for item in attached {
+        let kill_identity = item.identity.clone();
+        let action = item.action;
         let kill_task = tokio::task::spawn_blocking(move || {
             let bounded_action = match action {
                 process::ShutdownAction::Hard => process::ShutdownAction::Hard,
@@ -5431,10 +6030,11 @@ async fn drain_running_threads(state: &AppState) -> bool {
             };
             process::kill_by_action(&kill_identity, bounded_action)
         });
-        pending.push((thread_id, status, identity, kill_task));
+        pending.push((item, kill_task));
     }
 
-    for (thread_id, status, identity, kill_task) in pending {
+    for (item, kill_task) in pending {
+        let thread_id = item.thread_id.as_str();
         let result = match kill_task.await {
             Ok(result) => result,
             Err(error) => {
@@ -5452,35 +6052,24 @@ async fn drain_running_threads(state: &AppState) -> bool {
             );
             continue;
         }
-        let detached = match settle_shutdown_process(state, &thread_id, &identity) {
-            Ok(true) => true,
-            Ok(false) => match state.state_store.get_thread(&thread_id) {
-                Ok(Some(current)) if current.runtime.process_identity.is_none() => {
-                    // A concurrent clear is settlement only when it also
-                    // released membership. Old NULL-PID borrowers stay fenced.
-                    matches!(
-                        state.state_store.thread_workspace_binding(&thread_id),
-                        Ok(None)
-                    )
-                }
-                Ok(Some(_)) => {
-                    tracing::warn!(
-                        thread_id,
-                        "shutdown retains exact process authority for unsettled workspace recovery or a changed attachment"
-                    );
-                    false
-                }
-                Ok(None) => true,
-                Err(error) => {
-                    tracing::warn!(
-                        thread_id,
-                        error = %error,
-                        "failed to confirm concurrently cleared shutdown identity"
-                    );
-                    false
-                }
-            },
-            Err(error) => {
+        // The group is proved dead. A latched stop writes no settlement
+        // row; active-thread recovery reconciles it from the durable row.
+        let settled = match latch.refresh(&mut mode) {
+            DrainMode::Latched => None,
+            DrainMode::Normal => Some(settle_attached_normal(state, thread_id, &item.identity)),
+        };
+        let detached = match settled {
+            None => {
+                defer_attached(&mut deferred, &item);
+                continue;
+            }
+            Some(Ok(true)) => true,
+            Some(Ok(false)) => false,
+            Some(Err(_)) if latch.refresh(&mut mode) == DrainMode::Latched => {
+                defer_attached(&mut deferred, &item);
+                continue;
+            }
+            Some(Err(error)) => {
                 tracing::warn!(
                     thread_id,
                     error = %error,
@@ -5493,15 +6082,35 @@ async fn drain_running_threads(state: &AppState) -> bool {
             attached_snapshot_clean = false;
             continue;
         }
-        if !ryeos_app::state_store::is_terminal_status(&status) {
-            let reset_result = state.state_store.reset_resume_attempts(&thread_id);
-            if let Err(error) = reset_result {
-                attached_snapshot_clean = false;
-                tracing::warn!(
-                    thread_id,
-                    error = %error,
-                    "failed to re-arm resume budget during drain"
-                );
+        if !item
+            .status
+            .as_deref()
+            .is_some_and(ryeos_app::state_store::is_terminal_status)
+        {
+            let reset_result = match latch.refresh(&mut mode) {
+                DrainMode::Latched => None,
+                DrainMode::Normal => Some(state.state_store.reset_resume_attempts(thread_id)),
+            };
+            match reset_result {
+                Some(Ok(_)) => {}
+                None => {
+                    deferred
+                        .resume_reset
+                        .insert(item.thread_id.clone(), item.identity.clone());
+                }
+                Some(Err(_)) if latch.refresh(&mut mode) == DrainMode::Latched => {
+                    deferred
+                        .resume_reset
+                        .insert(item.thread_id.clone(), item.identity.clone());
+                }
+                Some(Err(error)) => {
+                    attached_snapshot_clean = false;
+                    tracing::warn!(
+                        thread_id,
+                        error = %error,
+                        "failed to re-arm resume budget during drain"
+                    );
+                }
             }
         }
     }
@@ -5515,6 +6124,13 @@ async fn drain_running_threads(state: &AppState) -> bool {
                 ryeos_app::state_store::InProcessHandlerCompletion::TerminalConfirmed
                 | ryeos_app::state_store::InProcessHandlerCompletion::BirthAborted,
             ) => {}
+            Ok(ryeos_app::state_store::InProcessHandlerCompletion::OwnerLostUnsettled)
+                if latch.refresh(&mut mode) == DrainMode::Latched =>
+            {
+                // The handler is gone; in-process reservation recovery
+                // reconciles its reservation at the next start.
+                deferred.in_process_owner_lost.push(thread_id);
+            }
             Ok(ryeos_app::state_store::InProcessHandlerCompletion::OwnerLostUnsettled) => {
                 in_process_completion_clean = false;
                 tracing::error!(
@@ -5532,20 +6148,39 @@ async fn drain_running_threads(state: &AppState) -> bool {
         }
     }
 
+    // Normal: no attachment may remain. Latched: every remaining attachment
+    // must be one this drain proved dead and deferred.
     let attached_drained = match state.state_store.list_attached_thread_ids() {
-        Ok(remaining) if !remaining.is_empty() => {
-            tracing::error!(
-                remaining = ?remaining,
-                "shutdown drain exhausted with attached identities still present"
-            );
-            false
+        Ok(remaining) => {
+            let unproved = remaining
+                .iter()
+                .filter(|thread_id| match mode {
+                    DrainMode::Normal => true,
+                    DrainMode::Latched => !deferred.attached.contains_key(*thread_id),
+                })
+                .collect::<Vec<_>>();
+            if unproved.is_empty() {
+                in_process_completion_clean
+            } else {
+                tracing::error!(
+                    remaining = ?unproved,
+                    "shutdown drain exhausted with attached identities still present"
+                );
+                false
+            }
         }
-        Ok(_) => in_process_completion_clean,
         Err(error) => {
             tracing::error!(error = %error, "failed final shutdown drain audit");
             false
         }
     };
+    // Proved-dead attachments whose rows recovery reconciles leave the
+    // in-memory records, so the live Store close sees no live attachment.
+    if attached_drained && mode == DrainMode::Latched {
+        state
+            .state_store
+            .forget_proven_dead_attachments(&deferred.attached);
+    }
     let in_process_drained = match state.state_store.active_in_process_handler_controls() {
         Ok(remaining) if !remaining.is_empty() => {
             let thread_ids = remaining
@@ -5569,12 +6204,21 @@ async fn drain_running_threads(state: &AppState) -> bool {
     };
     // Never settle a durable reservation while its volatile owner is still
     // active. A timed-out drain is an unclean shutdown; startup reconciliation
-    // owns the remaining reservation after this daemon exits.
+    // owns the remaining reservation after this daemon exits. A latched stop
+    // skips the audit's SQL and leaves it to that same startup recovery.
     let in_process_authoritative_clean = if !in_process_drained {
         false
+    } else if latch.refresh(&mut mode) == DrainMode::Latched {
+        deferred.in_process_audit_skipped = true;
+        true
     } else {
         match audit_ownerless_in_process_reservations(state) {
-            Ok(clean) => clean,
+            Ok(true) => true,
+            Ok(false) | Err(_) if latch.refresh(&mut mode) == DrainMode::Latched => {
+                deferred.in_process_audit_skipped = true;
+                true
+            }
+            Ok(false) => false,
             Err(error) => {
                 tracing::error!(
                     error = %error,
@@ -5584,13 +6228,18 @@ async fn drain_running_threads(state: &AppState) -> bool {
             }
         }
     };
-    external_candidate_imports_drained
+    let clean = external_candidate_imports_drained
         && persistent_session_pool_drained
         && persistent_session_workers_drained
         && attached_snapshot_clean
         && attached_drained
         && in_process_drained
-        && in_process_authoritative_clean
+        && in_process_authoritative_clean;
+    match (clean, mode) {
+        (false, _) => DrainOutcome::Unproved,
+        (true, DrainMode::Normal) => DrainOutcome::Clean,
+        (true, DrainMode::Latched) => DrainOutcome::ProcessCleanRowsDeferred(deferred),
+    }
 }
 
 async fn drain_external_candidate_imports(state: &AppState) -> bool {
@@ -5628,19 +6277,33 @@ async fn drain_external_candidate_imports(state: &AppState) -> bool {
     }
 }
 
-async fn drain_persistent_session_pool(state: &AppState) -> bool {
+async fn drain_persistent_session_pool(
+    state: &AppState,
+    mode: DrainMode,
+    deferred: &mut DeferredRows,
+) -> bool {
     let pool = Arc::clone(&state.persistent_sessions);
+    let retirement = match mode {
+        DrainMode::Normal => ryeos_app::persistent_session::RetirementMode::Normal,
+        DrainMode::Latched => ryeos_app::persistent_session::RetirementMode::Latched,
+    };
     match tokio::task::spawn_blocking(move || {
-        pool.shutdown_and_reap_all(Duration::from_secs(
-            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
-        ))
+        pool.shutdown_and_reap_all_in(
+            Duration::from_secs(process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS),
+            retirement,
+        )
     })
     .await
     {
-        Ok(Ok(reaped)) => {
+        Ok(Ok(reap)) => {
+            let ryeos_app::persistent_session::PersistentSessionShutdownReap {
+                reaped,
+                durable_rows_deferred,
+            } = reap;
             if reaped != 0 {
                 tracing::info!(reaped, "reaped persistent-session pool before daemon exit");
             }
+            deferred.pooled_owners = deferred.pooled_owners.saturating_add(durable_rows_deferred);
             true
         }
         Ok(Err(error)) => {
@@ -5660,9 +6323,79 @@ async fn drain_persistent_session_pool(state: &AppState) -> bool {
     }
 }
 
-async fn drain_persistent_session_workers(state: &AppState) -> bool {
+/// Latched worker drain: kill each exact live worker group recorded in
+/// memory and prove it dead without SQL. The fence and the resource-owner
+/// proof are left to dedicated worker recovery.
+async fn drain_persistent_session_workers_latched(
+    state: &AppState,
+    deferred: &mut DeferredRows,
+) -> bool {
+    let workers = state.state_store.live_worker_snapshot();
+    if !workers.is_empty() {
+        tracing::info!(
+            count = workers.len(),
+            "proving persistent-session worker death without service SQL"
+        );
+    }
+    let mut pending = Vec::with_capacity(workers.len());
+    for worker in workers {
+        let identity = worker.process_identity.clone();
+        let task = tokio::task::spawn_blocking(move || kill_and_prove_group_dead(&identity));
+        pending.push((worker.worker_instance_id, task));
+    }
+    let mut clean = true;
+    for (worker_instance_id, task) in pending {
+        match task.await {
+            Ok(true) => deferred.workers.push(worker_instance_id),
+            Ok(false) => {
+                clean = false;
+                tracing::error!(
+                    worker_instance_id = %worker_instance_id,
+                    "persistent-session worker death remains unproved in a latched stop"
+                );
+            }
+            Err(error) => {
+                clean = false;
+                tracing::error!(
+                    worker_instance_id = %worker_instance_id,
+                    error = %error,
+                    "persistent-session worker death proof panicked"
+                );
+            }
+        }
+    }
+    // Every worker still recorded live must be one proved dead here.
+    let remaining = state
+        .state_store
+        .live_worker_snapshot()
+        .into_iter()
+        .map(|worker| worker.worker_instance_id)
+        .filter(|worker_instance_id| !deferred.workers.contains(worker_instance_id))
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        tracing::error!(
+            remaining = ?remaining,
+            "latched stop left persistent-session workers without a death proof"
+        );
+        return false;
+    }
+    clean
+}
+
+async fn drain_persistent_session_workers(
+    state: &AppState,
+    latch: &DrainLatch,
+    mode: &mut DrainMode,
+    deferred: &mut DeferredRows,
+) -> bool {
+    if latch.refresh(mode) == DrainMode::Latched {
+        return drain_persistent_session_workers_latched(state, deferred).await;
+    }
     let workers = match state.state_store.live_worker_processes() {
         Ok(workers) => workers,
+        Err(_) if latch.refresh(mode) == DrainMode::Latched => {
+            return drain_persistent_session_workers_latched(state, deferred).await;
+        }
         Err(error) => {
             tracing::error!(
                 error = %error,
@@ -5707,6 +6440,25 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
         };
         let cleanup_state = match cleanup {
             Ok(cleanup_state) => cleanup_state,
+            // Retirement writes service SQL; once the latch is set its
+            // refusal says nothing about the process, so prove death from
+            // the exact identity and leave the rows to worker recovery.
+            Err(_) if latch.refresh(mode) == DrainMode::Latched => {
+                let identity = worker.process_identity.clone();
+                let proved = tokio::task::spawn_blocking(move || kill_and_prove_group_dead(&identity))
+                    .await
+                    .unwrap_or(false);
+                if proved {
+                    deferred.workers.push(worker.worker_instance_id.clone());
+                } else {
+                    clean = false;
+                    tracing::error!(
+                        worker_instance_id = %worker.worker_instance_id,
+                        "persistent-session worker death remains unproved after a latched retirement"
+                    );
+                }
+                continue;
+            }
             Err(error) => {
                 clean = false;
                 tracing::error!(
@@ -5719,37 +6471,64 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
             }
         };
 
-        let fenced = state.state_store.fence_abandoned_worker_process(
-            &worker.worker_instance_id,
-            &worker.placement_thread_id,
-            worker.boot_epoch,
-            cleanup_state,
-        );
-        if let Err(error) = fenced {
-            // A concurrent worker-I/O failure may have fenced the exact epoch
-            // after the shutdown snapshot. Accept only the matching durable
-            // dead record; every other CAS loss remains an unclean shutdown.
-            let already_fenced = state
-                .state_store
-                .worker_process(&worker.worker_instance_id)
-                .ok()
-                .flatten()
-                .is_some_and(|current| {
-                    current.placement_thread_id == worker.placement_thread_id
-                        && current.boot_epoch == worker.boot_epoch
-                        && current.state == ryeos_app::runtime_db::WorkerProcessState::Dead
-                        && current.cleanup_state == cleanup_state
-                });
-            if !already_fenced {
+        let fenced = match latch.refresh(mode) {
+            DrainMode::Latched => None,
+            DrainMode::Normal => Some(state.state_store.fence_abandoned_worker_process(
+                &worker.worker_instance_id,
+                &worker.placement_thread_id,
+                worker.boot_epoch,
+                cleanup_state,
+            )),
+        };
+        match fenced {
+            Some(Ok(())) => {}
+            // A reaped worker is proved dead; the fence row is left to
+            // worker recovery, which fences every prior-generation epoch.
+            None if cleanup_state == "reaped" => {
+                deferred.workers.push(worker.worker_instance_id.clone());
+                continue;
+            }
+            Some(Err(_))
+                if cleanup_state == "reaped" && latch.refresh(mode) == DrainMode::Latched =>
+            {
+                deferred.workers.push(worker.worker_instance_id.clone());
+                continue;
+            }
+            None => {
                 clean = false;
                 tracing::error!(
                     worker_instance_id = %worker.worker_instance_id,
-                    placement_thread_id = %worker.placement_thread_id,
                     cleanup_state,
-                    error = %error,
-                    "failed to persist persistent-session shutdown fence"
+                    "persistent-session worker death remains unproved in a latched stop"
                 );
                 continue;
+            }
+            Some(Err(error)) => {
+                // A concurrent worker-I/O failure may have fenced the exact epoch
+                // after the shutdown snapshot. Accept only the matching durable
+                // dead record; every other CAS loss remains an unclean shutdown.
+                let already_fenced = state
+                    .state_store
+                    .worker_process(&worker.worker_instance_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| {
+                        current.placement_thread_id == worker.placement_thread_id
+                            && current.boot_epoch == worker.boot_epoch
+                            && current.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+                            && current.cleanup_state == cleanup_state
+                    });
+                if !already_fenced {
+                    clean = false;
+                    tracing::error!(
+                        worker_instance_id = %worker.worker_instance_id,
+                        placement_thread_id = %worker.placement_thread_id,
+                        cleanup_state,
+                        error = %error,
+                        "failed to persist persistent-session shutdown fence"
+                    );
+                    continue;
+                }
             }
         }
         if cleanup_state != "reaped" {
@@ -5770,6 +6549,25 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
         }
     }
 
+    // Normal: the durable audit must find no live worker. Once latched, the
+    // in-memory records must hold only workers proved dead in this drain.
+    if latch.refresh(mode) == DrainMode::Latched {
+        let remaining = state
+            .state_store
+            .live_worker_snapshot()
+            .into_iter()
+            .map(|worker| worker.worker_instance_id)
+            .filter(|worker_instance_id| !deferred.workers.contains(worker_instance_id))
+            .collect::<Vec<_>>();
+        if !remaining.is_empty() {
+            tracing::error!(
+                remaining = ?remaining,
+                "latched stop left persistent-session workers without a death proof"
+            );
+            return false;
+        }
+        return clean;
+    }
     match state.state_store.live_worker_processes() {
         Ok(remaining) if remaining.is_empty() => clean,
         Ok(remaining) => {
@@ -6018,6 +6816,56 @@ fn standalone_operator_handler_context(
     )
 }
 
+/// Finish a standalone native host. A refusal keeps its owners inside the
+/// returned error for the rest of this process.
+fn finish_standalone_native(host: ryeos_app::standalone_native::StandaloneNativeHost) -> Result<()> {
+    match host.finish() {
+        Ok(_facts) => Ok(()),
+        Err((Some(host), error)) => Err(ryeos_state::operational::CarriedOwners::carry(
+            error.context("standalone native host finish refused"),
+            host,
+        )),
+        Err((None, error)) => Err(error.context("standalone native host finish refused")),
+    }
+}
+
+/// Close a Store opened on a standalone native host into the host's census
+/// and finish the host, after a setup step refused once the Store was open.
+/// The setup refusal stays the reported cause; a settlement refusal rides
+/// with it and keeps any owners it carries.
+fn settle_standalone_setup_failure(
+    host: Option<ryeos_app::standalone_native::StandaloneNativeHost>,
+    access: ryeos_app::service_registry::StandaloneStateAccess,
+    state_store: Arc<ryeos_app::state_store::StateStore>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let Some(host) = host else {
+        return error;
+    };
+    let closed = match access {
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
+        | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
+            host.close_control_store(state_store)
+        }
+        ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => host.close_store(state_store),
+    };
+    let finished = finish_standalone_native(host);
+    match (closed, finished) {
+        (Ok(()), Ok(())) => error,
+        (Err(settle), Ok(())) | (Ok(()), Err(settle)) => {
+            let message = format!("standalone native Store did not settle: {settle:#}");
+            ryeos_state::operational::CarriedOwners::carry(error.context(message), settle)
+        }
+        (Err(closed), Err(finished)) => {
+            let message = format!(
+                "standalone native Store did not settle: {closed:#}; host finish: {finished:#}"
+            );
+            let error = ryeos_state::operational::CarriedOwners::carry(error.context(message), closed);
+            ryeos_state::operational::CarriedOwners::carry(error, finished)
+        }
+    }
+}
+
 /// Run a service in standalone mode (daemon is not running).
 ///
 /// Performs bootstrap: load config, build engine + trust store,
@@ -6132,57 +6980,14 @@ async fn run_service_standalone(
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let head_trust = Arc::new(head_trust);
-    let state_store = Arc::new(match standalone_state_access {
-        ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => {
-            state_store::StateStore::new_with_head_trust(
-                config.app_root.clone(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                head_trust,
-            )?
-        }
-        ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
-            state_store::StateStore::new_for_projection_verification(
-                runtime_state_dir,
-                signer,
-                write_barrier.clone(),
-                head_trust,
-            )?
-        }
-        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
-            state_store::StateStore::new_for_projection_rebuild(
-                config.app_root.clone(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                head_trust,
-            )?
-        }
-    });
-
-    let events = Arc::new(event_store_service::EventStoreService::new(
-        state_store.clone(),
-    ));
-    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
-    let threads = Arc::new(thread_lifecycle::ThreadLifecycleService::new(
-        state_store.clone(),
-        engine.clone(),
-        kind_profiles.clone(),
-        events.clone(),
-        event_streams.clone(),
-        &identity.site_id(),
-    )?);
-    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
-    threads.set_live_input_queue(live_input.clone());
-    let commands = Arc::new(command_service::CommandService::new(
-        state_store.clone(),
-        kind_profiles,
-        events.clone(),
-    ));
-
+    // A read/write standalone Store opens through the native gate on an
+    // in-process host funded by the signed standalone class, and closes into
+    // that host's census before the host finishes.
+    // Projection rebuild and verification run in the stopped-node maintenance
+    // shape: this invocation holds the runtime namespace lock for the host's
+    // whole life.
+    // Every fallible step that needs no Store runs before the native host
+    // is issued, so none of them can strand an open Store or its host.
     let standalone_command_registry = Arc::new(
         ryeos_runtime::CommandRegistry::from_records(
             &node_config_snapshot.commands,
@@ -6192,6 +6997,144 @@ async fn run_service_standalone(
         )
         .context("failed to build command registry from node-config records")?,
     );
+    let publication_policy = node_policy_snapshot
+        .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+        .clone();
+    let publisher = configured_bundle_publisher(&publication_policy)?;
+    let standalone_vault = Arc::new(
+        ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
+            .context("load sealed-envelope vault — did `ryeos init` run?")?,
+    );
+    let standalone_ignore_matcher = Arc::new(
+        node_policy_snapshot
+            .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+            .matcher
+            .clone(),
+    );
+    let standalone_namespace = match standalone_state_access {
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
+        | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
+            let runtime = Arc::new(
+                lillux::PinnedDirectory::open(&runtime_state_dir)?
+                    .with_context(|| format!("runtime state is absent: {}", runtime_state_dir.display()))?,
+            );
+            let namespace = runtime
+                .lock_exclusive()
+                .context("lock the runtime namespace for projection rebuild")?;
+            Some((runtime, namespace))
+        }
+        ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => None,
+    };
+    let standalone_native = match standalone_state_access {
+        ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => Some(
+            ryeos_app::standalone_native::StandaloneNativeHost::issue(config, &identity, &standalone_state_lock)
+                .context("issue the standalone native host")?,
+        ),
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
+        | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
+            let (runtime, namespace) = standalone_namespace
+                .as_ref()
+                .context("stopped-node namespace absent")?;
+            Some(
+                ryeos_app::standalone_native::StandaloneNativeHost::issue_with_namespace(
+                    config,
+                    &identity,
+                    &standalone_state_lock,
+                    Arc::clone(runtime),
+                    namespace,
+                )
+                .context("issue the standalone stopped-node native host")?,
+            )
+        }
+    };
+    let state_store = Arc::new(match standalone_state_access {
+        ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => {
+            let host = standalone_native.as_ref().context("standalone native host absent")?;
+            let _ = (runtime_state_dir, runtime_db_path);
+            match host.open_store(config, &standalone_state_lock, signer, write_barrier.clone(), head_trust) {
+                Ok(store) => store,
+                Err(error) => {
+                    let refusal = host.settle_refused_open(error);
+                    let host = standalone_native.context("standalone native host absent")?;
+                    return Err(match finish_standalone_native(host) {
+                        Ok(()) => refusal,
+                        Err(finish) => refusal.context(format!("{finish:#}")),
+                    });
+                }
+            }
+        }
+        ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
+            let host = standalone_native.as_ref().context("standalone native host absent")?;
+            let (runtime, namespace) = standalone_namespace
+                .as_ref()
+                .context("projection verification namespace absent")?;
+            // A refused open has already settled its owners into the host's
+            // census; the host then finishes before the refusal returns.
+            match host.open_verification_store(config, runtime, namespace, signer, write_barrier.clone(), head_trust) {
+                Ok(store) => store,
+                Err(refusal) => {
+                    let host = standalone_native.context("standalone native host absent")?;
+                    return Err(match finish_standalone_native(host) {
+                        Ok(()) => refusal,
+                        Err(finish) => refusal.context(format!("{finish:#}")),
+                    });
+                }
+            }
+        }
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
+            let host = standalone_native.as_ref().context("standalone native host absent")?;
+            let (runtime, namespace) = standalone_namespace
+                .as_ref()
+                .context("projection rebuild namespace absent")?;
+            let _ = (runtime_state_dir, runtime_db_path);
+            // A refused open has already settled its owners into the host's
+            // census; the host then finishes before the refusal returns.
+            match host.open_rebuild_store(config, runtime, namespace, signer, write_barrier.clone(), head_trust) {
+                Ok(store) => store,
+                Err(refusal) => {
+                    let host = standalone_native.context("standalone native host absent")?;
+                    return Err(match finish_standalone_native(host) {
+                        Ok(()) => refusal,
+                        Err(finish) => refusal.context(format!("{finish:#}")),
+                    });
+                }
+            }
+        }
+    });
+
+    let events = Arc::new(event_store_service::EventStoreService::new(
+        state_store.clone(),
+    ));
+    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
+    let threads = match thread_lifecycle::ThreadLifecycleService::new(
+        state_store.clone(),
+        engine.clone(),
+        kind_profiles.clone(),
+        events.clone(),
+        event_streams.clone(),
+        &identity.site_id(),
+    ) {
+        Ok(threads) => Arc::new(threads),
+        Err(error) => {
+            // The open Store closes into its host's census and the host
+            // finishes before the setup refusal returns.
+            drop(events);
+            drop(event_streams);
+            return Err(settle_standalone_setup_failure(
+                standalone_native,
+                standalone_state_access,
+                state_store,
+                error,
+            ));
+        }
+    };
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
+    let commands = Arc::new(command_service::CommandService::new(
+        state_store.clone(),
+        kind_profiles,
+        events.clone(),
+    ));
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
     let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
@@ -6229,10 +7172,6 @@ async fn run_service_standalone(
             extensions.insert(Arc::clone(&standalone_state_lock));
             extensions.insert(standalone_ui_state);
             extensions.insert(standalone_node_config_validator);
-            let publication_policy = node_policy_snapshot
-                .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
-                .clone();
-            let publisher = configured_bundle_publisher(&publication_policy)?;
             let publication_authorities =
                 ryeos_app::bundle_publication::producer::BundleReleaseAuthorityRouter {
                     publisher,
@@ -6271,18 +7210,10 @@ async fn run_service_standalone(
         external_provider_configurations: Arc::new(external_artifacts.provider_configurations),
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: node_policy_snapshot.clone(),
-        vault: Arc::new(
-            ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
-                .context("load sealed-envelope vault — did `ryeos init` run?")?,
-        ),
+        vault: standalone_vault,
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
-        ignore_matcher: Arc::new(
-            node_policy_snapshot
-                .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
-                .matcher
-                .clone(),
-        ),
+        ignore_matcher: standalone_ignore_matcher,
         vault_fingerprint: None,
         // Standalone service invocations perform no paid launches; hard
         // admission is uniformly unavailable here.
@@ -6306,7 +7237,7 @@ async fn run_service_standalone(
         requested_call: None,
     };
 
-    let result = service_executor::execute_service_verified(
+    let outcome = service_executor::execute_service_verified(
         service_verified,
         service_ref,
         params,
@@ -6323,7 +7254,31 @@ async fn run_service_standalone(
         None,
         Some(standalone_handler_context),
     )
-    .await?;
+    .await;
+    // Every Store alias ends with the service state; a native Store then
+    // closes into its host's census and the host finishes.
+    drop(ctx);
+    drop(app_state);
+    if let Some(host) = standalone_native {
+        let closed = match standalone_state_access {
+            ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
+            | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
+                host.close_control_store(state_store)
+            }
+            ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => host.close_store(state_store),
+        };
+        let finished = finish_standalone_native(host);
+        match (&outcome, closed, finished) {
+            (_, Ok(()), Ok(())) => {}
+            (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => return Err(error),
+            (Err(_), closed, finished) => {
+                if let Err(error) = closed.and(finished) {
+                    tracing::error!(error = %format!("{error:#}"), "standalone native Store did not settle after the service failed");
+                }
+            }
+        }
+    }
+    let result = outcome?;
 
     tracing::info!(
         endpoint = %result.endpoint,
@@ -6394,7 +7349,8 @@ mod selected_composition_tests {
         let started = lifecycle_marker::record_running(
             &state_dir,
             lifecycle_marker::LaunchRoute::Direct,
-        );
+        )
+        .unwrap();
         (
             DaemonSelectedComposition {
                 root: barrier,
@@ -6438,6 +7394,7 @@ mod selected_composition_tests {
                 accounting_native_reference_parts: None,
                 accounting_native_unused_reference: None,
                 accounting_publisher: Arc::default(),
+                service_stop: ServiceStopState::default(),
                 #[cfg(feature = "scheduling")]
                 scheduler_db_custody: None,
                 #[cfg(feature = "scheduling")]
@@ -6498,7 +7455,7 @@ mod selected_composition_tests {
             lifecycle_marker::read(&state_dir),
             Some(lifecycle_marker::LifecycleMarker::Running { .. })
         ));
-        composition.record_exit("signal", None);
+        composition.record_exit("signal", None, None);
         assert!(
             matches!(lifecycle_marker::read(&state_dir), Some(lifecycle_marker::LifecycleMarker::Exited { reason, .. }) if reason == "signal")
         );
@@ -6651,7 +7608,7 @@ mod shutdown_mapping_tests {
 
 #[cfg(test)]
 mod shutdown_custody_tests {
-    use super::{complete_shutdown_drain, map_shutdown_drain_join};
+    use super::{DrainOutcome, complete_shutdown_drain, map_shutdown_drain_join};
     use std::future::Future as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -6676,7 +7633,7 @@ mod shutdown_custody_tests {
         let prior = Err(anyhow::anyhow!("listener failed first"));
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
-        let mut future = Box::pin(complete_shutdown_drain(Ok(false), &prior, &mut custody));
+        let mut future = Box::pin(complete_shutdown_drain(Ok(DrainOutcome::Unproved), &prior, &mut custody));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
@@ -6688,7 +7645,7 @@ mod shutdown_custody_tests {
     #[tokio::test]
     async fn drain_task_panic_keeps_real_owner_pending() {
         let task = tokio::spawn(async { panic!("injected shutdown coordinator panic") });
-        let task_result = map_shutdown_drain_join(task.await.map(|()| true));
+        let task_result = map_shutdown_drain_join(task.await.map(|()| DrainOutcome::Clean));
         let prior = Ok(());
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
@@ -6706,7 +7663,7 @@ mod shutdown_custody_tests {
         let prior = Err(anyhow::anyhow!("listener failed first"));
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
-        complete_shutdown_drain(Ok(true), &prior, &mut custody).await;
+        complete_shutdown_drain(Ok(DrainOutcome::Clean), &prior, &mut custody).await;
         assert!(custody.is_none());
         assert!(dropped.load(Ordering::Acquire));
     }

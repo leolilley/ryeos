@@ -72,6 +72,8 @@ fn failed_marker_status(
         exited_at,
         error,
         launch_route: _,
+        latched_drain: _,
+        carrier_incarnation: _,
     } = marker
     else {
         return None;
@@ -393,6 +395,8 @@ mod tests {
                 exited_at: "2026-09-10T01:02:04Z".to_owned(),
                 error: Some("failed to bind 127.0.0.1:7400".to_owned()),
                 launch_route: None,
+                latched_drain: None,
+                carrier_incarnation: None,
             },
         )
         .expect("startup failure marker must classify");
@@ -416,7 +420,8 @@ mod tests {
         let started_at = crate::lifecycle_marker::record_running(
             &state,
             crate::lifecycle_marker::LaunchRoute::Direct,
-        );
+        )
+        .unwrap();
         crate::lifecycle_marker::record_exit(
             &state,
             "startup_failed",

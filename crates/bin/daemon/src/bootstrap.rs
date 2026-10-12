@@ -758,9 +758,12 @@ fn load_node_config_two_phase_with_socket(
                 runtime.verify_loaded_node_identity(&node_identity)?;
                 Some(runtime.open_process_scope_provider()?)
             }
-            None => anyhow::bail!(
-                "node policy requires enclosing process scopes; direct launch cannot provide them; start through the host service or external controller"
-            ),
+            // Without a host runtime no scope capability qualifies. Policy
+            // validation guarantees required scopes name termination:scope
+            // and recovery:scope in the capability floor, so the floor match
+            // below refuses this start, records why, and names what the host
+            // can prove instead.
+            None => None,
         }
     } else {
         None
@@ -814,6 +817,61 @@ fn load_node_config_two_phase_with_socket(
         Arc::clone(&generation),
         bootstrap_trust_store.clone(),
     ));
+
+    // Signed inits trusted to exit with their only child, admitted before
+    // the host is observed below and before any lifetime witness is recorded,
+    // so both judge the node's enclosure by the same policy.
+    lillux::process_control::admit_enclosure_inits(&isolation.inspection().enclosure_inits)
+        .map_err(anyhow::Error::msg)
+        .context("Phase 1: admit trusted enclosure inits")?;
+
+    // Every node process records what it contains and what its host proves,
+    // then admits itself only if the signed policy's capability floor is met.
+    // This precedes the engine and every native reservation, so a refusal
+    // spends no incarnation.
+    let mut native_services = Vec::new();
+    if cfg!(feature = "scheduling") {
+        native_services.push("scheduling".to_owned());
+    }
+    let report = ryeos_node::capability_report::NodeCapabilityReport::assemble(
+        ryeos_node::capability_report::ReportInputs {
+            app_root,
+            node_fingerprint: node_identity.fingerprint(),
+            bundles: generation.records().iter().map(|record| record.name.clone()).collect(),
+            native_services,
+            policy_generation: format!("sha256:{}", node_policy.generation_digest()),
+            isolation: isolation.inspection(),
+            host_runtime_present: host_runtime.is_some(),
+        },
+    )
+    .context("Phase 1: assemble node capability report")?;
+    if daemon_socket.is_none() {
+        // A standalone or stopped-node service opens no process scopes and
+        // admits no scoped job, so the per-scope names of the floor describe
+        // nothing it does and are not checked here; every host-level name
+        // is. The recorded report stays the running daemon's, so it is not
+        // overwritten from this process.
+        report
+            .require_floor_without_scopes()
+            .context("Phase 1: node capability floor for a service without process scopes")?;
+    } else {
+        // The daemon's report is written either way so the doctor can show
+        // the reason.
+        let floor_result = report.require_floor();
+        let signed = report
+            .sign(node_identity.signing_key())
+            .context("Phase 1: sign node capability report")?;
+        let path = signed.write(app_root).context("Phase 1: record node capability report")?;
+        tracing::info!(
+            report = %path.display(),
+            digest = %signed.digest,
+            provided = ?signed.report.provided.keys().collect::<Vec<_>>(),
+            missing = ?signed.report.missing.keys().collect::<Vec<_>>(),
+            residency = ?signed.report.host.residency,
+            "node capability report recorded"
+        );
+        floor_result?;
+    }
 
     tracing::info!(
         app_root = %app_root.display(),
