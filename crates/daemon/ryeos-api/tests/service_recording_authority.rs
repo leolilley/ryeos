@@ -414,7 +414,7 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
                 verifier_key: "ryeos_signed",
                 verified: true,
                 authorized_key_class: Some(
-                    ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
                 ),
                 authenticated_origin_site_id: None,
                 authenticated_grant_authority: None,

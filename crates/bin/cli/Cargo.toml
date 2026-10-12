@@ -10,6 +10,7 @@ name = "ryeos"
 path = "src/main.rs"
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow      = { workspace = true }
 base64      = { workspace = true }
 clap        = { workspace = true }
@@ -44,4 +45,5 @@ ryeos-core-tools    = { workspace = true }
 ryeos-directive-definition = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

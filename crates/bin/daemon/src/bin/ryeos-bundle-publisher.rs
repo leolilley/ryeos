@@ -9,10 +9,10 @@ use ryeos_app::{
             observe_current_publisher_tool, observe_publisher_tool,
         },
     },
-    identity::NodeIdentity,
     state_store::NodeIdentitySigner,
 };
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use ryeos_node_runtime::identity::NodeIdentity;
 
 #[derive(Debug, Parser)]
 #[command(name = "ryeos-bundle-publisher")]

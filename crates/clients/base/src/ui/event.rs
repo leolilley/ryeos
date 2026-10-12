@@ -18,6 +18,36 @@ pub enum RyeOsFilterField {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiIntent {
     Refresh,
+    /// Ask the presentation host to open a fresh document under the same
+    /// authenticated session. Preparation precedes an explicit link; the child
+    /// independently claims its seat. No bearer authority enters the link.
+    OpenNewPresentationDocument,
+    OpenSurfaceInNewPresentation {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        dialog_id: String,
+        dialog_binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    /// Rust selects and freezes the exact source inventory before asking the
+    /// existing authenticated seat observer for a destination frontier.
+    /// The renderer supplies neither a phase hash nor an export commitment.
+    BeginTransfer {
+        mode: super::transfer_export::UiTransferExportMode,
+        source: UiTransferSourceSelection,
+        destination_presentation_id: String,
+    },
+    /// A local contact request only. Canonical evidence is selected from a
+    /// completed authenticated paired replay, never supplied by this intent.
+    ContactTransfer {
+        transfer: ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        action: UiTransferContactIntent,
+    },
+    /// Closed source inventory and immutable two-seat identity. The actor
+    /// captures live values and refuses a changed commitment, never rebases it.
+    PrepareTransfer {
+        transfer: ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        export: super::transfer_export::UiTransferExport,
+    },
     /// Run a content-declared affordance against a projected row: the
     /// ONE generic row interaction. The engine resolves the binding's
     /// affordance, substitutes row fields, and applies its plane (ui
@@ -28,19 +58,53 @@ pub enum RyeOsUiIntent {
         affordance_id: String,
         record: serde_json::Value,
     },
+    /// A Rust-projected local row, not a browser-supplied executable intent.
+    ActivateLocalProjection {
+        instance_key: RyeOsViewInstanceKey,
+        record_id: String,
+        projection_guard: String,
+    },
     OpenView {
         view: ViewSpec,
     },
     OpenNewView {
         view: ViewSpec,
     },
-    OpenOverlay {
-        overlay_id: String,
+    /// Open one admitted View as a fresh tab at the captured insertion owner.
+    /// Subject-dependent Views stay unresolved; this never copies ambient work.
+    OpenViewInNewTab {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        view_ref: String,
     },
-    /// Fold or unfold one launcher group. The overlay stays open — this
-    /// mutates presentation state, never launches anything.
-    ToggleOverlayGroup {
-        group: String,
+    OpenCompositionInNewSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        view_ref: Option<String>,
+        dialog_id: String,
+        dialog_binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    OpenLauncher,
+    SelectSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    CloseSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    RenameSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        title: String,
+    },
+    OpenDialog {
+        dialog_id: String,
+    },
+    CloseDialog {
+        instance_key: RyeOsViewInstanceKey,
     },
     CloseFocused,
     CloseTile {
@@ -99,6 +163,12 @@ pub enum RyeOsUiIntent {
     MoveTileToViewSet {
         layout_guard: String,
         tile_id: String,
+        view_set_id: crate::ids::ViewSetId,
+    },
+    MoveTileToSurfaceViewSet {
+        layout_guard: String,
+        tile_id: String,
+        surface_instance_id: crate::ids::SurfaceInstanceId,
         view_set_id: crate::ids::ViewSetId,
     },
     PinViewSelection {
@@ -196,6 +266,44 @@ pub enum RyeOsUiIntent {
         chain_root_id: String,
         input: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiTransferSourceSelection {
+    MountedView {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    ViewSet {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+    },
+    SurfaceViewSets {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+    },
+    SharedDock {
+        edge: RyeOsDockEdge,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum UiTransferContactIntent {
+    AcceptView {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+        placement: super::composition_operation::CompositionPlacement,
+    },
+    AcceptTabs {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+    },
+    AcceptSharedDock {
+        edge: String,
+    },
+    Commit,
+    Abort,
+    Activate,
+    CancelFreeze,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,12 +422,12 @@ pub enum RyeOsUiEvent {
     FocusDirection {
         direction: FocusDirection,
     },
-    OpenOverlay {
-        overlay_id: String,
+    OpenLauncher,
+    OpenDialog {
+        dialog_id: String,
     },
-    CloseOverlay,
-    SetOverlayQuery {
-        query: String,
+    CloseDialog {
+        instance_key: RyeOsViewInstanceKey,
     },
     FocusInput,
     BlurInput,
@@ -360,29 +468,6 @@ pub enum RyeOsUiEvent {
     /// cuts the in-flight cognition and redirects. Falls back to steer semantics
     /// on non-running targets. Bound to Alt+Enter.
     SubmitInputInterrupt,
-    MoveOverlaySelection {
-        delta: i32,
-    },
-    /// Pointer selection names the exact projected overlay row; it must not
-    /// derive a delta or trust a mutable index from a stale renderer frame.
-    SetOverlaySelection {
-        item_id: String,
-    },
-    ChooseOverlay {
-        secondary: bool,
-    },
-    /// Atomically select and choose one exact projected overlay row.
-    ChooseOverlayAt {
-        item_id: String,
-        secondary: bool,
-    },
-    /// Fold (`expand: false`) or unfold the launcher group under the
-    /// overlay selection. Folding from a leaf lands the selection on the
-    /// group's header. Inert while a search query is live — matches
-    /// present under force-expanded headers.
-    FoldOverlayGroup {
-        expand: bool,
-    },
     SetTileCursor {
         tile_id: String,
         index: usize,
@@ -410,6 +495,13 @@ pub enum RyeOsUiEvent {
         instance_key: RyeOsViewInstanceKey,
         item_id: String,
         expand: bool,
+    },
+    /// Fold descendants of the exact visible hierarchy item. Unlike the
+    /// keyboard-focused form, this also addresses shared docks and dialogs.
+    SetViewTreeItemCollapsed {
+        instance_key: RyeOsViewInstanceKey,
+        item_id: String,
+        collapsed: bool,
     },
     /// Dismiss one exact transient notice. Unknown/already-dismissed ids are
     /// idempotent no-ops so stale renderer frames cannot remove another one.
@@ -457,9 +549,20 @@ pub enum RyeOsUiEvent {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RyeOsInputAction {
     Focus,
-    SetText { text: String, cursor: usize },
+    SetText {
+        text: String,
+        cursor: usize,
+    },
     Complete,
-    Submit { interrupt: bool },
+    Submit {
+        interrupt: bool,
+    },
+    /// List navigation belongs to this exact live-filter mount, never to
+    /// whichever tile happened to gain focus after the renderer frame.
+    NavigateSelection {
+        delta: i32,
+    },
+    ActivateSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +609,7 @@ pub enum RyeOsTransportFreshness {
 pub enum RyeOsEvent {
     Start {
         session: BrowserSession,
+        presentation_id: String,
         viewport: BrowserViewport,
         now_ms: u64,
     },
@@ -514,6 +618,14 @@ pub enum RyeOsEvent {
     },
     EffectResult {
         result: RyeOsEffectResult,
+    },
+    /// Adapter observation after exact authenticated claim and replay; this
+    /// event cannot claim a daemon producer or manufacture its authority.
+    PresentationProducerReady {
+        producer: super::binding::UiPresentationProducer,
+        /// Authenticated next producer-event position, not a local prefix or
+        /// retained chain sequence. No default permits predecessor adapters.
+        next_engine_seq: u64,
     },
     DaemonEvent {
         payload: serde_json::Value,
@@ -558,4 +670,18 @@ pub enum RyeOsEvent {
     RouteChanged {
         route: String,
     },
+}
+
+#[cfg(test)]
+mod acknowledgement_ingress_tests {
+    #[test]
+    fn semantic_only_ack_cannot_enter_the_serialized_event_router() {
+        let error = serde_json::from_value::<super::RyeOsEvent>(serde_json::json!({
+            "type": "seat_append_acknowledged",
+            "producer": {},
+            "events": [],
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+    }
 }

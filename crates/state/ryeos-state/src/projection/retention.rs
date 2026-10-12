@@ -159,6 +159,27 @@ pub(crate) fn refresh_chain_retention(
 }
 
 impl ProjectionDb {
+    /// Positive scheduling only. Root-ID keyset order lets the lifecycle owner
+    /// retain independent bounded history cursors without rescanning all due
+    /// roots to skip a deadline-ordered prefix. Never retirement authority.
+    pub fn due_signed_seat_retirement_slice(&self, now: &str, after: Option<&str>, limit: usize)
+        -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!((1..=128).contains(&limit), "due seat slice exceeds existing candidate batch bound");
+        let now = parse_canonical_timestamp(now)?.timestamp();
+        let mut statement = self.connection().prepare(&format!(
+            "SELECT root.chain_root_id FROM chain_retention retention \
+             JOIN threads root ON root.thread_id=retention.chain_root_id AND root.chain_root_id=retention.chain_root_id \
+             JOIN projection_meta meta ON meta.chain_root_id=retention.chain_root_id \
+             WHERE root.kind='seat_session' AND retention.retire_after IS NOT NULL AND retention.retire_after <= ?1 \
+               AND retention.terminal_at IS NOT NULL AND (?2 IS NULL OR root.chain_root_id > ?2) \
+               AND NOT EXISTS (SELECT 1 FROM threads member WHERE member.chain_root_id=retention.chain_root_id \
+                 AND member.status NOT IN ({TERMINAL_STATUSES_SQL})) \
+             ORDER BY root.chain_root_id LIMIT ?3"
+        ))?;
+        let rows = statement.query_map(rusqlite::params![now, after, limit as i64], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn list_due_terminal_chains(
         &self,
         now: &str,

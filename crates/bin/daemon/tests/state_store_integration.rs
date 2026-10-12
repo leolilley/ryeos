@@ -39,7 +39,7 @@ mod integration_tests {
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
         let test_key_path = tmpdir.path().join("test_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&test_key_path)
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&test_key_path)
             .expect("test identity creation should succeed");
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,

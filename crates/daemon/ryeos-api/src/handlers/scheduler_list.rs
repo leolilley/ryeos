@@ -54,16 +54,7 @@ pub async fn handle(
     let cursors = state.scheduler_db.get_cursors_batch(&schedule_ids)?;
 
     // Batch-load fire counts
-    let fire_counts: std::collections::HashMap<String, usize> = schedule_ids
-        .iter()
-        .filter_map(|id| {
-            state
-                .scheduler_db
-                .count_fires(id, None)
-                .ok()
-                .map(|c| (id.clone(), c))
-        })
-        .collect();
+    let fire_counts = load_fire_counts(&state.scheduler_db, &schedule_ids)?;
 
     let now = lillux::time::timestamp_millis();
     let schedules: Vec<Value> = specs
@@ -132,6 +123,39 @@ pub async fn handle(
         ));
     }
     Ok(response)
+}
+
+fn load_fire_counts(
+    db: &ryeos_scheduler::SchedulerDb,
+    schedule_ids: &[String],
+) -> Result<std::collections::HashMap<String, usize>> {
+    schedule_ids
+        .iter()
+        .map(|id| db.count_fires(id, None).map(|count| (id.clone(), count)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_fire_count_read_is_not_returned_as_zero_or_partial_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scheduler.sqlite3");
+        let db = ryeos_scheduler::SchedulerDb::open(&path).unwrap();
+        let ids = vec!["one".into(), "two".into()];
+        let empty = load_fire_counts(&db, &ids).unwrap();
+        assert_eq!(empty["one"], 0);
+        assert_eq!(empty["two"], 0);
+        // A temporary test database only: make its observation relation
+        // unavailable without changing reader authority or injecting results.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TABLE schedule_fires")
+            .unwrap();
+        assert!(load_fire_counts(&db, &ids).is_err());
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

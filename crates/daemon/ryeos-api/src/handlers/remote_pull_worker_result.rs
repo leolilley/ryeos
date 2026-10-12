@@ -146,8 +146,8 @@ impl PullIntent {
             bail!("hosted worker-result pull remote URL is not canonical");
         }
         config::validate_remote_project_path(&self.target_project_path)?;
-        ryeos_app::identity::validate_canonical_site_id(&self.source_site_id)?;
-        ryeos_app::identity::validate_canonical_site_id(&self.target_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.source_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.target_site_id)?;
         ryeos_runtime::validate_runtime_thread_id(&self.chain_root_id)
             .map_err(|error| anyhow::anyhow!(error))?;
         validate_hash("operator fingerprint", &self.operator_fingerprint)?;

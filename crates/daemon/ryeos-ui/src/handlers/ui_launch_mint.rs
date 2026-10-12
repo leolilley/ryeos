@@ -7,6 +7,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use ryeos_client_base::presentation::{
+    PresentationReferenceKind, SharedPresentationConfig, SharedPresentationLimits,
+    UiCompositionDefinition, UiCompositionPresentation, UiCompositionSelection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -41,6 +45,16 @@ pub(crate) fn binding_request_bounds(
     Ok(ryeos_client_base::ui::UiBindingRequestBounds {
         max_request_bytes: maximum,
         max_input_bytes: maximum,
+        max_seat_append_bytes: state
+            .node_config
+            .routes
+            .iter()
+            .find(|route| {
+                route.response.source.as_deref()
+                    == Some(super::ui_seat::APPEND_DESCRIPTOR.service_ref)
+            })
+            .map(|route| route.limits.body_bytes_max)
+            .ok_or_else(|| HandlerError::Internal("UI seat append route is absent".into()))?,
     })
 }
 
@@ -48,7 +62,7 @@ pub(crate) fn binding_request_bounds(
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub ui_binding_contract_revision: String,
-    pub surface_ref: String,
+    pub composition: UiCompositionSelection,
     #[serde(default)]
     pub project_path: Option<String>,
     #[serde(default)]
@@ -122,7 +136,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     };
 
-    let (compiled_binding, effective_surface) =
+    let (compiled_binding, presentation) =
         compile_session_binding(&req, &ctx, &state, project_authority.as_deref())?;
     let _project_registry_gate = match (
         registered_project_id.as_deref(),
@@ -147,7 +161,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     };
     let launch_ctx = LaunchContext {
         compiled_binding: std::sync::Arc::new(compiled_binding),
-        effective_surface,
+        presentation,
         granted_caps: ctx.scopes.clone(),
         user_principal_id,
         project_authority,
@@ -186,7 +200,7 @@ pub(crate) fn compile_session_binding(
     ctx: &HandlerContext,
     state: &AppState,
     project_authority: Option<&lillux::PinnedDirectory>,
-) -> Result<(SessionCompiledUiBinding, Value)> {
+) -> Result<(SessionCompiledUiBinding, UiCompositionPresentation)> {
     use ryeos_engine::canonical_ref::CanonicalRef;
     use ryeos_engine::contracts::SubjectResolutionAuthority;
     use ryeos_engine::engine::EffectiveItemRequest;
@@ -205,8 +219,14 @@ pub(crate) fn compile_session_binding(
             .map(lillux::PinnedDirectory::try_clone)
             .transpose()?,
     )?;
-    let surface_ref = CanonicalRef::parse(&req.surface_ref)
-        .map_err(|error| HandlerError::BadRequest(format!("invalid surface ref: {error}")))?;
+    let root_ref = CanonicalRef::parse(req.composition.item_ref())
+        .map_err(|error| HandlerError::BadRequest(format!("invalid composition ref: {error}")))?;
+    if root_ref.kind != req.composition.expected_kind() {
+        return Err(HandlerError::BadRequest(
+            "composition selection kind does not match its ref".into(),
+        )
+        .into());
+    }
     let project_subject = project_authority.map(|_| project_path.as_path());
 
     prepared
@@ -214,34 +234,20 @@ pub(crate) fn compile_session_binding(
         .engine
         .with_checked_bundle_generation(|generation| -> Result<_> {
             let request = EffectiveItemRequest {
-                item_ref: surface_ref,
-                expected_kind: Some("surface".to_string()),
+                item_ref: root_ref,
+                expected_kind: Some(req.composition.expected_kind().to_string()),
                 project_root: project_authority.map(|_| project_path.clone()),
-                subject_resolution_authority:
-                    SubjectResolutionAuthority::for_live_project_root(project_subject),
-            };
-            let mut surface = match project_authority {
-                Some(authority) => {
-                    generation.effective_item_under_project_authority(request, authority)?
-                }
-                None => generation.effective_item(request)?,
-            };
-            let embedded = match project_authority {
-                Some(authority) => ryeos_api::surface_views::embed_effective_surface_views_in_generation_under_project_authority(
-                    generation,
-                    &project_path,
-                    authority,
-                    &mut surface,
-                ),
-                None => ryeos_api::surface_views::embed_effective_surface_views_in_generation(
-                    generation,
-                    None,
-                    &mut surface,
+                subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
+                    project_subject,
                 ),
             };
-            for (view_ref, reason) in &embedded.failures {
-                tracing::warn!(%view_ref, %reason, "view binding degraded during session compilation");
-            }
+            let (presentation, identities) = resolve_composition(
+                generation,
+                state,
+                request,
+                project_subject,
+                project_authority,
+            )?;
 
             let binding = SessionCompiledUiBinding::compile(
                 BindingCompileContext {
@@ -250,18 +256,155 @@ pub(crate) fn compile_session_binding(
                     caller_scopes: &ctx.scopes,
                     project_root: canonical_project_root.as_deref(),
                     node_policy_generation_digest: state.node_policy.generation_digest(),
-                    identities: embedded.identity,
+                    identities,
                 },
-                &surface.composed_value,
+                &presentation,
                 |target_ref| compile_target(generation, &prepared, target_ref),
             )?;
-            let presentation = binding.sanitize_effective_surface(&surface.composed_value)?;
+            let presentation = binding.sanitize_presentation(&presentation)?;
             Ok((binding, presentation))
         })
 }
 
+/// One checked-generation composition boundary. Config has its own validated
+/// declaration and exact View closure; it is never composed as a Surface.
+fn resolve_composition(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    state: &AppState,
+    request: ryeos_engine::engine::EffectiveItemRequest,
+    project_root: Option<&std::path::Path>,
+    project_content: Option<&lillux::PinnedDirectory>,
+) -> Result<(
+    UiCompositionPresentation,
+    ryeos_api::surface_views::EmbeddedUiCompositionIdentity,
+)> {
+    if project_root.is_some() != project_content.is_some() {
+        return Err(HandlerError::Internal(
+            "project binding lost its retained content authority".into(),
+        )
+        .into());
+    }
+    if request.item_ref.kind == "surface" {
+        let mut root = match project_content {
+            Some(content) => generation.effective_item_under_project_authority(request, content)?,
+            None => generation.effective_item(request)?,
+        };
+        let surface: ryeos_client_base::surface::SurfaceSpec =
+            serde_json::from_value(root.composed_value.clone())
+                .context("decode Surface presentation declaration")?;
+        let policy = state.node_policy.require::<
+            ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy
+        >()?;
+        let bounds = &policy.shared_presentation;
+        ryeos_client_base::presentation::PresentationDialogSpec::validate_entries(
+            &surface.dialogs,
+            SharedPresentationLimits {
+                max_declaration_bytes: usize::try_from(bounds.max_declaration_bytes)?,
+                max_dialogs: usize::try_from(bounds.max_dialogs)?,
+                max_initial_surfaces: usize::try_from(bounds.max_initial_surfaces)?,
+                max_label_bytes: usize::try_from(bounds.max_label_bytes)?,
+                max_mount_id_bytes: usize::try_from(bounds.max_mount_id_bytes)?,
+            },
+            |item_ref| {
+                let reference = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+                    .map_err(|error| error.to_string())?;
+                if reference.kind != "view" {
+                    return Err("contextual dialog reference must have kind view".into());
+                }
+                Ok(())
+            },
+        )
+        .map_err(HandlerError::BadRequest)?;
+        let embedded = match (project_root, project_content) {
+            (Some(path), Some(content)) => ryeos_api::surface_views::embed_effective_surface_views_in_generation_under_project_authority(generation, path, content, &mut root),
+            (None, None) => ryeos_api::surface_views::embed_effective_surface_views_in_generation(generation, None, &mut root),
+            _ => unreachable!("validated project authority pair"),
+        };
+        for (view_ref, reason) in &embedded.failures {
+            tracing::warn!(%view_ref, %reason, "view binding degraded during composition resolution");
+        }
+        return Ok((
+            UiCompositionPresentation::from_effective_surface(root.composed_value)?,
+            embedded.identity,
+        ));
+    }
+    if request.item_ref.kind != "config" {
+        return Err(HandlerError::BadRequest(
+            "UI composition root must be Config or Surface".into(),
+        )
+        .into());
+    }
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+    )?;
+    let bounds = &policy.shared_presentation;
+    let maximum = usize::try_from(bounds.max_declaration_bytes)?;
+    let root = generation.effective_item_with_content_bounds(
+        request,
+        project_content.map(|content| {
+            content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent
+        }),
+        maximum,
+        maximum,
+    )?;
+    let config: SharedPresentationConfig = serde_json::from_value(root.composed_value.clone())
+        .context("decode shared presentation Config")?;
+    config
+        .shared_presentation
+        .validate(
+            SharedPresentationLimits {
+                max_declaration_bytes: maximum,
+                max_dialogs: usize::try_from(bounds.max_dialogs)?,
+                max_initial_surfaces: usize::try_from(bounds.max_initial_surfaces)?,
+                max_label_bytes: usize::try_from(bounds.max_label_bytes)?,
+                max_mount_id_bytes: usize::try_from(bounds.max_mount_id_bytes)?,
+            },
+            |kind, item_ref| {
+                let reference = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+                    .map_err(|error| error.to_string())?;
+                let expected = match kind {
+                    PresentationReferenceKind::View => "view",
+                    PresentationReferenceKind::Surface => "surface",
+                };
+                if reference.kind != expected {
+                    return Err(format!("presentation reference must have kind {expected}"));
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| HandlerError::BadRequest(error))?;
+    let refs = config
+        .shared_presentation
+        .referenced_views()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let embedded = ryeos_api::surface_views::resolve_effective_ui_view_closure_in_generation(
+        generation,
+        project_root,
+        project_content.map(|content| {
+            content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent
+        }),
+        &root,
+        refs,
+    )
+    .map_err(anyhow::Error::msg)?;
+    for (view_ref, reason) in &embedded.failures {
+        tracing::warn!(%view_ref, %reason, "view binding degraded during composition resolution");
+    }
+    Ok((
+        UiCompositionPresentation {
+            definition: UiCompositionDefinition::SharedPresentation { config },
+            views: embedded.values,
+        },
+        embedded.identity,
+    ))
+}
+
 pub(crate) fn revalidate_binding_authority(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    state: &AppState,
     compiled: &SessionCompiledUiBinding,
     resolution_root: Option<&std::path::Path>,
     project_content: Option<&lillux::PinnedDirectory>,
@@ -272,39 +415,22 @@ pub(crate) fn revalidate_binding_authority(
 
     let project_root = resolution_root;
     let request = EffectiveItemRequest {
-        item_ref: CanonicalRef::parse(&compiled.binding.surface.canonical_ref)?,
-        expected_kind: Some("surface".to_string()),
+        item_ref: CanonicalRef::parse(&compiled.binding.root.identity().canonical_ref)?,
+        expected_kind: Some(compiled.binding.root.expected_kind().to_string()),
         project_root: project_root.map(std::path::Path::to_path_buf),
         subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
             project_root,
         ),
     };
-    let mut surface = match project_content {
-        Some(content) => generation.effective_item_under_project_authority(request, content)?,
-        None => generation.effective_item(request)?,
-    };
-    let current = match (project_root, project_content) {
-        (Some(root), Some(content)) => ryeos_api::surface_views::embed_effective_surface_views_in_generation_under_project_authority(
-            generation,
-            root,
-            content,
-            &mut surface,
-        ),
-        (None, None) => ryeos_api::surface_views::embed_effective_surface_views_in_generation(
-            generation,
-            None,
-            &mut surface,
-        ),
-        _ => return Err(HandlerError::Internal("project binding lost its retained content authority".into()).into()),
-    }
-    .identity;
-    if current.surface != compiled.binding.surface || current.views != compiled.binding.views {
+    let (_, current) =
+        resolve_composition(generation, state, request, project_root, project_content)?;
+    if current.root != compiled.binding.root || current.views != compiled.binding.views {
         return Err(HandlerError::Structured {
             code: "ui_binding_stale".to_string(),
             status: 409,
             body: serde_json::json!({
                 "code": "ui_binding_stale",
-                "error": "the effective surface/view authority changed after session mint",
+                "error": "the effective composition/View authority changed after admission",
                 "retryable": false,
                 "remediation": "mint a new UI session"
             }),
@@ -364,11 +490,14 @@ pub(crate) fn compile_target(
         UiDispatchMode::SessionLocal => CompiledUiDispatchClass::SessionLocal,
     };
     let result_effect = extract_ui_result_effect(metadata)?.map(|effect| match effect {
-        ryeos_app::service_registry::UiResultEffect::AdmitBindingAttachment => {
-            crate::compiled_binding::CompiledUiResultEffect::AdmitBindingAttachment
+        ryeos_app::service_registry::UiResultEffect::OpenSurface => {
+            crate::compiled_binding::CompiledUiResultEffect::SurfaceOpening
         }
         ryeos_app::service_registry::UiResultEffect::ResumeParticularViewSet => {
             crate::compiled_binding::CompiledUiResultEffect::ResumeParticularViewSet
+        }
+        ryeos_app::service_registry::UiResultEffect::ResumeParticularSurface => {
+            crate::compiled_binding::CompiledUiResultEffect::ResumeParticularSurface
         }
     });
     let declared_source_safe = extract_ui_read_only(metadata)?;
@@ -538,20 +667,20 @@ mod tests {
     fn launch_mint_has_no_caller_authored_posture() {
         let req: Request = serde_json::from_value(serde_json::json!({
             "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-            "surface_ref": "surface:ryeos/ui/base"
+            "composition": {"kind": "surface", "surface_ref": "surface:ryeos/ui/base"}
         }))
         .unwrap();
 
-        assert_eq!(req.surface_ref, "surface:ryeos/ui/base");
+        assert_eq!(req.composition.item_ref(), "surface:ryeos/ui/base");
         for forbidden in [
             serde_json::json!({
                 "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-                "surface_ref": "surface:ryeos/ui/base",
+                "composition": {"kind": "surface", "surface_ref": "surface:ryeos/ui/base"},
                 "read_only": true
             }),
             serde_json::json!({
                 "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-                "surface_ref": "surface:ryeos/ui/base",
+                "composition": {"kind": "surface", "surface_ref": "surface:ryeos/ui/base"},
                 "mode": "operate"
             }),
         ] {
@@ -562,13 +691,13 @@ mod tests {
     #[test]
     fn launch_mint_requires_the_exact_binding_contract_revision() {
         let missing = serde_json::from_value::<Request>(serde_json::json!({
-            "surface_ref": "surface:ryeos/ui/base"
+            "composition": {"kind": "surface", "surface_ref": "surface:ryeos/ui/base"}
         }));
         assert!(missing.is_err(), "old launchers must fail request decoding");
 
         let current: Request = serde_json::from_value(serde_json::json!({
             "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
-            "surface_ref": "surface:ryeos/ui/base"
+            "composition": {"kind": "surface", "surface_ref": "surface:ryeos/ui/base"}
         }))
         .unwrap();
         assert_eq!(

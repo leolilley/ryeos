@@ -20,6 +20,9 @@ effective_trust:
 composer_config:
   extends_field: extends
   fields:
+    - name: title
+      strategy: replace_root_last
+      expect_value_type: string
     - name: tiling
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -29,9 +32,9 @@ composer_config:
     - name: view_sets
       strategy: replace_root_last
       expect_value_type: sequence
-    - name: slots
-      strategy: dict_merge_root_last
-      expect_value_type: mapping
+    - name: dialogs
+      strategy: replace_root_last
+      expect_value_type: sequence
     - name: style
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -67,14 +70,20 @@ composer_config:
     - name: backdrop
       strategy: replace_root_last
       expect_value_type: string
-    - name: overlays
-      strategy: dict_merge_root_last
-      expect_value_type: mapping
+    - name: launch_entry
+      strategy: replace_root_last
+      expect_value_type: boolean
 
 composed_value_contract:
   root_type: mapping
   required: {}
   optional:
+    title:
+      type: single
+      prim: string
+    launch_entry:
+      type: single
+      prim: boolean
     tiling:
       type: single
       prim: mapping
@@ -84,9 +93,19 @@ composed_value_contract:
     view_sets:
       type: single
       prim: sequence
-    slots:
+    dialogs:
       type: single
-      prim: mapping
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+            title: { type: single, prim: string }
+            view: { type: single, prim: string }
+          optional: {}
     style:
       type: single
       prim: mapping
@@ -233,9 +252,6 @@ composed_value_contract:
     backdrop:
       type: single
       prim: string
-    overlays:
-      type: single
-      prim: mapping
 
 metadata:
   rules:

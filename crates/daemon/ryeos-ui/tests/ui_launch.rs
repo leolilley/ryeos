@@ -6,7 +6,6 @@ mod test_state;
 use test_state::{build_test_state, launch_context, mint_launch};
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -2,12 +2,10 @@
 name: node-gc
 title: Garbage Collection
 version: "1.0.0"
-description: Garbage collection state for the active project context
+description: Bounded node garbage collection observations; live maintenance ownership is unknown
 
 widget: key_value
 sources:
   default:
     ref: service:ui/ryeos-ui/gc/status
-    params:
-      project_path: "@session:project_root"
-    requires_project: true
+    params: {}

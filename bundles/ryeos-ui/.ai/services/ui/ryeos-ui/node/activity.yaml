@@ -3,9 +3,9 @@ kind: service
 name: ryeos-ui/node/activity
 version: "1.0.0"
 description: >-
-  Node-wide execution pulse — running and window-settled thread counts,
-  continuation-deduped usage totals, and the latest durable events across
-  every thread on the node.
+  Caller-authorized activity observations: bounded thread status counts and
+  authenticated recent events with explicit coverage. Counts are not node-wide
+  totals; scoped signed usage accounting is reported unavailable.
 endpoint: ui.ryeos.node.activity
 ui_read_only: true
 state_access: read_only_existing

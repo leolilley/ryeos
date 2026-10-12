@@ -2,7 +2,7 @@
 kind: service
 name: seat-open
 version: "1.0.0"
-description: Mint or attach the browser session's seat thread - the seat is itself a thread, braided and replayable
+description: Prepare an independent presentation seat, observe its retained writer without renewal, or explicitly claim a producer
 endpoint: ui.seat.open
 # Lifecycle routes preserve the authenticated browser context directly.
 # session_local is reserved for invocation through a compiled UI binding.

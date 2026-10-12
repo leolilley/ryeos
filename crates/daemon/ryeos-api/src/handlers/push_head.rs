@@ -40,7 +40,7 @@ pub struct Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Caller identity used for principal-scoped storage — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
-    ryeos_app::identity::validate_forwarding_origin_assertion(
+    ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
         req.required_origin_site_id.as_deref(),
         ctx.authorized_key_class,
         ctx.authenticated_origin_site_id.as_deref(),

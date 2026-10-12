@@ -474,7 +474,7 @@ impl RetainedExternalExecutionBinding {
         );
         ensure!(
             !self.signed_source.is_empty()
-                && self.signed_source.len() <= crate::node_document::MAX_ITEM_BYTES as usize,
+                && self.signed_source.len() <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
             "retained placement signed source is invalid"
         );
         self.document.validate()?;
@@ -875,7 +875,7 @@ pub fn provision_installed_test_placement_credential(
     // Reverify the exact signed source, including its document, capacity owner
     // and digest, before opening a vault that may perform recovery writes.
     binding.retained_generation()?;
-    let identity = crate::identity::NodeIdentity::load(
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(
         &app_root
             .join(ryeos_engine::AI_DIR)
             .join("node/identity/private_key.pem"),
@@ -1517,7 +1517,7 @@ mod persistent_placement_credential_tests {
 
     fn fixture() -> (tempfile::TempDir, InstalledExternalExecutionBinding) {
         let root = tempfile::tempdir().unwrap();
-        let identity = crate::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();

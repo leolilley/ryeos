@@ -75,6 +75,36 @@ test("bounded row evidence is rendered through the shared detail primitive", asy
   assert.match(field, /details=\{selected\.detail\}/);
 });
 
+test("unavailable rows stay discoverable with explicit disabled semantics", async () => {
+  const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
+  const projection = await readFile(new URL("../base/src/ui/local_projection.rs", root), "utf8");
+  const reducer = await readFile(new URL("../base/src/ui/reducer/mod.rs", root), "utf8");
+
+  assert.match(renderer, /data-kind=\{row\.kind \?\? undefined\}/);
+  assert.match(renderer, /aria-disabled=\{row\.kind === "unavailable"\}/);
+  assert.match(renderer, /<button[^>]*\sdisabled=\{row\.kind === "unavailable"\}[^>]*onclick=\{\(\) => select\(row\.id\)\}/);
+  // Enabled rows submit the exact mount and semantic row, never a cached intent.
+  assert.match(renderer, /type: "choose_view_item",\s*instance_key: instanceKey,\s*item_id: itemId,\s*activate: true/);
+  assert.match(projection, /intent: record\.intent\.filter\(\|_\| enabled\)/);
+  assert.match(reducer, /view_pointer_item\(self, &instance_key, &item_id\)/);
+  assert.match(reducer, /if activate && let Some\(intent\) = intent/);
+});
+
+test("empty tables describe an observed page rather than asserting absence", async () => {
+  const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
+  const tile = await readFile(new URL("browser/layout/TileFrame.svelte", root), "utf8");
+  assert.match(renderer, /model\.total_rows === 0/);
+  assert.match(renderer, /No rows in this page\./);
+  assert.match(tile, /model\.supplement\?\.frame_label \|\| model\.group_label \|\| model\.title/);
+});
+
+test("table coverage is rendered independently of whether rows are present", async () => {
+  const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
+  assert.match(renderer, /class="table-coverage"/);
+  assert.match(renderer, /tableCoverage\.state/);
+  assert.match(renderer, /tableCoverage\.reason/);
+});
+
 test("shell keeps semantic context in Rust while narrow navigation stays reachable", async () => {
   const shell = await readFile(new URL("browser/app/RyeOs.svelte", root), "utf8");
   const system = await readFile(new URL("browser/app/SystemBar.svelte", root), "utf8");
@@ -95,4 +125,21 @@ test("shell keeps semantic context in Rust while narrow navigation stays reachab
   assert.match(tile, /data-keyboard-focus=\{model\.focused/);
   const dock = await readFile(new URL("browser/layout/DockSlot.svelte", root), "utf8");
   assert.match(dock, /data-keyboard-focus=\{model\.focused/);
+});
+
+test("canonical mount identities bound renderer-local DOM lifetimes", async () => {
+  const viewSet = await readFile(new URL("browser/layout/ViewSet.svelte", root), "utf8");
+  const layout = await readFile(new URL("browser/layout/LayoutNode.svelte", root), "utf8");
+
+  assert.match(viewSet, /\{#key model\?\.view_set_id\}[\s\S]*<LayoutNode/);
+  assert.match(layout, /\{#key model\.instance_key\}[\s\S]*<TileFrame/);
+  for (const edge of ["top", "left", "right", "bottom"]) {
+    assert.match(viewSet, new RegExp(`\\{#key docks\\.${edge}\\.instance_key\\}<DockSlot`));
+  }
+
+  // Dock keys remain outside the center's view-set key. Switching Surfaces
+  // remounts the center while an unchanged shared dock keeps its DOM lifetime.
+  const centerKey = viewSet.indexOf("{#key model?.view_set_id}");
+  assert.ok(centerKey > viewSet.indexOf("{#key docks.top.instance_key}"));
+  assert.ok(viewSet.indexOf("{#key docks.bottom.instance_key}") > viewSet.indexOf("{/key}", centerKey));
 });

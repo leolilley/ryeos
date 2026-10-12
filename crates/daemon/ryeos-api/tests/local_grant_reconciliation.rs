@@ -5,7 +5,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ryeos_api::handlers::authorize_client::{Request, handle};
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use serde_json::json;
 
 #[test]
@@ -83,7 +83,7 @@ async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
     assert_eq!(merged["origin_site_id"], "site:source");
     assert_eq!(merged["previous_origin_site_id"], "site:source");
     assert_eq!(merged["dropped_scopes"], json!([]));
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         client.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -119,7 +119,7 @@ async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
             .is_err()
         );
     }
-    let after = ryeos_app::identity::load_verified_authorized_key(
+    let after = ryeos_node_runtime::identity::load_verified_authorized_key(
         client.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -215,8 +215,8 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
     );
 
     let other = tempfile::tempdir().unwrap();
-    let wrong_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(other.path()),
+    let wrong_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(other.path()),
     )
     .unwrap();
     let mut extensions = ryeos_app::extension_state::ExtensionState::new();
@@ -228,16 +228,16 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
             .is_err()
     );
 
-    let lock_path = ryeos_app::state_lock::default_lock_path(&state.config.app_root);
-    let lock = Arc::new(ryeos_app::state_lock::StateLock::acquire(&lock_path).unwrap());
+    let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&state.config.app_root);
+    let lock = Arc::new(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap());
     let mut extensions = ryeos_app::extension_state::ExtensionState::new();
     extensions.insert(lock.clone());
     Arc::get_mut(&mut state).unwrap().extensions = Arc::new(extensions);
-    assert!(ryeos_app::state_lock::StateLock::acquire(&lock_path).is_err());
+    assert!(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).is_err());
     let result = handle(request("site:other", true), context, state.clone())
         .await
         .unwrap();
     assert_eq!(result["previous_origin_site_id"], "site:source");
     assert_eq!(result["origin_site_id"], "site:other");
-    assert!(ryeos_app::state_lock::StateLock::acquire(&lock_path).is_err());
+    assert!(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).is_err());
 }

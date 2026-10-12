@@ -27,7 +27,7 @@ ryeos_bundle_set_ids() {
 ryeos_bundle_set_names() {
   case "$1" in
     full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference ;;
-    central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
+    central-host)    printf '%s\n' core central-auth standard web ;;
     standard)        printf '%s\n' core central-auth standard ;;
     local-inference) printf '%s\n' core central-auth standard local-inference ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
@@ -41,7 +41,7 @@ ryeos_bundle_set_names() {
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference tv-tracker-authoring bundle-source bundle-release
+      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
@@ -175,10 +175,9 @@ ryeos_bundle_set_node_init_profile() {
 ryeos_bundle_set_bin_managed_names() {
   local name
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
-    # central-auth (Python tool support) and tv-tracker-authoring (reuses
-    # bin:core/ryeos-core-tools) own no compiled
-    # binaries; local-inference owns separately built payloads.
-    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
+    # Source-only bundles own no compiled binaries; local-inference
+    # owns separately built payloads.
+    [[ "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
     printf '%s\n' "$name"
   done
 }

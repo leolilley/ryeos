@@ -11,6 +11,7 @@ function createCommitRuntime(options) {
 	const startedEffects = /* @__PURE__ */ new Set();
 	const scheduleRender = options.scheduleRender ?? ((render) => queueMicrotask(render));
 	let draining = false;
+	let closed = false;
 	let renderScheduled = false;
 	let renderRunning = false;
 	let pendingEffects = 0;
@@ -19,6 +20,7 @@ function createCommitRuntime(options) {
 	let settledSequence = 0;
 	const idleWaiters = [];
 	function enqueueMutation(mutation) {
+		if (closed) return;
 		mutationQueue.push(mutation);
 		acceptedSequence += 1;
 		drainMutations();
@@ -45,12 +47,14 @@ function createCommitRuntime(options) {
 			startedEffects.add(effect.id);
 			pendingEffects += 1;
 			let delivered = false;
-			options.startEffect(effect).then((result) => deliverEffectResult(result), (error) => deliverEffectResult(options.failedEffectResult(effect, error)));
+			options.startEffect(effect).then((result) => deliverEffectResult(() => result), (error) => deliverEffectResult(() => options.failedEffectResult(effect, error)));
 			function deliverEffectResult(result) {
 				if (delivered) return;
 				delivered = true;
 				pendingEffects -= 1;
-				enqueueMutation(() => options.applyEffectResult(result));
+				if (closed) return;
+				const resolved = result();
+				enqueueMutation(() => options.applyEffectResult(resolved));
 			}
 		}
 		latestRenderable = envelope;
@@ -66,6 +70,7 @@ function createCommitRuntime(options) {
 	async function flushRender() {
 		if (renderRunning) return;
 		renderScheduled = false;
+		if (closed) return;
 		renderRunning = true;
 		try {
 			const envelope = latestRenderable;
@@ -97,7 +102,15 @@ function createCommitRuntime(options) {
 		commitMutation(mutation) {
 			enqueueMutation(mutation);
 		},
+		close() {
+			if (closed) return;
+			closed = true;
+			mutationQueue.length = 0;
+			latestRenderable = null;
+			for (const waiter of idleWaiters.splice(0)) waiter.resolve();
+		},
 		idle() {
+			if (closed) return Promise.resolve();
 			const sequence = acceptedSequence;
 			if (!draining && mutationQueue.length === 0 && pendingEffects === 0 && !renderScheduled && !renderRunning && !latestRenderable && settledSequence >= sequence) return Promise.resolve();
 			return new Promise((resolve) => idleWaiters.push({
@@ -476,7 +489,7 @@ function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/shared/utils.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/utils.js
 var is_array = Array.isArray;
 var index_of = Array.prototype.indexOf;
 var includes = Array.prototype.includes;
@@ -555,7 +568,7 @@ var STALE_REACTION = new class StaleReactionError extends Error {
 }();
 var IS_XHTML = !!globalThis.document?.contentType && /* @__PURE__ */ globalThis.document.contentType.includes("xml");
 //#endregion
-//#region node_modules/svelte/src/constants.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/constants.js
 var HYDRATION_ERROR = {};
 var UNINITIALIZED = Symbol("uninitialized");
 var NAMESPACE_HTML = "http://www.w3.org/1999/xhtml";
@@ -579,7 +592,7 @@ function svelte_boundary_reset_noop() {
 	console.warn(`https://svelte.dev/e/svelte_boundary_reset_noop`);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/hydration.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/hydration.js
 /** @import { TemplateNode } from '#client' */
 /**
 * Use this variable to guard everything related to hydration code so it can be treeshaken out
@@ -658,7 +671,7 @@ function read_hydration_instruction(node) {
 	return node.data;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/equality.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/equality.js
 /** @import { Equals } from '#client' */
 /** @type {Equals} */
 function equals(value) {
@@ -685,7 +698,7 @@ function lifecycle_outside_component(name) {
 	throw new Error(`https://svelte.dev/e/lifecycle_outside_component`);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/errors.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/errors.js
 /**
 * Cannot create a `$derived(...)` with an `await` expression outside of an effect tree
 * @returns {never}
@@ -777,13 +790,13 @@ function svelte_boundary_reset_onerror() {
 	throw new Error(`https://svelte.dev/e/svelte_boundary_reset_onerror`);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/flags/index.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/flags/index.js
 /** True if experimental.async=true */
 var async_mode_flag = false;
 /** True if we're not certain that we only have Svelte 5 code in the compilation */
 var legacy_mode_flag = false;
 //#endregion
-//#region node_modules/svelte/src/internal/shared/context.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/context.js
 /**
 * @typedef {{ p: Context | null, c: Map<unknown, unknown> | null }} Context
 */
@@ -806,7 +819,7 @@ function get_or_init_context_map(context, name) {
 	return context.c ??= new Map(get_parent_context(context) || void 0);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/context.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/context.js
 /** @import { ComponentContext, DevStackEntry, Effect } from '#client' */
 /** @type {ComponentContext | null} */
 var component_context = null;
@@ -904,7 +917,7 @@ function is_runes() {
 	return !legacy_mode_flag || component_context !== null && component_context.l === null;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/task.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/task.js
 /** @type {Array<() => void>} */
 var micro_tasks = [];
 function run_micro_tasks() {
@@ -931,7 +944,7 @@ function flush_tasks() {
 	while (micro_tasks.length > 0) run_micro_tasks();
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/status.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/status.js
 /** @import { Derived, Signal } from '#client' */
 var STATUS_MASK = ~(DIRTY | MAYBE_DIRTY | CLEAN);
 /**
@@ -950,7 +963,7 @@ function update_derived_status(derived) {
 	else set_signal_status(derived, MAYBE_DIRTY);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/utils.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/utils.js
 /** @import { Derived, Effect, Value } from '#client' */
 /**
 * @param {Value[] | null} deps
@@ -978,7 +991,7 @@ function defer_effect(effect, dirty_effects, maybe_dirty_effects) {
 	set_signal_status(effect, CLEAN);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/store.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/store.js
 /**
 * We set this to `true` when updating a store so that we correctly
 * schedule effects if the update takes place inside a `$:` effect
@@ -1008,7 +1021,7 @@ function capture_store_binding(fn) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/misc.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/misc.js
 /**
 * The child of a textarea actually corresponds to the defaultValue property, so we need
 * to remove it upon hydration to avoid a bug when someone resets the form value.
@@ -1031,7 +1044,7 @@ function add_form_reset_listener() {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
 /**
 * @template T
 * @param {() => T} fn
@@ -1069,7 +1082,7 @@ function listen_to_event_and_reset_event(element, event, handler, on_reset = han
 	add_form_reset_listener();
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/async.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/async.js
 /** @import { Blocker, Effect, Source, Value } from '#client' */
 /**
 * @param {Blocker[]} blockers
@@ -1358,7 +1371,7 @@ function unfreeze_derived_effects(derived) {
 	for (const e of derived.effects) if (e.teardown && e.fn !== null) update_effect(e);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/batch.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/batch.js
 /** @import { Fork } from 'svelte' */
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /** @type {Batch | null} */
@@ -2098,7 +2111,7 @@ function reset_all(effect) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/sources.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/sources.js
 /** @import { Derived, Effect, Source, Value } from '#client' */
 /** @type {Set<Effect>} */
 var eager_effects = /* @__PURE__ */ new Set();
@@ -2397,7 +2410,7 @@ function proxy(value) {
 	});
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/operations.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/operations.js
 /** @import { Effect, TemplateNode } from '#client' */
 /** @type {Window} */
 var $window;
@@ -2622,7 +2635,7 @@ function invoke_error_boundary(error, effect) {
 	throw error;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/effects.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/effects.js
 /** @import { Blocker, ComponentContext, ComponentContextLegacy, Derived, Effect, TemplateNode, TransitionManager } from '#client' */
 /**
 * @param {'$effect' | '$effect.pre' | '$inspect'} rune
@@ -3002,14 +3015,14 @@ function move_effect(effect, fragment) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/legacy.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/legacy.js
 /**
 * @type {Set<Value> | null}
 * @deprecated
 */
 var captured_signals = null;
 //#endregion
-//#region node_modules/svelte/src/internal/client/runtime.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/runtime.js
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /**
 * True if updating in an effect context that is reactive (i.e. not branch/root effects)
@@ -3396,7 +3409,7 @@ function is_passive_event(name) {
 	return PASSIVE_EVENTS.includes(name);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/events.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/events.js
 /**
 * Used on elements, as a map of event type -> event handler,
 * and on events themselves to track which element handled an event
@@ -3544,7 +3557,7 @@ function handle_event_propagation(event) {
 	}
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/reconciler.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/reconciler.js
 var policy = globalThis?.window?.trustedTypes && /* @__PURE__ */ globalThis.window.trustedTypes.createPolicy("svelte-trusted-html", {
 /** @param {string} html */
 createHTML: (html) => {
@@ -3563,7 +3576,7 @@ function create_fragment_from_html(html) {
 	return elem.content;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/template.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/template.js
 /** @import { Effect, EffectNodes, TemplateNode } from '#client' */
 /** @import { TemplateStructure } from './types' */
 /**
@@ -3709,7 +3722,7 @@ function append(anchor, dom) {
 	anchor.before(dom);
 }
 //#endregion
-//#region node_modules/svelte/src/reactivity/create-subscriber.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/reactivity/create-subscriber.js
 /**
 * Returns a `subscribe` function that integrates external event-based systems with Svelte's reactivity.
 * It's particularly useful for integrating with web APIs like `MediaQuery`, `IntersectionObserver`, or `WebSocket`.
@@ -3782,7 +3795,7 @@ function createSubscriber(start) {
 	};
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/boundary.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/boundary.js
 /** @import { Effect, Source, TemplateNode, } from '#client' */
 /**
 * @typedef {{
@@ -4285,7 +4298,7 @@ function unmount(component, options) {
 	return Promise.resolve();
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/branches.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/branches.js
 /** @import { Effect, TemplateNode } from '#client' */
 /**
 * @typedef {{ effect: Effect, fragment: DocumentFragment }} Branch
@@ -4433,7 +4446,7 @@ var BranchManager = class {
 	}
 };
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/if.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/if.js
 /** @import { TemplateNode } from '#client' */
 /**
 * @param {TemplateNode} node
@@ -4479,7 +4492,29 @@ function if_block(node, fn, elseif = false) {
 	}, flags);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/blocks/each.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/key.js
+/** @import { TemplateNode } from '#client' */
+var NAN = Symbol("NaN");
+/**
+* @template V
+* @param {TemplateNode} node
+* @param {() => V} get_key
+* @param {(anchor: Node) => TemplateNode | void} render_fn
+* @returns {void}
+*/
+function key(node, get_key, render_fn) {
+	if (hydrating) hydrate_next();
+	var branches = new BranchManager(node);
+	var legacy = !is_runes();
+	block(() => {
+		var key = get_key();
+		if (key !== key) key = NAN;
+		if (legacy && key !== null && typeof key === "object") key = {};
+		branches.ensure(key, render_fn);
+	});
+}
+//#endregion
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/each.js
 /** @import { EachItem, EachOutroGroup, EachState, Effect, EffectNodes, MaybeSource, Source, TemplateNode, TransitionManager, Value } from '#client' */
 /** @import { Batch } from '../../reactivity/batch.js'; */
 /**
@@ -4896,7 +4931,7 @@ function link(state, prev, next) {
 	else next.prev = prev;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/shared/attributes.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/shared/attributes.js
 var whitespace = [..." 	\n\r\f\xA0\v﻿"];
 /**
 * @param {any} value
@@ -5006,7 +5041,7 @@ function to_style(value, styles) {
 	return value == null ? null : String(value);
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/class.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/class.js
 /**
 * @param {Element} dom
 * @param {boolean | number} is_html
@@ -5033,7 +5068,7 @@ function set_class(dom, is_html, value, hash, prev_classes, next_classes) {
 	return next_classes;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/style.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/style.js
 /**
 * @param {Element & ElementCSSInlineStyle} dom
 * @param {Record<string, any>} prev
@@ -5073,7 +5108,7 @@ function set_style(dom, value, prev_styles, next_styles) {
 	return next_styles;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/attributes.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/attributes.js
 /** @import { Blocker, Effect } from '#client' */
 var IS_CUSTOM_ELEMENT = Symbol("is custom element");
 var IS_HTML = Symbol("is html");
@@ -5165,7 +5200,7 @@ function get_setters(element) {
 	return setters;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/bindings/input.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/input.js
 /** @import { Batch } from '../../../reactivity/batch.js' */
 /**
 * @param {HTMLInputElement} input
@@ -5228,7 +5263,7 @@ function to_number(value) {
 	return value === "" ? null : +value;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
 /** @import { ComponentContext, Effect } from '#client' */
 /**
 * @param {any} bound_value
@@ -5280,7 +5315,7 @@ function bind_this(element_or_component = mark_as_component(), update, get_value
 	return element_or_component;
 }
 //#endregion
-//#region node_modules/svelte/src/internal/client/reactivity/props.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/client/reactivity/props.js
 /** @import { Derived, Effect, Source } from './types.js' */
 /**
 * This function is responsible for synchronizing a possibly bound prop with the inner component state.
@@ -5421,7 +5456,7 @@ function init_update_callbacks(context) {
 	};
 }
 //#endregion
-//#region node_modules/svelte/src/internal/disclose-version.js
+//#region ../../../../../crates/clients/web/node_modules/svelte/src/internal/disclose-version.js
 if (typeof window !== "undefined") ((window.__svelte ??= {}).v ??= /* @__PURE__ */ new Set()).add("5");
 //#endregion
 //#region browser/runtime/context.ts
@@ -5434,8 +5469,8 @@ function dispatchUi() {
 }
 //#endregion
 //#region browser/app/Navigation.svelte
-var root$19 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$14 = /* @__PURE__ */ from_html(`<button aria-label="Close view navigation"></button> <aside id="ryeos-navigation" aria-label="RyeOS view navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`, 1);
+var root$20 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
+var root_1$15 = /* @__PURE__ */ from_html(`<button aria-label="Close view navigation"></button> <aside id="ryeos-navigation" aria-label="RyeOS view navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`, 1);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -5466,7 +5501,7 @@ function Navigation($$anchor, $$props) {
 			first.focus();
 		}
 	}
-	var fragment = root_1$14();
+	var fragment = root_1$15();
 	event("keydown", $window, handleKeys);
 	var button = first_child(fragment);
 	let classes;
@@ -5477,7 +5512,7 @@ function Navigation($$anchor, $$props) {
 	reset(div);
 	var nav = sibling(div, 2);
 	each(nav, 21, () => $$props.model.items, (item) => item.id, ($$anchor, item) => {
-		var button_1 = root$19();
+		var button_1 = root$20();
 		let classes_2;
 		var span_1 = sibling(child(button_1), 2);
 		var text_1 = only_child(child(span_1), true);
@@ -5515,17 +5550,17 @@ function Navigation($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/app/Notices.svelte
-var root$18 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
-var root_1$13 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
+var root$19 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
+var root_1$14 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
 function Notices($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var aside = root_1$13();
+		var aside = root_1$14();
 		each(aside, 21, () => $$props.notices, (notice) => notice.id, ($$anchor, notice) => {
-			var div = root$18();
+			var div = root$19();
 			var span = child(div);
 			var text = only_child(span, true);
 			var button = sibling(span, 2);
@@ -5553,227 +5588,3042 @@ function Notices($$anchor, $$props) {
 }
 delegate(["click"]);
 //#endregion
-//#region browser/app/OverlayLayer.svelte
-var root$17 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$12 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
-var root_2$8 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
-var root_3$7 = /* @__PURE__ */ from_html(`<span class="overlay-secondary overlay-disabled-reason"> </span>`);
-var root_4$6 = /* @__PURE__ */ from_html(`<small> </small>`);
-var root_5$5 = /* @__PURE__ */ from_html(`<button class="overlay-secondary-action">↗</button>`);
-var root_6$5 = /* @__PURE__ */ from_html(`<div><button role="option"><span class="overlay-primary"><!> </span> <!> <!> <!></button> <!></div>`);
-var root_7$5 = /* @__PURE__ */ from_html(`<p class="overlay-empty">No matching entries</p>`);
-var root_8$4 = /* @__PURE__ */ from_html(`<footer> </footer>`);
-var root_9$3 = /* @__PURE__ */ from_html(`<div class="overlay-scrim" role="presentation"><div class="overlay-panel" role="dialog" aria-modal="true" tabindex="-1"><header><div><small> </small><h2> </h2></div> <button class="overlay-close">×</button></header> <input class="overlay-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-haspopup="listbox" autocomplete="off" spellcheck="false"/> <!> <div class="overlay-items" role="listbox"></div> <!></div></div>`);
-function OverlayLayer($$anchor, $$props) {
+//#region browser/components/InputComposer.svelte
+var root$18 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
+var root_1$13 = /* @__PURE__ */ from_html(`<button>↑</button>`);
+var root_2$10 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
+function InputComposer($$anchor, $$props) {
 	push($$props, true);
-	let queryInput;
-	let panel;
-	let opener = null;
 	const dispatch = dispatchUi();
-	onMount(() => {
-		opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-		queryInput?.focus();
-	});
-	onDestroy(() => {
-		const active = document.activeElement;
-		if (opener?.isConnected && (active === document.body || active === null || active instanceof Node && panel?.contains(active))) opener.focus();
-	});
-	function select(itemId) {
+	let composing = false;
+	function cursorBytes(text, utf16Offset) {
+		return BigInt(new TextEncoder().encode(text.slice(0, utf16Offset)).length);
+	}
+	function emitInput(target) {
+		if (composing) return;
 		dispatch({
-			type: "set_overlay_selection",
-			item_id: itemId
+			type: "input_at",
+			address: $$props.model.address,
+			action: {
+				type: "set_text",
+				text: target.value,
+				cursor: cursorBytes(target.value, target.selectionStart ?? target.value.length)
+			}
 		});
 	}
-	function choose(itemId, secondary) {
-		dispatch({
-			type: "choose_overlay_at",
-			item_id: itemId,
-			secondary
-		});
-	}
-	function handleKey(event) {
-		if (event.isComposing) return;
-		if (event.key === "Escape") {
-			event.preventDefault();
-			dispatch({ type: "close_overlay" });
-		} else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-			event.preventDefault();
-			dispatch({
-				type: "move_overlay_selection",
-				delta: event.key === "ArrowDown" ? 1 : -1
-			});
-		} else if (event.key === "Enter" && event.target === queryInput) {
-			event.preventDefault();
-			dispatch({
-				type: "choose_overlay",
-				secondary: event.shiftKey || event.altKey
-			});
-		} else if (event.key === "Tab" && panel) {
-			const focusable = [...panel.querySelectorAll("input,button:not([disabled])")];
-			if (focusable.length === 0) return;
-			const current = focusable.indexOf(document.activeElement);
-			const next = event.shiftKey ? current <= 0 ? focusable.length - 1 : current - 1 : current >= focusable.length - 1 ? 0 : current + 1;
-			event.preventDefault();
-			focusable[next]?.focus();
-		}
-	}
-	var div = root_9$3();
-	var div_1 = child(div);
-	var header = child(div_1);
-	var div_2 = child(header);
-	var small = child(div_2);
-	var text$1 = only_child(small, true);
-	var h2 = sibling(small);
-	var text_1 = only_child(h2, true);
-	reset(div_2);
-	var button = sibling(div_2, 2);
-	reset(header);
-	var input = sibling(header, 2);
-	remove_input_defaults(input);
-	bind_this(input, ($$value) => queryInput = $$value, () => queryInput);
-	var node = sibling(input, 2);
+	var section = root_2$10();
+	let classes;
+	var node = child(section);
 	var consequent = ($$anchor) => {
-		var div_3 = root_1$12();
-		each(div_3, 21, () => $$props.model.columns, index, ($$anchor, column) => {
-			var span = root$17();
-			var text_2 = only_child(span, true);
-			template_effect(() => set_text(text_2, get(column)));
-			append($$anchor, span);
-		});
-		reset(div_3);
-		template_effect(() => set_style(div_3, `--columns:${$$props.model.columns.length}`));
-		append($$anchor, div_3);
+		var div = root$18();
+		var text_1 = only_child(sibling(child(div)), true);
+		next();
+		reset(div);
+		template_effect(() => set_text(text_1, $$props.model.route_label));
+		append($$anchor, div);
 	};
 	if_block(node, ($$render) => {
-		if ($$props.model.columns.length > 0) $$render(consequent);
+		if (!$$props.model.live_filter) $$render(consequent);
 	});
-	var div_4 = sibling(node, 2);
-	each(div_4, 23, () => $$props.model.items, (item, index) => `${item.category}:${item.primary}:${index}`, ($$anchor, item, index) => {
-		var div_5 = root_6$5();
-		let classes;
-		var button_1 = child(div_5);
-		var span_1 = child(button_1);
-		var node_1 = child(span_1);
-		var consequent_1 = ($$anchor) => {
-			var text_3 = text();
-			template_effect(() => set_text(text_3, get(item).expanded ? "▾" : "▸"));
-			append($$anchor, text_3);
-		};
-		if_block(node_1, ($$render) => {
-			if (get(item).header) $$render(consequent_1);
+	var textarea = sibling(node, 2);
+	remove_textarea_child(textarea);
+	var div_1 = sibling(textarea, 2);
+	var span_1 = child(div_1);
+	var text_2 = only_child(span_1, true);
+	var node_1 = sibling(span_1);
+	var consequent_1 = ($$anchor) => {
+		var button = root_1$13();
+		template_effect(() => {
+			set_attribute(button, "aria-label", `Send to ${$$props.model.route_label}`);
+			button.disabled = !$$props.model.submit_enabled;
 		});
-		var text_4 = sibling(node_1, 1, true);
-		reset(span_1);
-		var node_2 = sibling(span_1, 2);
-		var consequent_2 = ($$anchor) => {
-			var span_2 = root_2$8();
-			var text_5 = only_child(span_2, true);
-			template_effect(() => set_text(text_5, get(item).secondary));
-			append($$anchor, span_2);
-		};
-		if_block(node_2, ($$render) => {
-			if (get(item).secondary && !get(item).disabled_reason) $$render(consequent_2);
-		});
-		var node_3 = sibling(node_2, 2);
-		var consequent_3 = ($$anchor) => {
-			var span_3 = root_3$7();
-			var text_6 = only_child(span_3, true);
-			template_effect(() => {
-				set_attribute(span_3, "id", `overlay-reason-${get(item).id}`);
-				set_text(text_6, get(item).disabled_reason);
-			});
-			append($$anchor, span_3);
-		};
-		if_block(node_3, ($$render) => {
-			if (get(item).disabled_reason) $$render(consequent_3);
-		});
-		var node_4 = sibling(node_3, 2);
-		var consequent_4 = ($$anchor) => {
-			var small_1 = root_4$6();
-			var text_7 = only_child(small_1, true);
-			template_effect(() => set_text(text_7, get(item).meta));
-			append($$anchor, small_1);
-		};
-		if_block(node_4, ($$render) => {
-			if (get(item).meta) $$render(consequent_4);
-		});
-		reset(button_1);
-		var node_5 = sibling(button_1, 2);
-		var consequent_5 = ($$anchor) => {
-			var button_2 = root_5$5();
-			template_effect(() => {
-				set_attribute(button_2, "data-focus-key", `overlay:${$$props.model.id}:item:${get(item).id}:alternate`);
-				set_attribute(button_2, "aria-label", `Alternate action for ${get(item).primary}`);
-			});
-			delegated("click", button_2, () => choose(get(item).id, true));
-			append($$anchor, button_2);
-		};
-		if_block(node_5, ($$render) => {
-			if (get(item).secondary_intent && get(item).enabled) $$render(consequent_5);
-		});
-		reset(div_5);
-		template_effect(($0, $1) => {
-			classes = set_class(div_5, 1, "overlay-item", null, classes, {
-				selected: $0,
-				header: get(item).header
-			});
-			set_style(div_5, `--depth:${get(item).depth}`);
-			set_attribute(button_1, "id", `overlay-option-${$$props.model.id}-${get(index)}`);
-			set_attribute(button_1, "aria-selected", $1);
-			set_attribute(button_1, "aria-describedby", get(item).disabled_reason ? `overlay-reason-${get(item).id}` : void 0);
-			set_attribute(button_1, "data-focus-key", `overlay:${$$props.model.id}:item:${get(item).id}`);
-			button_1.disabled = !get(item).enabled;
-			set_text(text_4, get(item).primary);
-		}, [() => $$props.model.selected === BigInt(get(index)), () => $$props.model.selected === BigInt(get(index))]);
-		delegated("click", button_1, () => choose(get(item).id, false));
-		event("pointerenter", button_1, () => select(get(item).id));
-		append($$anchor, div_5);
-	}, ($$anchor) => {
-		append($$anchor, root_7$5());
-	});
-	reset(div_4);
-	var node_6 = sibling(div_4, 2);
-	var consequent_6 = ($$anchor) => {
-		var footer = root_8$4();
-		var text_8 = only_child(footer, true);
-		template_effect(() => set_text(text_8, $$props.model.hint));
-		append($$anchor, footer);
+		delegated("click", button, () => dispatch({
+			type: "input_at",
+			address: $$props.model.address,
+			action: {
+				type: "submit",
+				interrupt: false
+			}
+		}));
+		append($$anchor, button);
 	};
-	if_block(node_6, ($$render) => {
-		if ($$props.model.hint) $$render(consequent_6);
+	if_block(node_1, ($$render) => {
+		if (!$$props.model.live_filter) $$render(consequent_1);
 	});
 	reset(div_1);
-	bind_this(div_1, ($$value) => panel = $$value, () => panel);
+	reset(section);
+	template_effect(() => {
+		classes = set_class(section, 1, "composer", null, classes, { "live-filter": $$props.model.live_filter });
+		set_attribute(section, "aria-label", $$props.model.route_label);
+		set_attribute(textarea, "data-focus-key", `input:${$$props.model.address.buffer.view_instance_key}:${$$props.model.address.buffer.input_id}`);
+		set_value(textarea, $$props.model.text);
+		set_attribute(textarea, "placeholder", $$props.model.placeholder);
+		set_attribute(textarea, "aria-label", $$props.model.route_label);
+		set_text(text_2, $$props.model.hint);
+	});
+	event("focus", textarea, () => dispatch({
+		type: "input_at",
+		address: $$props.model.address,
+		action: { type: "focus" }
+	}));
+	event("compositionstart", textarea, () => composing = true);
+	event("compositionend", textarea, (event) => {
+		composing = false;
+		emitInput(event.currentTarget);
+	});
+	delegated("input", textarea, (event) => emitInput(event.currentTarget));
+	delegated("keydown", textarea, (event) => {
+		if (composing || event.isComposing) return;
+		if ((event.key === "ArrowUp" || event.key === "ArrowDown") && $$props.model.live_filter && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+			event.preventDefault();
+			event.stopPropagation();
+			dispatch({
+				type: "input_at",
+				address: $$props.model.address,
+				action: {
+					type: "navigate_selection",
+					delta: event.key === "ArrowDown" ? 1 : -1
+				}
+			});
+		} else if (event.key === "Enter" && $$props.model.live_filter) {
+			event.preventDefault();
+			event.stopPropagation();
+			dispatch({
+				type: "input_at",
+				address: $$props.model.address,
+				action: { type: "activate_selection" }
+			});
+		} else if (event.key === "Enter" && !event.shiftKey && $$props.model.submit_enabled) {
+			event.preventDefault();
+			dispatch({
+				type: "input_at",
+				address: $$props.model.address,
+				action: {
+					type: "submit",
+					interrupt: event.altKey
+				}
+			});
+		}
+	});
+	append($$anchor, section);
+	pop();
+}
+delegate([
+	"input",
+	"keydown",
+	"click"
+]);
+//#endregion
+//#region browser/components/EmptyState.svelte
+var root$17 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
+function EmptyState($$anchor, $$props) {
+	var div = root$17();
+	var strong = sibling(child(div));
+	var text = only_child(strong, true);
+	var text_1 = only_child(sibling(strong), true);
 	reset(div);
+	template_effect(() => {
+		set_text(text, $$props.title);
+		set_text(text_1, $$props.message);
+	});
+	append($$anchor, div);
+}
+//#endregion
+//#region browser/components/RowDetails.svelte
+var root$16 = /* @__PURE__ */ from_html(`<div><dt> </dt> <dd> </dd></div>`);
+var root_1$12 = /* @__PURE__ */ from_html(`<dl class="row-details"></dl>`);
+function RowDetails($$anchor, $$props) {
+	push($$props, true);
+	let label = prop($$props, "label", 3, "Details");
+	var fragment = comment();
+	var node = first_child(fragment);
+	var consequent = ($$anchor) => {
+		var dl = root_1$12();
+		each(dl, 23, () => $$props.details, (detail, index) => `${detail.field}:${index}`, ($$anchor, detail) => {
+			var div = root$16();
+			var dt = child(div);
+			var text = only_child(dt, true);
+			var text_1 = only_child(sibling(dt, 2), true);
+			reset(div);
+			template_effect(() => {
+				set_attribute(div, "data-tone", get(detail).tone ?? void 0);
+				set_text(text, get(detail).field || "detail");
+				set_text(text_1, get(detail).value);
+			});
+			append($$anchor, div);
+		});
+		reset(dl);
+		template_effect(() => set_attribute(dl, "aria-label", label()));
+		append($$anchor, dl);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.details.length) $$render(consequent);
+	});
+	append($$anchor, fragment);
+	pop();
+}
+//#endregion
+//#region browser/visuals/ryeos_field_accessibility.js
+function fieldAccessibilityModel(vm, instanceKey) {
+	const byId = new Map((vm.entities || []).map((entity) => [entity.id, entity]));
+	const groups = new Map((vm.groups || []).map((group) => [group.id, group]));
+	const neighbors = new Map((vm.entities || []).map((entity) => [entity.id, []]));
+	for (const relation of vm.relations || []) {
+		if (neighbors.has(relation.source_id) && byId.has(relation.target_id)) neighbors.get(relation.source_id).push(`${relation.kind} to ${byId.get(relation.target_id).label}`);
+		if (neighbors.has(relation.target_id) && byId.has(relation.source_id)) neighbors.get(relation.target_id).push(`${relation.kind} from ${byId.get(relation.source_id).label}`);
+	}
+	const ordered = (vm.traversal || []).map((id) => byId.get(id)).filter(Boolean);
+	return ordered.map((entity, index) => {
+		const group = entity.group_id ? groups.get(entity.group_id) : null;
+		return {
+			id: entity.id,
+			domId: `ryeos-field-option-${safeId(instanceKey)}--${safeId(entity.id)}`,
+			label: entity.accessibility_label || entity.label || entity.id,
+			selected: vm.selected === entity.id,
+			position: index + 1,
+			size: ordered.length,
+			level: entityLevel(entity, byId),
+			groupId: group?.id || null,
+			groupLabel: group?.label || null,
+			expanded: group ? !group.collapsed : null,
+			neighbors: (neighbors.get(entity.id) || []).sort().join("; "),
+			selectIntent: entity.select_intent || null,
+			activateIntent: entity.activate_intent || null,
+			compare: entity.compare_available
+		};
+	});
+}
+function entityLevel(entity, byId) {
+	let level = 1;
+	let parentId = entity.parent_id;
+	const visited = /* @__PURE__ */ new Set([entity.id]);
+	while (parentId && byId.has(parentId) && !visited.has(parentId)) {
+		visited.add(parentId);
+		level += 1;
+		parentId = byId.get(parentId).parent_id;
+	}
+	return level;
+}
+function safeId(value) {
+	return [...String(value)].map((character) => character.codePointAt(0).toString(16)).join("-");
+}
+//#endregion
+//#region browser/visuals/ryeos_field_layout.js
+var GROUP_WIDTH = 520;
+var RANK_SPACING = 210;
+var GROUP_RIGHT_GUTTER = 300;
+var GROUP_HEADER_HEIGHT = 26;
+var LARGE_FIELD_ENTITY_COUNT = 240;
+var LARGE_FIELD_RELATION_COUNT = 720;
+var StaleFieldLayoutError = class extends Error {
+	constructor() {
+		super("field layout superseded");
+		this.name = "StaleFieldLayoutError";
+	}
+};
+function layoutField(vm, previous = /* @__PURE__ */ new Map()) {
+	const prepared = prepareField(vm);
+	return placeField(vm, prepared, stronglyConnectedComponents(prepared.ids, prepared.relations), previous);
+}
+async function layoutFieldChunked(vm, previous = /* @__PURE__ */ new Map(), { schedule = nextFrame, isStale = () => false } = {}) {
+	const prepared = prepareField(vm);
+	if (!isLarge(prepared)) return layoutField(vm, previous);
+	await schedule();
+	if (isStale()) throw new StaleFieldLayoutError();
+	const components = stronglyConnectedComponents(prepared.ids, prepared.relations);
+	await schedule();
+	if (isStale()) throw new StaleFieldLayoutError();
+	const layout = placeField(vm, prepared, components, previous);
+	if (isStale()) throw new StaleFieldLayoutError();
+	return layout;
+}
+function settleLayout(layout, amount = 1) {
+	for (const node of layout.nodes.values()) {
+		node.x += (node.targetX - node.x) * amount;
+		node.y += (node.targetY - node.y) * amount;
+	}
+	for (const edge of layout.edges) edge.points = routeEdge(layout.nodes.get(edge.relation.source_id), layout.nodes.get(edge.relation.target_id));
+	layout.groups = groupBounds(layout.groupDefinitions, layout.nodes, layout.groupOrigins);
+	return layout;
+}
+function hitTest(layout, x, y) {
+	return [...layout.nodes.values()].reverse().find((node) => Math.abs(x - node.x) <= node.width / 2 && Math.abs(y - node.y) <= node.height / 2) || null;
+}
+function hitTestGroup(layout, x, y) {
+	return [...layout.groups].reverse().find((group) => x >= group.x && x <= group.x + group.width && y >= group.y && y <= group.y + GROUP_HEADER_HEIGHT) || null;
+}
+function fieldLayoutIsLarge(vm) {
+	return (vm.entities || []).length >= LARGE_FIELD_ENTITY_COUNT || (vm.relations || []).length >= LARGE_FIELD_RELATION_COUNT;
+}
+function fieldLayoutMembershipKey(vm) {
+	return JSON.stringify(visibleEntities(vm).map((entity) => entity.id));
+}
+function rebindFieldLayout(layout, vm) {
+	const entities = new Map((vm?.entities || []).map((entity) => [entity.id, entity]));
+	const relations = new Map((vm?.relations || []).map((relation) => [relation.id, relation]));
+	for (const node of layout.nodes.values()) node.entity = entities.get(node.id) || node.entity;
+	for (const edge of layout.edges) edge.relation = relations.get(edge.relation.id) || edge.relation;
+	return layout;
+}
+function prepareField(vm) {
+	const visible = visibleEntities(vm);
+	const ids = visible.map((entity) => entity.id);
+	const idSet = new Set(ids);
+	return {
+		visible,
+		ids,
+		relations: (vm.relations || []).filter((relation) => idSet.has(relation.source_id) && idSet.has(relation.target_id))
+	};
+}
+function placeField(vm, prepared, components, previous) {
+	const { visible, relations } = prepared;
+	const componentById = /* @__PURE__ */ new Map();
+	components.forEach((members, index) => {
+		members.forEach((id) => componentById.set(id, index));
+	});
+	const componentRanks = rankComponents(components, componentById, relations, visible);
+	const groupDefinitions = (vm.groups || []).map((group) => ({ ...group }));
+	const groupOrder = new Map(groupDefinitions.map((group, index) => [group.id, index]));
+	const laneNames = [...new Set(visible.map((entity) => entity.lane || "").filter(Boolean))].sort();
+	const laneOrder = new Map(laneNames.map((lane, index) => [lane, index]));
+	const buckets = /* @__PURE__ */ new Map();
+	for (const entity of visible) {
+		const key = `${groupOrder.get(entity.group_id) ?? groupOrder.size}\0${Number.isFinite(entity.rank) ? Number(entity.rank) : componentRanks.get(componentById.get(entity.id)) || 0}\0${laneOrder.get(entity.lane) ?? laneOrder.size}`;
+		if (!buckets.has(key)) buckets.set(key, []);
+		buckets.get(key).push(entity);
+	}
+	for (const entities of buckets.values()) entities.sort((left, right) => number(left.order) - number(right.order) || left.id.localeCompare(right.id));
+	const maximumRankByGroup = /* @__PURE__ */ new Map();
+	groupDefinitions.forEach((_, index) => maximumRankByGroup.set(index, 0));
+	for (const key of buckets.keys()) {
+		const [groupText, rankText] = key.split("\0");
+		const group = Number(groupText);
+		const rank = Number(rankText);
+		maximumRankByGroup.set(group, Math.max(maximumRankByGroup.get(group) ?? 0, rank));
+	}
+	const groupOrigins = /* @__PURE__ */ new Map();
+	let nextGroupOrigin = 0;
+	for (const group of [...maximumRankByGroup.keys()].sort((left, right) => left - right)) {
+		groupOrigins.set(group, nextGroupOrigin);
+		nextGroupOrigin += Math.max(GROUP_WIDTH, (maximumRankByGroup.get(group) || 0) * RANK_SPACING + GROUP_RIGHT_GUTTER);
+	}
+	const nodes = /* @__PURE__ */ new Map();
+	const incoming = incomingSources(relations);
+	for (const [key, entities] of [...buckets.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+		const [groupText, rankText, laneText] = key.split("\0");
+		const group = Number(groupText);
+		const rank = Number(rankText);
+		const lane = Number(laneText);
+		entities.forEach((entity, index) => {
+			const targetX = 120 + (groupOrigins.get(group) || 0) + rank * RANK_SPACING;
+			const targetY = 90 + lane * 150 + index * 86;
+			const seed = seedPosition(entity, previous, incoming, targetX, targetY);
+			nodes.set(entity.id, {
+				id: entity.id,
+				entity,
+				x: seed.x,
+				y: seed.y,
+				targetX,
+				targetY,
+				width: entity.traits?.shape === "aggregate" ? 156 : 136,
+				height: entity.traits?.shape === "grid" ? 74 : 52,
+				componentSize: components[componentById.get(entity.id)]?.length || 1
+			});
+		});
+	}
+	const edges = relations.map((relation) => ({
+		relation,
+		points: routeEdge(nodes.get(relation.source_id), nodes.get(relation.target_id))
+	}));
+	const groups = groupBounds(groupDefinitions, nodes, groupOrigins);
+	return {
+		nodes,
+		edges,
+		groups,
+		groupDefinitions,
+		groupOrigins,
+		width: Math.max(640, ...[...nodes.values()].map((node) => node.targetX + node.width + 100), ...groups.map((group) => group.x + group.width + 40)),
+		height: Math.max(360, ...[...nodes.values()].map((node) => node.targetY + node.height + 100), ...groups.map((group) => group.y + group.height + 40))
+	};
+}
+function visibleEntities(vm) {
+	const hidden = new Set((vm.layers || []).filter((layer) => !layer.visible).map((layer) => layer.id));
+	const collapsed = new Set((vm.groups || []).filter((group) => group.collapsed).map((group) => group.id));
+	return (vm.entities || []).filter((entity) => {
+		if (entity.selected) return true;
+		if (entity.group_id && collapsed.has(entity.group_id)) return false;
+		if (!(entity.layer_ids || []).length) return true;
+		return entity.layer_ids.some((layer) => !hidden.has(layer));
+	});
+}
+function seedPosition(entity, previous, incoming, targetX, targetY) {
+	const prior = previous.get(entity.id);
+	if (prior) return {
+		x: prior.x,
+		y: prior.y
+	};
+	const parent = entity.parent_id && previous.get(entity.parent_id);
+	if (parent) return {
+		x: parent.x,
+		y: parent.y
+	};
+	for (const sourceId of incoming.get(entity.id) || []) {
+		const source = previous.get(sourceId);
+		if (source) return {
+			x: source.x,
+			y: source.y
+		};
+	}
+	return {
+		x: targetX - 28,
+		y: targetY
+	};
+}
+function incomingSources(relations) {
+	const incoming = /* @__PURE__ */ new Map();
+	for (const relation of relations) {
+		if (!incoming.has(relation.target_id)) incoming.set(relation.target_id, []);
+		incoming.get(relation.target_id).push(relation.source_id);
+	}
+	for (const sources of incoming.values()) sources.sort();
+	return incoming;
+}
+function stronglyConnectedComponents(ids, relations) {
+	const graph = new Map(ids.map((id) => [id, []]));
+	for (const relation of relations) graph.get(relation.source_id)?.push(relation.target_id);
+	for (const targets of graph.values()) targets.sort();
+	let index = 0;
+	const stack = [];
+	const onStack = /* @__PURE__ */ new Set();
+	const indices = /* @__PURE__ */ new Map();
+	const low = /* @__PURE__ */ new Map();
+	const components = [];
+	const visit = (id) => {
+		indices.set(id, index);
+		low.set(id, index);
+		index += 1;
+		stack.push(id);
+		onStack.add(id);
+		for (const next of graph.get(id) || []) if (!indices.has(next)) {
+			visit(next);
+			low.set(id, Math.min(low.get(id), low.get(next)));
+		} else if (onStack.has(next)) low.set(id, Math.min(low.get(id), indices.get(next)));
+		if (low.get(id) === indices.get(id)) {
+			const component = [];
+			let member;
+			do {
+				member = stack.pop();
+				onStack.delete(member);
+				component.push(member);
+			} while (member !== id);
+			component.sort();
+			components.push(component);
+		}
+	};
+	[...ids].sort().forEach((id) => {
+		if (!indices.has(id)) visit(id);
+	});
+	return components;
+}
+function rankComponents(components, componentById, relations, entities) {
+	const ranks = /* @__PURE__ */ new Map();
+	const authored = new Map(entities.filter((entity) => Number.isFinite(entity.rank)).map((entity) => [componentById.get(entity.id), Number(entity.rank)]));
+	const incoming = new Map(components.map((_, index) => [index, /* @__PURE__ */ new Set()]));
+	const outgoing = new Map(components.map((_, index) => [index, /* @__PURE__ */ new Set()]));
+	for (const relation of relations) {
+		const source = componentById.get(relation.source_id);
+		const target = componentById.get(relation.target_id);
+		if (source === target) continue;
+		outgoing.get(source).add(target);
+		incoming.get(target).add(source);
+	}
+	const remainingIncoming = new Map([...incoming].map(([component, parents]) => [component, new Set(parents)]));
+	const queue = components.map((_, index) => index).filter((index) => remainingIncoming.get(index).size === 0).sort((left, right) => left - right);
+	while (queue.length) {
+		const component = queue.shift();
+		const rank = authored.get(component) ?? Math.max(0, ...[...incoming.get(component)].map((parent) => (ranks.get(parent) || 0) + 1));
+		ranks.set(component, rank);
+		for (const next of [...outgoing.get(component)].sort((left, right) => left - right)) {
+			remainingIncoming.get(next).delete(component);
+			if (remainingIncoming.get(next).size === 0) queue.push(next);
+		}
+		queue.sort((left, right) => left - right);
+	}
+	components.forEach((_, index) => {
+		if (!ranks.has(index)) ranks.set(index, authored.get(index) || 0);
+	});
+	return ranks;
+}
+function routeEdge(source, target) {
+	if (!source || !target) return [];
+	const middle = (source.x + target.x) / 2;
+	return [
+		[source.x + source.width / 2, source.y],
+		[middle, source.y],
+		[middle, target.y],
+		[target.x - target.width / 2, target.y]
+	];
+}
+function groupBounds(groups, nodes, groupOrigins = /* @__PURE__ */ new Map()) {
+	return groups.map((group, index) => {
+		const members = [...nodes.values()].filter((node) => node.entity.group_id === group.id);
+		if (!members.length) return {
+			id: group.id,
+			label: group.label,
+			collapsed: !!group.collapsed,
+			x: 20 + (groupOrigins.get(index) ?? index * GROUP_WIDTH),
+			y: 20,
+			width: 200,
+			height: 38
+		};
+		const minX = Math.min(...members.map((node) => node.x - node.width / 2)) - 32;
+		const maxX = Math.max(...members.map((node) => node.x + node.width / 2)) + 32;
+		const minY = Math.min(...members.map((node) => node.y - node.height / 2)) - 42;
+		const maxY = Math.max(...members.map((node) => node.y + node.height / 2)) + 28;
+		return {
+			id: group.id,
+			label: group.label,
+			collapsed: !!group.collapsed,
+			x: minX,
+			y: minY,
+			width: maxX - minX,
+			height: maxY - minY
+		};
+	});
+}
+function isLarge(prepared) {
+	return prepared.visible.length >= LARGE_FIELD_ENTITY_COUNT || prepared.relations.length >= LARGE_FIELD_RELATION_COUNT;
+}
+function nextFrame() {
+	return new Promise((resolve) => {
+		if (globalThis.requestAnimationFrame) requestAnimationFrame(() => resolve());
+		else setTimeout(resolve, 0);
+	});
+}
+function number(value) {
+	return Number.isFinite(value) ? Number(value) : 0;
+}
+//#endregion
+//#region browser/visuals/ryeos_field_canvas.js
+var TONES = {
+	good: "#8ec07c",
+	warn: "#fabd2f",
+	danger: "#fb4934",
+	accent: "#d65d0e",
+	neutral: "#a89984"
+};
+var HIGH_CONTRAST_TONES = {
+	good: "CanvasText",
+	warn: "CanvasText",
+	danger: "CanvasText",
+	accent: "Highlight",
+	neutral: "CanvasText"
+};
+var FieldCanvasController = class {
+	constructor(canvas, interactions) {
+		this.canvas = canvas;
+		this.context = canvas.getContext?.("2d") || null;
+		this.interactions = interactions;
+		this.layout = emptyLayout();
+		this.structuralRevision = null;
+		this.viewport = {
+			x: 20,
+			y: 20,
+			zoom: 1
+		};
+		this.frame = null;
+		this.drag = null;
+		this.layoutGeneration = 0;
+		this.layoutCount = 0;
+		this.tombstones = /* @__PURE__ */ new Map();
+		this.unmounted = false;
+		this.wireEvents();
+	}
+	update(vm) {
+		this.vm = vm;
+		this.captureExited(vm);
+		const layoutRevision = `${vm.structural_revision || ""}\0${fieldLayoutMembershipKey(vm)}`;
+		if (this.structuralRevision !== layoutRevision) {
+			this.structuralRevision = layoutRevision;
+			this.scheduleLayout(vm);
+			return;
+		}
+		rebindFieldLayout(this.layout, vm);
+		this.draw();
+	}
+	resize() {
+		const rect = this.canvas.getBoundingClientRect?.() || {
+			width: 640,
+			height: 360
+		};
+		const ratio = globalThis.devicePixelRatio || 1;
+		const width = Math.max(1, Math.floor(rect.width * ratio));
+		const height = Math.max(1, Math.floor(rect.height * ratio));
+		if (this.canvas.width !== width || this.canvas.height !== height) {
+			this.canvas.width = width;
+			this.canvas.height = height;
+		}
+		this.draw();
+	}
+	draw() {
+		const context = this.context;
+		if (!context) return;
+		const ratio = globalThis.devicePixelRatio || 1;
+		const highContrast = preference("(forced-colors: active)");
+		context.setTransform(ratio * this.viewport.zoom, 0, 0, ratio * this.viewport.zoom, ratio * this.viewport.x, ratio * this.viewport.y);
+		context.clearRect(-this.viewport.x / this.viewport.zoom, -this.viewport.y / this.viewport.zoom, this.canvas.width / ratio / this.viewport.zoom, this.canvas.height / ratio / this.viewport.zoom);
+		drawGroups(context, this.layout.groups, highContrast);
+		const changes = new Map((this.vm?.changes || []).map((change) => [change.id, change]));
+		drawRelations(context, this.layout.edges, changes, this.viewport.zoom, highContrast);
+		for (const node of this.layout.nodes.values()) drawEntity(context, node, changes.get(node.id), this.viewport.zoom, highContrast);
+		drawTombstones(context, this.tombstones, highContrast);
+	}
+	scheduleLayout(vm) {
+		const token = ++this.layoutGeneration;
+		const previous = new Map(this.layout.nodes);
+		const commit = (layout) => {
+			if (this.unmounted || token !== this.layoutGeneration) return;
+			rebindFieldLayout(layout, this.vm);
+			this.layout = layout;
+			this.layoutCount += 1;
+			this.animate(token);
+		};
+		if (!fieldLayoutIsLarge(vm)) {
+			commit(layoutField(vm, previous));
+			return;
+		}
+		layoutFieldChunked(vm, previous, { isStale: () => this.unmounted || token !== this.layoutGeneration }).then(commit).catch((error) => {
+			if (!(error instanceof StaleFieldLayoutError)) {
+				this.structuralRevision = null;
+				this.canvas.dataset.layoutError = String(error?.message || error);
+			}
+		});
+	}
+	animate(token) {
+		this.cancelAnimation();
+		if (preference("(prefers-reduced-motion: reduce)")) {
+			settleLayout(this.layout, 1);
+			this.draw();
+			this.tombstones.clear();
+			return;
+		}
+		let remaining = this.tombstones.size ? 22 : 12;
+		const tick = () => {
+			if (this.unmounted || token !== this.layoutGeneration) return;
+			settleLayout(this.layout, remaining <= 1 ? 1 : .24);
+			fadeTombstones(this.tombstones, remaining);
+			this.draw();
+			remaining -= 1;
+			this.frame = remaining > 0 && globalThis.requestAnimationFrame ? requestAnimationFrame(tick) : null;
+		};
+		tick();
+	}
+	captureExited(vm) {
+		for (const change of vm.changes || []) {
+			if (change.kind !== "exited" || !change.tombstone) continue;
+			const prior = this.layout.nodes.get(change.id);
+			if (!prior) continue;
+			this.tombstones.set(change.id, {
+				id: change.id,
+				label: change.tombstone.label || change.id,
+				traits: change.tombstone.traits || {},
+				x: prior.x,
+				y: prior.y,
+				width: prior.width,
+				height: prior.height,
+				alpha: .72
+			});
+		}
+	}
+	cancelAnimation() {
+		if (this.frame != null && globalThis.cancelAnimationFrame) cancelAnimationFrame(this.frame);
+		this.frame = null;
+	}
+	unmount() {
+		this.unmounted = true;
+		this.layoutGeneration += 1;
+		this.cancelAnimation();
+		this.canvas.onpointerdown = null;
+		this.canvas.onpointermove = null;
+		this.canvas.onpointerup = null;
+		this.canvas.onpointercancel = null;
+		this.canvas.onwheel = null;
+		this.tombstones.clear();
+	}
+	wireEvents() {
+		this.canvas.onpointerdown = (event) => {
+			const point = this.fieldPoint(event);
+			const hit = hitTest(this.layout, point.x, point.y);
+			if (hit) {
+				this.interactions.entity({
+					entityId: hit.id,
+					compare: event.shiftKey,
+					activate: event.detail >= 2
+				});
+				return;
+			}
+			const group = hitTestGroup(this.layout, point.x, point.y);
+			if (group) {
+				this.interactions.group({
+					groupId: group.id,
+					collapsed: !group.collapsed
+				});
+				return;
+			}
+			this.drag = {
+				pointerId: event.pointerId,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				viewportX: this.viewport.x,
+				viewportY: this.viewport.y
+			};
+			this.canvas.setPointerCapture?.(event.pointerId);
+		};
+		this.canvas.onpointermove = (event) => {
+			if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+			this.viewport.x = this.drag.viewportX + event.clientX - this.drag.clientX;
+			this.viewport.y = this.drag.viewportY + event.clientY - this.drag.clientY;
+			this.draw();
+		};
+		const end = (event) => {
+			if (this.drag?.pointerId === event.pointerId) this.drag = null;
+		};
+		this.canvas.onpointerup = end;
+		this.canvas.onpointercancel = end;
+		this.canvas.onwheel = (event) => {
+			event.preventDefault();
+			const rect = this.canvas.getBoundingClientRect();
+			const screenX = event.clientX - rect.left;
+			const screenY = event.clientY - rect.top;
+			const fieldX = (screenX - this.viewport.x) / this.viewport.zoom;
+			const fieldY = (screenY - this.viewport.y) / this.viewport.zoom;
+			const zoom = Math.max(.25, Math.min(3.5, this.viewport.zoom * Math.exp(-event.deltaY * .001)));
+			this.viewport.zoom = zoom;
+			this.viewport.x = screenX - fieldX * zoom;
+			this.viewport.y = screenY - fieldY * zoom;
+			this.draw();
+		};
+	}
+	fieldPoint(event) {
+		const rect = this.canvas.getBoundingClientRect();
+		return {
+			x: (event.clientX - rect.left - this.viewport.x) / this.viewport.zoom,
+			y: (event.clientY - rect.top - this.viewport.y) / this.viewport.zoom
+		};
+	}
+};
+function drawGroups(context, groups, highContrast) {
+	context.font = "12px ui-monospace, monospace";
+	for (const group of groups) {
+		context.strokeStyle = highContrast ? "CanvasText" : "rgba(168,153,132,.52)";
+		context.setLineDash([6, 5]);
+		context.strokeRect(group.x, group.y, group.width, group.height);
+		context.setLineDash([]);
+		context.fillStyle = highContrast ? "Canvas" : "rgba(29,32,33,.94)";
+		context.fillRect(group.x, group.y, group.width, 26);
+		context.fillStyle = highContrast ? "CanvasText" : "#a89984";
+		context.textAlign = "left";
+		context.textBaseline = "alphabetic";
+		context.fillText(`${group.collapsed ? "▸" : "▾"} ${group.label || group.id}`, group.x + 8, group.y + 17);
+	}
+}
+function drawRelations(context, edges, changes, zoom, highContrast) {
+	for (const edge of edges) {
+		if (edge.points.length < 2) continue;
+		const relation = edge.relation;
+		if (zoom < .4 && !relation.selected && relation.emphasis !== "strong" && relation.motion !== "flow") continue;
+		const tones = highContrast ? HIGH_CONTRAST_TONES : TONES;
+		context.strokeStyle = tones[relation.tone] || tones.neutral;
+		context.lineWidth = changes.get(relation.id) ? 4 : relation.emphasis === "strong" ? 2.5 : relation.emphasis === "quiet" ? .7 : 1.3;
+		context.setLineDash(relation.stroke === "dashed" ? [7, 5] : relation.stroke === "dotted" ? [2, 4] : []);
+		context.beginPath();
+		edge.points.forEach(([x, y], index) => index ? context.lineTo(x, y) : context.moveTo(x, y));
+		context.stroke();
+	}
+	context.setLineDash([]);
+}
+function drawEntity(context, node, change, zoom, highContrast) {
+	const entity = node.entity;
+	const tones = highContrast ? HIGH_CONTRAST_TONES : TONES;
+	const tone = tones[entity.tone] || tones.neutral;
+	context.save();
+	context.translate(node.x, node.y);
+	context.fillStyle = entity.traits?.fill === "hollow" ? highContrast ? "Canvas" : "#1d2021" : tone;
+	context.strokeStyle = entity.selected ? highContrast ? "Highlight" : "#ebdbb2" : tone;
+	context.lineWidth = entity.selected ? 4 : 2;
+	context.setLineDash(entity.traits?.stroke === "dashed" ? [7, 4] : entity.traits?.stroke === "dotted" ? [2, 3] : []);
+	if (change) {
+		context.save();
+		context.globalAlpha = .32;
+		context.strokeStyle = tone;
+		context.lineWidth = 8;
+		entityPath(context, entity.traits?.shape, node.width + 14, node.height + 14);
+		context.stroke();
+		context.restore();
+	}
+	const width = zoom < .4 ? Math.min(36, node.width) : node.width;
+	const height = zoom < .4 ? Math.min(24, node.height) : node.height;
+	entityPath(context, entity.traits?.shape, width, height);
+	context.fill();
+	context.stroke();
+	context.setLineDash([]);
+	if (zoom >= .55) {
+		if (node.componentSize > 1) {
+			context.fillStyle = highContrast ? "CanvasText" : "#fabd2f";
+			context.fillText(`↻${node.componentSize}`, node.width / 2 - 24, -node.height / 2 + 13);
+		}
+		context.fillStyle = entity.traits?.fill === "hollow" ? highContrast ? "CanvasText" : "#ebdbb2" : highContrast ? "Canvas" : "#1d2021";
+		context.textAlign = "center";
+		context.textBaseline = "middle";
+		context.font = "600 12px ui-monospace, monospace";
+		context.fillText(clipLabel(entity.label || entity.id, zoom >= 1.25 ? 34 : 20), 0, -4);
+		if (zoom >= .9) {
+			context.font = "10px ui-monospace, monospace";
+			context.fillText(entity.status || entity.kind || "", 0, 12);
+		}
+	}
+	context.restore();
+}
+function drawTombstones(context, tombstones, highContrast) {
+	for (const tombstone of tombstones.values()) {
+		context.save();
+		context.globalAlpha = tombstone.alpha;
+		context.translate(tombstone.x, tombstone.y);
+		context.strokeStyle = highContrast ? "CanvasText" : TONES.neutral;
+		context.fillStyle = highContrast ? "Canvas" : "#1d2021";
+		context.setLineDash([4, 5]);
+		entityPath(context, tombstone.traits?.shape, tombstone.width, tombstone.height);
+		context.fill();
+		context.stroke();
+		context.fillStyle = highContrast ? "CanvasText" : "#a89984";
+		context.font = "11px ui-monospace, monospace";
+		context.textAlign = "center";
+		context.fillText(clipLabel(tombstone.label, 20), 0, 3);
+		context.restore();
+	}
+}
+function fadeTombstones(tombstones, remaining) {
+	for (const [id, tombstone] of tombstones) {
+		tombstone.alpha = Math.min(.72, remaining / 22);
+		if (remaining <= 1) tombstones.delete(id);
+	}
+}
+function entityPath(context, shape, width, height) {
+	context.beginPath();
+	if (shape === "disc" || shape === "ring" || shape === "dot") context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
+	else if (shape === "diamond") {
+		context.moveTo(0, -height / 2);
+		context.lineTo(width / 2, 0);
+		context.lineTo(0, height / 2);
+		context.lineTo(-width / 2, 0);
+		context.closePath();
+	} else if (shape === "hex") {
+		for (let index = 0; index < 6; index += 1) {
+			const angle = Math.PI / 3 * index;
+			const x = Math.cos(angle) * width / 2;
+			const y = Math.sin(angle) * height / 2;
+			if (index) context.lineTo(x, y);
+			else context.moveTo(x, y);
+		}
+		context.closePath();
+	} else context.roundRect(-width / 2, -height / 2, width, height, shape === "capsule" ? height / 2 : 7);
+}
+function emptyLayout() {
+	return {
+		nodes: /* @__PURE__ */ new Map(),
+		edges: [],
+		groups: [],
+		groupDefinitions: [],
+		width: 640,
+		height: 360
+	};
+}
+function preference(query) {
+	return !!globalThis.matchMedia?.(query)?.matches;
+}
+function clipLabel(value, length) {
+	return value.length <= length ? value : `${value.slice(0, length - 1)}…`;
+}
+//#endregion
+//#region browser/views/field_preview_groups.js
+function fieldPreviewGroups(field) {
+	const entities = new Map(field.entities.map((entity) => [entity.id, entity]));
+	const previewsFor = (entity) => {
+		const retainedIds = new Set(entity.preview_ids);
+		return field.previews.filter((preview) => preview.entity_id === entity.id && retainedIds.has(preview.id));
+	};
+	const selected = field.selected ? entities.get(field.selected) : null;
+	const compared = field.compare.flatMap((id) => {
+		const entity = entities.get(id);
+		return entity ? [{
+			entity,
+			previews: previewsFor(entity)
+		}] : [];
+	});
+	return {
+		selectedPreviews: selected ? previewsFor(selected) : [],
+		compared
+	};
+}
+//#endregion
+//#region browser/views/field_empty_state.js
+/** Describe only the Rust-projected source state of a zero-entity Field. */
+function fieldEmptyState(field) {
+	if (field.entities.length !== 0) return null;
+	const sources = field.sources;
+	if (sources.some((source) => source.phase === "error" || source.error)) return {
+		tone: "error",
+		title: "Source evidence failed",
+		detail: "No entities are shown. Inspect Evidence for the source error."
+	};
+	if (sources.some((source) => source.phase === "unresolved")) return {
+		tone: "pending",
+		title: "Source unresolved",
+		detail: "No entities are shown for the current subject selection."
+	};
+	if (sources.some((source) => source.phase === "loading" || source.phase === "refreshing")) return {
+		tone: "pending",
+		title: "Source evidence pending",
+		detail: "No entities are shown while source evidence is loading or refreshing."
+	};
+	if (sources.some((source) => source.truncated)) return {
+		tone: "bounded",
+		title: "Bounded projection",
+		detail: "No entities are shown in this bounded source response; retained evidence may extend beyond it."
+	};
+	if (sources.length > 0 && sources.every((source) => source.phase === "ready")) return {
+		tone: "empty",
+		title: "No entities in this projection",
+		detail: "This does not establish that no retained run or result exists."
+	};
+	return {
+		tone: "unknown",
+		title: "No entities projected",
+		detail: "Source availability is not established here. Inspect Evidence for retained context."
+	};
+}
+//#endregion
+//#region browser/visuals/ryeos_grid_canvas.js
+function drawIndexedGrid(canvas, preview, options = {}) {
+	const grid = preview?.grid;
+	const context = canvas?.getContext?.("2d");
+	if (!grid || !context || !grid.width || !grid.height) return false;
+	const scale = Math.max(1, Number(options.scale || 10));
+	canvas.width = grid.width * scale;
+	canvas.height = grid.height * scale;
+	const palette = new Map((grid.palette || []).map((entry) => [entry.index, entry]));
+	const changed = new Set(grid.changed || []);
+	for (let index = 0; index < grid.cells.length; index += 1) {
+		const entry = palette.get(grid.cells[index]);
+		if (!entry) continue;
+		const x = index % grid.width * scale;
+		const y = Math.floor(index / grid.width) * scale;
+		context.fillStyle = entry.color || "#a89984";
+		context.fillRect(x, y, scale, scale);
+		if (entry.glyph && scale >= 7) {
+			context.fillStyle = contrastingTextColor(entry.color);
+			context.font = `${Math.max(6, Math.floor(scale * .72))}px monospace`;
+			context.textAlign = "center";
+			context.textBaseline = "middle";
+			context.fillText(entry.glyph, x + scale / 2, y + scale / 2, scale);
+		}
+		if (changed.has(index)) {
+			context.strokeStyle = options.changedColor || "#fb4934";
+			context.lineWidth = Math.max(1, scale / 5);
+			context.strokeRect(x + 1, y + 1, scale - 2, scale - 2);
+		}
+	}
+	return true;
+}
+function indexedGridAccessibilityLabel(preview, label = preview?.label || preview?.id || "Grid") {
+	const grid = preview?.grid;
+	if (!grid) return label;
+	const glyphs = new Map((grid.palette || []).map((entry) => [entry.index, entry.glyph]));
+	const cells = (grid.cells || []).slice(0, 64).map((index) => glyphs.get(index) || String(index));
+	const suffix = (grid.cells || []).length > cells.length ? "; remaining cells available in the grid transcript" : "";
+	return `${label}; ${grid.width} by ${grid.height} indexed grid; cells ${cells.join(" ")}${suffix}`;
+}
+function indexedGridTranscriptPage(preview, requestedRow = 0, pageSize = 16) {
+	const grid = preview?.grid;
+	if (!grid || !Number.isInteger(grid.width) || !Number.isInteger(grid.height) || grid.width < 1 || grid.height < 1 || grid.width > 512 || grid.height > 512 || !Array.isArray(grid.cells) || grid.cells.length > 262144 || grid.cells.length !== grid.width * grid.height) return null;
+	const size = Number.isInteger(pageSize) && pageSize > 0 ? Math.min(pageSize, 16) : 16;
+	const start = Number.isInteger(requestedRow) ? Math.max(0, Math.min(requestedRow, grid.height - 1)) : 0;
+	const end = Math.min(start + size, grid.height);
+	const palette = new Map((grid.palette || []).map((entry) => [entry.index, entry]));
+	const changed = new Set(grid.changed || []);
+	const rows = [];
+	for (let row = start; row < end; row += 1) {
+		const cells = [];
+		for (let column = 0; column < grid.width; column += 1) {
+			const offset = row * grid.width + column;
+			const index = grid.cells[offset];
+			const entry = palette.get(index);
+			const name = entry?.label || entry?.glyph || String(index);
+			cells.push(`column ${column + 1}: ${name}${changed.has(offset) ? " (changed)" : ""}`);
+		}
+		rows.push({
+			number: row + 1,
+			cells
+		});
+	}
+	return {
+		rows,
+		start,
+		end,
+		height: grid.height
+	};
+}
+function contrastingTextColor(color) {
+	const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color || "");
+	if (!match) return "CanvasText";
+	return (Number.parseInt(match[1], 16) * 299 + Number.parseInt(match[2], 16) * 587 + Number.parseInt(match[3], 16) * 114) / 1e3 >= 140 ? "#111111" : "#ffffff";
+}
+//#endregion
+//#region browser/views/GridPreview.svelte
+var root$15 = /* @__PURE__ */ from_html(`<p><strong> </strong><span> </span></p>`);
+var root_1$11 = /* @__PURE__ */ from_html(`<section class="field-grid-transcript"><div class="field-grid-transcript-nav"><button type="button">Previous rows</button> <span aria-live="polite"> </span> <button type="button">Next rows</button></div> <div class="field-grid-transcript-rows"></div></section>`);
+var root_2$9 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas> <button type="button" class="field-grid-transcript-toggle"> </button> <!></figure>`);
+function GridPreview($$anchor, $$props) {
+	push($$props, true);
+	let canvas;
+	let transcriptOpen = /* @__PURE__ */ state(false);
+	let transcriptRow = /* @__PURE__ */ state(0);
+	const label = /* @__PURE__ */ user_derived(() => indexedGridAccessibilityLabel($$props.preview, $$props.preview.label));
+	const transcript = /* @__PURE__ */ user_derived(() => get(transcriptOpen) ? indexedGridTranscriptPage($$props.preview, get(transcriptRow)) : null);
+	onMount(() => drawIndexedGrid(canvas, $$props.preview, { scale: 9 }));
+	user_effect(() => {
+		if (canvas) drawIndexedGrid(canvas, $$props.preview, { scale: 9 });
+	});
+	var figure = root_2$9();
+	var figcaption = child(figure);
+	var text = only_child(figcaption, true);
+	var canvas_1 = sibling(figcaption, 2);
+	bind_this(canvas_1, ($$value) => canvas = $$value, () => canvas);
+	var button = sibling(canvas_1, 2);
+	var text_1 = only_child(button, true);
+	var node = sibling(button, 2);
+	var consequent = ($$anchor) => {
+		var section = root_1$11();
+		var div = child(section);
+		var button_1 = child(div);
+		var span = sibling(button_1, 2);
+		var text_2 = only_child(span);
+		var button_2 = sibling(span, 2);
+		reset(div);
+		var div_1 = sibling(div, 2);
+		each(div_1, 21, () => get(transcript).rows, (row) => row.number, ($$anchor, row) => {
+			var p = root$15();
+			var strong = child(p);
+			var text_3 = only_child(strong);
+			var text_4 = only_child(sibling(strong), true);
+			reset(p);
+			template_effect(($0) => {
+				set_text(text_3, `Row ${get(row).number ?? ""}`);
+				set_text(text_4, $0);
+			}, [() => get(row).cells.join(" | ")]);
+			append($$anchor, p);
+		});
+		reset(div_1);
+		reset(section);
+		template_effect(() => {
+			set_attribute(section, "aria-label", `${$$props.preview.label} cells`);
+			button_1.disabled = get(transcript).start === 0;
+			set_text(text_2, `Rows ${get(transcript).start + 1}–${get(transcript).end ?? ""} of ${get(transcript).height ?? ""}`);
+			button_2.disabled = get(transcript).end === get(transcript).height;
+		});
+		delegated("click", button_1, () => {
+			set(transcriptRow, Math.max(0, get(transcript).start - 16), true);
+		});
+		delegated("click", button_2, () => {
+			set(transcriptRow, get(transcript).end, true);
+		});
+		append($$anchor, section);
+	};
+	if_block(node, ($$render) => {
+		if (get(transcriptOpen) && get(transcript)) $$render(consequent);
+	});
+	reset(figure);
+	template_effect(() => {
+		set_text(text, $$props.preview.label);
+		set_attribute(canvas_1, "aria-label", get(label));
+		set_attribute(canvas_1, "title", $$props.compareEnabled ? "Shift-click to compare" : void 0);
+		set_attribute(button, "aria-expanded", get(transcriptOpen));
+		set_text(text_1, get(transcriptOpen) ? "Hide grid cells" : "Read grid cells");
+	});
+	delegated("click", canvas_1, (event) => {
+		if (event.shiftKey && $$props.compareEnabled) $$props.oncompare();
+	});
+	delegated("click", button, () => {
+		set(transcriptOpen, !get(transcriptOpen));
+		set(transcriptRow, 0);
+	});
+	append($$anchor, figure);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region browser/views/FieldView.svelte
+var root$14 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_1$10 = /* @__PURE__ */ from_html(`<button>Activate</button>`);
+var root_2$8 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
+var root_3$8 = /* @__PURE__ */ from_html(`<!> <button> </button> <button> </button> <!>`, 1);
+var root_4$6 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
+var root_5$5 = /* @__PURE__ */ from_html(`<div class="field-empty-state" role="status"><strong> </strong><p> </p></div>`);
+var root_6$5 = /* @__PURE__ */ from_html(`<b>bounded</b>`);
+var root_7$5 = /* @__PURE__ */ from_html(`<b>error</b>`);
+var root_8$3 = /* @__PURE__ */ from_html(`<span> <small> </small><!><!></span>`);
+var root_9$3 = /* @__PURE__ */ from_html(`<span><b>subjects</b></span>`);
+var root_10$3 = /* @__PURE__ */ from_html(`<span><b>metrics</b></span>`);
+var root_11$2 = /* @__PURE__ */ from_html(`<span><b>provenance</b></span>`);
+var root_12$2 = /* @__PURE__ */ from_html(`<span><b>outside cut</b></span>`);
+var root_13$2 = /* @__PURE__ */ from_html(`<span><b>bounded search</b></span>`);
+var root_14$1 = /* @__PURE__ */ from_html(`<span><b>bounded expansion</b></span>`);
+var root_15$1 = /* @__PURE__ */ from_html(`<p class="field-source-coordinate">Subject fingerprint <code> </code></p>`);
+var root_16$1 = /* @__PURE__ */ from_html(`<p>Truncated response — this is not the complete retained field.</p>`);
+var root_17$1 = /* @__PURE__ */ from_html(`<p class="field-source-error"> </p>`);
+var root_18$1 = /* @__PURE__ */ from_html(`<small> </small>`);
+var root_19$1 = /* @__PURE__ */ from_html(`<p> </p>`);
+var root_20$1 = /* @__PURE__ */ from_html(`<section><strong> </strong> <p class="field-source-coordinate">Source <code> </code></p> <!> <!> <!> <!> <!> <!></section>`);
+var root_21$1 = /* @__PURE__ */ from_html(`<br/>Definition <code> </code>`, 1);
+var root_22$1 = /* @__PURE__ */ from_html(`<br/>Effective digest <code> </code>`, 1);
+var root_23$1 = /* @__PURE__ */ from_html(`<li><code> </code> <code> </code> <!> <!></li>`);
+var root_24$1 = /* @__PURE__ */ from_html(`<section aria-label="Projected source subjects"><strong>Projected source subjects</strong> <ul></ul></section>`);
+var root_25$1 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_26$1 = /* @__PURE__ */ from_html(`<li class="field-metric"><span> </span> <code> </code><!></li>`);
+var root_27$1 = /* @__PURE__ */ from_html(`<section aria-label="Projected field metrics"><strong>Projected field metrics</strong> <ul></ul></section>`);
+var root_28$1 = /* @__PURE__ */ from_html(`<li><code> </code></li>`);
+var root_29$1 = /* @__PURE__ */ from_html(`<section aria-label="Projected entity and relation source references"><strong>Projected entity/relation source refs</strong> <ul></ul></section>`);
+var root_30$1 = /* @__PURE__ */ from_html(`<p>Expansion is bounded — additional retained evidence may exist.</p>`);
+var root_31$1 = /* @__PURE__ */ from_html(`<section aria-label="Selected entity expansion evidence"><strong> </strong> <p> </p> <!></section>`);
+var root_32 = /* @__PURE__ */ from_html(`<li> </li>`);
+var root_33 = /* @__PURE__ */ from_html(`<section aria-label="Concurrent events outside replay cut"><strong>Outside replay cut</strong> <p>Concurrent retained context is not included in the selected braid cut.</p> <ul></ul></section>`);
+var root_34 = /* @__PURE__ */ from_html(`<section aria-label="Bounded field search"><strong>Bounded search results</strong> <p>The visible matches are not the complete matching field.</p></section>`);
+var root_35 = /* @__PURE__ */ from_html(`<details><summary><span>Evidence</span> <!> <!> <!> <!> <!> <!> <!></summary> <div class="field-source-evidence"><!> <!> <!> <!> <!> <!> <!></div></details>`);
+var root_36 = /* @__PURE__ */ from_html(`<div role="treeitem" tabindex="-1"> </div>`);
+var root_37 = /* @__PURE__ */ from_html(`<dl class="row-details" aria-label="Retained artifact coordinate"><div><dt>Thread</dt><dd> </dd></div> <div><dt>Artifact</dt><dd> </dd></div> <div><dt>Content hash</dt><dd> </dd></div></dl>`);
+var root_38 = /* @__PURE__ */ from_html(`<p class="field-preview-unavailable">This projected preview has no grid payload.</p>`);
+var root_39 = /* @__PURE__ */ from_html(`<strong> </strong><small> </small> <!> <!> <!> <!>`, 1);
+var root_40 = /* @__PURE__ */ from_html(`<p class="field-preview-unavailable">No grid preview is present in this projection.</p>`);
+var root_41 = /* @__PURE__ */ from_html(`<article><h3> </h3><small><code> </code> </small> <!></article>`);
+var root_42 = /* @__PURE__ */ from_html(`<section class="field-comparison" aria-label="Compared field entities"><strong>Compared entities</strong> <!></section>`);
+var root_43 = /* @__PURE__ */ from_html(`<small class="field-warning"> </small>`);
+var root_44 = /* @__PURE__ */ from_html(`<aside class="field-detail"><!> <!> <!></aside>`);
+var root_45 = /* @__PURE__ */ from_html(`<section class="field-view"><header class="field-toolbar"><div class="field-identity"><strong> </strong><span> </span></div> <div class="field-controls"><button>◀</button> <button> </button> <button>▶</button> <button>Live</button> <!> <!> <!></div> <input type="search" placeholder="Search field" aria-label="Search field entities"/></header> <!> <div class="field-stage"><canvas aria-hidden="true"></canvas> <!></div> <!> <div class="field-accessibility" role="tree" tabindex="0"></div> <!></section>`);
+function FieldView($$anchor, $$props) {
+	push($$props, true);
+	const dispatch = dispatchUi();
+	let canvas;
+	let controller = null;
+	const selected = /* @__PURE__ */ user_derived(() => $$props.field.entities.find((entity) => entity.id === $$props.field.selected) ?? null);
+	const selectedRelations = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.relations.filter((relation) => relation.source_id === get(selected).id || relation.target_id === get(selected).id) : []);
+	const previewGroups = /* @__PURE__ */ user_derived(() => fieldPreviewGroups($$props.field));
+	const emptyState = /* @__PURE__ */ user_derived(() => fieldEmptyState($$props.field));
+	const expansion = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.expansions.find((item) => item.source === get(selected).source && item.root_id === get(selected).id) ?? null : null);
+	const accessibilityItems = /* @__PURE__ */ user_derived(() => fieldAccessibilityModel($$props.field, $$props.instanceKey));
+	const activeOptionId = /* @__PURE__ */ user_derived(() => get(accessibilityItems).find((item) => item.selected)?.domId);
+	const selectEntity = (entityId) => dispatch({
+		type: "set_field_selection",
+		instance_key: $$props.instanceKey,
+		entity_id: entityId
+	});
+	const activateEntity = (entityId) => {
+		const entity = $$props.field.entities.find((candidate) => candidate.id === entityId);
+		if (entity?.activate_intent) dispatch({
+			type: "activate",
+			intent: entity.activate_intent
+		});
+	};
+	const compareEntity = (entityId) => {
+		if ($$props.field.entities.find((candidate) => candidate.id === entityId)?.compare_available) dispatch({
+			type: "toggle_field_compare",
+			instance_key: $$props.instanceKey,
+			entity_id: entityId
+		});
+	};
+	onMount(() => {
+		controller = new FieldCanvasController(canvas, {
+			entity: ({ entityId, compare, activate }) => {
+				selectEntity(entityId);
+				if (compare) compareEntity(entityId);
+				if (activate) activateEntity(entityId);
+			},
+			group: ({ groupId, collapsed }) => dispatch({
+				type: "set_field_group_collapsed",
+				instance_key: $$props.instanceKey,
+				group_id: groupId,
+				collapsed
+			})
+		});
+		const observer = new ResizeObserver(() => controller?.resize());
+		observer.observe(canvas);
+		controller.update($$props.field);
+		controller.resize();
+		return () => {
+			observer.disconnect();
+			controller?.unmount();
+			controller = null;
+		};
+	});
+	user_effect(() => controller?.update($$props.field));
+	var section = root_45();
+	var header = child(section);
+	var div = child(header);
+	var strong = child(div);
+	var text = only_child(strong, true);
+	var text_1 = only_child(sibling(strong), true);
+	reset(div);
+	var div_1 = sibling(div, 2);
+	var button = child(div_1);
+	var button_1 = sibling(button, 2);
+	var text_2 = only_child(button_1, true);
+	var button_2 = sibling(button_1, 2);
+	var button_3 = sibling(button_2, 2);
+	var node = sibling(button_3, 2);
+	each(node, 17, () => $$props.field.groups, (group) => group.id, ($$anchor, group) => {
+		var button_4 = root$14();
+		var text_3 = only_child(button_4);
+		template_effect(() => set_text(text_3, `${get(group).collapsed ? "▸" : "▾"} ${get(group).label ?? ""}`));
+		delegated("click", button_4, () => dispatch({
+			type: "set_field_group_collapsed",
+			instance_key: $$props.instanceKey,
+			group_id: get(group).id,
+			collapsed: !get(group).collapsed
+		}));
+		append($$anchor, button_4);
+	});
+	var node_1 = sibling(node, 2);
+	each(node_1, 17, () => $$props.field.layers, (layer) => layer.id, ($$anchor, layer) => {
+		var button_5 = root$14();
+		var text_4 = only_child(button_5);
+		template_effect(() => {
+			set_attribute(button_5, "aria-pressed", get(layer).visible);
+			set_text(text_4, `${get(layer).visible ? "●" : "○"} ${get(layer).label ?? ""}`);
+		});
+		delegated("click", button_5, () => dispatch({
+			type: "set_field_layer_visible",
+			instance_key: $$props.instanceKey,
+			layer_id: get(layer).id,
+			visible: !get(layer).visible
+		}));
+		append($$anchor, button_5);
+	});
+	var node_2 = sibling(node_1, 2);
+	var consequent_2 = ($$anchor) => {
+		var fragment = root_3$8();
+		var node_3 = first_child(fragment);
+		var consequent = ($$anchor) => {
+			var button_6 = root_1$10();
+			template_effect(() => set_attribute(button_6, "aria-label", `Activate ${get(selected).label}`));
+			delegated("click", button_6, () => activateEntity(get(selected).id));
+			append($$anchor, button_6);
+		};
+		if_block(node_3, ($$render) => {
+			if (get(selected).activate_intent) $$render(consequent);
+		});
+		var button_7 = sibling(node_3, 2);
+		var text_5 = only_child(button_7, true);
+		var button_8 = sibling(button_7, 2);
+		var text_6 = only_child(button_8, true);
+		var node_4 = sibling(button_8, 2);
+		var consequent_1 = ($$anchor) => {
+			var button_9 = root_2$8();
+			delegated("click", button_9, () => dispatch({
+				type: "clear_field_expansion",
+				instance_key: $$props.instanceKey,
+				source: get(selected).source,
+				root_id: get(selected).id
+			}));
+			append($$anchor, button_9);
+		};
+		if_block(node_4, ($$render) => {
+			if (get(expansion)) $$render(consequent_1);
+		});
+		template_effect(($0) => {
+			button_7.disabled = !get(selected).compare_available;
+			set_text(text_5, $0);
+			button_8.disabled = !!get(expansion) && !get(expansion).can_continue;
+			set_text(text_6, get(expansion)?.can_continue ? "Continue" : get(expansion) ? "Expanded" : "Expand");
+		}, [() => $$props.field.compare.includes(get(selected).id) ? "Uncompare" : "Compare"]);
+		delegated("click", button_7, () => compareEntity(get(selected).id));
+		delegated("click", button_8, () => dispatch({
+			type: get(expansion)?.can_continue ? "continue_field_expansion" : "request_field_expansion",
+			instance_key: $$props.instanceKey,
+			source: get(selected).source,
+			root_id: get(selected).id
+		}));
+		append($$anchor, fragment);
+	};
+	if_block(node_2, ($$render) => {
+		if (get(selected)) $$render(consequent_2);
+	});
+	reset(div_1);
+	var input = sibling(div_1, 2);
+	remove_input_defaults(input);
+	reset(header);
+	var node_5 = sibling(header, 2);
+	var consequent_3 = ($$anchor) => {
+		var nav = root_4$6();
+		each(nav, 21, () => $$props.field.replay.rail, index, ($$anchor, entry) => {
+			var button_10 = root$14();
+			let classes;
+			var text_7 = only_child(button_10, true);
+			template_effect(() => {
+				set_attribute(button_10, "aria-pressed", get(entry).selected);
+				classes = set_class(button_10, 1, "", null, classes, { selected: get(entry).selected });
+				set_text(text_7, get(entry).label);
+			});
+			delegated("click", button_10, () => dispatch({
+				type: "set_field_cursor",
+				instance_key: $$props.instanceKey,
+				cursor: {
+					mode: "braid_cut",
+					anchor: get(entry).event
+				}
+			}));
+			append($$anchor, button_10);
+		});
+		reset(nav);
+		append($$anchor, nav);
+	};
+	if_block(node_5, ($$render) => {
+		if ($$props.field.replay.rail.length) $$render(consequent_3);
+	});
+	var div_2 = sibling(node_5, 2);
+	var canvas_1 = child(div_2);
+	bind_this(canvas_1, ($$value) => canvas = $$value, () => canvas);
+	var node_6 = sibling(canvas_1, 2);
+	var consequent_4 = ($$anchor) => {
+		var div_3 = root_5$5();
+		var strong_1 = child(div_3);
+		var text_8 = only_child(strong_1, true);
+		var text_9 = only_child(sibling(strong_1), true);
+		reset(div_3);
+		template_effect(() => {
+			set_attribute(div_3, "data-tone", get(emptyState).tone);
+			set_text(text_8, get(emptyState).title);
+			set_text(text_9, get(emptyState).detail);
+		});
+		append($$anchor, div_3);
+	};
+	if_block(node_6, ($$render) => {
+		if (get(emptyState)) $$render(consequent_4);
+	});
+	reset(div_2);
+	var node_7 = sibling(div_2, 2);
+	var consequent_28 = ($$anchor) => {
+		var details = root_35();
+		let classes_1;
+		var summary = child(details);
+		var node_8 = sibling(child(summary), 2);
+		each(node_8, 17, () => $$props.field.sources, (source) => source.name, ($$anchor, source) => {
+			var span_1 = root_8$3();
+			var text_10 = child(span_1);
+			var small = sibling(text_10);
+			var text_11 = only_child(small, true);
+			var node_9 = sibling(small);
+			var consequent_5 = ($$anchor) => {
+				append($$anchor, root_6$5());
+			};
+			if_block(node_9, ($$render) => {
+				if (get(source).truncated) $$render(consequent_5);
+			});
+			var node_10 = sibling(node_9);
+			var consequent_6 = ($$anchor) => {
+				append($$anchor, root_7$5());
+			};
+			if_block(node_10, ($$render) => {
+				if (get(source).error) $$render(consequent_6);
+			});
+			reset(span_1);
+			template_effect(() => {
+				set_attribute(span_1, "data-phase", get(source).phase);
+				set_text(text_10, `${get(source).name ?? ""} `);
+				set_text(text_11, get(source).phase);
+			});
+			append($$anchor, span_1);
+		});
+		var node_11 = sibling(node_8, 2);
+		var consequent_7 = ($$anchor) => {
+			append($$anchor, root_9$3());
+		};
+		if_block(node_11, ($$render) => {
+			if ($$props.field.subjects.length) $$render(consequent_7);
+		});
+		var node_12 = sibling(node_11, 2);
+		var consequent_8 = ($$anchor) => {
+			append($$anchor, root_10$3());
+		};
+		if_block(node_12, ($$render) => {
+			if ($$props.field.metrics.length) $$render(consequent_8);
+		});
+		var node_13 = sibling(node_12, 2);
+		var consequent_9 = ($$anchor) => {
+			append($$anchor, root_11$2());
+		};
+		if_block(node_13, ($$render) => {
+			if ($$props.field.provenance.length) $$render(consequent_9);
+		});
+		var node_14 = sibling(node_13, 2);
+		var consequent_10 = ($$anchor) => {
+			append($$anchor, root_12$2());
+		};
+		if_block(node_14, ($$render) => {
+			if ($$props.field.replay.outside_cut.length) $$render(consequent_10);
+		});
+		var node_15 = sibling(node_14, 2);
+		var consequent_11 = ($$anchor) => {
+			append($$anchor, root_13$2());
+		};
+		if_block(node_15, ($$render) => {
+			if ($$props.field.search.truncated) $$render(consequent_11);
+		});
+		var node_16 = sibling(node_15, 2);
+		var consequent_12 = ($$anchor) => {
+			append($$anchor, root_14$1());
+		};
+		if_block(node_16, ($$render) => {
+			if (get(expansion)?.truncated) $$render(consequent_12);
+		});
+		reset(summary);
+		var div_4 = sibling(summary, 2);
+		var node_17 = child(div_4);
+		each(node_17, 17, () => $$props.field.sources, (source) => source.name, ($$anchor, source) => {
+			var section_1 = root_20$1();
+			var strong_2 = child(section_1);
+			var text_12 = only_child(strong_2);
+			var p_1 = sibling(strong_2, 2);
+			var text_13 = only_child(sibling(child(p_1)), true);
+			reset(p_1);
+			var node_18 = sibling(p_1, 2);
+			var consequent_13 = ($$anchor) => {
+				var p_2 = root_15$1();
+				var text_14 = only_child(sibling(child(p_2)), true);
+				reset(p_2);
+				template_effect(() => set_text(text_14, get(source).subject_fingerprint));
+				append($$anchor, p_2);
+			};
+			if_block(node_18, ($$render) => {
+				if (get(source).subject_fingerprint) $$render(consequent_13);
+			});
+			var node_19 = sibling(node_18, 2);
+			var consequent_14 = ($$anchor) => {
+				append($$anchor, root_16$1());
+			};
+			if_block(node_19, ($$render) => {
+				if (get(source).truncated) $$render(consequent_14);
+			});
+			var node_20 = sibling(node_19, 2);
+			var consequent_15 = ($$anchor) => {
+				var p_4 = root_17$1();
+				var text_15 = only_child(p_4, true);
+				template_effect(() => set_text(text_15, get(source).error));
+				append($$anchor, p_4);
+			};
+			if_block(node_20, ($$render) => {
+				if (get(source).error) $$render(consequent_15);
+			});
+			var node_21 = sibling(node_20, 2);
+			var consequent_16 = ($$anchor) => {
+				var small_1 = root_18$1();
+				var text_16 = only_child(small_1);
+				template_effect(() => set_text(text_16, `Revision ${get(source).revision ?? ""}`));
+				append($$anchor, small_1);
+			};
+			if_block(node_21, ($$render) => {
+				if (get(source).revision) $$render(consequent_16);
+			});
+			var node_22 = sibling(node_21, 2);
+			each(node_22, 17, () => get(source).evidence, index, ($$anchor, evidence) => {
+				var p_5 = root_19$1();
+				var text_17 = only_child(p_5, true);
+				template_effect(() => set_text(text_17, get(evidence)));
+				append($$anchor, p_5);
+			});
+			var node_23 = sibling(node_22, 2);
+			var consequent_17 = ($$anchor) => {
+				var p_6 = root_19$1();
+				var text_18 = only_child(p_6);
+				template_effect(() => set_text(text_18, `${get(source).evidence_omitted ?? ""} further entity evidence references omitted from this display.`));
+				append($$anchor, p_6);
+			};
+			if_block(node_23, ($$render) => {
+				if (get(source).evidence_omitted > 0) $$render(consequent_17);
+			});
+			reset(section_1);
+			template_effect(() => {
+				set_attribute(section_1, "aria-label", `${get(source).name} source evidence`);
+				set_text(text_12, `${get(source).name ?? ""} · ${get(source).phase ?? ""}`);
+				set_text(text_13, get(source).source_ref);
+			});
+			append($$anchor, section_1);
+		});
+		var node_24 = sibling(node_17, 2);
+		var consequent_20 = ($$anchor) => {
+			var section_2 = root_24$1();
+			var ul = sibling(child(section_2), 2);
+			each(ul, 23, () => $$props.field.subjects, (subject, index) => `${subject.source}:${subject.kind}:${subject.id}:${index}`, ($$anchor, subject) => {
+				var li = root_23$1();
+				var code_2 = child(li);
+				var text_19 = only_child(code_2, true);
+				var text_20 = sibling(code_2);
+				var code_3 = sibling(text_20);
+				var text_21 = only_child(code_3, true);
+				var node_25 = sibling(code_3, 2);
+				var consequent_18 = ($$anchor) => {
+					var fragment_1 = root_21$1();
+					var text_22 = only_child(sibling(first_child(fragment_1), 2), true);
+					template_effect(() => set_text(text_22, get(subject).definition_ref));
+					append($$anchor, fragment_1);
+				};
+				if_block(node_25, ($$render) => {
+					if (get(subject).definition_ref) $$render(consequent_18);
+				});
+				var node_26 = sibling(node_25, 2);
+				var consequent_19 = ($$anchor) => {
+					var fragment_2 = root_22$1();
+					var text_23 = only_child(sibling(first_child(fragment_2), 2), true);
+					template_effect(() => set_text(text_23, get(subject).effective_definition_digest));
+					append($$anchor, fragment_2);
+				};
+				if_block(node_26, ($$render) => {
+					if (get(subject).effective_definition_digest) $$render(consequent_19);
+				});
+				reset(li);
+				template_effect(() => {
+					set_text(text_19, get(subject).source);
+					set_text(text_20, ` · ${get(subject).kind ?? ""} · `);
+					set_text(text_21, get(subject).id);
+				});
+				append($$anchor, li);
+			});
+			reset(ul);
+			reset(section_2);
+			append($$anchor, section_2);
+		};
+		if_block(node_24, ($$render) => {
+			if ($$props.field.subjects.length) $$render(consequent_20);
+		});
+		var node_27 = sibling(node_24, 2);
+		var consequent_22 = ($$anchor) => {
+			var section_3 = root_27$1();
+			var ul_1 = sibling(child(section_3), 2);
+			each(ul_1, 23, () => $$props.field.metrics, (metric, index) => `${metric.id}:${index}`, ($$anchor, metric) => {
+				var li_1 = root_26$1();
+				var span_8 = child(li_1);
+				var text_24 = only_child(span_8, true);
+				var code_6 = sibling(span_8, 2);
+				var text_25 = only_child(code_6, true);
+				var node_28 = sibling(code_6);
+				var consequent_21 = ($$anchor) => {
+					var span_9 = root_25$1();
+					var text_26 = only_child(span_9, true);
+					template_effect(() => set_text(text_26, get(metric).unit));
+					append($$anchor, span_9);
+				};
+				if_block(node_28, ($$render) => {
+					if (get(metric).unit) $$render(consequent_21);
+				});
+				reset(li_1);
+				template_effect(($0) => {
+					set_text(text_24, get(metric).label);
+					set_text(text_25, $0);
+				}, [() => JSON.stringify(get(metric).value)]);
+				append($$anchor, li_1);
+			});
+			reset(ul_1);
+			reset(section_3);
+			append($$anchor, section_3);
+		};
+		if_block(node_27, ($$render) => {
+			if ($$props.field.metrics.length) $$render(consequent_22);
+		});
+		var node_29 = sibling(node_27, 2);
+		var consequent_23 = ($$anchor) => {
+			var section_4 = root_29$1();
+			var ul_2 = sibling(child(section_4), 2);
+			each(ul_2, 23, () => $$props.field.provenance, (sourceRef, index) => `${sourceRef}:${index}`, ($$anchor, sourceRef) => {
+				var li_2 = root_28$1();
+				var text_27 = only_child(child(li_2), true);
+				reset(li_2);
+				template_effect(() => set_text(text_27, get(sourceRef)));
+				append($$anchor, li_2);
+			});
+			reset(ul_2);
+			reset(section_4);
+			append($$anchor, section_4);
+		};
+		if_block(node_29, ($$render) => {
+			if ($$props.field.provenance.length) $$render(consequent_23);
+		});
+		var node_30 = sibling(node_29, 2);
+		var consequent_25 = ($$anchor) => {
+			var section_5 = root_31$1();
+			var strong_3 = child(section_5);
+			var text_28 = only_child(strong_3);
+			var p_7 = sibling(strong_3, 2);
+			var text_29 = only_child(p_7);
+			var node_31 = sibling(p_7, 2);
+			var consequent_24 = ($$anchor) => {
+				append($$anchor, root_30$1());
+			};
+			if_block(node_31, ($$render) => {
+				if (get(expansion).truncated) $$render(consequent_24);
+			});
+			reset(section_5);
+			template_effect(() => {
+				set_text(text_28, `Expansion · ${get(expansion).phase ?? ""}`);
+				set_text(text_29, `Applied depth ${get(expansion).applied_depth ?? ""}; ${get(expansion).entity_count ?? ""} retained entities.`);
+			});
+			append($$anchor, section_5);
+		};
+		if_block(node_30, ($$render) => {
+			if (get(expansion)) $$render(consequent_25);
+		});
+		var node_32 = sibling(node_30, 2);
+		var consequent_26 = ($$anchor) => {
+			var section_6 = root_33();
+			var ul_3 = sibling(child(section_6), 4);
+			each(ul_3, 23, () => $$props.field.replay.outside_cut, (event, index) => `${event}:${index}`, ($$anchor, event) => {
+				var li_3 = root_32();
+				var text_30 = only_child(li_3, true);
+				template_effect(() => set_text(text_30, get(event)));
+				append($$anchor, li_3);
+			});
+			reset(ul_3);
+			reset(section_6);
+			append($$anchor, section_6);
+		};
+		if_block(node_32, ($$render) => {
+			if ($$props.field.replay.outside_cut.length) $$render(consequent_26);
+		});
+		var node_33 = sibling(node_32, 2);
+		var consequent_27 = ($$anchor) => {
+			append($$anchor, root_34());
+		};
+		if_block(node_33, ($$render) => {
+			if ($$props.field.search.truncated) $$render(consequent_27);
+		});
+		reset(div_4);
+		reset(details);
+		template_effect(() => classes_1 = set_class(details, 1, "field-source-status", null, classes_1, { "has-rail": $$props.field.replay.rail.length > 0 }));
+		append($$anchor, details);
+	};
+	if_block(node_7, ($$render) => {
+		if ($$props.field.sources.length || $$props.field.subjects.length || $$props.field.metrics.length || $$props.field.provenance.length || $$props.field.replay.outside_cut.length || $$props.field.search.truncated || get(expansion)) $$render(consequent_28);
+	});
+	var div_5 = sibling(node_7, 2);
+	each(div_5, 21, () => get(accessibilityItems), (item) => item.id, ($$anchor, item) => {
+		var div_6 = root_36();
+		var text_31 = only_child(div_6);
+		template_effect(() => {
+			set_attribute(div_6, "id", get(item).domId);
+			set_attribute(div_6, "aria-selected", get(item).selected);
+			set_attribute(div_6, "aria-posinset", get(item).position);
+			set_attribute(div_6, "aria-setsize", get(item).size);
+			set_attribute(div_6, "aria-level", get(item).level);
+			set_attribute(div_6, "aria-expanded", get(item).expanded ?? void 0);
+			set_text(text_31, `${get(item).groupLabel ? `Group ${get(item).groupLabel}. ` : ""}${get(item).label ?? ""}${get(item).neighbors ? `. ${get(item).neighbors}` : ""}`);
+		});
+		delegated("click", div_6, () => selectEntity(get(item).id));
+		delegated("dblclick", div_6, () => activateEntity(get(item).id));
+		delegated("keydown", div_6, (event) => {
+			if (event.key === "Enter") {
+				event.preventDefault();
+				event.stopPropagation();
+				activateEntity(get(item).id);
+			}
+		});
+		append($$anchor, div_6);
+	});
+	reset(div_5);
+	var node_34 = sibling(div_5, 2);
+	var consequent_34 = ($$anchor) => {
+		var aside = root_44();
+		var node_35 = child(aside);
+		var consequent_31 = ($$anchor) => {
+			var fragment_3 = root_39();
+			var strong_4 = first_child(fragment_3);
+			var text_32 = only_child(strong_4, true);
+			var small_2 = sibling(strong_4);
+			var text_33 = only_child(small_2, true);
+			var node_36 = sibling(small_2, 2);
+			{
+				let $0 = /* @__PURE__ */ user_derived(() => `${get(selected).label} details`);
+				RowDetails(node_36, {
+					get details() {
+						return get(selected).detail;
+					},
+					get label() {
+						return get($0);
+					}
+				});
+			}
+			var node_37 = sibling(node_36, 2);
+			var consequent_29 = ($$anchor) => {
+				var dl = root_37();
+				var div_7 = child(dl);
+				var text_34 = only_child(sibling(child(div_7)), true);
+				reset(div_7);
+				var div_8 = sibling(div_7, 2);
+				var text_35 = only_child(sibling(child(div_8)), true);
+				reset(div_8);
+				var div_9 = sibling(div_8, 2);
+				var text_36 = only_child(sibling(child(div_9)), true);
+				reset(div_9);
+				reset(dl);
+				template_effect(() => {
+					set_text(text_34, get(selected).artifact_ref.thread_id);
+					set_text(text_35, get(selected).artifact_ref.artifact_id);
+					set_text(text_36, get(selected).artifact_ref.content_hash ?? "Not recorded");
+				});
+				append($$anchor, dl);
+			};
+			if_block(node_37, ($$render) => {
+				if (get(selected).artifact_ref) $$render(consequent_29);
+			});
+			var node_38 = sibling(node_37, 2);
+			each(node_38, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
+				var button_11 = root$14();
+				var text_37 = only_child(button_11, true);
+				template_effect(() => {
+					button_11.disabled = !get(relation).activate_intent;
+					set_text(text_37, get(relation).label);
+				});
+				delegated("click", button_11, () => get(relation).activate_intent && dispatch({
+					type: "activate",
+					intent: get(relation).activate_intent
+				}));
+				append($$anchor, button_11);
+			});
+			each(sibling(node_38, 2), 17, () => get(previewGroups).selectedPreviews, (preview) => preview.id, ($$anchor, preview) => {
+				var fragment_4 = comment();
+				var node_40 = first_child(fragment_4);
+				var consequent_30 = ($$anchor) => {
+					GridPreview($$anchor, {
+						get preview() {
+							return get(preview);
+						},
+						get compareEnabled() {
+							return get(selected).compare_available;
+						},
+						oncompare: () => compareEntity(get(selected).id)
+					});
+				};
+				var alternate = ($$anchor) => {
+					append($$anchor, root_38());
+				};
+				if_block(node_40, ($$render) => {
+					if (get(preview).grid) $$render(consequent_30);
+					else $$render(alternate, -1);
+				});
+				append($$anchor, fragment_4);
+			});
+			template_effect(($0) => {
+				set_text(text_32, get(selected).label);
+				set_text(text_33, $0);
+			}, [() => [
+				get(selected).kind,
+				get(selected).status,
+				get(selected).source
+			].filter(Boolean).join(" · ")]);
+			append($$anchor, fragment_3);
+		};
+		if_block(node_35, ($$render) => {
+			if (get(selected)) $$render(consequent_31);
+		});
+		var node_41 = sibling(node_35, 2);
+		var consequent_33 = ($$anchor) => {
+			var section_8 = root_42();
+			each(sibling(child(section_8), 2), 17, () => get(previewGroups).compared, (entry) => entry.entity.id, ($$anchor, entry) => {
+				var article = root_41();
+				var h3 = child(article);
+				var text_38 = only_child(h3, true);
+				var small_3 = sibling(h3);
+				var code_8 = child(small_3);
+				var text_39 = only_child(code_8, true);
+				var text_40 = sibling(code_8);
+				reset(small_3);
+				each(sibling(small_3, 2), 17, () => get(entry).previews, (preview) => preview.id, ($$anchor, preview) => {
+					var fragment_6 = comment();
+					var node_44 = first_child(fragment_6);
+					var consequent_32 = ($$anchor) => {
+						GridPreview($$anchor, {
+							get preview() {
+								return get(preview);
+							},
+							get compareEnabled() {
+								return get(entry).entity.compare_available;
+							},
+							oncompare: () => compareEntity(get(entry).entity.id)
+						});
+					};
+					var alternate_1 = ($$anchor) => {
+						append($$anchor, root_38());
+					};
+					if_block(node_44, ($$render) => {
+						if (get(preview).grid) $$render(consequent_32);
+						else $$render(alternate_1, -1);
+					});
+					append($$anchor, fragment_6);
+				}, ($$anchor) => {
+					append($$anchor, root_40());
+				});
+				reset(article);
+				template_effect(() => {
+					set_attribute(article, "aria-label", `${get(entry).entity.label} (${get(entry).entity.id}) comparison`);
+					set_text(text_38, get(entry).entity.label);
+					set_text(text_39, get(entry).entity.id);
+					set_text(text_40, ` · ${get(entry).entity.source ?? ""}`);
+				});
+				append($$anchor, article);
+			});
+			reset(section_8);
+			append($$anchor, section_8);
+		};
+		if_block(node_41, ($$render) => {
+			if (get(previewGroups).compared.length) $$render(consequent_33);
+		});
+		each(sibling(node_41, 2), 17, () => $$props.field.warnings, index, ($$anchor, warning) => {
+			var small_4 = root_43();
+			var text_41 = only_child(small_4, true);
+			template_effect(() => set_text(text_41, get(warning)));
+			append($$anchor, small_4);
+		});
+		reset(aside);
+		append($$anchor, aside);
+	};
+	if_block(node_34, ($$render) => {
+		if (get(selected) || get(previewGroups).compared.length || $$props.field.warnings.length) $$render(consequent_34);
+	});
+	reset(section);
 	template_effect(($0) => {
-		set_attribute(div_1, "aria-labelledby", `overlay-title-${$$props.model.id}`);
-		set_text(text$1, $$props.model.widget);
-		set_attribute(h2, "id", `overlay-title-${$$props.model.id}`);
-		set_text(text_1, $$props.model.title);
-		set_attribute(button, "aria-label", `Close ${$$props.model.title}`);
-		set_attribute(input, "data-focus-key", `overlay:${$$props.model.id}:query`);
-		set_value(input, $$props.model.query);
-		set_attribute(input, "aria-label", `Filter ${$$props.model.title}`);
-		set_attribute(input, "aria-controls", `overlay-options-${$$props.model.id}`);
-		set_attribute(input, "aria-activedescendant", $0);
-		set_attribute(div_4, "id", `overlay-options-${$$props.model.id}`);
-		set_attribute(div_4, "aria-label", $$props.model.title);
-	}, [() => $$props.model.selected >= 0n && $$props.model.selected < BigInt($$props.model.items.length) ? `overlay-option-${$$props.model.id}-${$$props.model.selected}` : void 0]);
-	delegated("click", div, (event) => event.target === event.currentTarget && dispatch({ type: "close_overlay" }));
-	delegated("keydown", div_1, handleKey);
-	delegated("click", button, () => dispatch({ type: "close_overlay" }));
+		set_attribute(section, "aria-label", $$props.field.title);
+		set_text(text, $$props.field.title);
+		set_text(text_1, $0);
+		button.disabled = !$$props.field.replay.previous;
+		button_1.disabled = !$$props.field.replay.playing && !$$props.field.replay.next;
+		set_text(text_2, $$props.field.replay.playing ? "Pause" : "Play");
+		button_2.disabled = !$$props.field.replay.next;
+		button_3.disabled = $$props.field.replay.mode === "live";
+		set_value(input, $$props.field.search.query);
+		set_attribute(div_5, "aria-label", `${$$props.field.title} entities`);
+		set_attribute(div_5, "aria-activedescendant", get(activeOptionId));
+	}, [() => $$props.field.sources.map((source) => `${source.name}:${source.phase}`).join(" · ")]);
+	delegated("click", button, () => dispatch({
+		type: "step_field_cursor",
+		instance_key: $$props.instanceKey,
+		direction: "previous"
+	}));
+	delegated("click", button_1, () => dispatch({
+		type: "set_field_playback",
+		instance_key: $$props.instanceKey,
+		playing: !$$props.field.replay.playing
+	}));
+	delegated("click", button_2, () => dispatch({
+		type: "step_field_cursor",
+		instance_key: $$props.instanceKey,
+		direction: "next"
+	}));
+	delegated("click", button_3, () => dispatch({
+		type: "step_field_cursor",
+		instance_key: $$props.instanceKey,
+		direction: "live"
+	}));
 	delegated("input", input, (event) => dispatch({
-		type: "set_overlay_query",
+		type: "set_field_query",
+		instance_key: $$props.instanceKey,
 		query: event.currentTarget.value
 	}));
-	append($$anchor, div);
+	delegated("keydown", input, (event) => {
+		if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+			event.preventDefault();
+			dispatch({
+				type: "move_field_search_match",
+				instance_key: $$props.instanceKey,
+				delta: event.key === "ArrowUp" ? -1 : 1
+			});
+		}
+	});
+	event("focus", div_5, () => {
+		if (!$$props.field.selected && get(accessibilityItems)[0]) selectEntity(get(accessibilityItems)[0].id);
+	});
+	delegated("keydown", div_5, (event) => {
+		const current = get(accessibilityItems).find((item) => item.selected) ?? get(accessibilityItems)[0];
+		if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+			event.preventDefault();
+			dispatch({
+				type: "move_field_selection",
+				instance_key: $$props.instanceKey,
+				delta: event.key === "ArrowUp" ? -1 : 1
+			});
+		} else if (event.key === "Home" || event.key === "End") {
+			event.preventDefault();
+			const item = event.key === "Home" ? get(accessibilityItems)[0] : get(accessibilityItems).at(-1);
+			if (item) selectEntity(item.id);
+		} else if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && current?.groupId) {
+			const collapsed = event.key === "ArrowLeft";
+			if (current.expanded === collapsed) {
+				event.preventDefault();
+				dispatch({
+					type: "set_field_group_collapsed",
+					instance_key: $$props.instanceKey,
+					group_id: current.groupId,
+					collapsed
+				});
+			}
+		} else if (event.key === "Enter" && $$props.field.selected) {
+			event.preventDefault();
+			activateEntity($$props.field.selected);
+		} else if (event.key === " " && $$props.field.selected) {
+			event.preventDefault();
+			compareEntity($$props.field.selected);
+		}
+	});
+	append($$anchor, section);
 	pop();
 }
 delegate([
 	"click",
+	"input",
 	"keydown",
-	"input"
+	"dblclick"
 ]);
+//#endregion
+//#region browser/views/SceneView.svelte
+var root$13 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_1$9 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div> <div class="atlas-lenses" aria-label="Atlas lens"></div>`, 1);
+var root_2$7 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"></div> <!></div>`);
+var root_3$7 = /* @__PURE__ */ from_svg(`<line></line>`);
+var root_4$5 = /* @__PURE__ */ from_svg(`<text> </text>`);
+var root_5$4 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
+var root_6$4 = /* @__PURE__ */ from_svg(`<rect></rect>`);
+var root_7$4 = /* @__PURE__ */ from_svg(`<circle></circle>`);
+var root_8$2 = /* @__PURE__ */ from_svg(`<title> </title>`);
+var root_9$2 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
+var root_10$2 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055"><title> </title></circle>`);
+var root_11$1 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text></g><!>`, 1);
+var root_12$1 = /* @__PURE__ */ from_svg(`<!><!>`, 1);
+var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!> <svg role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg></div>`);
+function SceneView($$anchor, $$props) {
+	push($$props, true);
+	const dispatch = dispatchUi();
+	const points = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => [object.position, object.end].filter((point) => point != null)));
+	const bounds = /* @__PURE__ */ user_derived(() => {
+		const xs = get(points).map((point) => Number(point[0] ?? 0));
+		const ys = get(points).map((point) => -Number(point[1] ?? 0));
+		const minX = xs.length ? Math.min(...xs) : 0;
+		const maxX = xs.length ? Math.max(...xs) : 1;
+		const minY = ys.length ? Math.min(...ys) : 0;
+		const maxY = ys.length ? Math.max(...ys) : 1;
+		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
+		const width = Math.max(40, maxX - minX + 40) * scale;
+		const height = Math.max(30, maxY - minY + 30) * scale;
+		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${-Number($$props.scene.camera.target[1] ?? 0) - height / 2} ${width} ${height}`;
+	});
+	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
+	const activate = (intent) => intent && dispatch({
+		type: "activate",
+		intent
+	});
+	const radius = (object) => Math.max(1, Number(object.scale?.[0] ?? 5));
+	const x = (object) => Number(object.position?.[0] ?? 0);
+	const y = (object) => -Number(object.position?.[1] ?? 0);
+	const atlasNodes = /* @__PURE__ */ user_derived(() => new Map(($$props.scene.atlas?.nodes ?? []).map((node) => [node.id, node])));
+	const atlasBounds = /* @__PURE__ */ user_derived(() => {
+		const bounds = $$props.scene.atlas?.bounds;
+		if (!bounds) return "-10 -10 20 20";
+		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
+		const width = Math.max(4, bounds.x_max - bounds.x_min + 4) * scale;
+		const height = Math.max(4, bounds.z_max - bounds.z_min + 4) * scale;
+		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${Number($$props.scene.camera.target[2] ?? 0) - height / 2} ${width} ${height}`;
+	});
+	const atlasPoint = (position) => ({
+		x: Number(position[0] ?? 0),
+		y: Number(position[2] ?? position[1] ?? 0)
+	});
+	const actionById = /* @__PURE__ */ user_derived(() => new Map($$props.scene.actions.map((action) => [action.id, action])));
+	const actions = (group) => $$props.scene.actions.filter((action) => action.group === group);
+	const runAction = (action) => action && dispatch(action.event);
+	const keyAction = (event, action) => {
+		if (event.key === "Enter" || event.key === " ") {
+			event.preventDefault();
+			runAction(action);
+		}
+	};
+	var div = root_13$1();
+	var node_1 = child(div);
+	var consequent_1 = ($$anchor) => {
+		var div_1 = root_2$7();
+		var div_2 = child(div_1);
+		var strong = child(div_2);
+		var text = only_child(strong, true);
+		var text_1 = only_child(sibling(strong));
+		reset(div_2);
+		var div_3 = sibling(div_2, 2);
+		each(div_3, 21, () => actions("projection"), (action) => action.id, ($$anchor, action) => {
+			var button = root$13();
+			let classes;
+			var text_2 = only_child(button, true);
+			template_effect(() => {
+				set_attribute(button, "aria-pressed", get(action).active);
+				classes = set_class(button, 1, "", null, classes, { active: get(action).active });
+				set_text(text_2, get(action).label);
+			});
+			delegated("click", button, () => runAction(get(action)));
+			append($$anchor, button);
+		});
+		reset(div_3);
+		var node_2 = sibling(div_3, 2);
+		var consequent = ($$anchor) => {
+			var fragment = root_1$9();
+			var div_4 = first_child(fragment);
+			each(div_4, 21, () => actions("layer"), (action) => action.id, ($$anchor, action) => {
+				var button_1 = root$13();
+				let classes_1;
+				var text_3 = only_child(button_1, true);
+				template_effect(() => {
+					set_attribute(button_1, "aria-pressed", get(action).active);
+					classes_1 = set_class(button_1, 1, "", null, classes_1, { active: get(action).active });
+					set_text(text_3, get(action).label);
+				});
+				delegated("click", button_1, () => runAction(get(action)));
+				append($$anchor, button_1);
+			});
+			reset(div_4);
+			var div_5 = sibling(div_4, 2);
+			each(div_5, 21, () => actions("lens"), (action) => action.id, ($$anchor, action) => {
+				var button_2 = root$13();
+				let classes_2;
+				var text_4 = only_child(button_2, true);
+				template_effect(() => {
+					set_attribute(button_2, "aria-pressed", get(action).active);
+					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(action).active });
+					set_text(text_4, get(action).label);
+				});
+				delegated("click", button_2, () => runAction(get(action)));
+				append($$anchor, button_2);
+			});
+			reset(div_5);
+			append($$anchor, fragment);
+		};
+		if_block(node_2, ($$render) => {
+			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
+		});
+		reset(div_1);
+		template_effect(() => {
+			set_text(text, $$props.scene.atlas.root_label);
+			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
+		});
+		append($$anchor, div_1);
+	};
+	if_block(node_1, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_1);
+	});
+	var svg = sibling(node_1, 2);
+	let classes_3;
+	var node_3 = child(svg);
+	each(node_3, 17, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
+		const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
+		const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
+		const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
+		const end = /* @__PURE__ */ user_derived(() => get(object).end);
+		var g = root_9$2();
+		let classes_4;
+		var node_4 = child(g);
+		var consequent_2 = ($$anchor) => {
+			var line = root_3$7();
+			template_effect(($0, $1) => {
+				set_attribute(line, "x1", get(ox));
+				set_attribute(line, "y1", get(oy));
+				set_attribute(line, "x2", $0);
+				set_attribute(line, "y2", $1);
+				set_attribute(line, "stroke", get(object).color);
+			}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
+			append($$anchor, line);
+		};
+		var consequent_3 = ($$anchor) => {
+			var text_5 = root_4$5();
+			var text_6 = only_child(text_5, true);
+			template_effect(() => {
+				set_attribute(text_5, "x", get(ox));
+				set_attribute(text_5, "y", get(oy));
+				set_attribute(text_5, "fill", get(object).color);
+				set_text(text_6, get(object).label ?? "");
+			});
+			append($$anchor, text_5);
+		};
+		var consequent_4 = ($$anchor) => {
+			var polygon = root_5$4();
+			template_effect(() => {
+				set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
+				set_attribute(polygon, "stroke", get(object).color);
+			});
+			append($$anchor, polygon);
+		};
+		var consequent_5 = ($$anchor) => {
+			var rect = root_6$4();
+			template_effect(() => {
+				set_attribute(rect, "x", get(ox) - get(r));
+				set_attribute(rect, "y", get(oy) - get(r));
+				set_attribute(rect, "width", get(r) * 2);
+				set_attribute(rect, "height", get(r) * 2);
+				set_attribute(rect, "stroke", get(object).color);
+			});
+			append($$anchor, rect);
+		};
+		var alternate = ($$anchor) => {
+			var circle = root_7$4();
+			template_effect(() => {
+				set_attribute(circle, "cx", get(ox));
+				set_attribute(circle, "cy", get(oy));
+				set_attribute(circle, "r", get(r));
+				set_attribute(circle, "stroke", get(object).color);
+			});
+			append($$anchor, circle);
+		};
+		if_block(node_4, ($$render) => {
+			if (get(end)) $$render(consequent_2);
+			else if (get(object).kind === "text") $$render(consequent_3, 1);
+			else if (get(object).glyph === "diamond") $$render(consequent_4, 2);
+			else if (get(object).glyph === "square") $$render(consequent_5, 3);
+			else $$render(alternate, -1);
+		});
+		var node_5 = sibling(node_4);
+		var consequent_6 = ($$anchor) => {
+			var title = root_8$2();
+			var text_7 = only_child(title, true);
+			template_effect(() => set_text(text_7, get(object).label));
+			append($$anchor, title);
+		};
+		if_block(node_5, ($$render) => {
+			if (get(object).label && get(object).kind !== "text") $$render(consequent_6);
+		});
+		reset(g);
+		template_effect(() => {
+			set_attribute(g, "data-tone", get(object).tone);
+			set_attribute(g, "opacity", get(object).opacity);
+			set_attribute(g, "role", get(object).intent ? "button" : void 0);
+			set_attribute(g, "tabindex", get(object).intent ? 0 : void 0);
+			classes_4 = set_class(g, 0, "", null, classes_4, { interactive: get(object).intent != null });
+		});
+		delegated("click", g, () => activate(get(object).intent));
+		delegated("keydown", g, (event) => {
+			if (event.key === "Enter" || event.key === " ") {
+				event.preventDefault();
+				activate(get(object).intent);
+			}
+		});
+		append($$anchor, g);
+	});
+	var node_6 = sibling(node_3);
+	var consequent_8 = ($$anchor) => {
+		var fragment_1 = root_12$1();
+		var node_7 = first_child(fragment_1);
+		each(node_7, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
+			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
+			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
+			var fragment_2 = comment();
+			var node_8 = first_child(fragment_2);
+			var consequent_7 = ($$anchor) => {
+				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
+				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
+				var line_1 = root_3$7();
+				template_effect(() => {
+					set_attribute(line_1, "x1", get(start).x);
+					set_attribute(line_1, "y1", get(start).y);
+					set_attribute(line_1, "x2", get(end).x);
+					set_attribute(line_1, "y2", get(end).y);
+					set_attribute(line_1, "data-kind", get(link).kind);
+				});
+				append($$anchor, line_1);
+			};
+			if_block(node_8, ($$render) => {
+				if (get(from) && get(to)) $$render(consequent_7);
+			});
+			append($$anchor, fragment_2);
+		});
+		each(sibling(node_7), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
+			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
+			const nodeAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`node:${get(node).id}`));
+			var fragment_3 = root_11$1();
+			var g_1 = first_child(fragment_3);
+			let classes_5;
+			var circle_1 = child(g_1);
+			var text_8 = sibling(circle_1);
+			var text_9 = only_child(text_8, true);
+			reset(g_1);
+			each(sibling(g_1), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
+				const itemAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`item:${get(item).id}`));
+				var circle_2 = root_10$2();
+				var text_10 = only_child(child(circle_2), true);
+				reset(circle_2);
+				template_effect(() => {
+					set_attribute(circle_2, "data-kind", get(item).kind);
+					set_attribute(circle_2, "cx", get(point).x + get(index) * .11);
+					set_attribute(circle_2, "cy", get(point).y - .24);
+					set_attribute(circle_2, "role", get(itemAction) ? "button" : void 0);
+					set_attribute(circle_2, "tabindex", get(itemAction) ? 0 : void 0);
+					set_text(text_10, get(item).canonical_ref);
+				});
+				delegated("click", circle_2, () => runAction(get(itemAction)));
+				delegated("keydown", circle_2, (event) => keyAction(event, get(itemAction)));
+				append($$anchor, circle_2);
+			});
+			template_effect(($0) => {
+				classes_5 = set_class(g_1, 0, "atlas-node", null, classes_5, {
+					selected: get(node).state.selected,
+					highlighted: get(node).state.highlighted,
+					dimmed: get(node).state.dimmed
+				});
+				set_attribute(g_1, "role", get(nodeAction) ? "button" : void 0);
+				set_attribute(g_1, "tabindex", get(nodeAction) ? 0 : void 0);
+				set_attribute(circle_1, "cx", get(point).x);
+				set_attribute(circle_1, "cy", get(point).y);
+				set_attribute(circle_1, "r", $0);
+				set_attribute(text_8, "x", get(point).x + .28);
+				set_attribute(text_8, "y", get(point).y + .08);
+				set_text(text_9, get(node).label);
+			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
+			delegated("click", g_1, () => runAction(get(nodeAction)));
+			delegated("keydown", g_1, (event) => keyAction(event, get(nodeAction)));
+			append($$anchor, fragment_3);
+		});
+		append($$anchor, fragment_1);
+	};
+	if_block(node_6, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_8);
+	});
+	reset(svg);
+	reset(div);
+	template_effect(() => {
+		set_attribute(svg, "viewBox", $$props.scene.atlas ? get(atlasBounds) : get(bounds));
+		set_attribute(svg, "aria-label", $$props.scene.atlas ? `${$$props.scene.atlas.root_label} atlas` : get(accessibleLabel));
+		classes_3 = set_class(svg, 0, "", null, classes_3, { "atlas-canvas": $$props.scene.atlas != null });
+	});
+	append($$anchor, div);
+	pop();
+}
+delegate(["click", "keydown"]);
+//#endregion
+//#region browser/views/TableHierarchy.svelte
+var root$12 = /* @__PURE__ */ from_html(`<span aria-hidden="true"> </span>`);
+var root_1$8 = /* @__PURE__ */ from_html(`<button class="tree-fold svelte-5rokht"> </button>`);
+var root_2$6 = /* @__PURE__ */ from_html(`<span aria-hidden="true">─</span>`);
+var root_3$6 = /* @__PURE__ */ from_html(`<span class="table-hierarchy svelte-5rokht"><!> <span aria-hidden="true"> </span> <!></span>`);
+function TableHierarchy($$anchor, $$props) {
+	push($$props, true);
+	var span = root_3$6();
+	var node = child(span);
+	each(node, 17, () => $$props.hierarchy.ancestor_continues ?? [], index, ($$anchor, continues) => {
+		var span_1 = root$12();
+		var text = only_child(span_1, true);
+		template_effect(() => set_text(text, get(continues) ? "│" : "\xA0"));
+		append($$anchor, span_1);
+	});
+	var span_2 = sibling(node, 2);
+	var text_1 = only_child(span_2, true);
+	var node_1 = sibling(span_2, 2);
+	var consequent = ($$anchor) => {
+		var button = root_1$8();
+		var text_2 = only_child(button, true);
+		template_effect(() => {
+			set_attribute(button, "data-focus-key", $$props.focusKey);
+			set_attribute(button, "aria-label", `${$$props.hierarchy.collapsed ? "Expand" : "Collapse"} descendants of ${$$props.label}`);
+			set_attribute(button, "aria-expanded", !$$props.hierarchy.collapsed);
+			set_text(text_2, $$props.hierarchy.collapsed ? "▸" : "▾");
+		});
+		delegated("click", button, function(...$$args) {
+			$$props.onToggle?.apply(this, $$args);
+		});
+		append($$anchor, button);
+	};
+	var alternate = ($$anchor) => {
+		append($$anchor, root_2$6());
+	};
+	if_block(node_1, ($$render) => {
+		if ($$props.hierarchy.has_children) $$render(consequent);
+		else $$render(alternate, -1);
+	});
+	reset(span);
+	template_effect(() => set_text(text_1, $$props.hierarchy.is_last ? "└" : "├"));
+	append($$anchor, span);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region browser/views/ViewRenderer.svelte
+var root$11 = /* @__PURE__ */ from_html(`<div class="source-status" role="status"><!> </div>`);
+var root_1$7 = /* @__PURE__ */ from_html(`<div> </div>`);
+var root_2$5 = /* @__PURE__ */ from_html(`<div class="text-view"></div>`);
+var root_3$5 = /* @__PURE__ */ from_html(`<small>bounded preview</small>`);
+var root_4$4 = /* @__PURE__ */ from_html(`<article class="document-view"><header><span> </span><!></header> <pre> </pre></article>`);
+var root_5$3 = /* @__PURE__ */ from_html(`<small> </small>`);
+var root_6$3 = /* @__PURE__ */ from_html(`<span class="row-meta"> </span>`);
+var root_7$3 = /* @__PURE__ */ from_html(`<button class="row-disclosure"> </button>`);
+var root_8$1 = /* @__PURE__ */ from_html(`<div class="view-record-line"><button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button> <!></div> <!>`, 1);
+var root_9$1 = /* @__PURE__ */ from_html(`<div class="view-record" role="listitem"><!></div>`);
+var root_10$1 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
+var root_11 = /* @__PURE__ */ from_html(`<div class="table-coverage" role="status"> </div>`);
+var root_12 = /* @__PURE__ */ from_html(`<span role="columnheader"> </span>`);
+var root_13 = /* @__PURE__ */ from_html(`<div class="table-empty-page" role="status">No rows in this page.</div>`);
+var root_14 = /* @__PURE__ */ from_html(`<div role="cell"><!> <button class="svelte-15ewqy0"> </button></div>`);
+var root_15 = /* @__PURE__ */ from_html(`<div class="table-detail" role="row"><div role="cell"><!></div></div>`);
+var root_16 = /* @__PURE__ */ from_html(`<div class="table-record" role="rowgroup"><div role="row"><!> <div class="table-action-cell" role="cell"><!></div></div> <!></div>`);
+var root_17 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><!> <div class="table-head" role="row"><!><span class="table-action-head" role="columnheader">detail</span></div> <!> <!></div>`);
+var root_18 = /* @__PURE__ */ from_html(`<p> </p>`);
+var root_19 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
+var root_20 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
+var root_21 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
+var root_22 = /* @__PURE__ */ from_html(`<div class="view-record"><div class="view-record-line"><button><!></button> <!></div> <!></div>`);
+var root_23 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
+var root_24 = /* @__PURE__ */ from_html(`<div class="view-record"><div class="view-record-line"><button><span> </span><small> </small></button><!></div> <!></div>`);
+var root_25 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!> <!></section>`);
+var root_26 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
+var root_27 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_28 = /* @__PURE__ */ from_html(`<div class="required-subject-actions" aria-label="Compatible current selections"></div>`);
+var root_29 = /* @__PURE__ */ from_html(`<p class="required-subject-waiting">Select a compatible subject in another open set.</p>`);
+var root_30 = /* @__PURE__ */ from_html(`<section class="required-subject" aria-live="polite"><span class="required-subject-kicker">Unresolved view</span> <h3> </h3> <p><strong> </strong> </p> <!></section>`);
+var root_31 = /* @__PURE__ */ from_html(`<div class="view"><!> <!></div>`);
+function ViewRenderer($$anchor, $$props) {
+	push($$props, true);
+	let sourceStatus = /* @__PURE__ */ user_derived(() => $$props.model.type === "rows" || $$props.model.type === "timeline" || $$props.model.type === "table" || $$props.model.type === "document" ? $$props.model.source_status : void 0);
+	let tableCoverage = /* @__PURE__ */ user_derived(() => $$props.model.type === "table" ? $$props.model.coverage : void 0);
+	const dispatch = dispatchUi();
+	const select = (itemId) => {
+		if (!itemId) return;
+		dispatch({
+			type: "choose_view_item",
+			instance_key: $$props.instanceKey,
+			item_id: itemId,
+			activate: true
+		});
+	};
+	const expand = (itemId, expanded) => dispatch({
+		type: "toggle_view_item_expansion",
+		instance_key: $$props.instanceKey,
+		item_id: itemId,
+		expand: !expanded
+	});
+	const foldTree = (itemId, collapsed) => dispatch({
+		type: "set_view_tree_item_collapsed",
+		instance_key: $$props.instanceKey,
+		item_id: itemId,
+		collapsed: !collapsed
+	});
+	const expandTimeline = (index) => {
+		const itemId = $$props.model.type === "timeline" ? $$props.model.entry_ids[index] : void 0;
+		if (itemId) expand(itemId, $$props.model.type === "timeline" && ($$props.model.entry_expanded?.[index] ?? false));
+	};
+	var div = root_31();
+	var node = child(div);
+	var consequent_1 = ($$anchor) => {
+		var div_1 = root$11();
+		var node_1 = child(div_1);
+		var consequent = ($$anchor) => {
+			append($$anchor, text("Last observation (stale) ·"));
+		};
+		if_block(node_1, ($$render) => {
+			if (get(sourceStatus).stale) $$render(consequent);
+		});
+		var text_1 = sibling(node_1);
+		reset(div_1);
+		template_effect(() => set_text(text_1, `${get(sourceStatus).state ?? ""}: ${get(sourceStatus).message ?? ""}`));
+		append($$anchor, div_1);
+	};
+	if_block(node, ($$render) => {
+		if (get(sourceStatus)) $$render(consequent_1);
+	});
+	var node_2 = sibling(node, 2);
+	var consequent_2 = ($$anchor) => {
+		var div_2 = root_2$5();
+		each(div_2, 21, () => $$props.model.lines, index, ($$anchor, line) => {
+			var div_3 = root_1$7();
+			var text_2 = only_child(div_3, true);
+			template_effect(() => {
+				set_attribute(div_3, "data-tone", get(line).tone);
+				set_text(text_2, get(line).text);
+			});
+			append($$anchor, div_3);
+		});
+		reset(div_2);
+		template_effect(() => set_attribute(div_2, "aria-label", $$props.model.title));
+		append($$anchor, div_2);
+	};
+	var consequent_4 = ($$anchor) => {
+		var article = root_4$4();
+		var header = child(article);
+		var span = child(header);
+		var text_3 = only_child(span, true);
+		var node_3 = sibling(span);
+		var consequent_3 = ($$anchor) => {
+			append($$anchor, root_3$5());
+		};
+		if_block(node_3, ($$render) => {
+			if ($$props.model.truncated) $$render(consequent_3);
+		});
+		reset(header);
+		var text_4 = only_child(sibling(header, 2), true);
+		reset(article);
+		template_effect(() => {
+			set_attribute(article, "aria-label", $$props.model.title);
+			set_text(text_3, $$props.model.path);
+			set_text(text_4, $$props.model.content);
+		});
+		append($$anchor, article);
+	};
+	var consequent_10 = ($$anchor) => {
+		var div_4 = root_10$1();
+		each(div_4, 21, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
+			var div_5 = root_9$1();
+			var node_4 = child(div_5);
+			var consequent_5 = ($$anchor) => {
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+					RowDetails($$anchor, {
+						get details() {
+							return get($0);
+						},
+						get label() {
+							return get(row).primary;
+						}
+					});
+				}
+			};
+			var alternate = ($$anchor) => {
+				var fragment_1 = root_8$1();
+				var div_6 = first_child(fragment_1);
+				var button = child(div_6);
+				let classes;
+				var span_1 = child(button);
+				var text_5 = only_child(span_1, true);
+				var span_2 = sibling(span_1, 2);
+				var strong = child(span_2);
+				var text_6 = only_child(strong, true);
+				var node_5 = sibling(strong);
+				var consequent_6 = ($$anchor) => {
+					var small_1 = root_5$3();
+					var text_7 = only_child(small_1, true);
+					template_effect(() => set_text(text_7, get(row).secondary));
+					append($$anchor, small_1);
+				};
+				if_block(node_5, ($$render) => {
+					if (get(row).secondary) $$render(consequent_6);
+				});
+				reset(span_2);
+				var node_6 = sibling(span_2, 2);
+				var consequent_7 = ($$anchor) => {
+					var span_3 = root_6$3();
+					var text_8 = only_child(span_3, true);
+					template_effect(() => set_text(text_8, get(row).meta));
+					append($$anchor, span_3);
+				};
+				if_block(node_6, ($$render) => {
+					if (get(row).meta) $$render(consequent_7);
+				});
+				reset(button);
+				var node_7 = sibling(button, 2);
+				var consequent_8 = ($$anchor) => {
+					var button_1 = root_7$3();
+					var text_9 = only_child(button_1, true);
+					template_effect(() => {
+						set_attribute(button_1, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
+						set_attribute(button_1, "aria-expanded", get(row).expanded);
+						set_text(text_9, get(row).expanded ? "▾" : "▸");
+					});
+					delegated("click", button_1, () => expand(get(row).id, get(row).expanded));
+					append($$anchor, button_1);
+				};
+				if_block(node_7, ($$render) => {
+					if (get(row).expandable) $$render(consequent_8);
+				});
+				reset(div_6);
+				var node_8 = sibling(div_6, 2);
+				var consequent_9 = ($$anchor) => {
+					{
+						let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+						let $1 = /* @__PURE__ */ user_derived(() => `${get(row).primary} details`);
+						RowDetails($$anchor, {
+							get details() {
+								return get($0);
+							},
+							get label() {
+								return get($1);
+							}
+						});
+					}
+				};
+				if_block(node_8, ($$render) => {
+					if (get(row).expanded) $$render(consequent_9);
+				});
+				template_effect(() => {
+					set_attribute(button, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
+					set_attribute(button, "data-tone", get(row).tone);
+					set_attribute(button, "data-kind", get(row).kind ?? void 0);
+					button.disabled = get(row).kind === "unavailable";
+					set_attribute(button, "aria-disabled", get(row).kind === "unavailable");
+					classes = set_class(button, 1, "", null, classes, { selected: get(row).selected });
+					set_text(text_5, get(row).glyph ?? "◇");
+					set_text(text_6, get(row).primary);
+				});
+				delegated("click", button, () => select(get(row).id));
+				append($$anchor, fragment_1);
+			};
+			if_block(node_4, ($$render) => {
+				if (get(row).kind === "detail") $$render(consequent_5);
+				else $$render(alternate, -1);
+			});
+			reset(div_5);
+			template_effect(() => set_attribute(div_5, "data-expanded", get(row).expanded));
+			append($$anchor, div_5);
+		});
+		reset(div_4);
+		template_effect(() => set_attribute(div_4, "aria-label", $$props.model.title));
+		append($$anchor, div_4);
+	};
+	var consequent_16 = ($$anchor) => {
+		var div_7 = root_17();
+		var node_9 = child(div_7);
+		var consequent_11 = ($$anchor) => {
+			var div_8 = root_11();
+			var text_10 = only_child(div_8);
+			template_effect(() => set_text(text_10, `${get(tableCoverage).state ?? ""} / ${get(tableCoverage).reason ?? ""}`));
+			append($$anchor, div_8);
+		};
+		if_block(node_9, ($$render) => {
+			if (get(tableCoverage)) $$render(consequent_11);
+		});
+		var div_9 = sibling(node_9, 2);
+		each(child(div_9), 17, () => $$props.model.columns, index, ($$anchor, column) => {
+			var span_4 = root_12();
+			var text_11 = only_child(span_4, true);
+			template_effect(() => set_text(text_11, get(column)));
+			append($$anchor, span_4);
+		});
+		next();
+		reset(div_9);
+		var node_11 = sibling(div_9, 2);
+		var consequent_12 = ($$anchor) => {
+			append($$anchor, root_13());
+		};
+		if_block(node_11, ($$render) => {
+			if ($$props.model.total_rows === 0n) $$render(consequent_12);
+		});
+		each(sibling(node_11, 2), 17, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
+			var div_11 = root_16();
+			var div_12 = child(div_11);
+			let classes_1;
+			var node_13 = child(div_12);
+			each(node_13, 17, () => get(row).cells, index, ($$anchor, cell, index) => {
+				var div_13 = root_14();
+				let classes_2;
+				var node_14 = child(div_13);
+				var consequent_13 = ($$anchor) => {
+					{
+						let $0 = /* @__PURE__ */ user_derived(() => `view:${$$props.instanceKey}:tree:${get(row).id}`);
+						TableHierarchy($$anchor, {
+							get hierarchy() {
+								return get(row).hierarchy;
+							},
+							get label() {
+								return get(cell);
+							},
+							get focusKey() {
+								return get($0);
+							},
+							onToggle: () => foldTree(get(row).id, get(row).hierarchy.collapsed)
+						});
+					}
+				};
+				if_block(node_14, ($$render) => {
+					if (index === 0 && get(row).hierarchy) $$render(consequent_13);
+				});
+				var button_2 = sibling(node_14, 2);
+				var text_12 = only_child(button_2, true);
+				reset(div_13);
+				template_effect(() => {
+					set_attribute(div_13, "data-tone", get(row).cell_tones?.[index] ?? void 0);
+					classes_2 = set_class(div_13, 1, "svelte-15ewqy0", null, classes_2, { "tree-cell": index === 0 && !!get(row).hierarchy });
+					set_attribute(button_2, "data-focus-key", index === 0 ? `view:${$$props.instanceKey}:item:${get(row).id}` : void 0);
+					set_attribute(button_2, "aria-label", `Select row: ${get(cell)}`);
+					set_text(text_12, get(cell));
+				});
+				delegated("click", button_2, () => select(get(row).id));
+				append($$anchor, div_13);
+			});
+			var div_14 = sibling(node_13, 2);
+			var node_15 = child(div_14);
+			var consequent_14 = ($$anchor) => {
+				var button_3 = root_7$3();
+				var text_13 = only_child(button_3, true);
+				template_effect(() => {
+					set_attribute(button_3, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} row`);
+					set_attribute(button_3, "aria-expanded", get(row).expanded);
+					set_text(text_13, get(row).expanded ? "▾" : "▸");
+				});
+				delegated("click", button_3, () => expand(get(row).id, get(row).expanded));
+				append($$anchor, button_3);
+			};
+			if_block(node_15, ($$render) => {
+				if (get(row).expandable) $$render(consequent_14);
+			});
+			reset(div_14);
+			reset(div_12);
+			var node_16 = sibling(div_12, 2);
+			var consequent_15 = ($$anchor) => {
+				var div_15 = root_15();
+				var div_16 = child(div_15);
+				var node_17 = child(div_16);
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+					RowDetails(node_17, {
+						get details() {
+							return get($0);
+						},
+						label: "Row details"
+					});
+				}
+				reset(div_16);
+				reset(div_15);
+				template_effect(() => set_attribute(div_16, "aria-colspan", $$props.model.columns.length + 1));
+				append($$anchor, div_15);
+			};
+			if_block(node_16, ($$render) => {
+				if (get(row).expanded) $$render(consequent_15);
+			});
+			reset(div_11);
+			template_effect(() => {
+				set_attribute(div_11, "data-expanded", get(row).expanded);
+				classes_1 = set_class(div_12, 1, "table-record-line svelte-15ewqy0", null, classes_1, { selected: get(row).selected });
+				set_attribute(div_12, "data-tone", get(row).tone);
+			});
+			append($$anchor, div_11);
+		});
+		reset(div_7);
+		template_effect(() => {
+			set_attribute(div_7, "aria-label", $$props.model.title);
+			set_style(div_7, `--columns:${$$props.model.columns.length}`);
+		});
+		append($$anchor, div_7);
+	};
+	var consequent_24 = ($$anchor) => {
+		var div_17 = root_23();
+		each(div_17, 21, () => $$props.model.entries, index, ($$anchor, entry, index) => {
+			var div_18 = root_22();
+			var div_19 = child(div_18);
+			var button_4 = child(div_19);
+			let classes_3;
+			var node_18 = child(button_4);
+			var consequent_17 = ($$anchor) => {
+				var p = root_18();
+				var text_14 = only_child(p, true);
+				template_effect(() => {
+					set_attribute(p, "data-tone", get(entry).tone);
+					set_text(text_14, get(entry).text);
+				});
+				append($$anchor, p);
+			};
+			var consequent_19 = ($$anchor) => {
+				var fragment_4 = root_19();
+				var strong_1 = first_child(fragment_4);
+				var text_15 = only_child(strong_1, true);
+				var node_19 = sibling(strong_1);
+				var consequent_18 = ($$anchor) => {
+					var small_2 = root_5$3();
+					var text_16 = only_child(small_2, true);
+					template_effect(() => set_text(text_16, get(entry).meta));
+					append($$anchor, small_2);
+				};
+				if_block(node_19, ($$render) => {
+					if (get(entry).meta) $$render(consequent_18);
+				});
+				template_effect(() => set_text(text_15, get(entry).primary));
+				append($$anchor, fragment_4);
+			};
+			var consequent_21 = ($$anchor) => {
+				var fragment_5 = root_20();
+				var span_5 = first_child(fragment_5);
+				var text_17 = only_child(span_5, true);
+				var node_20 = sibling(span_5);
+				var consequent_20 = ($$anchor) => {
+					var small_3 = root_5$3();
+					var text_18 = only_child(small_3, true);
+					template_effect(() => set_text(text_18, get(entry).meta));
+					append($$anchor, small_3);
+				};
+				if_block(node_20, ($$render) => {
+					if (get(entry).meta) $$render(consequent_20);
+				});
+				template_effect(() => set_text(text_17, get(entry).summary));
+				append($$anchor, fragment_5);
+			};
+			var alternate_1 = ($$anchor) => {
+				var span_6 = root_21();
+				var text_19 = only_child(span_6, true);
+				template_effect(() => set_text(text_19, get(entry).label));
+				append($$anchor, span_6);
+			};
+			if_block(node_18, ($$render) => {
+				if (get(entry).type === "block") $$render(consequent_17);
+				else if (get(entry).type === "line") $$render(consequent_19, 1);
+				else if (get(entry).type === "pair") $$render(consequent_21, 2);
+				else $$render(alternate_1, -1);
+			});
+			reset(button_4);
+			var node_21 = sibling(button_4, 2);
+			var consequent_22 = ($$anchor) => {
+				var button_5 = root_7$3();
+				var text_20 = only_child(button_5, true);
+				template_effect(() => {
+					set_attribute(button_5, "aria-label", `${$$props.model.entry_expanded?.[index] ? "Collapse" : "Expand"} timeline entry`);
+					set_attribute(button_5, "aria-expanded", $$props.model.entry_expanded?.[index] ?? false);
+					set_text(text_20, $$props.model.entry_expanded?.[index] ? "▾" : "▸");
+				});
+				delegated("click", button_5, () => expandTimeline(index));
+				append($$anchor, button_5);
+			};
+			if_block(node_21, ($$render) => {
+				if ($$props.model.entry_expandable?.[index]) $$render(consequent_22);
+			});
+			reset(div_19);
+			var node_22 = sibling(div_19, 2);
+			var consequent_23 = ($$anchor) => {
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => $$props.model.entry_details?.[index] ?? []);
+					RowDetails($$anchor, {
+						get details() {
+							return get($0);
+						},
+						label: "Timeline entry details"
+					});
+				}
+			};
+			if_block(node_22, ($$render) => {
+				if ($$props.model.entry_expanded?.[index]) $$render(consequent_23);
+			});
+			reset(div_18);
+			template_effect(($0) => {
+				set_attribute(div_18, "data-expanded", $$props.model.entry_expanded?.[index] ?? false);
+				set_attribute(button_4, "data-focus-key", `view:${$$props.instanceKey}:item:${$$props.model.entry_ids[index]}`);
+				classes_3 = set_class(button_4, 1, "timeline-entry", null, classes_3, { selected: $0 });
+				set_attribute(button_4, "data-kind", get(entry).type);
+				set_style(button_4, `--indent:${$$props.model.entry_indents[index] ?? 0}`);
+			}, [() => $$props.model.selected === BigInt(index)]);
+			delegated("click", button_4, () => select($$props.model.entry_ids[index]));
+			append($$anchor, div_18);
+		});
+		reset(div_17);
+		template_effect(() => set_attribute(div_17, "aria-label", $$props.model.title));
+		append($$anchor, div_17);
+	};
+	var consequent_30 = ($$anchor) => {
+		var div_20 = root_26();
+		each(div_20, 21, () => $$props.model.sections, index, ($$anchor, section) => {
+			var section_1 = root_25();
+			let classes_4;
+			var button_6 = child(section_1);
+			let classes_5;
+			var span_7 = child(button_6);
+			var text_21 = only_child(span_7);
+			var text_22 = only_child(sibling(span_7), true);
+			reset(button_6);
+			var node_23 = sibling(button_6, 2);
+			var consequent_26 = ($$anchor) => {
+				var div_21 = root$11();
+				var node_24 = child(div_21);
+				var consequent_25 = ($$anchor) => {
+					append($$anchor, text("Last observation (stale) ·"));
+				};
+				if_block(node_24, ($$render) => {
+					if (get(section).source_status.stale) $$render(consequent_25);
+				});
+				var text_24 = sibling(node_24);
+				reset(div_21);
+				template_effect(() => set_text(text_24, `${get(section).source_status.state ?? ""}: ${get(section).source_status.message ?? ""}`));
+				append($$anchor, div_21);
+			};
+			if_block(node_23, ($$render) => {
+				if (get(section).source_status) $$render(consequent_26);
+			});
+			var node_25 = sibling(node_23, 2);
+			var consequent_29 = ($$anchor) => {
+				var fragment_7 = comment();
+				each(first_child(fragment_7), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
+					var div_22 = root_24();
+					var div_23 = child(div_22);
+					var button_7 = child(div_23);
+					let classes_6;
+					var span_9 = child(button_7);
+					var text_25 = only_child(span_9, true);
+					var text_26 = only_child(sibling(span_9), true);
+					reset(button_7);
+					var node_27 = sibling(button_7);
+					var consequent_27 = ($$anchor) => {
+						var button_8 = root_7$3();
+						var text_27 = only_child(button_8, true);
+						template_effect(() => {
+							set_attribute(button_8, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
+							set_attribute(button_8, "aria-expanded", get(row).expanded);
+							set_text(text_27, get(row).expanded ? "▾" : "▸");
+						});
+						delegated("click", button_8, () => expand(get(row).id, get(row).expanded));
+						append($$anchor, button_8);
+					};
+					if_block(node_27, ($$render) => {
+						if (get(row).expandable) $$render(consequent_27);
+					});
+					reset(div_23);
+					var node_28 = sibling(div_23, 2);
+					var consequent_28 = ($$anchor) => {
+						{
+							let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
+							let $1 = /* @__PURE__ */ user_derived(() => `${get(row).primary} details`);
+							RowDetails($$anchor, {
+								get details() {
+									return get($0);
+								},
+								get label() {
+									return get($1);
+								}
+							});
+						}
+					};
+					if_block(node_28, ($$render) => {
+						if (get(row).expanded) $$render(consequent_28);
+					});
+					reset(div_22);
+					template_effect(() => {
+						set_attribute(div_22, "data-expanded", get(row).expanded);
+						set_attribute(button_7, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
+						classes_6 = set_class(button_7, 1, "section-row", null, classes_6, { selected: get(row).selected });
+						set_attribute(button_7, "data-tone", get(row).tone);
+						set_text(text_25, get(row).primary);
+						set_text(text_26, get(row).meta ?? get(row).secondary ?? "");
+					});
+					delegated("click", button_7, () => select(get(row).id));
+					append($$anchor, div_22);
+				});
+				append($$anchor, fragment_7);
+			};
+			if_block(node_25, ($$render) => {
+				if (!get(section).collapsed) $$render(consequent_29);
+			});
+			reset(section_1);
+			template_effect(($0) => {
+				classes_4 = set_class(section_1, 1, "", null, classes_4, { collapsed: get(section).collapsed });
+				set_attribute(button_6, "data-focus-key", `view:${$$props.instanceKey}:section:${get(section).id}`);
+				classes_5 = set_class(button_6, 1, "", null, classes_5, { selected: get(section).header_selected });
+				set_text(text_21, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
+				set_text(text_22, $0);
+			}, [() => get(section).source_status ? "—" : String(get(section).count).padStart(2, "0")]);
+			delegated("click", button_6, () => dispatch({
+				type: "toggle_view_section",
+				instance_key: $$props.instanceKey,
+				section_id: get(section).id
+			}));
+			append($$anchor, section_1);
+		});
+		reset(div_20);
+		template_effect(() => set_attribute(div_20, "aria-label", $$props.model.title));
+		append($$anchor, div_20);
+	};
+	var consequent_31 = ($$anchor) => {
+		EmptyState($$anchor, {
+			get title() {
+				return $$props.model.title;
+			},
+			get message() {
+				return $$props.model.message;
+			}
+		});
+	};
+	var consequent_33 = ($$anchor) => {
+		var section_2 = root_30();
+		var h3 = sibling(child(section_2), 2);
+		var text_28 = only_child(h3, true);
+		var p_1 = sibling(h3, 2);
+		var strong_2 = child(p_1);
+		var text_29 = only_child(strong_2, true);
+		var text_30 = sibling(strong_2);
+		reset(p_1);
+		var node_29 = sibling(p_1, 2);
+		var consequent_32 = ($$anchor) => {
+			var div_24 = root_28();
+			each(div_24, 21, () => $$props.model.actions, index, ($$anchor, action, index) => {
+				var button_9 = root_27();
+				var text_31 = only_child(button_9, true);
+				template_effect(() => {
+					set_attribute(button_9, "data-focus-key", `view:${$$props.instanceKey}:required-subject:${index}`);
+					set_attribute(button_9, "title", get(action).title);
+					set_text(text_31, get(action).label);
+				});
+				delegated("click", button_9, () => dispatch({
+					type: "activate",
+					intent: get(action).intent
+				}));
+				append($$anchor, button_9);
+			});
+			reset(div_24);
+			append($$anchor, div_24);
+		};
+		var alternate_2 = ($$anchor) => {
+			append($$anchor, root_29());
+		};
+		if_block(node_29, ($$render) => {
+			if ($$props.model.actions.length > 0) $$render(consequent_32);
+			else $$render(alternate_2, -1);
+		});
+		reset(section_2);
+		template_effect(($0) => {
+			set_attribute(section_2, "aria-labelledby", `required-subject-${$$props.tileId}`);
+			set_attribute(h3, "id", `required-subject-${$$props.tileId}`);
+			set_text(text_28, $$props.model.title);
+			set_text(text_29, $$props.model.input);
+			set_text(text_30, ` needs ${$0 ?? ""}.`);
+		}, [() => $$props.model.facets.join(", ")]);
+		append($$anchor, section_2);
+	};
+	var consequent_34 = ($$anchor) => {
+		SceneView($$anchor, { get scene() {
+			return $$props.model.scene;
+		} });
+	};
+	var consequent_35 = ($$anchor) => {
+		FieldView($$anchor, {
+			get field() {
+				return $$props.model.field;
+			},
+			get instanceKey() {
+				return $$props.instanceKey;
+			}
+		});
+	};
+	if_block(node_2, ($$render) => {
+		if ($$props.model.type === "text") $$render(consequent_2);
+		else if ($$props.model.type === "document") $$render(consequent_4, 1);
+		else if ($$props.model.type === "rows") $$render(consequent_10, 2);
+		else if ($$props.model.type === "table") $$render(consequent_16, 3);
+		else if ($$props.model.type === "timeline") $$render(consequent_24, 4);
+		else if ($$props.model.type === "sections") $$render(consequent_30, 5);
+		else if ($$props.model.type === "placeholder") $$render(consequent_31, 6);
+		else if ($$props.model.type === "required_subject") $$render(consequent_33, 7);
+		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_34, 8);
+		else if ($$props.model.type === "field") $$render(consequent_35, 9);
+	});
+	reset(div);
+	template_effect(() => set_attribute(div, "data-view", $$props.model.type));
+	append($$anchor, div);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region browser/runtime/dialog-focus.ts
+/** DOM-only modal mechanics. Neither focus nor a dialog frame chooses a
+* subject, route, grant, insertion target or semantic operation. */
+function dialogFocusables(panel) {
+	return [...panel.querySelectorAll("button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),a[href],[tabindex=\"0\"]")].filter((element) => !element.closest("[hidden],[inert],[aria-hidden=\"true\"]") && element.getClientRects().length > 0);
+}
+function trapDialogTab(panel, event) {
+	if (event.key !== "Tab" || event.isComposing) return;
+	const controls = dialogFocusables(panel);
+	event.preventDefault();
+	if (!controls.length) {
+		panel.focus();
+		return;
+	}
+	const current = controls.indexOf(panel.ownerDocument.activeElement);
+	(controls[event.shiftKey ? current <= 0 ? controls.length - 1 : current - 1 : current < 0 || current === controls.length - 1 ? 0 : current + 1] ?? panel).focus();
+}
+function restoreDialogFocus(panel, opener) {
+	const active = panel.ownerDocument.activeElement;
+	if (opener?.isConnected && (active === panel.ownerDocument.body || active === null || panel.contains(active))) opener.focus();
+}
+//#endregion
+//#region browser/app/DialogLayer.svelte
+var root$10 = /* @__PURE__ */ from_html(`<div class="dialog-scrim" role="presentation"><div class="dialog-panel" role="dialog" aria-modal="true" tabindex="-1"><header><h2> </h2> <button class="dialog-close">×</button></header> <div class="dialog-content"><!> <!> <!></div></div></div>`);
+function DialogLayer($$anchor, $$props) {
+	push($$props, true);
+	let panel;
+	let opener = null;
+	const dispatch = dispatchUi();
+	const close = () => dispatch({
+		type: "close_dialog",
+		instance_key: $$props.model.instance_key
+	});
+	onMount(() => {
+		const active = panel.ownerDocument.activeElement;
+		opener = active instanceof HTMLElement ? active : null;
+		(panel.querySelector("textarea:not([disabled]),input:not([disabled])") ?? dialogFocusables(panel)[0] ?? panel).focus();
+	});
+	onDestroy(() => {
+		if (panel) restoreDialogFocus(panel, opener);
+	});
+	function handleKey(event) {
+		if (event.isComposing) return;
+		if (event.key === "Escape") {
+			event.preventDefault();
+			event.stopPropagation();
+			close();
+		} else if (event.key === "Tab") trapDialogTab(panel, event);
+	}
+	var div = root$10();
+	var div_1 = child(div);
+	var header = child(div_1);
+	var h2 = child(header);
+	var text = only_child(h2, true);
+	var button = sibling(h2, 2);
+	reset(header);
+	var div_2 = sibling(header, 2);
+	var node = child(div_2);
+	var consequent = ($$anchor) => {
+		InputComposer($$anchor, { get model() {
+			return $$props.model.input;
+		} });
+	};
+	if_block(node, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent);
+	});
+	var node_1 = sibling(node, 2);
+	{
+		let $0 = /* @__PURE__ */ user_derived(() => String($$props.model.instance_key));
+		ViewRenderer(node_1, {
+			get model() {
+				return $$props.model.view;
+			},
+			get tileId() {
+				return get($0);
+			},
+			get instanceKey() {
+				return $$props.model.instance_key;
+			}
+		});
+	}
+	var node_2 = sibling(node_1, 2);
+	var consequent_1 = ($$anchor) => {
+		InputComposer($$anchor, { get model() {
+			return $$props.model.input;
+		} });
+	};
+	if_block(node_2, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_1);
+	});
+	reset(div_2);
+	reset(div_1);
+	bind_this(div_1, ($$value) => panel = $$value, () => panel);
+	reset(div);
+	template_effect(() => {
+		set_attribute(div_1, "aria-labelledby", `dialog-title-${$$props.model.instance_key}`);
+		set_attribute(h2, "id", `dialog-title-${$$props.model.instance_key}`);
+		set_text(text, $$props.model.title);
+		set_attribute(button, "data-focus-key", `dialog:${$$props.model.instance_key}:close`);
+		set_attribute(button, "aria-label", `Close ${$$props.model.title}`);
+	});
+	delegated("click", div, (event) => event.target === event.currentTarget && close());
+	delegated("keydown", div_1, handleKey);
+	delegated("click", button, close);
+	append($$anchor, div);
+	pop();
+}
+delegate(["click", "keydown"]);
 //#endregion
 //#region \0vite/preload-helper.js
 var scriptRel = "modulepreload";
@@ -7421,7 +10271,7 @@ function colorValue(value) {
 }
 //#endregion
 //#region browser/app/AmbientLayer.svelte
-var root$16 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
+var root$9 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
 function AmbientLayer($$anchor, $$props) {
 	push($$props, true);
 	let canvas;
@@ -7440,7 +10290,7 @@ function AmbientLayer($$anchor, $$props) {
 	user_effect(() => {
 		controller?.update($$props.scene, get(options));
 	});
-	var div = root$16();
+	var div = root$9();
 	bind_this(child(div), ($$value) => canvas = $$value, () => canvas);
 	reset(div);
 	template_effect(() => set_style(div, `--ambient-opacity:${$$props.ambient.opacity ?? 1}`));
@@ -7449,17 +10299,18 @@ function AmbientLayer($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/StatusBar.svelte
-var root$15 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$11 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
+var root$8 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_1$6 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span> <button class="ryeos-launcher svelte-19xwx1o" data-focus-key="shell:launch">RyeOS</button></footer>`);
 function StatusBar($$anchor, $$props) {
 	push($$props, true);
+	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var footer = root_1$11();
+		var footer = root_1$6();
 		var node_1 = child(footer);
 		each(node_1, 17, () => $$props.model.segments, index, ($$anchor, segment) => {
-			var span = root$15();
+			var span = root$8();
 			let classes;
 			var text = only_child(span);
 			template_effect(() => {
@@ -7469,9 +10320,12 @@ function StatusBar($$anchor, $$props) {
 			});
 			append($$anchor, span);
 		});
-		var text_1 = only_child(sibling(node_1, 2), true);
+		var span_1 = sibling(node_1, 2);
+		var text_1 = only_child(span_1, true);
+		var button = sibling(span_1, 2);
 		reset(footer);
 		template_effect(() => set_text(text_1, $$props.model.key_hint));
+		delegated("click", button, () => dispatch({ type: "open_launcher" }));
 		append($$anchor, footer);
 	};
 	if_block(node, ($$render) => {
@@ -7480,70 +10334,219 @@ function StatusBar($$anchor, $$props) {
 	append($$anchor, fragment);
 	pop();
 }
+delegate(["click"]);
 //#endregion
 //#region browser/app/SystemBar.svelte
-var root$14 = /* @__PURE__ */ from_html(`<button class="system-navigation" aria-controls="ryeos-navigation">Views</button>`);
-var root_1$10 = /* @__PURE__ */ from_html(`<header class="system-bar"><div class="brand" aria-label="RyeOS"><span class="brand-mark" aria-hidden="true">◇</span> <span> </span></div> <div class="system-context"><span class="presence">●</span> <span> </span> <span class="separator">/</span> <span title="Signed surface"> </span></div> <div class="system-state"><span> </span> <span class="transport"> </span> <!> <button class="system-launch" data-focus-key="shell:launch">Launch</button> <button class="system-commands" data-focus-key="shell:commands" aria-label="Open context commands" title="Context commands">⌘</button></div></header>`);
+var root$7 = /* @__PURE__ */ from_html(`<span class="surface-number svelte-8hxs5n"> </span>`);
+var root_1$5 = /* @__PURE__ */ from_html(`<form class="svelte-8hxs5n"><input aria-label="Surface name" class="svelte-8hxs5n"/> <button type="submit" class="svelte-8hxs5n">Save</button> <button type="button" class="svelte-8hxs5n">Cancel</button></form>`);
+var root_2$4 = /* @__PURE__ */ from_html(`<button class="svelte-8hxs5n"><span class="surface-number svelte-8hxs5n"> </span> </button> <button class="svelte-8hxs5n">✎</button>`, 1);
+var root_3$4 = /* @__PURE__ */ from_html(`<div><!> <button class="surface-close svelte-8hxs5n">×</button></div>`);
+var root_4$3 = /* @__PURE__ */ from_html(`<details class="surface-picker svelte-8hxs5n"><summary aria-label="Select an open Surface" class="svelte-8hxs5n"><!> <span> </span><span class="surface-chevron svelte-8hxs5n" aria-hidden="true">⌄</span></summary> <div class="surface-choices svelte-8hxs5n" role="group" aria-label="Open Surfaces"></div></details>`);
+var root_5$2 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_6$2 = /* @__PURE__ */ from_html(`<button class="system-navigation" aria-controls="ryeos-navigation">Views</button>`);
+var root_7$2 = /* @__PURE__ */ from_html(`<header class="system-bar svelte-8hxs5n"><div class="system-context svelte-8hxs5n" role="group" aria-label="Surface context" tabindex="-1"><!></div> <div class="system-state"><span> </span> <span class="transport"> </span> <!></div></header>`);
 function SystemBar($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var header = root_1$10();
+	let contextRoot;
+	let renameTarget = /* @__PURE__ */ state(null);
+	let renameDraft = /* @__PURE__ */ state("");
+	let renameInput = /* @__PURE__ */ state(void 0);
+	async function beginRename(surface) {
+		set(renameTarget, surface, true);
+		set(renameDraft, surface.title, true);
+		await tick();
+		if (get(renameTarget)?.surface_instance_id === surface.surface_instance_id) {
+			get(renameInput)?.focus();
+			get(renameInput)?.select();
+		}
+	}
+	async function cancelRename() {
+		const id = get(renameTarget)?.surface_instance_id;
+		set(renameTarget, null);
+		await tick();
+		if (id) contextRoot?.querySelector(`[data-surface-select="${id}"]`)?.focus();
+	}
+	user_effect(() => {
+		if (get(renameTarget) && !$$props.session.surfaces.some((surface) => surface.surface_instance_id === get(renameTarget)?.surface_instance_id && surface.rename_intent)) set(renameTarget, null);
+	});
+	function submitRename() {
+		const intent = get(renameTarget)?.rename_intent;
+		if (!intent || intent.type !== "rename_surface") return;
+		dispatch({
+			type: "activate",
+			intent: {
+				...intent,
+				title: get(renameDraft)
+			}
+		});
+		cancelRename();
+	}
+	function dismissSurfacePicker(details, restoreFocus = true) {
+		details.removeAttribute("open");
+		if (restoreFocus) details.querySelector("summary")?.focus();
+	}
+	function handleSurfacePickerKey(event) {
+		if (event.key !== "Escape" || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const picker = event.currentTarget.closest("details");
+		if (picker?.open) dismissSurfacePicker(picker);
+	}
+	var header = root_7$2();
 	var div = child(header);
-	var text = only_child(sibling(child(div), 2), true);
-	reset(div);
-	var div_1 = sibling(div, 2);
-	var span_1 = child(div_1);
-	var span_2 = sibling(span_1, 2);
-	var text_1 = only_child(span_2, true);
-	var text_2 = only_child(sibling(span_2, 4), true);
-	reset(div_1);
-	var div_2 = sibling(div_1, 2);
-	var span_4 = child(div_2);
-	var text_3 = only_child(span_4, true);
-	var span_5 = sibling(span_4, 2);
-	var text_4 = only_child(span_5, true);
-	var node = sibling(span_5, 2);
-	var consequent = ($$anchor) => {
-		var button = root$14();
-		template_effect(() => set_attribute(button, "aria-expanded", $$props.navigationOpen));
-		delegated("click", button, (event) => $$props.onToggleNavigation(event.currentTarget));
-		append($$anchor, button);
+	var node = child(div);
+	var consequent_2 = ($$anchor) => {
+		var details_1 = root_4$3();
+		var summary = child(details_1);
+		var node_1 = child(summary);
+		var consequent = ($$anchor) => {
+			var span = root$7();
+			var text = only_child(span, true);
+			template_effect(($0) => set_text(text, $0), [() => String($$props.session.surface_ordinal).padStart(2, "0")]);
+			append($$anchor, span);
+		};
+		if_block(node_1, ($$render) => {
+			if ($$props.session.surface_ordinal !== null) $$render(consequent);
+		});
+		var text_1 = only_child(sibling(node_1, 2), true);
+		next();
+		reset(summary);
+		var div_1 = sibling(summary, 2);
+		each(div_1, 21, () => $$props.session.surfaces, (surface) => surface.surface_instance_id, ($$anchor, surface) => {
+			var div_2 = root_3$4();
+			let classes;
+			var node_2 = child(div_2);
+			var consequent_1 = ($$anchor) => {
+				var form = root_1$5();
+				var input = child(form);
+				remove_input_defaults(input);
+				bind_this(input, ($$value) => set(renameInput, $$value), () => get(renameInput));
+				var button = sibling(input, 2);
+				var button_1 = sibling(button, 2);
+				reset(form);
+				event("submit", form, (event) => {
+					event.preventDefault();
+					submitRename();
+				});
+				delegated("keydown", input, (event) => {
+					event.stopPropagation();
+					if (event.key === "Escape" && !event.isComposing) {
+						event.preventDefault();
+						cancelRename();
+					}
+				});
+				bind_value(input, () => get(renameDraft), ($$value) => set(renameDraft, $$value));
+				delegated("keydown", button, handleSurfacePickerKey);
+				delegated("keydown", button_1, handleSurfacePickerKey);
+				delegated("click", button_1, cancelRename);
+				append($$anchor, form);
+			};
+			var alternate = ($$anchor) => {
+				var fragment = root_2$4();
+				var button_2 = first_child(fragment);
+				var span_2 = child(button_2);
+				var text_2 = only_child(span_2, true);
+				var text_3 = sibling(span_2, 1, true);
+				reset(button_2);
+				var button_3 = sibling(button_2, 2);
+				template_effect(($0) => {
+					set_attribute(button_2, "data-surface-select", get(surface).surface_instance_id);
+					set_attribute(button_2, "aria-current", get(surface).active ? "true" : void 0);
+					set_text(text_2, $0);
+					set_text(text_3, get(surface).title);
+					button_3.disabled = !get(surface).rename_intent;
+					set_attribute(button_3, "aria-label", `Rename ${get(surface).title}`);
+				}, [() => String(get(surface).ordinal).padStart(2, "0")]);
+				delegated("keydown", button_2, handleSurfacePickerKey);
+				delegated("click", button_2, (event) => {
+					const picker = event.currentTarget.closest("details");
+					if (picker) dismissSurfacePicker(picker);
+					dispatch({
+						type: "activate",
+						intent: get(surface).select_intent
+					});
+				});
+				delegated("keydown", button_3, handleSurfacePickerKey);
+				delegated("click", button_3, () => beginRename(get(surface)));
+				append($$anchor, fragment);
+			};
+			if_block(node_2, ($$render) => {
+				if (get(renameTarget)?.surface_instance_id === get(surface).surface_instance_id) $$render(consequent_1);
+				else $$render(alternate, -1);
+			});
+			var button_4 = sibling(node_2, 2);
+			reset(div_2);
+			template_effect(() => {
+				classes = set_class(div_2, 1, "surface-choice svelte-8hxs5n", null, classes, { active: get(surface).active });
+				button_4.disabled = !get(surface).close_intent;
+				set_attribute(button_4, "aria-label", `Close ${get(surface).title}; running work is unaffected`);
+			});
+			delegated("keydown", button_4, handleSurfacePickerKey);
+			delegated("click", button_4, (event) => {
+				if (!get(surface).close_intent) return;
+				const picker = event.currentTarget.closest("details");
+				const closingLast = $$props.session.surfaces.length === 1;
+				if (picker) dismissSurfacePicker(picker, !closingLast);
+				if (closingLast) contextRoot?.focus();
+				dispatch({
+					type: "activate",
+					intent: get(surface).close_intent
+				});
+			});
+			append($$anchor, div_2);
+		});
+		reset(div_1);
+		reset(details_1);
+		template_effect(() => set_text(text_1, $$props.session.title));
+		delegated("keydown", summary, handleSurfacePickerKey);
+		append($$anchor, details_1);
+	};
+	var alternate_1 = ($$anchor) => {
+		var span_3 = root_5$2();
+		var text_4 = only_child(span_3, true);
+		template_effect(() => set_text(text_4, $$props.session.title));
+		append($$anchor, span_3);
 	};
 	if_block(node, ($$render) => {
-		if ($$props.navigationAvailable) $$render(consequent);
+		if ($$props.session.surfaces.length > 0) $$render(consequent_2);
+		else $$render(alternate_1, -1);
 	});
-	var button_1 = sibling(node, 2);
-	var button_2 = sibling(button_1, 2);
-	reset(div_2);
+	reset(div);
+	bind_this(div, ($$value) => contextRoot = $$value, () => contextRoot);
+	var div_3 = sibling(div, 2);
+	var span_4 = child(div_3);
+	var text_5 = only_child(span_4, true);
+	var span_5 = sibling(span_4, 2);
+	var text_6 = only_child(span_5, true);
+	var node_3 = sibling(span_5, 2);
+	var consequent_3 = ($$anchor) => {
+		var button_5 = root_6$2();
+		template_effect(() => set_attribute(button_5, "aria-expanded", $$props.navigationOpen));
+		delegated("click", button_5, (event) => $$props.onToggleNavigation(event.currentTarget));
+		append($$anchor, button_5);
+	};
+	if_block(node_3, ($$render) => {
+		if ($$props.navigationAvailable) $$render(consequent_3);
+	});
+	reset(div_3);
 	reset(header);
 	template_effect(() => {
-		set_text(text, $$props.chrome.title);
-		set_attribute(span_1, "data-tone", $$props.chrome.health_tone);
-		set_text(text_1, $$props.session.user_principal_id ?? "local");
-		set_text(text_2, $$props.session.surface_ref);
-		set_text(text_3, $$props.chrome.health_label);
+		set_text(text_5, $$props.chrome.health_label);
 		set_attribute(span_5, "data-freshness", $$props.transport.freshness);
-		set_text(text_4, $$props.transport.freshness);
+		set_text(text_6, $$props.transport.freshness);
 	});
-	delegated("click", button_1, () => dispatch({
-		type: "open_overlay",
-		overlay_id: "views"
-	}));
-	delegated("click", button_2, () => dispatch({
-		type: "open_overlay",
-		overlay_id: "commands"
-	}));
 	append($$anchor, header);
 	pop();
 }
-delegate(["click"]);
+delegate(["keydown", "click"]);
 //#endregion
 //#region browser/app/ViewSetStrip.svelte
-var root$13 = /* @__PURE__ */ from_html(`<form class="view-set-rename"><input aria-label="View set name"/> <button type="submit" aria-label="Save view set name">✓</button> <button type="button" aria-label="Cancel rename">×</button></form>`);
-var root_1$9 = /* @__PURE__ */ from_html(`<button class="view-set-select"><span class="ordinal"> </span> <span> </span></button>`);
-var root_2$7 = /* @__PURE__ */ from_html(`<span class="view-set-actions" role="group"><button title="Rename view set">✎</button> <button title="Duplicate view set">⧉</button> <button title="Close view set">×</button></span>`);
-var root_3$6 = /* @__PURE__ */ from_html(`<div><!> <!></div>`);
-var root_4$5 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button> <div class="view-set-context" aria-label="Focused view and layout"><span> </span> <span aria-label="Layout"> </span></div></nav>`);
+var root$6 = /* @__PURE__ */ from_html(`<form class="view-set-rename"><input aria-label="View set name"/> <button type="submit" aria-label="Save view set name">✓</button> <button type="button" aria-label="Cancel rename">×</button></form>`);
+var root_1$4 = /* @__PURE__ */ from_html(`<button class="view-set-select"><span class="ordinal"> </span> <span> </span></button>`);
+var root_2$3 = /* @__PURE__ */ from_html(`<span class="view-set-actions" role="group"><button title="Rename view set">✎</button> <button title="Duplicate view set">⧉</button> <button title="Close view set">×</button></span>`);
+var root_3$3 = /* @__PURE__ */ from_html(`<div><!> <!></div>`);
+var root_4$2 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button> <div class="view-set-context" aria-label="Focused view and layout"><span> </span> <span aria-label="Layout"> </span></div></nav>`);
 function ViewSetStrip($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -7583,14 +10586,14 @@ function ViewSetStrip($$anchor, $$props) {
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent_2 = ($$anchor) => {
-		var nav = root_4$5();
+		var nav = root_4$2();
 		var node_1 = child(nav);
 		each(node_1, 17, () => $$props.model.tabs, (tab) => tab.view_set_id, ($$anchor, tab) => {
-			var div = root_3$6();
+			var div = root_3$3();
 			let classes;
 			var node_2 = child(div);
 			var consequent = ($$anchor) => {
-				var form = root$13();
+				var form = root$6();
 				var input = child(form);
 				remove_input_defaults(input);
 				bind_this(input, ($$value) => set(renameInput, $$value), () => get(renameInput));
@@ -7613,7 +10616,7 @@ function ViewSetStrip($$anchor, $$props) {
 				append($$anchor, form);
 			};
 			var alternate = ($$anchor) => {
-				var button_1 = root_1$9();
+				var button_1 = root_1$4();
 				var span = child(button_1);
 				var text = only_child(span, true);
 				var text_1 = only_child(sibling(span, 2), true);
@@ -7639,7 +10642,7 @@ function ViewSetStrip($$anchor, $$props) {
 			});
 			var node_3 = sibling(node_2, 2);
 			var consequent_1 = ($$anchor) => {
-				var span_2 = root_2$7();
+				var span_2 = root_2$3();
 				var button_2 = child(span_2);
 				var button_3 = sibling(button_2, 2);
 				var button_4 = sibling(button_3, 2);
@@ -7700,446 +10703,21 @@ function ViewSetStrip($$anchor, $$props) {
 }
 delegate(["keydown", "click"]);
 //#endregion
-//#region browser/components/InputComposer.svelte
-var root$12 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
-var root_1$8 = /* @__PURE__ */ from_html(`<button>↑</button>`);
-var root_2$6 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
-function InputComposer($$anchor, $$props) {
-	push($$props, true);
-	const dispatch = dispatchUi();
-	let composing = false;
-	function cursorBytes(text, utf16Offset) {
-		return BigInt(new TextEncoder().encode(text.slice(0, utf16Offset)).length);
-	}
-	function emitInput(target) {
-		if (composing) return;
-		dispatch({
-			type: "input_at",
-			address: $$props.model.address,
-			action: {
-				type: "set_text",
-				text: target.value,
-				cursor: cursorBytes(target.value, target.selectionStart ?? target.value.length)
-			}
-		});
-	}
-	var section = root_2$6();
-	let classes;
-	var node = child(section);
-	var consequent = ($$anchor) => {
-		var div = root$12();
-		var text_1 = only_child(sibling(child(div)), true);
-		next();
-		reset(div);
-		template_effect(() => set_text(text_1, $$props.model.route_label));
-		append($$anchor, div);
-	};
-	if_block(node, ($$render) => {
-		if (!$$props.model.live_filter) $$render(consequent);
-	});
-	var textarea = sibling(node, 2);
-	remove_textarea_child(textarea);
-	var div_1 = sibling(textarea, 2);
-	var span_1 = child(div_1);
-	var text_2 = only_child(span_1, true);
-	var node_1 = sibling(span_1);
-	var consequent_1 = ($$anchor) => {
-		var button = root_1$8();
-		template_effect(() => {
-			set_attribute(button, "aria-label", `Send to ${$$props.model.route_label}`);
-			button.disabled = !$$props.model.submit_enabled;
-		});
-		delegated("click", button, () => dispatch({
-			type: "input_at",
-			address: $$props.model.address,
-			action: {
-				type: "submit",
-				interrupt: false
-			}
-		}));
-		append($$anchor, button);
-	};
-	if_block(node_1, ($$render) => {
-		if (!$$props.model.live_filter) $$render(consequent_1);
-	});
-	reset(div_1);
-	reset(section);
-	template_effect(() => {
-		classes = set_class(section, 1, "composer", null, classes, { "live-filter": $$props.model.live_filter });
-		set_attribute(section, "aria-label", $$props.model.route_label);
-		set_attribute(textarea, "data-focus-key", `input:${$$props.model.address.buffer.view_instance_key}:${$$props.model.address.buffer.input_id}`);
-		set_value(textarea, $$props.model.text);
-		set_attribute(textarea, "placeholder", $$props.model.placeholder);
-		set_attribute(textarea, "aria-label", $$props.model.route_label);
-		set_text(text_2, $$props.model.hint);
-	});
-	event("focus", textarea, () => dispatch({
-		type: "input_at",
-		address: $$props.model.address,
-		action: { type: "focus" }
-	}));
-	event("compositionstart", textarea, () => composing = true);
-	event("compositionend", textarea, (event) => {
-		composing = false;
-		emitInput(event.currentTarget);
-	});
-	delegated("input", textarea, (event) => emitInput(event.currentTarget));
-	delegated("keydown", textarea, (event) => {
-		if (event.key === "Enter" && $$props.model.live_filter && !composing) {
-			event.preventDefault();
-			dispatch({ type: "activate_focused" });
-		} else if (event.key === "Enter" && !event.shiftKey && !composing && $$props.model.submit_enabled) {
-			event.preventDefault();
-			dispatch({
-				type: "input_at",
-				address: $$props.model.address,
-				action: {
-					type: "submit",
-					interrupt: event.altKey
-				}
-			});
-		}
-	});
-	append($$anchor, section);
-	pop();
-}
-delegate([
-	"input",
-	"keydown",
-	"click"
-]);
-//#endregion
-//#region browser/views/SceneView.svelte
-var root$11 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_1$7 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div> <div class="atlas-lenses" aria-label="Atlas lens"></div>`, 1);
-var root_2$5 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"></div> <!></div>`);
-var root_3$5 = /* @__PURE__ */ from_svg(`<line></line>`);
-var root_4$4 = /* @__PURE__ */ from_svg(`<text> </text>`);
-var root_5$4 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
-var root_6$4 = /* @__PURE__ */ from_svg(`<rect></rect>`);
-var root_7$4 = /* @__PURE__ */ from_svg(`<circle></circle>`);
-var root_8$3 = /* @__PURE__ */ from_svg(`<title> </title>`);
-var root_9$2 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
-var root_10$2 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055"><title> </title></circle>`);
-var root_11$1 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text></g><!>`, 1);
-var root_12$1 = /* @__PURE__ */ from_svg(`<!><!>`, 1);
-var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!> <svg role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg></div>`);
-function SceneView($$anchor, $$props) {
-	push($$props, true);
-	const dispatch = dispatchUi();
-	const points = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => [object.position, object.end].filter((point) => point != null)));
-	const bounds = /* @__PURE__ */ user_derived(() => {
-		const xs = get(points).map((point) => Number(point[0] ?? 0));
-		const ys = get(points).map((point) => -Number(point[1] ?? 0));
-		const minX = xs.length ? Math.min(...xs) : 0;
-		const maxX = xs.length ? Math.max(...xs) : 1;
-		const minY = ys.length ? Math.min(...ys) : 0;
-		const maxY = ys.length ? Math.max(...ys) : 1;
-		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
-		const width = Math.max(40, maxX - minX + 40) * scale;
-		const height = Math.max(30, maxY - minY + 30) * scale;
-		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${-Number($$props.scene.camera.target[1] ?? 0) - height / 2} ${width} ${height}`;
-	});
-	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
-	const activate = (intent) => intent && dispatch({
-		type: "activate",
-		intent
-	});
-	const radius = (object) => Math.max(1, Number(object.scale?.[0] ?? 5));
-	const x = (object) => Number(object.position?.[0] ?? 0);
-	const y = (object) => -Number(object.position?.[1] ?? 0);
-	const atlasNodes = /* @__PURE__ */ user_derived(() => new Map(($$props.scene.atlas?.nodes ?? []).map((node) => [node.id, node])));
-	const atlasBounds = /* @__PURE__ */ user_derived(() => {
-		const bounds = $$props.scene.atlas?.bounds;
-		if (!bounds) return "-10 -10 20 20";
-		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
-		const width = Math.max(4, bounds.x_max - bounds.x_min + 4) * scale;
-		const height = Math.max(4, bounds.z_max - bounds.z_min + 4) * scale;
-		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${Number($$props.scene.camera.target[2] ?? 0) - height / 2} ${width} ${height}`;
-	});
-	const atlasPoint = (position) => ({
-		x: Number(position[0] ?? 0),
-		y: Number(position[2] ?? position[1] ?? 0)
-	});
-	const actionById = /* @__PURE__ */ user_derived(() => new Map($$props.scene.actions.map((action) => [action.id, action])));
-	const actions = (group) => $$props.scene.actions.filter((action) => action.group === group);
-	const runAction = (action) => action && dispatch(action.event);
-	const keyAction = (event, action) => {
-		if (event.key === "Enter" || event.key === " ") {
-			event.preventDefault();
-			runAction(action);
-		}
-	};
-	var div = root_13$1();
-	var node_1 = child(div);
-	var consequent_1 = ($$anchor) => {
-		var div_1 = root_2$5();
-		var div_2 = child(div_1);
-		var strong = child(div_2);
-		var text = only_child(strong, true);
-		var text_1 = only_child(sibling(strong));
-		reset(div_2);
-		var div_3 = sibling(div_2, 2);
-		each(div_3, 21, () => actions("projection"), (action) => action.id, ($$anchor, action) => {
-			var button = root$11();
-			let classes;
-			var text_2 = only_child(button, true);
-			template_effect(() => {
-				set_attribute(button, "aria-pressed", get(action).active);
-				classes = set_class(button, 1, "", null, classes, { active: get(action).active });
-				set_text(text_2, get(action).label);
-			});
-			delegated("click", button, () => runAction(get(action)));
-			append($$anchor, button);
-		});
-		reset(div_3);
-		var node_2 = sibling(div_3, 2);
-		var consequent = ($$anchor) => {
-			var fragment = root_1$7();
-			var div_4 = first_child(fragment);
-			each(div_4, 21, () => actions("layer"), (action) => action.id, ($$anchor, action) => {
-				var button_1 = root$11();
-				let classes_1;
-				var text_3 = only_child(button_1, true);
-				template_effect(() => {
-					set_attribute(button_1, "aria-pressed", get(action).active);
-					classes_1 = set_class(button_1, 1, "", null, classes_1, { active: get(action).active });
-					set_text(text_3, get(action).label);
-				});
-				delegated("click", button_1, () => runAction(get(action)));
-				append($$anchor, button_1);
-			});
-			reset(div_4);
-			var div_5 = sibling(div_4, 2);
-			each(div_5, 21, () => actions("lens"), (action) => action.id, ($$anchor, action) => {
-				var button_2 = root$11();
-				let classes_2;
-				var text_4 = only_child(button_2, true);
-				template_effect(() => {
-					set_attribute(button_2, "aria-pressed", get(action).active);
-					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(action).active });
-					set_text(text_4, get(action).label);
-				});
-				delegated("click", button_2, () => runAction(get(action)));
-				append($$anchor, button_2);
-			});
-			reset(div_5);
-			append($$anchor, fragment);
-		};
-		if_block(node_2, ($$render) => {
-			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
-		});
-		reset(div_1);
-		template_effect(() => {
-			set_text(text, $$props.scene.atlas.root_label);
-			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
-		});
-		append($$anchor, div_1);
-	};
-	if_block(node_1, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_1);
-	});
-	var svg = sibling(node_1, 2);
-	let classes_3;
-	var node_3 = child(svg);
-	each(node_3, 17, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
-		const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
-		const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
-		const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
-		const end = /* @__PURE__ */ user_derived(() => get(object).end);
-		var g = root_9$2();
-		let classes_4;
-		var node_4 = child(g);
-		var consequent_2 = ($$anchor) => {
-			var line = root_3$5();
-			template_effect(($0, $1) => {
-				set_attribute(line, "x1", get(ox));
-				set_attribute(line, "y1", get(oy));
-				set_attribute(line, "x2", $0);
-				set_attribute(line, "y2", $1);
-				set_attribute(line, "stroke", get(object).color);
-			}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
-			append($$anchor, line);
-		};
-		var consequent_3 = ($$anchor) => {
-			var text_5 = root_4$4();
-			var text_6 = only_child(text_5, true);
-			template_effect(() => {
-				set_attribute(text_5, "x", get(ox));
-				set_attribute(text_5, "y", get(oy));
-				set_attribute(text_5, "fill", get(object).color);
-				set_text(text_6, get(object).label ?? "");
-			});
-			append($$anchor, text_5);
-		};
-		var consequent_4 = ($$anchor) => {
-			var polygon = root_5$4();
-			template_effect(() => {
-				set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
-				set_attribute(polygon, "stroke", get(object).color);
-			});
-			append($$anchor, polygon);
-		};
-		var consequent_5 = ($$anchor) => {
-			var rect = root_6$4();
-			template_effect(() => {
-				set_attribute(rect, "x", get(ox) - get(r));
-				set_attribute(rect, "y", get(oy) - get(r));
-				set_attribute(rect, "width", get(r) * 2);
-				set_attribute(rect, "height", get(r) * 2);
-				set_attribute(rect, "stroke", get(object).color);
-			});
-			append($$anchor, rect);
-		};
-		var alternate = ($$anchor) => {
-			var circle = root_7$4();
-			template_effect(() => {
-				set_attribute(circle, "cx", get(ox));
-				set_attribute(circle, "cy", get(oy));
-				set_attribute(circle, "r", get(r));
-				set_attribute(circle, "stroke", get(object).color);
-			});
-			append($$anchor, circle);
-		};
-		if_block(node_4, ($$render) => {
-			if (get(end)) $$render(consequent_2);
-			else if (get(object).kind === "text") $$render(consequent_3, 1);
-			else if (get(object).glyph === "diamond") $$render(consequent_4, 2);
-			else if (get(object).glyph === "square") $$render(consequent_5, 3);
-			else $$render(alternate, -1);
-		});
-		var node_5 = sibling(node_4);
-		var consequent_6 = ($$anchor) => {
-			var title = root_8$3();
-			var text_7 = only_child(title, true);
-			template_effect(() => set_text(text_7, get(object).label));
-			append($$anchor, title);
-		};
-		if_block(node_5, ($$render) => {
-			if (get(object).label && get(object).kind !== "text") $$render(consequent_6);
-		});
-		reset(g);
-		template_effect(() => {
-			set_attribute(g, "data-tone", get(object).tone);
-			set_attribute(g, "opacity", get(object).opacity);
-			set_attribute(g, "role", get(object).intent ? "button" : void 0);
-			set_attribute(g, "tabindex", get(object).intent ? 0 : void 0);
-			classes_4 = set_class(g, 0, "", null, classes_4, { interactive: get(object).intent != null });
-		});
-		delegated("click", g, () => activate(get(object).intent));
-		delegated("keydown", g, (event) => {
-			if (event.key === "Enter" || event.key === " ") {
-				event.preventDefault();
-				activate(get(object).intent);
-			}
-		});
-		append($$anchor, g);
-	});
-	var node_6 = sibling(node_3);
-	var consequent_8 = ($$anchor) => {
-		var fragment_1 = root_12$1();
-		var node_7 = first_child(fragment_1);
-		each(node_7, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
-			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
-			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
-			var fragment_2 = comment();
-			var node_8 = first_child(fragment_2);
-			var consequent_7 = ($$anchor) => {
-				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
-				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
-				var line_1 = root_3$5();
-				template_effect(() => {
-					set_attribute(line_1, "x1", get(start).x);
-					set_attribute(line_1, "y1", get(start).y);
-					set_attribute(line_1, "x2", get(end).x);
-					set_attribute(line_1, "y2", get(end).y);
-					set_attribute(line_1, "data-kind", get(link).kind);
-				});
-				append($$anchor, line_1);
-			};
-			if_block(node_8, ($$render) => {
-				if (get(from) && get(to)) $$render(consequent_7);
-			});
-			append($$anchor, fragment_2);
-		});
-		each(sibling(node_7), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
-			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
-			const nodeAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`node:${get(node).id}`));
-			var fragment_3 = root_11$1();
-			var g_1 = first_child(fragment_3);
-			let classes_5;
-			var circle_1 = child(g_1);
-			var text_8 = sibling(circle_1);
-			var text_9 = only_child(text_8, true);
-			reset(g_1);
-			each(sibling(g_1), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
-				const itemAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`item:${get(item).id}`));
-				var circle_2 = root_10$2();
-				var text_10 = only_child(child(circle_2), true);
-				reset(circle_2);
-				template_effect(() => {
-					set_attribute(circle_2, "data-kind", get(item).kind);
-					set_attribute(circle_2, "cx", get(point).x + get(index) * .11);
-					set_attribute(circle_2, "cy", get(point).y - .24);
-					set_attribute(circle_2, "role", get(itemAction) ? "button" : void 0);
-					set_attribute(circle_2, "tabindex", get(itemAction) ? 0 : void 0);
-					set_text(text_10, get(item).canonical_ref);
-				});
-				delegated("click", circle_2, () => runAction(get(itemAction)));
-				delegated("keydown", circle_2, (event) => keyAction(event, get(itemAction)));
-				append($$anchor, circle_2);
-			});
-			template_effect(($0) => {
-				classes_5 = set_class(g_1, 0, "atlas-node", null, classes_5, {
-					selected: get(node).state.selected,
-					highlighted: get(node).state.highlighted,
-					dimmed: get(node).state.dimmed
-				});
-				set_attribute(g_1, "role", get(nodeAction) ? "button" : void 0);
-				set_attribute(g_1, "tabindex", get(nodeAction) ? 0 : void 0);
-				set_attribute(circle_1, "cx", get(point).x);
-				set_attribute(circle_1, "cy", get(point).y);
-				set_attribute(circle_1, "r", $0);
-				set_attribute(text_8, "x", get(point).x + .28);
-				set_attribute(text_8, "y", get(point).y + .08);
-				set_text(text_9, get(node).label);
-			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
-			delegated("click", g_1, () => runAction(get(nodeAction)));
-			delegated("keydown", g_1, (event) => keyAction(event, get(nodeAction)));
-			append($$anchor, fragment_3);
-		});
-		append($$anchor, fragment_1);
-	};
-	if_block(node_6, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_8);
-	});
-	reset(svg);
-	reset(div);
-	template_effect(() => {
-		set_attribute(svg, "viewBox", $$props.scene.atlas ? get(atlasBounds) : get(bounds));
-		set_attribute(svg, "aria-label", $$props.scene.atlas ? `${$$props.scene.atlas.root_label} atlas` : get(accessibleLabel));
-		classes_3 = set_class(svg, 0, "", null, classes_3, { "atlas-canvas": $$props.scene.atlas != null });
-	});
-	append($$anchor, div);
-	pop();
-}
-delegate(["click", "keydown"]);
-//#endregion
 //#region browser/components/ViewSupplement.svelte
-var root$10 = /* @__PURE__ */ from_html(`<section class="view-supplement-scene" aria-label="View topology"><!></section>`);
-var root_1$6 = /* @__PURE__ */ from_html(`<header> </header>`);
-var root_2$4 = /* @__PURE__ */ from_html(`<div><span> </span><code> </code></div>`);
-var root_3$4 = /* @__PURE__ */ from_html(`<section class="view-supplement-excerpt"><!> <div class="view-supplement-code"></div></section>`);
-var root_4$3 = /* @__PURE__ */ from_html(`<strong> </strong>`);
-var root_5$3 = /* @__PURE__ */ from_html(`<div><span> </span><small> </small></div>`);
-var root_6$3 = /* @__PURE__ */ from_html(`<footer class="view-supplement-footer"><!> <!></footer>`);
-var root_7$3 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
+var root$5 = /* @__PURE__ */ from_html(`<section class="view-supplement-scene" aria-label="View topology"><!></section>`);
+var root_1$3 = /* @__PURE__ */ from_html(`<header> </header>`);
+var root_2$2 = /* @__PURE__ */ from_html(`<div><span> </span><code> </code></div>`);
+var root_3$2 = /* @__PURE__ */ from_html(`<section class="view-supplement-excerpt"><!> <div class="view-supplement-code"></div></section>`);
+var root_4$1 = /* @__PURE__ */ from_html(`<strong> </strong>`);
+var root_5$1 = /* @__PURE__ */ from_html(`<div><span> </span><small> </small></div>`);
+var root_6$1 = /* @__PURE__ */ from_html(`<footer class="view-supplement-footer"><!> <!></footer>`);
+var root_7$1 = /* @__PURE__ */ from_html(`<!> <!>`, 1);
 function ViewSupplement($$anchor, $$props) {
 	push($$props, true);
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var section = root$10();
+		var section = root$5();
 		SceneView(child(section), { get scene() {
 			return $$props.model.scene;
 		} });
@@ -8147,13 +10725,13 @@ function ViewSupplement($$anchor, $$props) {
 		append($$anchor, section);
 	};
 	var consequent_5 = ($$anchor) => {
-		var fragment_1 = root_7$3();
+		var fragment_1 = root_7$1();
 		var node_2 = first_child(fragment_1);
 		var consequent_2 = ($$anchor) => {
-			var section_1 = root_3$4();
+			var section_1 = root_3$2();
 			var node_3 = child(section_1);
 			var consequent_1 = ($$anchor) => {
-				var header = root_1$6();
+				var header = root_1$3();
 				var text = only_child(header, true);
 				template_effect(() => set_text(text, $$props.model.excerpt_title));
 				append($$anchor, header);
@@ -8163,7 +10741,7 @@ function ViewSupplement($$anchor, $$props) {
 			});
 			var div = sibling(node_3, 2);
 			each(div, 21, () => $$props.model.excerpt, index, ($$anchor, row) => {
-				var div_1 = root_2$4();
+				var div_1 = root_2$2();
 				var span = child(div_1);
 				var text_1 = only_child(span, true);
 				var text_2 = only_child(sibling(span), true);
@@ -8185,10 +10763,10 @@ function ViewSupplement($$anchor, $$props) {
 		});
 		var node_4 = sibling(node_2, 2);
 		var consequent_4 = ($$anchor) => {
-			var footer = root_6$3();
+			var footer = root_6$1();
 			var node_5 = child(footer);
 			var consequent_3 = ($$anchor) => {
-				var strong = root_4$3();
+				var strong = root_4$1();
 				var text_3 = only_child(strong, true);
 				template_effect(() => set_text(text_3, $$props.model.footer));
 				append($$anchor, strong);
@@ -8197,7 +10775,7 @@ function ViewSupplement($$anchor, $$props) {
 				if ($$props.model.footer) $$render(consequent_3);
 			});
 			each(sibling(node_5, 2), 17, () => $$props.model.footer_rows, index, ($$anchor, row) => {
-				var div_2 = root_5$3();
+				var div_2 = root_5$1();
 				var span_1 = child(div_2);
 				var text_4 = only_child(span_1, true);
 				var text_5 = only_child(sibling(span_1), true);
@@ -8224,1737 +10802,6 @@ function ViewSupplement($$anchor, $$props) {
 	append($$anchor, fragment);
 	pop();
 }
-//#endregion
-//#region browser/components/EmptyState.svelte
-var root$9 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
-function EmptyState($$anchor, $$props) {
-	var div = root$9();
-	var strong = sibling(child(div));
-	var text = only_child(strong, true);
-	var text_1 = only_child(sibling(strong), true);
-	reset(div);
-	template_effect(() => {
-		set_text(text, $$props.title);
-		set_text(text_1, $$props.message);
-	});
-	append($$anchor, div);
-}
-//#endregion
-//#region browser/components/RowDetails.svelte
-var root$8 = /* @__PURE__ */ from_html(`<div><dt> </dt> <dd> </dd></div>`);
-var root_1$5 = /* @__PURE__ */ from_html(`<dl class="row-details"></dl>`);
-function RowDetails($$anchor, $$props) {
-	push($$props, true);
-	let label = prop($$props, "label", 3, "Details");
-	var fragment = comment();
-	var node = first_child(fragment);
-	var consequent = ($$anchor) => {
-		var dl = root_1$5();
-		each(dl, 23, () => $$props.details, (detail, index) => `${detail.field}:${index}`, ($$anchor, detail) => {
-			var div = root$8();
-			var dt = child(div);
-			var text = only_child(dt, true);
-			var text_1 = only_child(sibling(dt, 2), true);
-			reset(div);
-			template_effect(() => {
-				set_attribute(div, "data-tone", get(detail).tone ?? void 0);
-				set_text(text, get(detail).field || "detail");
-				set_text(text_1, get(detail).value);
-			});
-			append($$anchor, div);
-		});
-		reset(dl);
-		template_effect(() => set_attribute(dl, "aria-label", label()));
-		append($$anchor, dl);
-	};
-	if_block(node, ($$render) => {
-		if ($$props.details.length) $$render(consequent);
-	});
-	append($$anchor, fragment);
-	pop();
-}
-//#endregion
-//#region browser/visuals/ryeos_field_accessibility.js
-function fieldAccessibilityModel(vm) {
-	const byId = new Map((vm.entities || []).map((entity) => [entity.id, entity]));
-	const groups = new Map((vm.groups || []).map((group) => [group.id, group]));
-	const neighbors = new Map((vm.entities || []).map((entity) => [entity.id, []]));
-	for (const relation of vm.relations || []) {
-		if (neighbors.has(relation.source_id) && byId.has(relation.target_id)) neighbors.get(relation.source_id).push(`${relation.kind} to ${byId.get(relation.target_id).label}`);
-		if (neighbors.has(relation.target_id) && byId.has(relation.source_id)) neighbors.get(relation.target_id).push(`${relation.kind} from ${byId.get(relation.source_id).label}`);
-	}
-	const ordered = (vm.traversal || []).map((id) => byId.get(id)).filter(Boolean);
-	return ordered.map((entity, index) => {
-		const group = entity.group_id ? groups.get(entity.group_id) : null;
-		return {
-			id: entity.id,
-			domId: `ryeos-field-option-${safeId(entity.id)}`,
-			label: entity.accessibility_label || entity.label || entity.id,
-			selected: vm.selected === entity.id,
-			position: index + 1,
-			size: ordered.length,
-			level: entityLevel(entity, byId),
-			groupId: group?.id || null,
-			groupLabel: group?.label || null,
-			expanded: group ? !group.collapsed : null,
-			neighbors: (neighbors.get(entity.id) || []).sort().join("; "),
-			selectIntent: entity.select_intent || null,
-			activateIntent: entity.activate_intent || null,
-			compare: entity.compare_available
-		};
-	});
-}
-function entityLevel(entity, byId) {
-	let level = 1;
-	let parentId = entity.parent_id;
-	const visited = /* @__PURE__ */ new Set([entity.id]);
-	while (parentId && byId.has(parentId) && !visited.has(parentId)) {
-		visited.add(parentId);
-		level += 1;
-		parentId = byId.get(parentId).parent_id;
-	}
-	return level;
-}
-function safeId(value) {
-	return [...String(value)].map((character) => /[a-zA-Z0-9-]/.test(character) ? character : `_${character.codePointAt(0).toString(16)}_`).join("");
-}
-//#endregion
-//#region browser/visuals/ryeos_field_layout.js
-var GROUP_WIDTH = 520;
-var RANK_SPACING = 210;
-var GROUP_RIGHT_GUTTER = 300;
-var GROUP_HEADER_HEIGHT = 26;
-var LARGE_FIELD_ENTITY_COUNT = 240;
-var LARGE_FIELD_RELATION_COUNT = 720;
-var StaleFieldLayoutError = class extends Error {
-	constructor() {
-		super("field layout superseded");
-		this.name = "StaleFieldLayoutError";
-	}
-};
-function layoutField(vm, previous = /* @__PURE__ */ new Map()) {
-	const prepared = prepareField(vm);
-	return placeField(vm, prepared, stronglyConnectedComponents(prepared.ids, prepared.relations), previous);
-}
-async function layoutFieldChunked(vm, previous = /* @__PURE__ */ new Map(), { schedule = nextFrame, isStale = () => false } = {}) {
-	const prepared = prepareField(vm);
-	if (!isLarge(prepared)) return layoutField(vm, previous);
-	await schedule();
-	if (isStale()) throw new StaleFieldLayoutError();
-	const components = stronglyConnectedComponents(prepared.ids, prepared.relations);
-	await schedule();
-	if (isStale()) throw new StaleFieldLayoutError();
-	const layout = placeField(vm, prepared, components, previous);
-	if (isStale()) throw new StaleFieldLayoutError();
-	return layout;
-}
-function settleLayout(layout, amount = 1) {
-	for (const node of layout.nodes.values()) {
-		node.x += (node.targetX - node.x) * amount;
-		node.y += (node.targetY - node.y) * amount;
-	}
-	for (const edge of layout.edges) edge.points = routeEdge(layout.nodes.get(edge.relation.source_id), layout.nodes.get(edge.relation.target_id));
-	layout.groups = groupBounds(layout.groupDefinitions, layout.nodes, layout.groupOrigins);
-	return layout;
-}
-function hitTest(layout, x, y) {
-	return [...layout.nodes.values()].reverse().find((node) => Math.abs(x - node.x) <= node.width / 2 && Math.abs(y - node.y) <= node.height / 2) || null;
-}
-function hitTestGroup(layout, x, y) {
-	return [...layout.groups].reverse().find((group) => x >= group.x && x <= group.x + group.width && y >= group.y && y <= group.y + GROUP_HEADER_HEIGHT) || null;
-}
-function fieldLayoutIsLarge(vm) {
-	return (vm.entities || []).length >= LARGE_FIELD_ENTITY_COUNT || (vm.relations || []).length >= LARGE_FIELD_RELATION_COUNT;
-}
-function fieldLayoutMembershipKey(vm) {
-	return JSON.stringify(visibleEntities(vm).map((entity) => entity.id));
-}
-function rebindFieldLayout(layout, vm) {
-	const entities = new Map((vm?.entities || []).map((entity) => [entity.id, entity]));
-	const relations = new Map((vm?.relations || []).map((relation) => [relation.id, relation]));
-	for (const node of layout.nodes.values()) node.entity = entities.get(node.id) || node.entity;
-	for (const edge of layout.edges) edge.relation = relations.get(edge.relation.id) || edge.relation;
-	return layout;
-}
-function prepareField(vm) {
-	const visible = visibleEntities(vm);
-	const ids = visible.map((entity) => entity.id);
-	const idSet = new Set(ids);
-	return {
-		visible,
-		ids,
-		relations: (vm.relations || []).filter((relation) => idSet.has(relation.source_id) && idSet.has(relation.target_id))
-	};
-}
-function placeField(vm, prepared, components, previous) {
-	const { visible, relations } = prepared;
-	const componentById = /* @__PURE__ */ new Map();
-	components.forEach((members, index) => {
-		members.forEach((id) => componentById.set(id, index));
-	});
-	const componentRanks = rankComponents(components, componentById, relations, visible);
-	const groupDefinitions = (vm.groups || []).map((group) => ({ ...group }));
-	const groupOrder = new Map(groupDefinitions.map((group, index) => [group.id, index]));
-	const laneNames = [...new Set(visible.map((entity) => entity.lane || "").filter(Boolean))].sort();
-	const laneOrder = new Map(laneNames.map((lane, index) => [lane, index]));
-	const buckets = /* @__PURE__ */ new Map();
-	for (const entity of visible) {
-		const key = `${groupOrder.get(entity.group_id) ?? groupOrder.size}\0${Number.isFinite(entity.rank) ? Number(entity.rank) : componentRanks.get(componentById.get(entity.id)) || 0}\0${laneOrder.get(entity.lane) ?? laneOrder.size}`;
-		if (!buckets.has(key)) buckets.set(key, []);
-		buckets.get(key).push(entity);
-	}
-	for (const entities of buckets.values()) entities.sort((left, right) => number(left.order) - number(right.order) || left.id.localeCompare(right.id));
-	const maximumRankByGroup = /* @__PURE__ */ new Map();
-	groupDefinitions.forEach((_, index) => maximumRankByGroup.set(index, 0));
-	for (const key of buckets.keys()) {
-		const [groupText, rankText] = key.split("\0");
-		const group = Number(groupText);
-		const rank = Number(rankText);
-		maximumRankByGroup.set(group, Math.max(maximumRankByGroup.get(group) ?? 0, rank));
-	}
-	const groupOrigins = /* @__PURE__ */ new Map();
-	let nextGroupOrigin = 0;
-	for (const group of [...maximumRankByGroup.keys()].sort((left, right) => left - right)) {
-		groupOrigins.set(group, nextGroupOrigin);
-		nextGroupOrigin += Math.max(GROUP_WIDTH, (maximumRankByGroup.get(group) || 0) * RANK_SPACING + GROUP_RIGHT_GUTTER);
-	}
-	const nodes = /* @__PURE__ */ new Map();
-	const incoming = incomingSources(relations);
-	for (const [key, entities] of [...buckets.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-		const [groupText, rankText, laneText] = key.split("\0");
-		const group = Number(groupText);
-		const rank = Number(rankText);
-		const lane = Number(laneText);
-		entities.forEach((entity, index) => {
-			const targetX = 120 + (groupOrigins.get(group) || 0) + rank * RANK_SPACING;
-			const targetY = 90 + lane * 150 + index * 86;
-			const seed = seedPosition(entity, previous, incoming, targetX, targetY);
-			nodes.set(entity.id, {
-				id: entity.id,
-				entity,
-				x: seed.x,
-				y: seed.y,
-				targetX,
-				targetY,
-				width: entity.traits?.shape === "aggregate" ? 156 : 136,
-				height: entity.traits?.shape === "grid" ? 74 : 52,
-				componentSize: components[componentById.get(entity.id)]?.length || 1
-			});
-		});
-	}
-	const edges = relations.map((relation) => ({
-		relation,
-		points: routeEdge(nodes.get(relation.source_id), nodes.get(relation.target_id))
-	}));
-	const groups = groupBounds(groupDefinitions, nodes, groupOrigins);
-	return {
-		nodes,
-		edges,
-		groups,
-		groupDefinitions,
-		groupOrigins,
-		width: Math.max(640, ...[...nodes.values()].map((node) => node.targetX + node.width + 100), ...groups.map((group) => group.x + group.width + 40)),
-		height: Math.max(360, ...[...nodes.values()].map((node) => node.targetY + node.height + 100), ...groups.map((group) => group.y + group.height + 40))
-	};
-}
-function visibleEntities(vm) {
-	const hidden = new Set((vm.layers || []).filter((layer) => !layer.visible).map((layer) => layer.id));
-	const collapsed = new Set((vm.groups || []).filter((group) => group.collapsed).map((group) => group.id));
-	return (vm.entities || []).filter((entity) => {
-		if (entity.selected) return true;
-		if (entity.group_id && collapsed.has(entity.group_id)) return false;
-		if (!(entity.layer_ids || []).length) return true;
-		return entity.layer_ids.some((layer) => !hidden.has(layer));
-	});
-}
-function seedPosition(entity, previous, incoming, targetX, targetY) {
-	const prior = previous.get(entity.id);
-	if (prior) return {
-		x: prior.x,
-		y: prior.y
-	};
-	const parent = entity.parent_id && previous.get(entity.parent_id);
-	if (parent) return {
-		x: parent.x,
-		y: parent.y
-	};
-	for (const sourceId of incoming.get(entity.id) || []) {
-		const source = previous.get(sourceId);
-		if (source) return {
-			x: source.x,
-			y: source.y
-		};
-	}
-	return {
-		x: targetX - 28,
-		y: targetY
-	};
-}
-function incomingSources(relations) {
-	const incoming = /* @__PURE__ */ new Map();
-	for (const relation of relations) {
-		if (!incoming.has(relation.target_id)) incoming.set(relation.target_id, []);
-		incoming.get(relation.target_id).push(relation.source_id);
-	}
-	for (const sources of incoming.values()) sources.sort();
-	return incoming;
-}
-function stronglyConnectedComponents(ids, relations) {
-	const graph = new Map(ids.map((id) => [id, []]));
-	for (const relation of relations) graph.get(relation.source_id)?.push(relation.target_id);
-	for (const targets of graph.values()) targets.sort();
-	let index = 0;
-	const stack = [];
-	const onStack = /* @__PURE__ */ new Set();
-	const indices = /* @__PURE__ */ new Map();
-	const low = /* @__PURE__ */ new Map();
-	const components = [];
-	const visit = (id) => {
-		indices.set(id, index);
-		low.set(id, index);
-		index += 1;
-		stack.push(id);
-		onStack.add(id);
-		for (const next of graph.get(id) || []) if (!indices.has(next)) {
-			visit(next);
-			low.set(id, Math.min(low.get(id), low.get(next)));
-		} else if (onStack.has(next)) low.set(id, Math.min(low.get(id), indices.get(next)));
-		if (low.get(id) === indices.get(id)) {
-			const component = [];
-			let member;
-			do {
-				member = stack.pop();
-				onStack.delete(member);
-				component.push(member);
-			} while (member !== id);
-			component.sort();
-			components.push(component);
-		}
-	};
-	[...ids].sort().forEach((id) => {
-		if (!indices.has(id)) visit(id);
-	});
-	return components;
-}
-function rankComponents(components, componentById, relations, entities) {
-	const ranks = /* @__PURE__ */ new Map();
-	const authored = new Map(entities.filter((entity) => Number.isFinite(entity.rank)).map((entity) => [componentById.get(entity.id), Number(entity.rank)]));
-	const incoming = new Map(components.map((_, index) => [index, /* @__PURE__ */ new Set()]));
-	const outgoing = new Map(components.map((_, index) => [index, /* @__PURE__ */ new Set()]));
-	for (const relation of relations) {
-		const source = componentById.get(relation.source_id);
-		const target = componentById.get(relation.target_id);
-		if (source === target) continue;
-		outgoing.get(source).add(target);
-		incoming.get(target).add(source);
-	}
-	const remainingIncoming = new Map([...incoming].map(([component, parents]) => [component, new Set(parents)]));
-	const queue = components.map((_, index) => index).filter((index) => remainingIncoming.get(index).size === 0).sort((left, right) => left - right);
-	while (queue.length) {
-		const component = queue.shift();
-		const rank = authored.get(component) ?? Math.max(0, ...[...incoming.get(component)].map((parent) => (ranks.get(parent) || 0) + 1));
-		ranks.set(component, rank);
-		for (const next of [...outgoing.get(component)].sort((left, right) => left - right)) {
-			remainingIncoming.get(next).delete(component);
-			if (remainingIncoming.get(next).size === 0) queue.push(next);
-		}
-		queue.sort((left, right) => left - right);
-	}
-	components.forEach((_, index) => {
-		if (!ranks.has(index)) ranks.set(index, authored.get(index) || 0);
-	});
-	return ranks;
-}
-function routeEdge(source, target) {
-	if (!source || !target) return [];
-	const middle = (source.x + target.x) / 2;
-	return [
-		[source.x + source.width / 2, source.y],
-		[middle, source.y],
-		[middle, target.y],
-		[target.x - target.width / 2, target.y]
-	];
-}
-function groupBounds(groups, nodes, groupOrigins = /* @__PURE__ */ new Map()) {
-	return groups.map((group, index) => {
-		const members = [...nodes.values()].filter((node) => node.entity.group_id === group.id);
-		if (!members.length) return {
-			id: group.id,
-			label: group.label,
-			collapsed: !!group.collapsed,
-			x: 20 + (groupOrigins.get(index) ?? index * GROUP_WIDTH),
-			y: 20,
-			width: 200,
-			height: 38
-		};
-		const minX = Math.min(...members.map((node) => node.x - node.width / 2)) - 32;
-		const maxX = Math.max(...members.map((node) => node.x + node.width / 2)) + 32;
-		const minY = Math.min(...members.map((node) => node.y - node.height / 2)) - 42;
-		const maxY = Math.max(...members.map((node) => node.y + node.height / 2)) + 28;
-		return {
-			id: group.id,
-			label: group.label,
-			collapsed: !!group.collapsed,
-			x: minX,
-			y: minY,
-			width: maxX - minX,
-			height: maxY - minY
-		};
-	});
-}
-function isLarge(prepared) {
-	return prepared.visible.length >= LARGE_FIELD_ENTITY_COUNT || prepared.relations.length >= LARGE_FIELD_RELATION_COUNT;
-}
-function nextFrame() {
-	return new Promise((resolve) => {
-		if (globalThis.requestAnimationFrame) requestAnimationFrame(() => resolve());
-		else setTimeout(resolve, 0);
-	});
-}
-function number(value) {
-	return Number.isFinite(value) ? Number(value) : 0;
-}
-//#endregion
-//#region browser/visuals/ryeos_field_canvas.js
-var TONES = {
-	good: "#8ec07c",
-	warn: "#fabd2f",
-	danger: "#fb4934",
-	accent: "#d65d0e",
-	neutral: "#a89984"
-};
-var HIGH_CONTRAST_TONES = {
-	good: "CanvasText",
-	warn: "CanvasText",
-	danger: "CanvasText",
-	accent: "Highlight",
-	neutral: "CanvasText"
-};
-var FieldCanvasController = class {
-	constructor(canvas, interactions) {
-		this.canvas = canvas;
-		this.context = canvas.getContext?.("2d") || null;
-		this.interactions = interactions;
-		this.layout = emptyLayout();
-		this.structuralRevision = null;
-		this.viewport = {
-			x: 20,
-			y: 20,
-			zoom: 1
-		};
-		this.frame = null;
-		this.drag = null;
-		this.layoutGeneration = 0;
-		this.layoutCount = 0;
-		this.tombstones = /* @__PURE__ */ new Map();
-		this.unmounted = false;
-		this.wireEvents();
-	}
-	update(vm) {
-		this.vm = vm;
-		this.captureExited(vm);
-		const layoutRevision = `${vm.structural_revision || ""}\0${fieldLayoutMembershipKey(vm)}`;
-		if (this.structuralRevision !== layoutRevision) {
-			this.structuralRevision = layoutRevision;
-			this.scheduleLayout(vm);
-			return;
-		}
-		rebindFieldLayout(this.layout, vm);
-		this.draw();
-	}
-	resize() {
-		const rect = this.canvas.getBoundingClientRect?.() || {
-			width: 640,
-			height: 360
-		};
-		const ratio = globalThis.devicePixelRatio || 1;
-		const width = Math.max(1, Math.floor(rect.width * ratio));
-		const height = Math.max(1, Math.floor(rect.height * ratio));
-		if (this.canvas.width !== width || this.canvas.height !== height) {
-			this.canvas.width = width;
-			this.canvas.height = height;
-		}
-		this.draw();
-	}
-	draw() {
-		const context = this.context;
-		if (!context) return;
-		const ratio = globalThis.devicePixelRatio || 1;
-		const highContrast = preference("(forced-colors: active)");
-		context.setTransform(ratio * this.viewport.zoom, 0, 0, ratio * this.viewport.zoom, ratio * this.viewport.x, ratio * this.viewport.y);
-		context.clearRect(-this.viewport.x / this.viewport.zoom, -this.viewport.y / this.viewport.zoom, this.canvas.width / ratio / this.viewport.zoom, this.canvas.height / ratio / this.viewport.zoom);
-		drawGroups(context, this.layout.groups, highContrast);
-		const changes = new Map((this.vm?.changes || []).map((change) => [change.id, change]));
-		drawRelations(context, this.layout.edges, changes, this.viewport.zoom, highContrast);
-		for (const node of this.layout.nodes.values()) drawEntity(context, node, changes.get(node.id), this.viewport.zoom, highContrast);
-		drawTombstones(context, this.tombstones, highContrast);
-	}
-	scheduleLayout(vm) {
-		const token = ++this.layoutGeneration;
-		const previous = new Map(this.layout.nodes);
-		const commit = (layout) => {
-			if (this.unmounted || token !== this.layoutGeneration) return;
-			rebindFieldLayout(layout, this.vm);
-			this.layout = layout;
-			this.layoutCount += 1;
-			this.animate(token);
-		};
-		if (!fieldLayoutIsLarge(vm)) {
-			commit(layoutField(vm, previous));
-			return;
-		}
-		layoutFieldChunked(vm, previous, { isStale: () => this.unmounted || token !== this.layoutGeneration }).then(commit).catch((error) => {
-			if (!(error instanceof StaleFieldLayoutError)) {
-				this.structuralRevision = null;
-				this.canvas.dataset.layoutError = String(error?.message || error);
-			}
-		});
-	}
-	animate(token) {
-		this.cancelAnimation();
-		if (preference("(prefers-reduced-motion: reduce)")) {
-			settleLayout(this.layout, 1);
-			this.draw();
-			this.tombstones.clear();
-			return;
-		}
-		let remaining = this.tombstones.size ? 22 : 12;
-		const tick = () => {
-			if (this.unmounted || token !== this.layoutGeneration) return;
-			settleLayout(this.layout, remaining <= 1 ? 1 : .24);
-			fadeTombstones(this.tombstones, remaining);
-			this.draw();
-			remaining -= 1;
-			this.frame = remaining > 0 && globalThis.requestAnimationFrame ? requestAnimationFrame(tick) : null;
-		};
-		tick();
-	}
-	captureExited(vm) {
-		for (const change of vm.changes || []) {
-			if (change.kind !== "exited" || !change.tombstone) continue;
-			const prior = this.layout.nodes.get(change.id);
-			if (!prior) continue;
-			this.tombstones.set(change.id, {
-				id: change.id,
-				label: change.tombstone.label || change.id,
-				traits: change.tombstone.traits || {},
-				x: prior.x,
-				y: prior.y,
-				width: prior.width,
-				height: prior.height,
-				alpha: .72
-			});
-		}
-	}
-	cancelAnimation() {
-		if (this.frame != null && globalThis.cancelAnimationFrame) cancelAnimationFrame(this.frame);
-		this.frame = null;
-	}
-	unmount() {
-		this.unmounted = true;
-		this.layoutGeneration += 1;
-		this.cancelAnimation();
-		this.canvas.onpointerdown = null;
-		this.canvas.onpointermove = null;
-		this.canvas.onpointerup = null;
-		this.canvas.onpointercancel = null;
-		this.canvas.onwheel = null;
-		this.tombstones.clear();
-	}
-	wireEvents() {
-		this.canvas.onpointerdown = (event) => {
-			const point = this.fieldPoint(event);
-			const hit = hitTest(this.layout, point.x, point.y);
-			if (hit) {
-				this.interactions.entity({
-					entityId: hit.id,
-					compare: event.shiftKey,
-					activate: event.detail >= 2
-				});
-				return;
-			}
-			const group = hitTestGroup(this.layout, point.x, point.y);
-			if (group) {
-				this.interactions.group({
-					groupId: group.id,
-					collapsed: !group.collapsed
-				});
-				return;
-			}
-			this.drag = {
-				pointerId: event.pointerId,
-				clientX: event.clientX,
-				clientY: event.clientY,
-				viewportX: this.viewport.x,
-				viewportY: this.viewport.y
-			};
-			this.canvas.setPointerCapture?.(event.pointerId);
-		};
-		this.canvas.onpointermove = (event) => {
-			if (!this.drag || this.drag.pointerId !== event.pointerId) return;
-			this.viewport.x = this.drag.viewportX + event.clientX - this.drag.clientX;
-			this.viewport.y = this.drag.viewportY + event.clientY - this.drag.clientY;
-			this.draw();
-		};
-		const end = (event) => {
-			if (this.drag?.pointerId === event.pointerId) this.drag = null;
-		};
-		this.canvas.onpointerup = end;
-		this.canvas.onpointercancel = end;
-		this.canvas.onwheel = (event) => {
-			event.preventDefault();
-			const rect = this.canvas.getBoundingClientRect();
-			const screenX = event.clientX - rect.left;
-			const screenY = event.clientY - rect.top;
-			const fieldX = (screenX - this.viewport.x) / this.viewport.zoom;
-			const fieldY = (screenY - this.viewport.y) / this.viewport.zoom;
-			const zoom = Math.max(.25, Math.min(3.5, this.viewport.zoom * Math.exp(-event.deltaY * .001)));
-			this.viewport.zoom = zoom;
-			this.viewport.x = screenX - fieldX * zoom;
-			this.viewport.y = screenY - fieldY * zoom;
-			this.draw();
-		};
-	}
-	fieldPoint(event) {
-		const rect = this.canvas.getBoundingClientRect();
-		return {
-			x: (event.clientX - rect.left - this.viewport.x) / this.viewport.zoom,
-			y: (event.clientY - rect.top - this.viewport.y) / this.viewport.zoom
-		};
-	}
-};
-function drawGroups(context, groups, highContrast) {
-	context.font = "12px ui-monospace, monospace";
-	for (const group of groups) {
-		context.strokeStyle = highContrast ? "CanvasText" : "rgba(168,153,132,.52)";
-		context.setLineDash([6, 5]);
-		context.strokeRect(group.x, group.y, group.width, group.height);
-		context.setLineDash([]);
-		context.fillStyle = highContrast ? "Canvas" : "rgba(29,32,33,.94)";
-		context.fillRect(group.x, group.y, group.width, 26);
-		context.fillStyle = highContrast ? "CanvasText" : "#a89984";
-		context.textAlign = "left";
-		context.textBaseline = "alphabetic";
-		context.fillText(`${group.collapsed ? "▸" : "▾"} ${group.label || group.id}`, group.x + 8, group.y + 17);
-	}
-}
-function drawRelations(context, edges, changes, zoom, highContrast) {
-	for (const edge of edges) {
-		if (edge.points.length < 2) continue;
-		const relation = edge.relation;
-		if (zoom < .4 && !relation.selected && relation.emphasis !== "strong" && relation.motion !== "flow") continue;
-		const tones = highContrast ? HIGH_CONTRAST_TONES : TONES;
-		context.strokeStyle = tones[relation.tone] || tones.neutral;
-		context.lineWidth = changes.get(relation.id) ? 4 : relation.emphasis === "strong" ? 2.5 : relation.emphasis === "quiet" ? .7 : 1.3;
-		context.setLineDash(relation.stroke === "dashed" ? [7, 5] : relation.stroke === "dotted" ? [2, 4] : []);
-		context.beginPath();
-		edge.points.forEach(([x, y], index) => index ? context.lineTo(x, y) : context.moveTo(x, y));
-		context.stroke();
-	}
-	context.setLineDash([]);
-}
-function drawEntity(context, node, change, zoom, highContrast) {
-	const entity = node.entity;
-	const tones = highContrast ? HIGH_CONTRAST_TONES : TONES;
-	const tone = tones[entity.tone] || tones.neutral;
-	context.save();
-	context.translate(node.x, node.y);
-	context.fillStyle = entity.traits?.fill === "hollow" ? highContrast ? "Canvas" : "#1d2021" : tone;
-	context.strokeStyle = entity.selected ? highContrast ? "Highlight" : "#ebdbb2" : tone;
-	context.lineWidth = entity.selected ? 4 : 2;
-	context.setLineDash(entity.traits?.stroke === "dashed" ? [7, 4] : entity.traits?.stroke === "dotted" ? [2, 3] : []);
-	if (change) {
-		context.save();
-		context.globalAlpha = .32;
-		context.strokeStyle = tone;
-		context.lineWidth = 8;
-		entityPath(context, entity.traits?.shape, node.width + 14, node.height + 14);
-		context.stroke();
-		context.restore();
-	}
-	const width = zoom < .4 ? Math.min(36, node.width) : node.width;
-	const height = zoom < .4 ? Math.min(24, node.height) : node.height;
-	entityPath(context, entity.traits?.shape, width, height);
-	context.fill();
-	context.stroke();
-	context.setLineDash([]);
-	if (zoom >= .55) {
-		if (node.componentSize > 1) {
-			context.fillStyle = highContrast ? "CanvasText" : "#fabd2f";
-			context.fillText(`↻${node.componentSize}`, node.width / 2 - 24, -node.height / 2 + 13);
-		}
-		context.fillStyle = entity.traits?.fill === "hollow" ? highContrast ? "CanvasText" : "#ebdbb2" : highContrast ? "Canvas" : "#1d2021";
-		context.textAlign = "center";
-		context.textBaseline = "middle";
-		context.font = "600 12px ui-monospace, monospace";
-		context.fillText(clipLabel(entity.label || entity.id, zoom >= 1.25 ? 34 : 20), 0, -4);
-		if (zoom >= .9) {
-			context.font = "10px ui-monospace, monospace";
-			context.fillText(entity.status || entity.kind || "", 0, 12);
-		}
-	}
-	context.restore();
-}
-function drawTombstones(context, tombstones, highContrast) {
-	for (const tombstone of tombstones.values()) {
-		context.save();
-		context.globalAlpha = tombstone.alpha;
-		context.translate(tombstone.x, tombstone.y);
-		context.strokeStyle = highContrast ? "CanvasText" : TONES.neutral;
-		context.fillStyle = highContrast ? "Canvas" : "#1d2021";
-		context.setLineDash([4, 5]);
-		entityPath(context, tombstone.traits?.shape, tombstone.width, tombstone.height);
-		context.fill();
-		context.stroke();
-		context.fillStyle = highContrast ? "CanvasText" : "#a89984";
-		context.font = "11px ui-monospace, monospace";
-		context.textAlign = "center";
-		context.fillText(clipLabel(tombstone.label, 20), 0, 3);
-		context.restore();
-	}
-}
-function fadeTombstones(tombstones, remaining) {
-	for (const [id, tombstone] of tombstones) {
-		tombstone.alpha = Math.min(.72, remaining / 22);
-		if (remaining <= 1) tombstones.delete(id);
-	}
-}
-function entityPath(context, shape, width, height) {
-	context.beginPath();
-	if (shape === "disc" || shape === "ring" || shape === "dot") context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
-	else if (shape === "diamond") {
-		context.moveTo(0, -height / 2);
-		context.lineTo(width / 2, 0);
-		context.lineTo(0, height / 2);
-		context.lineTo(-width / 2, 0);
-		context.closePath();
-	} else if (shape === "hex") {
-		for (let index = 0; index < 6; index += 1) {
-			const angle = Math.PI / 3 * index;
-			const x = Math.cos(angle) * width / 2;
-			const y = Math.sin(angle) * height / 2;
-			if (index) context.lineTo(x, y);
-			else context.moveTo(x, y);
-		}
-		context.closePath();
-	} else context.roundRect(-width / 2, -height / 2, width, height, shape === "capsule" ? height / 2 : 7);
-}
-function emptyLayout() {
-	return {
-		nodes: /* @__PURE__ */ new Map(),
-		edges: [],
-		groups: [],
-		groupDefinitions: [],
-		width: 640,
-		height: 360
-	};
-}
-function preference(query) {
-	return !!globalThis.matchMedia?.(query)?.matches;
-}
-function clipLabel(value, length) {
-	return value.length <= length ? value : `${value.slice(0, length - 1)}…`;
-}
-//#endregion
-//#region browser/visuals/ryeos_grid_canvas.js
-function drawIndexedGrid(canvas, preview, options = {}) {
-	const grid = preview?.grid;
-	const context = canvas?.getContext?.("2d");
-	if (!grid || !context || !grid.width || !grid.height) return false;
-	const scale = Math.max(1, Number(options.scale || 10));
-	canvas.width = grid.width * scale;
-	canvas.height = grid.height * scale;
-	const palette = new Map((grid.palette || []).map((entry) => [entry.index, entry]));
-	const changed = new Set(grid.changed || []);
-	for (let index = 0; index < grid.cells.length; index += 1) {
-		const entry = palette.get(grid.cells[index]);
-		if (!entry) continue;
-		const x = index % grid.width * scale;
-		const y = Math.floor(index / grid.width) * scale;
-		context.fillStyle = entry.color || "#a89984";
-		context.fillRect(x, y, scale, scale);
-		if (entry.glyph && scale >= 7) {
-			context.fillStyle = contrastingTextColor(entry.color);
-			context.font = `${Math.max(6, Math.floor(scale * .72))}px monospace`;
-			context.textAlign = "center";
-			context.textBaseline = "middle";
-			context.fillText(entry.glyph, x + scale / 2, y + scale / 2, scale);
-		}
-		if (changed.has(index)) {
-			context.strokeStyle = options.changedColor || "#fb4934";
-			context.lineWidth = Math.max(1, scale / 5);
-			context.strokeRect(x + 1, y + 1, scale - 2, scale - 2);
-		}
-	}
-	return true;
-}
-function indexedGridAccessibilityLabel(preview, label = preview?.label || preview?.id || "Grid") {
-	const grid = preview?.grid;
-	if (!grid) return label;
-	const glyphs = new Map((grid.palette || []).map((entry) => [entry.index, entry.glyph]));
-	const cells = (grid.cells || []).slice(0, 64).map((index) => glyphs.get(index) || String(index));
-	const suffix = (grid.cells || []).length > cells.length ? "; remaining cells omitted" : "";
-	return `${label}; ${grid.width} by ${grid.height} indexed grid; cells ${cells.join(" ")}${suffix}`;
-}
-function contrastingTextColor(color) {
-	const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color || "");
-	if (!match) return "CanvasText";
-	return (Number.parseInt(match[1], 16) * 299 + Number.parseInt(match[2], 16) * 587 + Number.parseInt(match[3], 16) * 114) / 1e3 >= 140 ? "#111111" : "#ffffff";
-}
-//#endregion
-//#region browser/views/GridPreview.svelte
-var root$7 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas></figure>`);
-function GridPreview($$anchor, $$props) {
-	push($$props, true);
-	let canvas;
-	const label = /* @__PURE__ */ user_derived(() => indexedGridAccessibilityLabel($$props.preview, $$props.preview.label));
-	onMount(() => drawIndexedGrid(canvas, $$props.preview, { scale: 9 }));
-	user_effect(() => {
-		if (canvas) drawIndexedGrid(canvas, $$props.preview, { scale: 9 });
-	});
-	var figure = root$7();
-	var figcaption = child(figure);
-	var text = only_child(figcaption, true);
-	var canvas_1 = sibling(figcaption, 2);
-	bind_this(canvas_1, ($$value) => canvas = $$value, () => canvas);
-	reset(figure);
-	template_effect(() => {
-		set_text(text, $$props.preview.label);
-		set_attribute(canvas_1, "aria-label", get(label));
-		set_attribute(canvas_1, "title", $$props.compareEnabled ? "Shift-click to compare" : void 0);
-	});
-	delegated("click", canvas_1, (event) => {
-		if (event.shiftKey && $$props.compareEnabled) $$props.oncompare();
-	});
-	append($$anchor, figure);
-	pop();
-}
-delegate(["click"]);
-//#endregion
-//#region browser/views/FieldView.svelte
-var root$6 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_1$4 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
-var root_2$3 = /* @__PURE__ */ from_html(`<button> </button> <button> </button> <!>`, 1);
-var root_3$3 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
-var root_4$2 = /* @__PURE__ */ from_html(`<div role="treeitem" tabindex="-1"> </div>`);
-var root_5$2 = /* @__PURE__ */ from_html(`<strong> </strong><small> </small> <!> <!> <!>`, 1);
-var root_6$2 = /* @__PURE__ */ from_html(`<small class="field-warning"> </small>`);
-var root_7$2 = /* @__PURE__ */ from_html(`<aside class="field-detail"><!> <!></aside>`);
-var root_8$2 = /* @__PURE__ */ from_html(`<section class="field-view"><header class="field-toolbar"><div class="field-identity"><strong> </strong><span> </span></div> <div class="field-controls"><button>◀</button> <button> </button> <button>▶</button> <button>Live</button> <!> <!> <!></div> <input type="search" placeholder="Search field" aria-label="Search field entities"/></header> <!> <div class="field-stage"><canvas aria-hidden="true"></canvas></div> <div class="field-accessibility" role="tree" tabindex="0"></div> <!></section>`);
-function FieldView($$anchor, $$props) {
-	push($$props, true);
-	const dispatch = dispatchUi();
-	let canvas;
-	let controller = null;
-	const selected = /* @__PURE__ */ user_derived(() => $$props.field.entities.find((entity) => entity.id === $$props.field.selected) ?? null);
-	const selectedRelations = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.relations.filter((relation) => relation.source_id === get(selected).id || relation.target_id === get(selected).id) : []);
-	const previewIds = /* @__PURE__ */ user_derived(() => {
-		const ids = new Set(get(selected)?.preview_ids ?? []);
-		for (const id of $$props.field.compare) for (const preview of $$props.field.entities.find((entity) => entity.id === id)?.preview_ids ?? []) ids.add(preview);
-		return ids;
-	});
-	const previews = /* @__PURE__ */ user_derived(() => $$props.field.previews.filter((preview) => get(previewIds).has(preview.id)));
-	const expansion = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.expansions.find((item) => item.source === get(selected).source && item.root_id === get(selected).id) ?? null : null);
-	const accessibilityItems = /* @__PURE__ */ user_derived(() => fieldAccessibilityModel($$props.field));
-	const activeOptionId = /* @__PURE__ */ user_derived(() => get(accessibilityItems).find((item) => item.selected)?.domId);
-	const selectEntity = (entityId) => dispatch({
-		type: "set_field_selection",
-		instance_key: $$props.instanceKey,
-		entity_id: entityId
-	});
-	const activateEntity = (entityId) => {
-		const entity = $$props.field.entities.find((candidate) => candidate.id === entityId);
-		if (entity?.activate_intent) dispatch({
-			type: "activate",
-			intent: entity.activate_intent
-		});
-	};
-	const compareEntity = (entityId) => {
-		if ($$props.field.entities.find((candidate) => candidate.id === entityId)?.compare_available) dispatch({
-			type: "toggle_field_compare",
-			instance_key: $$props.instanceKey,
-			entity_id: entityId
-		});
-	};
-	onMount(() => {
-		controller = new FieldCanvasController(canvas, {
-			entity: ({ entityId, compare, activate }) => {
-				selectEntity(entityId);
-				if (compare) compareEntity(entityId);
-				if (activate) activateEntity(entityId);
-			},
-			group: ({ groupId, collapsed }) => dispatch({
-				type: "set_field_group_collapsed",
-				instance_key: $$props.instanceKey,
-				group_id: groupId,
-				collapsed
-			})
-		});
-		const observer = new ResizeObserver(() => controller?.resize());
-		observer.observe(canvas);
-		controller.update($$props.field);
-		controller.resize();
-		return () => {
-			observer.disconnect();
-			controller?.unmount();
-			controller = null;
-		};
-	});
-	user_effect(() => controller?.update($$props.field));
-	var section = root_8$2();
-	var header = child(section);
-	var div = child(header);
-	var strong = child(div);
-	var text = only_child(strong, true);
-	var text_1 = only_child(sibling(strong), true);
-	reset(div);
-	var div_1 = sibling(div, 2);
-	var button = child(div_1);
-	var button_1 = sibling(button, 2);
-	var text_2 = only_child(button_1, true);
-	var button_2 = sibling(button_1, 2);
-	var button_3 = sibling(button_2, 2);
-	var node = sibling(button_3, 2);
-	each(node, 17, () => $$props.field.groups, (group) => group.id, ($$anchor, group) => {
-		var button_4 = root$6();
-		var text_3 = only_child(button_4);
-		template_effect(() => set_text(text_3, `${get(group).collapsed ? "▸" : "▾"} ${get(group).label ?? ""}`));
-		delegated("click", button_4, () => dispatch({
-			type: "set_field_group_collapsed",
-			instance_key: $$props.instanceKey,
-			group_id: get(group).id,
-			collapsed: !get(group).collapsed
-		}));
-		append($$anchor, button_4);
-	});
-	var node_1 = sibling(node, 2);
-	each(node_1, 17, () => $$props.field.layers, (layer) => layer.id, ($$anchor, layer) => {
-		var button_5 = root$6();
-		var text_4 = only_child(button_5);
-		template_effect(() => {
-			set_attribute(button_5, "aria-pressed", get(layer).visible);
-			set_text(text_4, `${get(layer).visible ? "●" : "○"} ${get(layer).label ?? ""}`);
-		});
-		delegated("click", button_5, () => dispatch({
-			type: "set_field_layer_visible",
-			instance_key: $$props.instanceKey,
-			layer_id: get(layer).id,
-			visible: !get(layer).visible
-		}));
-		append($$anchor, button_5);
-	});
-	var node_2 = sibling(node_1, 2);
-	var consequent_1 = ($$anchor) => {
-		var fragment = root_2$3();
-		var button_6 = first_child(fragment);
-		var text_5 = only_child(button_6, true);
-		var button_7 = sibling(button_6, 2);
-		var text_6 = only_child(button_7, true);
-		var node_3 = sibling(button_7, 2);
-		var consequent = ($$anchor) => {
-			var button_8 = root_1$4();
-			delegated("click", button_8, () => dispatch({
-				type: "clear_field_expansion",
-				instance_key: $$props.instanceKey,
-				source: get(selected).source,
-				root_id: get(selected).id
-			}));
-			append($$anchor, button_8);
-		};
-		if_block(node_3, ($$render) => {
-			if (get(expansion)) $$render(consequent);
-		});
-		template_effect(($0) => {
-			button_6.disabled = !get(selected).compare_available;
-			set_text(text_5, $0);
-			button_7.disabled = !!get(expansion) && !get(expansion).can_continue;
-			set_text(text_6, get(expansion)?.can_continue ? "Continue" : get(expansion) ? "Expanded" : "Expand");
-		}, [() => $$props.field.compare.includes(get(selected).id) ? "Uncompare" : "Compare"]);
-		delegated("click", button_6, () => compareEntity(get(selected).id));
-		delegated("click", button_7, () => dispatch({
-			type: get(expansion)?.can_continue ? "continue_field_expansion" : "request_field_expansion",
-			instance_key: $$props.instanceKey,
-			source: get(selected).source,
-			root_id: get(selected).id
-		}));
-		append($$anchor, fragment);
-	};
-	if_block(node_2, ($$render) => {
-		if (get(selected)) $$render(consequent_1);
-	});
-	reset(div_1);
-	var input = sibling(div_1, 2);
-	remove_input_defaults(input);
-	reset(header);
-	var node_4 = sibling(header, 2);
-	var consequent_2 = ($$anchor) => {
-		var nav = root_3$3();
-		each(nav, 21, () => $$props.field.replay.rail, index, ($$anchor, entry) => {
-			var button_9 = root$6();
-			let classes;
-			var text_7 = only_child(button_9, true);
-			template_effect(() => {
-				set_attribute(button_9, "aria-pressed", get(entry).selected);
-				classes = set_class(button_9, 1, "", null, classes, { selected: get(entry).selected });
-				set_text(text_7, get(entry).label);
-			});
-			delegated("click", button_9, () => dispatch({
-				type: "set_field_cursor",
-				instance_key: $$props.instanceKey,
-				cursor: {
-					mode: "braid_cut",
-					anchor: get(entry).event
-				}
-			}));
-			append($$anchor, button_9);
-		});
-		reset(nav);
-		append($$anchor, nav);
-	};
-	if_block(node_4, ($$render) => {
-		if ($$props.field.replay.rail.length) $$render(consequent_2);
-	});
-	var div_2 = sibling(node_4, 2);
-	bind_this(child(div_2), ($$value) => canvas = $$value, () => canvas);
-	reset(div_2);
-	var div_3 = sibling(div_2, 2);
-	each(div_3, 21, () => get(accessibilityItems), (item) => item.id, ($$anchor, item) => {
-		var div_4 = root_4$2();
-		var text_8 = only_child(div_4);
-		template_effect(() => {
-			set_attribute(div_4, "id", get(item).domId);
-			set_attribute(div_4, "aria-selected", get(item).selected);
-			set_attribute(div_4, "aria-posinset", get(item).position);
-			set_attribute(div_4, "aria-setsize", get(item).size);
-			set_attribute(div_4, "aria-level", get(item).level);
-			set_attribute(div_4, "aria-expanded", get(item).expanded ?? void 0);
-			set_text(text_8, `${get(item).groupLabel ? `Group ${get(item).groupLabel}. ` : ""}${get(item).label ?? ""}${get(item).neighbors ? `. ${get(item).neighbors}` : ""}`);
-		});
-		delegated("click", div_4, () => selectEntity(get(item).id));
-		delegated("dblclick", div_4, () => activateEntity(get(item).id));
-		delegated("keydown", div_4, (event) => {
-			if (event.key === "Enter") activateEntity(get(item).id);
-		});
-		append($$anchor, div_4);
-	});
-	reset(div_3);
-	var node_5 = sibling(div_3, 2);
-	var consequent_4 = ($$anchor) => {
-		var aside = root_7$2();
-		var node_6 = child(aside);
-		var consequent_3 = ($$anchor) => {
-			var fragment_1 = root_5$2();
-			var strong_1 = first_child(fragment_1);
-			var text_9 = only_child(strong_1, true);
-			var small = sibling(strong_1);
-			var text_10 = only_child(small, true);
-			var node_7 = sibling(small, 2);
-			{
-				let $0 = /* @__PURE__ */ user_derived(() => `${get(selected).label} details`);
-				RowDetails(node_7, {
-					get details() {
-						return get(selected).detail;
-					},
-					get label() {
-						return get($0);
-					}
-				});
-			}
-			var node_8 = sibling(node_7, 2);
-			each(node_8, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
-				var button_10 = root$6();
-				var text_11 = only_child(button_10, true);
-				template_effect(() => {
-					button_10.disabled = !get(relation).activate_intent;
-					set_text(text_11, get(relation).label);
-				});
-				delegated("click", button_10, () => get(relation).activate_intent && dispatch({
-					type: "activate",
-					intent: get(relation).activate_intent
-				}));
-				append($$anchor, button_10);
-			});
-			each(sibling(node_8, 2), 17, () => get(previews), (preview) => preview.id, ($$anchor, preview) => {
-				GridPreview($$anchor, {
-					get preview() {
-						return get(preview);
-					},
-					get compareEnabled() {
-						return get(selected).compare_available;
-					},
-					oncompare: () => compareEntity(get(selected).id)
-				});
-			});
-			template_effect(($0) => {
-				set_text(text_9, get(selected).label);
-				set_text(text_10, $0);
-			}, [() => [
-				get(selected).kind,
-				get(selected).status,
-				get(selected).source
-			].filter(Boolean).join(" · ")]);
-			append($$anchor, fragment_1);
-		};
-		if_block(node_6, ($$render) => {
-			if (get(selected)) $$render(consequent_3);
-		});
-		each(sibling(node_6, 2), 17, () => $$props.field.warnings, index, ($$anchor, warning) => {
-			var small_1 = root_6$2();
-			var text_12 = only_child(small_1, true);
-			template_effect(() => set_text(text_12, get(warning)));
-			append($$anchor, small_1);
-		});
-		reset(aside);
-		append($$anchor, aside);
-	};
-	if_block(node_5, ($$render) => {
-		if (get(selected) || $$props.field.warnings.length) $$render(consequent_4);
-	});
-	reset(section);
-	template_effect(($0) => {
-		set_attribute(section, "aria-label", $$props.field.title);
-		set_text(text, $$props.field.title);
-		set_text(text_1, $0);
-		button.disabled = !$$props.field.replay.previous;
-		button_1.disabled = !$$props.field.replay.playing && !$$props.field.replay.next;
-		set_text(text_2, $$props.field.replay.playing ? "Pause" : "Play");
-		button_2.disabled = !$$props.field.replay.next;
-		button_3.disabled = $$props.field.replay.mode === "live";
-		set_value(input, $$props.field.search.query);
-		set_attribute(div_3, "aria-label", `${$$props.field.title} entities`);
-		set_attribute(div_3, "aria-activedescendant", get(activeOptionId));
-	}, [() => $$props.field.sources.map((source) => `${source.name}:${source.phase}`).join(" · ")]);
-	delegated("click", button, () => dispatch({
-		type: "step_field_cursor",
-		instance_key: $$props.instanceKey,
-		direction: "previous"
-	}));
-	delegated("click", button_1, () => dispatch({
-		type: "set_field_playback",
-		instance_key: $$props.instanceKey,
-		playing: !$$props.field.replay.playing
-	}));
-	delegated("click", button_2, () => dispatch({
-		type: "step_field_cursor",
-		instance_key: $$props.instanceKey,
-		direction: "next"
-	}));
-	delegated("click", button_3, () => dispatch({
-		type: "step_field_cursor",
-		instance_key: $$props.instanceKey,
-		direction: "live"
-	}));
-	delegated("input", input, (event) => dispatch({
-		type: "set_field_query",
-		instance_key: $$props.instanceKey,
-		query: event.currentTarget.value
-	}));
-	delegated("keydown", input, (event) => {
-		if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-			event.preventDefault();
-			dispatch({
-				type: "move_field_search_match",
-				instance_key: $$props.instanceKey,
-				delta: event.key === "ArrowUp" ? -1 : 1
-			});
-		}
-	});
-	event("focus", div_3, () => {
-		if (!$$props.field.selected && get(accessibilityItems)[0]) selectEntity(get(accessibilityItems)[0].id);
-	});
-	delegated("keydown", div_3, (event) => {
-		const current = get(accessibilityItems).find((item) => item.selected) ?? get(accessibilityItems)[0];
-		if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-			event.preventDefault();
-			dispatch({
-				type: "move_field_selection",
-				instance_key: $$props.instanceKey,
-				delta: event.key === "ArrowUp" ? -1 : 1
-			});
-		} else if (event.key === "Home" || event.key === "End") {
-			event.preventDefault();
-			const item = event.key === "Home" ? get(accessibilityItems)[0] : get(accessibilityItems).at(-1);
-			if (item) selectEntity(item.id);
-		} else if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && current?.groupId) {
-			const collapsed = event.key === "ArrowLeft";
-			if (current.expanded === collapsed) {
-				event.preventDefault();
-				dispatch({
-					type: "set_field_group_collapsed",
-					instance_key: $$props.instanceKey,
-					group_id: current.groupId,
-					collapsed
-				});
-			}
-		} else if (event.key === "Enter" && $$props.field.selected) {
-			event.preventDefault();
-			activateEntity($$props.field.selected);
-		} else if (event.key === " " && $$props.field.selected) {
-			event.preventDefault();
-			compareEntity($$props.field.selected);
-		}
-	});
-	append($$anchor, section);
-	pop();
-}
-delegate([
-	"click",
-	"input",
-	"keydown",
-	"dblclick"
-]);
-//#endregion
-//#region browser/views/ViewRenderer.svelte
-var root$5 = /* @__PURE__ */ from_html(`<div> </div>`);
-var root_1$3 = /* @__PURE__ */ from_html(`<div class="text-view"></div>`);
-var root_2$2 = /* @__PURE__ */ from_html(`<small>bounded preview</small>`);
-var root_3$2 = /* @__PURE__ */ from_html(`<article class="document-view"><header><span> </span><!></header> <pre> </pre></article>`);
-var root_4$1 = /* @__PURE__ */ from_html(`<small> </small>`);
-var root_5$1 = /* @__PURE__ */ from_html(`<span class="row-meta"> </span>`);
-var root_6$1 = /* @__PURE__ */ from_html(`<button class="row-disclosure"> </button>`);
-var root_7$1 = /* @__PURE__ */ from_html(`<div class="view-record" role="listitem"><div class="view-record-line"><button><span class="row-glyph"> </span> <span class="row-copy"><strong> </strong><!></span> <!></button> <!></div> <!></div>`);
-var root_8$1 = /* @__PURE__ */ from_html(`<div class="rows-view" role="list"></div>`);
-var root_9$1 = /* @__PURE__ */ from_html(`<span role="columnheader"> </span>`);
-var root_10$1 = /* @__PURE__ */ from_html(`<div role="cell"><button> </button></div>`);
-var root_11 = /* @__PURE__ */ from_html(`<div class="table-detail" role="row"><div role="cell"><!></div></div>`);
-var root_12 = /* @__PURE__ */ from_html(`<div class="table-record" role="rowgroup"><div role="row"><!> <div class="table-action-cell" role="cell"><!></div></div> <!></div>`);
-var root_13 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><div class="table-head" role="row"><!><span class="table-action-head" role="columnheader">detail</span></div> <!></div>`);
-var root_14 = /* @__PURE__ */ from_html(`<p> </p>`);
-var root_15 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
-var root_16 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
-var root_17 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
-var root_18 = /* @__PURE__ */ from_html(`<div class="view-record"><div class="view-record-line"><button><!></button> <!></div> <!></div>`);
-var root_19 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
-var root_20 = /* @__PURE__ */ from_html(`<div class="view-record"><div class="view-record-line"><button><span> </span><small> </small></button><!></div> <!></div>`);
-var root_21 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
-var root_22 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
-var root_23 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_24 = /* @__PURE__ */ from_html(`<div class="required-subject-actions" aria-label="Compatible current selections"></div>`);
-var root_25 = /* @__PURE__ */ from_html(`<p class="required-subject-waiting">Select a compatible subject in another open set.</p>`);
-var root_26 = /* @__PURE__ */ from_html(`<section class="required-subject" aria-live="polite"><span class="required-subject-kicker">Unresolved view</span> <h3> </h3> <p><strong> </strong> </p> <!></section>`);
-var root_27 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
-function ViewRenderer($$anchor, $$props) {
-	push($$props, true);
-	const dispatch = dispatchUi();
-	const select = (itemId) => {
-		if (!itemId) return;
-		dispatch({
-			type: "choose_view_item",
-			instance_key: $$props.instanceKey,
-			item_id: itemId,
-			activate: true
-		});
-	};
-	const expand = (itemId, expanded) => dispatch({
-		type: "toggle_view_item_expansion",
-		instance_key: $$props.instanceKey,
-		item_id: itemId,
-		expand: !expanded
-	});
-	const expandTimeline = (index) => {
-		const itemId = $$props.model.type === "timeline" ? $$props.model.entry_ids[index] : void 0;
-		if (itemId) expand(itemId, $$props.model.type === "timeline" && ($$props.model.entry_expanded?.[index] ?? false));
-	};
-	var div = root_27();
-	var node = child(div);
-	var consequent = ($$anchor) => {
-		var div_1 = root_1$3();
-		each(div_1, 21, () => $$props.model.lines, index, ($$anchor, line) => {
-			var div_2 = root$5();
-			var text = only_child(div_2, true);
-			template_effect(() => {
-				set_attribute(div_2, "data-tone", get(line).tone);
-				set_text(text, get(line).text);
-			});
-			append($$anchor, div_2);
-		});
-		reset(div_1);
-		template_effect(() => set_attribute(div_1, "aria-label", $$props.model.title));
-		append($$anchor, div_1);
-	};
-	var consequent_2 = ($$anchor) => {
-		var article = root_3$2();
-		var header = child(article);
-		var span = child(header);
-		var text_1 = only_child(span, true);
-		var node_1 = sibling(span);
-		var consequent_1 = ($$anchor) => {
-			append($$anchor, root_2$2());
-		};
-		if_block(node_1, ($$render) => {
-			if ($$props.model.truncated) $$render(consequent_1);
-		});
-		reset(header);
-		var text_2 = only_child(sibling(header, 2), true);
-		reset(article);
-		template_effect(() => {
-			set_attribute(article, "aria-label", $$props.model.title);
-			set_text(text_1, $$props.model.path);
-			set_text(text_2, $$props.model.content);
-		});
-		append($$anchor, article);
-	};
-	var consequent_7 = ($$anchor) => {
-		var div_3 = root_8$1();
-		each(div_3, 21, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
-			var div_4 = root_7$1();
-			var div_5 = child(div_4);
-			var button = child(div_5);
-			let classes;
-			var span_1 = child(button);
-			var text_3 = only_child(span_1, true);
-			var span_2 = sibling(span_1, 2);
-			var strong = child(span_2);
-			var text_4 = only_child(strong, true);
-			var node_2 = sibling(strong);
-			var consequent_3 = ($$anchor) => {
-				var small_1 = root_4$1();
-				var text_5 = only_child(small_1, true);
-				template_effect(() => set_text(text_5, get(row).secondary));
-				append($$anchor, small_1);
-			};
-			if_block(node_2, ($$render) => {
-				if (get(row).secondary) $$render(consequent_3);
-			});
-			reset(span_2);
-			var node_3 = sibling(span_2, 2);
-			var consequent_4 = ($$anchor) => {
-				var span_3 = root_5$1();
-				var text_6 = only_child(span_3, true);
-				template_effect(() => set_text(text_6, get(row).meta));
-				append($$anchor, span_3);
-			};
-			if_block(node_3, ($$render) => {
-				if (get(row).meta) $$render(consequent_4);
-			});
-			reset(button);
-			var node_4 = sibling(button, 2);
-			var consequent_5 = ($$anchor) => {
-				var button_1 = root_6$1();
-				var text_7 = only_child(button_1, true);
-				template_effect(() => {
-					set_attribute(button_1, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
-					set_attribute(button_1, "aria-expanded", get(row).expanded);
-					set_text(text_7, get(row).expanded ? "▾" : "▸");
-				});
-				delegated("click", button_1, () => expand(get(row).id, get(row).expanded));
-				append($$anchor, button_1);
-			};
-			if_block(node_4, ($$render) => {
-				if (get(row).expandable) $$render(consequent_5);
-			});
-			reset(div_5);
-			var node_5 = sibling(div_5, 2);
-			var consequent_6 = ($$anchor) => {
-				{
-					let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
-					let $1 = /* @__PURE__ */ user_derived(() => `${get(row).primary} details`);
-					RowDetails($$anchor, {
-						get details() {
-							return get($0);
-						},
-						get label() {
-							return get($1);
-						}
-					});
-				}
-			};
-			if_block(node_5, ($$render) => {
-				if (get(row).expanded) $$render(consequent_6);
-			});
-			reset(div_4);
-			template_effect(() => {
-				set_attribute(div_4, "data-expanded", get(row).expanded);
-				set_attribute(button, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
-				set_attribute(button, "data-tone", get(row).tone);
-				classes = set_class(button, 1, "", null, classes, { selected: get(row).selected });
-				set_text(text_3, get(row).glyph ?? "◇");
-				set_text(text_4, get(row).primary);
-			});
-			delegated("click", button, () => select(get(row).id));
-			append($$anchor, div_4);
-		});
-		reset(div_3);
-		template_effect(() => set_attribute(div_3, "aria-label", $$props.model.title));
-		append($$anchor, div_3);
-	};
-	var consequent_10 = ($$anchor) => {
-		var div_6 = root_13();
-		var div_7 = child(div_6);
-		each(child(div_7), 17, () => $$props.model.columns, index, ($$anchor, column) => {
-			var span_4 = root_9$1();
-			var text_8 = only_child(span_4, true);
-			template_effect(() => set_text(text_8, get(column)));
-			append($$anchor, span_4);
-		});
-		next();
-		reset(div_7);
-		each(sibling(div_7, 2), 17, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
-			var div_8 = root_12();
-			var div_9 = child(div_8);
-			let classes_1;
-			var node_8 = child(div_9);
-			each(node_8, 17, () => get(row).cells, index, ($$anchor, cell, index) => {
-				var div_10 = root_10$1();
-				var button_2 = child(div_10);
-				var text_9 = only_child(button_2, true);
-				reset(div_10);
-				template_effect(() => {
-					set_attribute(div_10, "data-tone", get(row).cell_tones?.[index] ?? void 0);
-					set_attribute(button_2, "data-focus-key", index === 0 ? `view:${$$props.instanceKey}:item:${get(row).id}` : void 0);
-					set_attribute(button_2, "aria-label", `Select row: ${get(cell)}`);
-					set_text(text_9, get(cell));
-				});
-				delegated("click", button_2, () => select(get(row).id));
-				append($$anchor, div_10);
-			});
-			var div_11 = sibling(node_8, 2);
-			var node_9 = child(div_11);
-			var consequent_8 = ($$anchor) => {
-				var button_3 = root_6$1();
-				var text_10 = only_child(button_3, true);
-				template_effect(() => {
-					set_attribute(button_3, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} row`);
-					set_attribute(button_3, "aria-expanded", get(row).expanded);
-					set_text(text_10, get(row).expanded ? "▾" : "▸");
-				});
-				delegated("click", button_3, () => expand(get(row).id, get(row).expanded));
-				append($$anchor, button_3);
-			};
-			if_block(node_9, ($$render) => {
-				if (get(row).expandable) $$render(consequent_8);
-			});
-			reset(div_11);
-			reset(div_9);
-			var node_10 = sibling(div_9, 2);
-			var consequent_9 = ($$anchor) => {
-				var div_12 = root_11();
-				var div_13 = child(div_12);
-				var node_11 = child(div_13);
-				{
-					let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
-					RowDetails(node_11, {
-						get details() {
-							return get($0);
-						},
-						label: "Row details"
-					});
-				}
-				reset(div_13);
-				reset(div_12);
-				template_effect(() => set_attribute(div_13, "aria-colspan", $$props.model.columns.length + 1));
-				append($$anchor, div_12);
-			};
-			if_block(node_10, ($$render) => {
-				if (get(row).expanded) $$render(consequent_9);
-			});
-			reset(div_8);
-			template_effect(() => {
-				set_attribute(div_8, "data-expanded", get(row).expanded);
-				classes_1 = set_class(div_9, 1, "table-record-line", null, classes_1, { selected: get(row).selected });
-				set_attribute(div_9, "data-tone", get(row).tone);
-			});
-			append($$anchor, div_8);
-		});
-		reset(div_6);
-		template_effect(() => {
-			set_attribute(div_6, "aria-label", $$props.model.title);
-			set_style(div_6, `--columns:${$$props.model.columns.length}`);
-		});
-		append($$anchor, div_6);
-	};
-	var consequent_18 = ($$anchor) => {
-		var div_14 = root_19();
-		each(div_14, 21, () => $$props.model.entries, index, ($$anchor, entry, index) => {
-			var div_15 = root_18();
-			var div_16 = child(div_15);
-			var button_4 = child(div_16);
-			let classes_2;
-			var node_12 = child(button_4);
-			var consequent_11 = ($$anchor) => {
-				var p = root_14();
-				var text_11 = only_child(p, true);
-				template_effect(() => {
-					set_attribute(p, "data-tone", get(entry).tone);
-					set_text(text_11, get(entry).text);
-				});
-				append($$anchor, p);
-			};
-			var consequent_13 = ($$anchor) => {
-				var fragment_1 = root_15();
-				var strong_1 = first_child(fragment_1);
-				var text_12 = only_child(strong_1, true);
-				var node_13 = sibling(strong_1);
-				var consequent_12 = ($$anchor) => {
-					var small_2 = root_4$1();
-					var text_13 = only_child(small_2, true);
-					template_effect(() => set_text(text_13, get(entry).meta));
-					append($$anchor, small_2);
-				};
-				if_block(node_13, ($$render) => {
-					if (get(entry).meta) $$render(consequent_12);
-				});
-				template_effect(() => set_text(text_12, get(entry).primary));
-				append($$anchor, fragment_1);
-			};
-			var consequent_15 = ($$anchor) => {
-				var fragment_2 = root_16();
-				var span_5 = first_child(fragment_2);
-				var text_14 = only_child(span_5, true);
-				var node_14 = sibling(span_5);
-				var consequent_14 = ($$anchor) => {
-					var small_3 = root_4$1();
-					var text_15 = only_child(small_3, true);
-					template_effect(() => set_text(text_15, get(entry).meta));
-					append($$anchor, small_3);
-				};
-				if_block(node_14, ($$render) => {
-					if (get(entry).meta) $$render(consequent_14);
-				});
-				template_effect(() => set_text(text_14, get(entry).summary));
-				append($$anchor, fragment_2);
-			};
-			var alternate = ($$anchor) => {
-				var span_6 = root_17();
-				var text_16 = only_child(span_6, true);
-				template_effect(() => set_text(text_16, get(entry).label));
-				append($$anchor, span_6);
-			};
-			if_block(node_12, ($$render) => {
-				if (get(entry).type === "block") $$render(consequent_11);
-				else if (get(entry).type === "line") $$render(consequent_13, 1);
-				else if (get(entry).type === "pair") $$render(consequent_15, 2);
-				else $$render(alternate, -1);
-			});
-			reset(button_4);
-			var node_15 = sibling(button_4, 2);
-			var consequent_16 = ($$anchor) => {
-				var button_5 = root_6$1();
-				var text_17 = only_child(button_5, true);
-				template_effect(() => {
-					set_attribute(button_5, "aria-label", `${$$props.model.entry_expanded?.[index] ? "Collapse" : "Expand"} timeline entry`);
-					set_attribute(button_5, "aria-expanded", $$props.model.entry_expanded?.[index] ?? false);
-					set_text(text_17, $$props.model.entry_expanded?.[index] ? "▾" : "▸");
-				});
-				delegated("click", button_5, () => expandTimeline(index));
-				append($$anchor, button_5);
-			};
-			if_block(node_15, ($$render) => {
-				if ($$props.model.entry_expandable?.[index]) $$render(consequent_16);
-			});
-			reset(div_16);
-			var node_16 = sibling(div_16, 2);
-			var consequent_17 = ($$anchor) => {
-				{
-					let $0 = /* @__PURE__ */ user_derived(() => $$props.model.entry_details?.[index] ?? []);
-					RowDetails($$anchor, {
-						get details() {
-							return get($0);
-						},
-						label: "Timeline entry details"
-					});
-				}
-			};
-			if_block(node_16, ($$render) => {
-				if ($$props.model.entry_expanded?.[index]) $$render(consequent_17);
-			});
-			reset(div_15);
-			template_effect(($0) => {
-				set_attribute(div_15, "data-expanded", $$props.model.entry_expanded?.[index] ?? false);
-				set_attribute(button_4, "data-focus-key", `view:${$$props.instanceKey}:item:${$$props.model.entry_ids[index]}`);
-				classes_2 = set_class(button_4, 1, "timeline-entry", null, classes_2, { selected: $0 });
-				set_attribute(button_4, "data-kind", get(entry).type);
-				set_style(button_4, `--indent:${$$props.model.entry_indents[index] ?? 0}`);
-			}, [() => $$props.model.selected === BigInt(index)]);
-			delegated("click", button_4, () => select($$props.model.entry_ids[index]));
-			append($$anchor, div_15);
-		});
-		reset(div_14);
-		template_effect(() => set_attribute(div_14, "aria-label", $$props.model.title));
-		append($$anchor, div_14);
-	};
-	var consequent_22 = ($$anchor) => {
-		var div_17 = root_22();
-		each(div_17, 21, () => $$props.model.sections, index, ($$anchor, section) => {
-			var section_1 = root_21();
-			let classes_3;
-			var button_6 = child(section_1);
-			let classes_4;
-			var span_7 = child(button_6);
-			var text_18 = only_child(span_7);
-			var text_19 = only_child(sibling(span_7), true);
-			reset(button_6);
-			var node_17 = sibling(button_6, 2);
-			var consequent_21 = ($$anchor) => {
-				var fragment_4 = comment();
-				each(first_child(fragment_4), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
-					var div_18 = root_20();
-					var div_19 = child(div_18);
-					var button_7 = child(div_19);
-					let classes_5;
-					var span_9 = child(button_7);
-					var text_20 = only_child(span_9, true);
-					var text_21 = only_child(sibling(span_9), true);
-					reset(button_7);
-					var node_19 = sibling(button_7);
-					var consequent_19 = ($$anchor) => {
-						var button_8 = root_6$1();
-						var text_22 = only_child(button_8, true);
-						template_effect(() => {
-							set_attribute(button_8, "aria-label", `${get(row).expanded ? "Collapse" : "Expand"} ${get(row).primary}`);
-							set_attribute(button_8, "aria-expanded", get(row).expanded);
-							set_text(text_22, get(row).expanded ? "▾" : "▸");
-						});
-						delegated("click", button_8, () => expand(get(row).id, get(row).expanded));
-						append($$anchor, button_8);
-					};
-					if_block(node_19, ($$render) => {
-						if (get(row).expandable) $$render(consequent_19);
-					});
-					reset(div_19);
-					var node_20 = sibling(div_19, 2);
-					var consequent_20 = ($$anchor) => {
-						{
-							let $0 = /* @__PURE__ */ user_derived(() => get(row).detail ?? []);
-							let $1 = /* @__PURE__ */ user_derived(() => `${get(row).primary} details`);
-							RowDetails($$anchor, {
-								get details() {
-									return get($0);
-								},
-								get label() {
-									return get($1);
-								}
-							});
-						}
-					};
-					if_block(node_20, ($$render) => {
-						if (get(row).expanded) $$render(consequent_20);
-					});
-					reset(div_18);
-					template_effect(() => {
-						set_attribute(div_18, "data-expanded", get(row).expanded);
-						set_attribute(button_7, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
-						classes_5 = set_class(button_7, 1, "section-row", null, classes_5, { selected: get(row).selected });
-						set_attribute(button_7, "data-tone", get(row).tone);
-						set_text(text_20, get(row).primary);
-						set_text(text_21, get(row).meta ?? get(row).secondary ?? "");
-					});
-					delegated("click", button_7, () => select(get(row).id));
-					append($$anchor, div_18);
-				});
-				append($$anchor, fragment_4);
-			};
-			if_block(node_17, ($$render) => {
-				if (!get(section).collapsed) $$render(consequent_21);
-			});
-			reset(section_1);
-			template_effect(($0) => {
-				classes_3 = set_class(section_1, 1, "", null, classes_3, { collapsed: get(section).collapsed });
-				set_attribute(button_6, "data-focus-key", `view:${$$props.instanceKey}:section:${get(section).id}`);
-				classes_4 = set_class(button_6, 1, "", null, classes_4, { selected: get(section).header_selected });
-				set_text(text_18, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
-				set_text(text_19, $0);
-			}, [() => String(get(section).count).padStart(2, "0")]);
-			delegated("click", button_6, () => dispatch({
-				type: "toggle_view_section",
-				instance_key: $$props.instanceKey,
-				section_id: get(section).id
-			}));
-			append($$anchor, section_1);
-		});
-		reset(div_17);
-		template_effect(() => set_attribute(div_17, "aria-label", $$props.model.title));
-		append($$anchor, div_17);
-	};
-	var consequent_23 = ($$anchor) => {
-		EmptyState($$anchor, {
-			get title() {
-				return $$props.model.title;
-			},
-			get message() {
-				return $$props.model.message;
-			}
-		});
-	};
-	var consequent_25 = ($$anchor) => {
-		var section_2 = root_26();
-		var h3 = sibling(child(section_2), 2);
-		var text_23 = only_child(h3, true);
-		var p_1 = sibling(h3, 2);
-		var strong_2 = child(p_1);
-		var text_24 = only_child(strong_2, true);
-		var text_25 = sibling(strong_2);
-		reset(p_1);
-		var node_21 = sibling(p_1, 2);
-		var consequent_24 = ($$anchor) => {
-			var div_20 = root_24();
-			each(div_20, 21, () => $$props.model.actions, index, ($$anchor, action, index) => {
-				var button_9 = root_23();
-				var text_26 = only_child(button_9, true);
-				template_effect(() => {
-					set_attribute(button_9, "data-focus-key", `view:${$$props.instanceKey}:required-subject:${index}`);
-					set_attribute(button_9, "title", get(action).title);
-					set_text(text_26, get(action).label);
-				});
-				delegated("click", button_9, () => dispatch({
-					type: "activate",
-					intent: get(action).intent
-				}));
-				append($$anchor, button_9);
-			});
-			reset(div_20);
-			append($$anchor, div_20);
-		};
-		var alternate_1 = ($$anchor) => {
-			append($$anchor, root_25());
-		};
-		if_block(node_21, ($$render) => {
-			if ($$props.model.actions.length > 0) $$render(consequent_24);
-			else $$render(alternate_1, -1);
-		});
-		reset(section_2);
-		template_effect(($0) => {
-			set_attribute(section_2, "aria-labelledby", `required-subject-${$$props.tileId}`);
-			set_attribute(h3, "id", `required-subject-${$$props.tileId}`);
-			set_text(text_23, $$props.model.title);
-			set_text(text_24, $$props.model.input);
-			set_text(text_25, ` needs ${$0 ?? ""}.`);
-		}, [() => $$props.model.facets.join(", ")]);
-		append($$anchor, section_2);
-	};
-	var consequent_26 = ($$anchor) => {
-		SceneView($$anchor, { get scene() {
-			return $$props.model.scene;
-		} });
-	};
-	var consequent_27 = ($$anchor) => {
-		FieldView($$anchor, {
-			get field() {
-				return $$props.model.field;
-			},
-			get instanceKey() {
-				return $$props.instanceKey;
-			}
-		});
-	};
-	if_block(node, ($$render) => {
-		if ($$props.model.type === "text") $$render(consequent);
-		else if ($$props.model.type === "document") $$render(consequent_2, 1);
-		else if ($$props.model.type === "rows") $$render(consequent_7, 2);
-		else if ($$props.model.type === "table") $$render(consequent_10, 3);
-		else if ($$props.model.type === "timeline") $$render(consequent_18, 4);
-		else if ($$props.model.type === "sections") $$render(consequent_22, 5);
-		else if ($$props.model.type === "placeholder") $$render(consequent_23, 6);
-		else if ($$props.model.type === "required_subject") $$render(consequent_25, 7);
-		else if ($$props.model.type === "map" || $$props.model.type === "atlas") $$render(consequent_26, 8);
-		else if ($$props.model.type === "field") $$render(consequent_27, 9);
-	});
-	reset(div);
-	template_effect(() => set_attribute(div, "data-view", $$props.model.type));
-	append($$anchor, div);
-	pop();
-}
-delegate(["click"]);
 //#endregion
 //#region browser/layout/DockSlot.svelte
 var root$4 = /* @__PURE__ */ from_html(`<p> </p>`);
@@ -10392,7 +11239,7 @@ function LayoutNode_1($$anchor, $$props) {
 		if (position === retained.start) return;
 		resize(Math.max(retained.min, Math.min(retained.max, retained.ratio + (position - retained.start) / retained.extent)), retained.guard, retained.path);
 	}
-	function key(event) {
+	function key$1(event) {
 		if ($$props.model.type !== "split") return;
 		const negative = $$props.model.axis === "horizontal" ? "ArrowLeft" : "ArrowUp";
 		if (![
@@ -10409,16 +11256,20 @@ function LayoutNode_1($$anchor, $$props) {
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		TileFrame($$anchor, { get model() {
-			return $$props.model;
-		} });
+		var fragment_1 = comment();
+		key(first_child(fragment_1), () => $$props.model.instance_key, ($$anchor) => {
+			TileFrame($$anchor, { get model() {
+				return $$props.model;
+			} });
+		});
+		append($$anchor, fragment_1);
 	};
 	var alternate = ($$anchor) => {
 		var div = root$2();
-		var node_1 = child(div);
+		var node_2 = child(div);
 		{
 			let $0 = /* @__PURE__ */ user_derived(() => [...path(), "first"]);
-			LayoutNode_1(node_1, {
+			LayoutNode_1(node_2, {
 				get model() {
 					return $$props.model.first;
 				},
@@ -10436,11 +11287,11 @@ function LayoutNode_1($$anchor, $$props) {
 				}
 			});
 		}
-		var div_1 = sibling(node_1, 2);
-		var node_2 = sibling(div_1, 2);
+		var div_1 = sibling(node_2, 2);
+		var node_3 = sibling(div_1, 2);
 		{
 			let $0 = /* @__PURE__ */ user_derived(() => [...path(), "second"]);
-			LayoutNode_1(node_2, {
+			LayoutNode_1(node_3, {
 				get model() {
 					return $$props.model.second;
 				},
@@ -10476,7 +11327,7 @@ function LayoutNode_1($$anchor, $$props) {
 		delegated("pointerup", div_1, end);
 		event("pointercancel", div_1, () => drag = null);
 		event("lostpointercapture", div_1, () => drag = null);
-		delegated("keydown", div_1, key);
+		delegated("keydown", div_1, key$1);
 		append($$anchor, div);
 	};
 	if_block(node, ($$render) => {
@@ -10497,82 +11348,102 @@ var root$1 = /* @__PURE__ */ from_html(`<div class="view-set-backdrop" aria-labe
 var root_1 = /* @__PURE__ */ from_html(`<main><!> <div class="view-set-middle"><!> <section class="view-set-center"><!></section> <!></div> <!></main>`);
 function ViewSet($$anchor, $$props) {
 	push($$props, true);
-	const maximized = /* @__PURE__ */ user_derived(() => $$props.model.root?.type === "tile" && $$props.model.root.maximized);
+	const maximized = /* @__PURE__ */ user_derived(() => $$props.model?.root?.type === "tile" && $$props.model.root.maximized);
 	var main = root_1();
 	let classes;
 	var node = child(main);
 	var consequent = ($$anchor) => {
-		DockSlot($$anchor, { get model() {
-			return $$props.model.docks.top;
-		} });
+		var fragment = comment();
+		key(first_child(fragment), () => $$props.docks.top.instance_key, ($$anchor) => {
+			DockSlot($$anchor, { get model() {
+				return $$props.docks.top;
+			} });
+		});
+		append($$anchor, fragment);
 	};
 	if_block(node, ($$render) => {
-		if (!get(maximized) && $$props.model.docks.top) $$render(consequent);
+		if (!get(maximized) && $$props.docks.top) $$render(consequent);
 	});
 	var div = sibling(node, 2);
-	var node_1 = child(div);
+	var node_2 = child(div);
 	var consequent_1 = ($$anchor) => {
-		DockSlot($$anchor, { get model() {
-			return $$props.model.docks.left;
-		} });
-	};
-	if_block(node_1, ($$render) => {
-		if (!get(maximized) && $$props.model.docks.left) $$render(consequent_1);
-	});
-	var section = sibling(node_1, 2);
-	var node_2 = child(section);
-	var consequent_2 = ($$anchor) => {
-		LayoutNode_1($$anchor, {
-			get model() {
-				return $$props.model.root;
-			},
-			get guard() {
-				return $$props.model.layout_guard;
-			},
-			get minRatio() {
-				return $$props.model.split_min_ratio;
-			},
-			get maxRatio() {
-				return $$props.model.split_max_ratio;
-			}
+		var fragment_2 = comment();
+		key(first_child(fragment_2), () => $$props.docks.left.instance_key, ($$anchor) => {
+			DockSlot($$anchor, { get model() {
+				return $$props.docks.left;
+			} });
 		});
-	};
-	var consequent_3 = ($$anchor) => {
-		SceneView($$anchor, { get scene() {
-			return $$props.model.backdrop;
-		} });
-	};
-	var alternate = ($$anchor) => {
-		append($$anchor, root$1());
+		append($$anchor, fragment_2);
 	};
 	if_block(node_2, ($$render) => {
-		if ($$props.model.root) $$render(consequent_2);
-		else if ($$props.model.backdrop) $$render(consequent_3, 1);
-		else $$render(alternate, -1);
+		if (!get(maximized) && $$props.docks.left) $$render(consequent_1);
+	});
+	var section = sibling(node_2, 2);
+	key(child(section), () => $$props.model?.view_set_id, ($$anchor) => {
+		var fragment_4 = comment();
+		var node_5 = first_child(fragment_4);
+		var consequent_2 = ($$anchor) => {
+			LayoutNode_1($$anchor, {
+				get model() {
+					return $$props.model.root;
+				},
+				get guard() {
+					return $$props.model.layout_guard;
+				},
+				get minRatio() {
+					return $$props.model.split_min_ratio;
+				},
+				get maxRatio() {
+					return $$props.model.split_max_ratio;
+				}
+			});
+		};
+		var consequent_3 = ($$anchor) => {
+			SceneView($$anchor, { get scene() {
+				return $$props.backdrop;
+			} });
+		};
+		var alternate = ($$anchor) => {
+			append($$anchor, root$1());
+		};
+		if_block(node_5, ($$render) => {
+			if ($$props.model?.root) $$render(consequent_2);
+			else if ($$props.backdrop) $$render(consequent_3, 1);
+			else $$render(alternate, -1);
+		});
+		append($$anchor, fragment_4);
 	});
 	reset(section);
-	var node_3 = sibling(section, 2);
+	var node_6 = sibling(section, 2);
 	var consequent_4 = ($$anchor) => {
-		DockSlot($$anchor, { get model() {
-			return $$props.model.docks.right;
-		} });
+		var fragment_7 = comment();
+		key(first_child(fragment_7), () => $$props.docks.right.instance_key, ($$anchor) => {
+			DockSlot($$anchor, { get model() {
+				return $$props.docks.right;
+			} });
+		});
+		append($$anchor, fragment_7);
 	};
-	if_block(node_3, ($$render) => {
-		if (!get(maximized) && $$props.model.docks.right) $$render(consequent_4);
+	if_block(node_6, ($$render) => {
+		if (!get(maximized) && $$props.docks.right) $$render(consequent_4);
 	});
 	reset(div);
-	var node_4 = sibling(div, 2);
+	var node_8 = sibling(div, 2);
 	var consequent_5 = ($$anchor) => {
-		DockSlot($$anchor, { get model() {
-			return $$props.model.docks.bottom;
-		} });
+		var fragment_9 = comment();
+		key(first_child(fragment_9), () => $$props.docks.bottom.instance_key, ($$anchor) => {
+			DockSlot($$anchor, { get model() {
+				return $$props.docks.bottom;
+			} });
+		});
+		append($$anchor, fragment_9);
 	};
-	if_block(node_4, ($$render) => {
-		if (!get(maximized) && $$props.model.docks.bottom) $$render(consequent_5);
+	if_block(node_8, ($$render) => {
+		if (!get(maximized) && $$props.docks.bottom) $$render(consequent_5);
 	});
 	reset(main);
 	template_effect(() => classes = set_class(main, 1, "view-set", null, classes, {
-		empty: $$props.model.center_is_empty,
+		empty: !$$props.model || $$props.model.center_is_empty,
 		maximized: get(maximized)
 	}));
 	append($$anchor, main);
@@ -10613,6 +11484,7 @@ function RyeOs($$anchor, $$props) {
 	var $$exports = { replaceEnvelope };
 	var div = root();
 	let classes;
+	set_style(div, "", {}, { "--system-height": "24px" });
 	var node = child(div);
 	var consequent = ($$anchor) => {
 		AmbientLayer($$anchor, {
@@ -10670,9 +11542,17 @@ function RyeOs($$anchor, $$props) {
 	if_block(node_3, ($$render) => {
 		if (get(envelope).view_model.navigation.items.length > 0) $$render(consequent_1);
 	});
-	ViewSet(sibling(node_3, 2), { get model() {
-		return get(envelope).view_model.view_set;
-	} });
+	ViewSet(sibling(node_3, 2), {
+		get model() {
+			return get(envelope).view_model.view_set;
+		},
+		get docks() {
+			return get(envelope).view_model.docks;
+		},
+		get backdrop() {
+			return get(envelope).view_model.backdrop;
+		}
+	});
 	reset(div_1);
 	var node_5 = sibling(div_1, 2);
 	StatusBar(node_5, { get model() {
@@ -10682,9 +11562,9 @@ function RyeOs($$anchor, $$props) {
 	Notices(node_6, { get notices() {
 		return get(envelope).view_model.notices;
 	} });
-	each(sibling(node_6, 2), 17, () => get(envelope).view_model.overlays, (overlay) => overlay.id, ($$anchor, overlay) => {
-		OverlayLayer($$anchor, { get model() {
-			return get(overlay);
+	each(sibling(node_6, 2), 17, () => get(envelope).view_model.dialogs, (dialog) => dialog.instance_key, ($$anchor, dialog) => {
+		DialogLayer($$anchor, { get model() {
+			return get(dialog);
 		} });
 	});
 	reset(div);
@@ -10733,6 +11613,7 @@ function captureBrowserPresentation(root) {
 	const key = active instanceof HTMLElement && root.contains(active) ? active.dataset.focusKey ?? null : null;
 	const focus = key === null ? null : {
 		key,
+		inDialog: active instanceof HTMLElement && active.closest("[role=\"dialog\"][aria-modal=\"true\"]") !== null,
 		selectionStart: selection(active, "selectionStart"),
 		selectionEnd: selection(active, "selectionEnd")
 	};
@@ -10759,7 +11640,7 @@ function restoreBrowserPresentation(root, snapshot) {
 		node.scrollLeft = state.left;
 	}
 	if (root.querySelector("[role=\"dialog\"][aria-modal=\"true\"]")) {
-		if (snapshot.focus && !snapshot.focus.key.startsWith("overlay:")) modalReturnFocus.set(root, snapshot.focus);
+		if (snapshot.focus && !snapshot.focus.inDialog) modalReturnFocus.set(root, snapshot.focus);
 		return;
 	}
 	let focus = snapshot.focus ?? modalReturnFocus.get(root) ?? null;
@@ -10790,11 +11671,54 @@ function cssEscape(value) {
 }
 //#endregion
 //#region browser/runtime/effects.ts
-async function runEffect(effect) {
+async function runEffect(effect, producer) {
 	const kind = effect.kind;
 	switch (kind.type) {
-		case "fetch_source": return success(effect, "source_data", unwrapResult$1(await dispatchBinding(kind.request, kind.request_bounds)));
-		case "invoke_binding": return success(effect, "binding_invoked", unwrapResult$1(await dispatchBinding(kind.request, kind.request_bounds)));
+		case "open_new_presentation_document":
+		case "show_prepared_presentation_document": throw new Error("presentation document requires its prepare-first document host");
+		case "observe_transfer_destination": {
+			if (!producer || producer.presentation_id !== kind.source_producer.presentation_id || producer.thread_id !== kind.source_producer.thread_id || producer.producer_incarnation !== kind.source_producer.producer_incarnation) throw new Error("transfer observation has another current source producer");
+			const encoded = encodeJsonBody({
+				action: "observe",
+				presentation_id: kind.destination_presentation_id,
+				thread_id: kind.destination_thread_id,
+				chain_root_id: kind.destination_chain_root_id
+			});
+			if (new TextEncoder().encode(encoded).byteLength > safeBound(kind.request_bounds.max_request_bytes, "max_request_bytes")) throw new Error("transfer observation exceeds admitted request bound");
+			const response = await postEncodedJson("/ui/api/session/seat/open", encoded);
+			return success(effect, "transfer_destination_observed", {
+				operation_id: crypto.randomUUID(),
+				observation: unwrapResult$1(response)
+			});
+		}
+		case "contact_transfer": {
+			if (!producer) throw new Error("transfer contact requires an acknowledged active presentation producer");
+			const request = kind.request;
+			const actor = request.action === "commit" || request.action === "abort" || request.action === "cancel_freeze" ? request.transfer.source : request.transfer.destination;
+			if (producer.presentation_id !== actor.presentation_id || producer.thread_id !== actor.thread_id) throw new Error("transfer contact has another active producer");
+			const encoded = encodeJsonBody(request);
+			if (new TextEncoder().encode(encoded).byteLength > safeBound(kind.request_bounds.max_request_bytes, "max_request_bytes")) throw new Error("transfer contact exceeds admitted request bound");
+			return success(effect, "binding_invoked", unwrapResult$1(await postEncodedJson("/ui/api/session/seat/transfer", encoded)));
+		}
+		case "prepare_transfer": {
+			if (!producer) throw new Error("transfer preparation requires an acknowledged active presentation producer");
+			if (producer.presentation_id !== kind.transfer.source.presentation_id || producer.thread_id !== kind.transfer.source.thread_id || producer.producer_incarnation !== kind.transfer.source.producer_incarnation) throw new Error("transfer preparation has another active producer");
+			const encoded = encodeJsonBody({
+				action: "prepare",
+				transfer: kind.transfer,
+				export: kind.export,
+				freeze: kind.freeze
+			});
+			if (new TextEncoder().encode(encoded).byteLength > safeBound(kind.request_bounds.max_request_bytes, "max_request_bytes")) throw new Error("transfer preparation exceeds admitted request bound");
+			return success(effect, "binding_invoked", unwrapResult$1(await postEncodedJson("/ui/api/session/seat/transfer", encoded)));
+		}
+		case "fetch_source": return success(effect, "source_data", unwrapResult$1(await dispatchBinding(kind.request, kind.request_bounds, producer)));
+		case "invoke_binding": return success(effect, "binding_invoked", unwrapResult$1(await dispatchBinding(kind.request, kind.request_bounds, producer)));
+		case "invoke_presentation_operation": {
+			const operation = kind.operation;
+			if (operation.body.kind !== "admission") throw new Error("composition operations are not executable invocations");
+			return success(effect, "binding_invoked", unwrapResult$1(await dispatchBinding(operation.body.request, operation.request_bounds, producer, operation.operation_id)));
+		}
 		case "set_location_hash":
 			location.hash = kind.hash;
 			return success(effect, "browser_only", null);
@@ -10803,18 +11727,25 @@ async function runEffect(effect) {
 			return success(effect, "browser_only", null);
 		case "open_url":
 			window.open(kind.url, "_blank", "noopener,noreferrer");
-			return success(effect, "browser_only", null);
+			return success(effect, "browser_only", {
+				action: "open_url",
+				dispatch: "returned",
+				opened: "unknown"
+			});
 		case "replace_session": {
 			const launch = new URL(kind.launch_url, location.href);
 			if (launch.origin !== location.origin || !launch.pathname.startsWith("/ui/launch/")) throw new Error("replacement UI session has an invalid launch origin or path");
 			location.assign(`${launch.pathname}${launch.search}${launch.hash}`);
 			return success(effect, "browser_only", null);
 		}
-		case "release_binding_attachment": return success(effect, "browser_only", unwrapResult$1(await postEncodedJson("/ui/api/session/attachments/detach", encodeJsonBody({
-			binding_attachment_id: kind.binding_attachment_id,
-			binding_generation: kind.binding_generation,
-			binding_digest: kind.binding_digest
-		}))));
+		case "release_binding_attachment":
+			if (!producer) throw new Error("attachment release requires an acknowledged active presentation producer");
+			return success(effect, "browser_only", unwrapResult$1(await postEncodedJson("/ui/api/session/attachments/detach", encodeJsonBody({
+				producer,
+				binding_attachment_id: kind.binding_attachment_id,
+				binding_generation: kind.binding_generation,
+				binding_digest: kind.binding_digest
+			}))));
 	}
 }
 function failedEffectResult(effect, error) {
@@ -10831,10 +11762,16 @@ function failedEffectResult(effect, error) {
 		}
 	};
 }
-async function dispatchBinding(request, bounds) {
+async function dispatchBinding(request, bounds, producer, presentationOperationId) {
+	if (!producer) throw new Error("UI dispatch requires an acknowledged active presentation producer");
 	const maximum = safeBound(bounds.max_request_bytes, "max_request_bytes");
 	const inputMaximum = safeBound(bounds.max_input_bytes, "max_input_bytes");
-	const encoded = encodeJsonBody(request);
+	const invocation = {
+		producer,
+		binding: request
+	};
+	if (presentationOperationId !== void 0) invocation.presentation_operation_id = presentationOperationId;
+	const encoded = encodeJsonBody(invocation);
 	if (new TextEncoder().encode(encoded).byteLength > maximum) throw new Error("UI binding request exceeds the session bound");
 	if (request.payload.kind === "input" && new TextEncoder().encode(request.payload.value).byteLength > inputMaximum) throw new Error("UI binding input exceeds the session bound");
 	return postEncodedJson("/ui/api/invocations/dispatch", encoded);
@@ -10853,8 +11790,9 @@ function success(effect, kind, data) {
 	};
 }
 function resultKind(effect) {
+	if (effect.kind.type === "observe_transfer_destination") return "transfer_destination_observed";
 	if (effect.kind.type === "fetch_source") return "source_data";
-	if (effect.kind.type === "invoke_binding") return "binding_invoked";
+	if (effect.kind.type === "invoke_binding" || effect.kind.type === "invoke_presentation_operation" || effect.kind.type === "prepare_transfer" || effect.kind.type === "contact_transfer") return "binding_invoked";
 	return "browser_only";
 }
 function unwrapResult$1(value) {
@@ -10898,14 +11836,80 @@ function hasModifiers(event) {
 	const { ctrl, alt, shift, meta } = event.modifiers;
 	return ctrl || alt || shift || meta;
 }
+/** The launcher is a shell control even while an editable view owns focus. */
+function isLauncherChord(event) {
+	return !event.isComposing && event.key.toLowerCase() === "k" && !event.shiftKey && !event.metaKey && event.ctrlKey !== event.altKey;
+}
 function isTypingTarget(target) {
-	return target instanceof Element && target.closest("input, textarea, select, [contenteditable='true']") !== null;
+	if (!(target instanceof Element)) return false;
+	if (target.closest("input, textarea, select")) return true;
+	let element = target;
+	while (element) {
+		if (element instanceof HTMLElement) return element.isContentEditable;
+		element = element.parentElement;
+	}
+	return false;
+}
+/** Key events from an open shadow tree may be retargeted to its host. */
+function isTypingEvent(event) {
+	return isTypingTarget(event.composedPath().find((entry) => entry instanceof Element) ?? event.target);
 }
 function isNativeActivationTarget(target) {
 	return target instanceof Element && target.closest("button, a, summary") !== null;
 }
 //#endregion
+//#region browser/runtime/chrome-keyboard.js
+/** Shell chrome owns an unmodified Escape; it must not close a focused View. */
+function isShellChromeEscape(event) {
+	if (event.key !== "Escape" || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+	return [...event.composedPath?.() ?? [], event.target].some((entry) => entry instanceof Element && entry.closest(".system-bar, .status-bar") !== null);
+}
+//#endregion
 //#region browser/runtime/layout-preferences.ts
+/** Adapter persistence follows the opaque scope projected by Rust. It never
+* reconstructs a Surface identity or writes a new scope under an old key. */
+function createScopedLayoutPreferencePersistence(options) {
+	let key = null;
+	let active = null;
+	let switching = false;
+	return {
+		observeAcceptedState() {
+			if (switching) return false;
+			try {
+				const nextKey = options.readKey() ?? null;
+				if (nextKey !== key || nextKey !== null && active === null) {
+					active?.flush();
+					active = null;
+					key = nextKey;
+					if (key === null) return false;
+					switching = true;
+					try {
+						const saved = options.storage.getItem(key);
+						const capturedKey = key;
+						active = createLayoutPreferencePersistence({
+							...options,
+							key: capturedKey,
+							persisted: saved,
+							readCurrent: () => {
+								if (options.readKey() !== capturedKey) throw new Error("layout preference scope changed");
+								return options.readCurrent();
+							}
+						});
+					} finally {
+						switching = false;
+					}
+				}
+				return active?.observeAcceptedState() ?? false;
+			} catch (error) {
+				options.reportError(error);
+				return false;
+			}
+		},
+		flush() {
+			return active?.flush() ?? false;
+		}
+	};
+}
 /** Persist one opaque Rust-owned presentation arrangement. */
 function createLayoutPreferencePersistence(options) {
 	const delay = options.delayMs ?? 400;
@@ -10937,7 +11941,6 @@ function createLayoutPreferencePersistence(options) {
 		pending = value;
 		timer = window.setTimeout(() => writeCaptured(value), delay);
 	}
-	if (options.persisted !== null && lastObserved !== options.persisted) queue(lastObserved);
 	return {
 		observeAcceptedState() {
 			let current;
@@ -10965,32 +11968,340 @@ function createLayoutPreferencePersistence(options) {
 	};
 }
 //#endregion
+//#region browser/runtime/attachment-subject.ts
+/** Mechanical public DTO shape check only. Subject metadata never grants access. */
+function requireAttachmentSubject(attachment) {
+	const subject = attachment.subject;
+	if (typeof subject !== "object" || subject === null || Array.isArray(subject)) throw new Error("binding attachment subject is required");
+	const value = subject;
+	const keys = Object.keys(value);
+	const validText = (text) => typeof text === "string" && text.length > 0 && text.trim() === text && !/[\u0000-\u001f\u007f-\u009f]/u.test(text);
+	const project = validText(attachment.project_path);
+	if (value.kind === "projectless" && keys.length === 1 && attachment.project_path === null) return;
+	if (value.kind === "unregistered_project" && keys.length === 1 && project) return;
+	if (value.kind === "registered_project" && keys.length === 2 && keys.includes("local_id") && validText(value.local_id) && project) return;
+	throw new Error("binding attachment subject contradicts its project metadata or closed schema");
+}
+//#endregion
+//#region browser/runtime/seat-history-stream.ts
+var MAX_FRAME_BYTES = 16777216;
+var CHUNK_SLICE_CHARS = 65536;
+var MAX_BATCH = 64;
+var U64_MAX = 18446744073709551615n;
+/** A provisional proof ended without a completion fence. No staged state is authoritative. */
+var SeatHistoryIncompleteError = class extends Error {};
+/** A completed cut needs replacement; this wake carries no phase authority. */
+var SeatHistoryReproofRequiredError = class extends Error {};
+function controlTip(payload) {
+	if (!record(payload.request)) throw new Error("seat history producer control has no request");
+	return {
+		schema_version: payload.schema_version,
+		operation_id: payload.operation_id,
+		producer_incarnation: payload.producer_incarnation,
+		state: payload.state,
+		next_engine_seq: exactU64(payload.next_engine_seq),
+		request_action: payload.request.action,
+		request_operation_id: payload.request.operation_id,
+		request_presentation_id: payload.request.presentation_id,
+		request_chain_root_id: payload.request.chain_root_id,
+		request_thread_id: payload.request.thread_id
+	};
+}
+/** A fresh POST and a fresh proof on every call; no EventSource reconnect cursor. */
+async function consumeSeatHistory(coordinate, claim, signal, stage, onInvalidated, onVerifiedAppend, stageTransferProof, stageMoveFreezeCancellationProof) {
+	const seat = { ...coordinate };
+	const expectedClaim = { ...claim };
+	const response = await fetch("/ui/api/session/seat/history", {
+		method: "POST",
+		credentials: "same-origin",
+		headers: {
+			"Content-Type": "application/json",
+			"Accept": "text/event-stream"
+		},
+		body: encodeJsonBody({
+			presentation_id: seat.presentation_id,
+			chain_root_id: seat.chain_root_id
+		}),
+		signal
+	});
+	if (!response.ok) throw new HttpResponseError(response.status, `seat history refused: ${response.status}`);
+	if (!response.body || !response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream")) throw new Error("seat history did not return an event stream");
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	let buffer = "";
+	let bufferedBytes = 0;
+	let began = false;
+	let complete = null;
+	let eventCount = 0n;
+	let lastThreadSeq = 0n;
+	let lastEventHash = null;
+	let lastControl = null;
+	const recentVerified = /* @__PURE__ */ new Map();
+	let settled = false;
+	let stopped = false;
+	const stop = () => {
+		stopped = true;
+		reader.cancel().catch(() => {});
+	};
+	return new Promise((resolve, reject) => {
+		const fail = (error) => {
+			if (stopped) return;
+			stop();
+			if (settled) onInvalidated(error);
+			else reject(error);
+		};
+		const onAbort = () => fail(/* @__PURE__ */ new Error("seat history read was aborted"));
+		signal.addEventListener("abort", onAbort, { once: true });
+		(async () => {
+			try {
+				for (;;) {
+					signal.throwIfAborted();
+					const chunk = await reader.read();
+					const decoded = decoder.decode(chunk.value, { stream: !chunk.done });
+					for (let offset = 0; offset < decoded.length; offset += CHUNK_SLICE_CHARS) {
+						const scanFrom = Math.max(0, buffer.length - 3);
+						const piece = decoded.slice(offset, offset + CHUNK_SLICE_CHARS);
+						buffer += piece;
+						bufferedBytes += new TextEncoder().encode(piece).length;
+						const separator = /\r?\n\r?\n/g;
+						separator.lastIndex = scanFrom;
+						let boundary;
+						while ((boundary = separator.exec(buffer)) !== null) {
+							if (stopped) return;
+							const raw = buffer.slice(0, boundary.index);
+							buffer = buffer.slice(boundary.index + boundary[0].length);
+							bufferedBytes = new TextEncoder().encode(buffer).length;
+							separator.lastIndex = 0;
+							if (new TextEncoder().encode(raw).length > MAX_FRAME_BYTES) throw new Error("seat history frame exceeds bound");
+							if (!raw || raw.split(/\r?\n/).every((line) => line.startsWith(":"))) continue;
+							const frame = parseFrame(raw);
+							if (complete) {
+								if (frame.event === "ui_seat.replay.append_verified.v1") {
+									const append = verifiedAppend(frame.data);
+									const duplicate = recentVerified.get(append.operation_id);
+									if (duplicate && (duplicate.threadSeq !== append.thread_seq || duplicate.eventHash !== append.event_hash)) throw new Error("seat history verified append reused an operation with different testimony");
+									if (append.thread_seq < lastThreadSeq && (duplicate?.threadSeq !== append.thread_seq || duplicate.eventHash !== append.event_hash)) throw new Error("seat history verified append moved backwards");
+									if (append.thread_seq === lastThreadSeq && append.event_hash !== lastEventHash) throw new Error("seat history verified append changed the retained tip");
+									if (append.thread_seq > lastThreadSeq) {
+										lastThreadSeq = append.thread_seq;
+										lastEventHash = append.event_hash;
+									}
+									if (!duplicate) {
+										recentVerified.set(append.operation_id, {
+											threadSeq: append.thread_seq,
+											eventHash: append.event_hash
+										});
+										if (recentVerified.size > 128) recentVerified.delete(recentVerified.keys().next().value);
+									}
+									onVerifiedAppend(append);
+									if (stopped) return;
+									continue;
+								}
+								if (frame.event === "ui_seat.replay.reproof_required.v1" && frame.data.schema === 1n && Object.keys(frame.data).length === 1) {
+									fail(new SeatHistoryReproofRequiredError("seat history requires a fresh paired proof"));
+									return;
+								}
+								if (frame.event === "ui_seat.replay.invalidated.v1" && frame.data.schema === 1n && Object.keys(frame.data).length === 1) {
+									fail(/* @__PURE__ */ new Error("seat history was invalidated"));
+									return;
+								}
+								throw new Error("seat history emitted unsupported post-completion frame");
+							}
+							if (frame.event === "ui_seat.replay.begin.v1") {
+								if (began || frame.data.schema !== 1n || frame.data.presentation_id !== seat.presentation_id || frame.data.chain_root_id !== seat.chain_root_id || frame.data.thread_id !== seat.thread_id) throw new Error("seat history begin does not match the claimed seat");
+								began = true;
+							} else if (frame.event === "ui_seat.replay.events.v1") {
+								if (!began || frame.data.schema !== 1n || !Array.isArray(frame.data.events) || frame.data.events.length === 0 || frame.data.events.length > MAX_BATCH) throw new Error("seat history batch has invalid shape or order");
+								const records = [];
+								for (const entry of frame.data.events) {
+									if (!record(entry) || entry.thread_id !== seat.thread_id || entry.chain_root_id !== seat.chain_root_id || typeof entry.event_hash !== "string" || !/^[0-9a-f]{64}$/.test(entry.event_hash)) throw new Error("seat history event has invalid retained identity");
+									const sequence = exactU64(entry.thread_seq);
+									if (sequence <= lastThreadSeq) throw new Error("seat history event order moved backwards");
+									if (lastEventHash !== null && sequence === lastThreadSeq + 1n && entry.prev_thread_event_hash !== lastEventHash) throw new Error("seat history predecessor is discontinuous");
+									lastThreadSeq = sequence;
+									lastEventHash = entry.event_hash;
+									if (entry.event_type === "ui_seat.producer.v3") {
+										if (!record(entry.payload)) throw new Error("seat history producer control has no payload");
+										lastControl = controlTip(entry.payload);
+									}
+									eventCount++;
+									records.push(entry);
+								}
+								stage(records);
+								if (stopped) return;
+							} else if (frame.event === "ui_seat.replay.transfer_proof.v1") {
+								if (!began || frame.data.schema !== 1n || Object.keys(frame.data).length !== 2 || !record(frame.data.proof)) throw new Error("seat history transfer proof has invalid shape or order");
+								stageTransferProof(frame.data.proof);
+								if (stopped) return;
+							} else if (frame.event === "ui_seat.replay.move_freeze_cancellation_proof.v1") {
+								if (!began || frame.data.schema !== 1n || Object.keys(frame.data).length !== 2 || !record(frame.data.proof)) throw new Error("seat history move freeze cancellation proof has invalid shape or order");
+								stageMoveFreezeCancellationProof(frame.data.proof);
+								if (stopped) return;
+							} else if (frame.event === "ui_seat.replay.complete.v1") {
+								if (!began || frame.data.schema !== 1n || typeof frame.data.tip_hash !== "string" || !/^[0-9a-f]{64}$/.test(frame.data.tip_hash)) throw new Error("seat history completion is invalid");
+								const count = exactU64(frame.data.event_count);
+								const tipSequence = exactU64(frame.data.thread_seq);
+								if (count !== eventCount || tipSequence !== lastThreadSeq || lastEventHash !== null && frame.data.tip_hash !== lastEventHash) throw new Error("seat history completion does not match staged events");
+								if (!lastControl || lastControl.schema_version !== "ryeos.ui.seat.producer.v3" || lastControl.operation_id !== expectedClaim.operation_id || lastControl.producer_incarnation !== expectedClaim.producer_incarnation || lastControl.state !== "active" || lastControl.next_engine_seq !== expectedClaim.next_engine_seq || lastControl.request_action !== "claim" || lastControl.request_operation_id !== expectedClaim.operation_id || lastControl.request_presentation_id !== seat.presentation_id || lastControl.request_chain_root_id !== seat.chain_root_id || lastControl.request_thread_id !== seat.thread_id) throw new Error("seat history completion does not retain the acknowledged producer claim");
+								complete = {
+									tip_hash: frame.data.tip_hash,
+									thread_seq: tipSequence,
+									event_count: count
+								};
+								settled = true;
+								resolve({
+									completion: complete,
+									close: stop
+								});
+							} else if (frame.event === "ui_seat.replay.invalidated.v1" && began && frame.data.schema === 1n && Object.keys(frame.data).length === 1) {
+								fail(new SeatHistoryIncompleteError("seat history was invalidated before completion"));
+								return;
+							} else throw new Error(`seat history has unknown frame ${frame.event}`);
+						}
+						if (bufferedBytes > MAX_FRAME_BYTES) {
+							bufferedBytes = new TextEncoder().encode(buffer).length;
+							if (bufferedBytes > MAX_FRAME_BYTES) throw new Error("seat history frame exceeds bound");
+						}
+					}
+					if (chunk.done) break;
+				}
+				if (!stopped) fail(settled ? /* @__PURE__ */ new Error("seat history live handoff ended") : new SeatHistoryIncompleteError(buffer.trim() ? "seat history ended with an incomplete frame" : "seat history stream ended before completion"));
+			} catch (error) {
+				if (!stopped) fail(error instanceof Error ? error : new Error(String(error)));
+				else if (!settled) reject(error);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+				if (!stopped) stop();
+			}
+		})();
+	});
+}
+function verifiedAppend(data) {
+	const fields = [
+		"schema",
+		"operation_id",
+		"producer_incarnation",
+		"first_engine_seq",
+		"last_engine_seq",
+		"event_count",
+		"payload_digest",
+		"event_hash",
+		"thread_seq"
+	];
+	if (Object.keys(data).length !== fields.length || fields.some((field) => !Object.hasOwn(data, field)) || data.schema !== 1n || typeof data.operation_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(data.operation_id) || typeof data.producer_incarnation !== "string" || !/^[0-9a-f]{64}$/.test(data.producer_incarnation) || typeof data.payload_digest !== "string" || !/^[0-9a-f]{64}$/.test(data.payload_digest) || typeof data.event_hash !== "string" || !/^[0-9a-f]{64}$/.test(data.event_hash)) throw new Error("seat history verified append has invalid shape");
+	const first = exactU64(data.first_engine_seq);
+	const last = exactU64(data.last_engine_seq);
+	const count = exactU64(data.event_count);
+	const threadSeq = exactU64(data.thread_seq);
+	if (count === 0n || first > last || last - first + 1n !== count || threadSeq === 0n) throw new Error("seat history verified append has invalid interval");
+	return {
+		operation_id: data.operation_id,
+		producer_incarnation: data.producer_incarnation,
+		first_engine_seq: first,
+		last_engine_seq: last,
+		event_count: count,
+		payload_digest: data.payload_digest,
+		event_hash: data.event_hash,
+		thread_seq: threadSeq
+	};
+}
+function parseFrame(raw) {
+	let event = null;
+	let data = null;
+	for (const line of raw.split(/\r?\n/)) {
+		if (line.startsWith(":")) continue;
+		if (line.startsWith("event: ") && event === null) event = line.slice(7);
+		else if (line.startsWith("data: ") && data === null) data = line.slice(6);
+		else throw new Error("seat history has duplicate or unsupported SSE field");
+	}
+	if (!event || data === null) throw new Error("seat history frame omitted event or payload");
+	const decoded = decodeJsonBody(data);
+	if (!record(decoded)) throw new Error("seat history frame payload is not an object");
+	return {
+		event,
+		data: decoded
+	};
+}
+function record(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function exactU64(value) {
+	const number = typeof value === "bigint" ? value : typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value) ? BigInt(value) : null;
+	if (number === null || number < 0n || number > U64_MAX) throw new Error("seat history integer is invalid");
+	return number;
+}
+//#endregion
+//#region browser/runtime/thread-tail.ts
+/** A chain stream is wider than the currently focused route thread. */
+function focusedThreadTailFrame(frame, chainRootId, threadId) {
+	if (!chainRootId || !threadId || frame === null || typeof frame !== "object" || Array.isArray(frame)) return null;
+	const envelope = frame;
+	if (typeof envelope.event_type !== "string" || envelope.payload === null || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)) return null;
+	const record = envelope.payload;
+	if (record.chain_root_id !== chainRootId || record.thread_id !== threadId || record.event_type !== envelope.event_type) return null;
+	return {
+		eventType: envelope.event_type,
+		payload: record
+	};
+}
+//#endregion
 //#region browser/runtime/session.ts
 var MAX_SEAT_BATCH_EVENTS = 64;
+var MAX_COLD_REPLAY_ATTEMPTS = 3;
+var MAX_U64 = 18446744073709551615n;
 var MAX_SEAT_APPEND_ATTEMPTS = 5;
-var MAX_SEAT_APPEND_BODY_BYTES = 65536;
 var MAX_PENDING_SEAT_EVENTS = 512;
 var MAX_PENDING_SEAT_BYTES = 524288;
+var MAX_REMEMBERED_APPENDS = 128;
 function createSessionRuntime(options) {
-	const pendingStorageKey = `ryeos.ui.seat.pending.v1:${options.sessionId}`;
+	if (typeof options.maxSeatAppendBytes !== "bigint" || options.maxSeatAppendBytes < 1n || options.maxSeatAppendBytes > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("signed seat append byte bound is invalid");
+	if (typeof options.deriveSeatAppendIdentity !== "function") throw new Error("shared Rust seat append identity bridge is required");
+	if (typeof options.deriveSeatControlIdentity !== "function") throw new Error("shared Rust seat control identity bridge is required");
+	if (typeof options.replaySeatTransferProof !== "function") throw new Error("shared Rust provisional transfer proof bridge is required");
+	if (typeof options.replayAcknowledgedSeatEvents !== "function") throw new Error("shared Rust acknowledged seat evidence bridge is required");
+	if (typeof options.replaySeatMoveFreezeCancellationProof !== "function") throw new Error("session requires move freeze cancellation proof replay bridge");
+	const maxSeatAppendBytes = Number(options.maxSeatAppendBytes);
+	let presentation = options.presentation ?? null;
+	let pendingStorageKey = presentation ? storageKey(options.sessionId, presentation.presentation_id) : null;
+	const creationRequestId = crypto.randomUUID();
+	const claimIntentNonce = crypto.randomUUID();
+	let claimRequest = null;
+	let relinquishRequest = null;
+	let relinquishing = null;
+	let attaching = null;
+	const controlRequests = /* @__PURE__ */ new Map();
 	let seatThreadId = null;
 	let seatProducer = null;
 	let nextEngineSeq = 0n;
+	let acknowledgedClaim = null;
 	let seatObserved = 0;
+	let replayHandoff = null;
+	let replayAbort = null;
+	let replayInvalidated = false;
+	let engineBootstrapped = false;
 	const pendingSeatEvents = [];
 	let pendingSeatBytes = 0;
 	let seatAttaching = false;
 	let seatReady = false;
 	let seatSyncing = false;
+	let seatSyncPromise = null;
+	let reproofing = null;
+	let reproofPending = false;
 	let seatSyncBlocked = false;
+	let currentAppend = null;
+	const acknowledgedAppends = /* @__PURE__ */ new Map();
+	const acknowledgedReceipts = /* @__PURE__ */ new Map();
+	const verifiedAppends = /* @__PURE__ */ new Map();
 	let closed = false;
 	let seatEpoch = 0;
 	let heartbeat = null;
+	let seatTouchInflight = false;
 	let events = null;
 	let eventsOpened = false;
 	let tail = null;
 	let tailUrl = null;
 	let tailThreadId = null;
+	let tailChainRootId = null;
 	let hintTimer = null;
 	const dirtyHints = /* @__PURE__ */ new Set();
 	function commitTransport(channel, freshness) {
@@ -11002,71 +12313,345 @@ function createSessionRuntime(options) {
 			error: null
 		});
 	}
-	async function attachSeat() {
+	function fenceSeatHistory(error) {
+		replayInvalidated = true;
+		seatReady = false;
+		seatSyncBlocked = true;
+		options.onUnavailable?.({
+			kind: "writer_refused",
+			error
+		});
+	}
+	function receiveHistoryFailure(error) {
+		if (!(error instanceof SeatHistoryReproofRequiredError) || !engineBootstrapped) {
+			fenceSeatHistory(error);
+			return;
+		}
+		if (closed || replayInvalidated) return;
+		if (reproofing) {
+			reproofPending = true;
+			return;
+		}
+		reproofPending = false;
+		capturePendingSeatEvents();
+		seatReady = false;
+		const taskEpoch = seatEpoch;
+		const taskProducer = seatProducer;
+		const task = reproveCurrentSeat();
+		reproofing = task;
+		task.catch((reason) => {
+			if (!closed && taskEpoch === seatEpoch && taskProducer === seatProducer) fenceSeatHistory(reason instanceof Error ? reason : new Error(String(reason)));
+		}).finally(() => {
+			if (reproofing !== task) return;
+			reproofing = null;
+			if (reproofPending && !closed && !replayInvalidated && taskEpoch === seatEpoch && taskProducer === seatProducer) receiveHistoryFailure(new SeatHistoryReproofRequiredError("paired cut advanced during promotion"));
+		});
+	}
+	async function reproveCurrentSeat() {
+		const coordinate = presentation ? { ...presentation } : null;
+		const claim = acknowledgedClaim;
+		const epoch = seatEpoch;
+		const producer = seatProducer;
+		if (!coordinate || !claim || !producer || replayInvalidated || closed) throw new Error("paired reproof has no current acknowledged owner");
+		const requireOwner = () => {
+			if (closed || replayInvalidated || epoch !== seatEpoch || producer !== seatProducer || presentation?.presentation_id !== coordinate.presentation_id) throw new Error("paired reproof owner changed");
+		};
+		if (seatSyncPromise) await seatSyncPromise;
+		requireOwner();
+		if (currentAppend || pendingStorageKey && loadRetainedAppend(pendingStorageKey)) {
+			await reconcileRetainedAppend();
+			requireOwner();
+		}
+		capturePendingSeatEvents();
+		while (pendingSeatEvents.length > 0) {
+			const frontier = nextEngineSeq;
+			await syncSeat();
+			requireOwner();
+			if (seatSyncBlocked || nextEngineSeq === frontier) throw new Error("paired reproof must retain unresolved seat mutations");
+			capturePendingSeatEvents();
+		}
+		if (seatSyncBlocked || currentAppend) throw new Error("paired reproof append is not settled");
+		replayHandoff?.close();
+		replayHandoff = null;
+		replayAbort?.abort();
+		replayAbort = new AbortController();
+		for (let attempt = 0; attempt < MAX_COLD_REPLAY_ATTEMPTS; attempt++) {
+			let changed = false;
+			let promoted = false;
+			let handoff = null;
+			try {
+				await options.beginSeatReproof(coordinate, requireOwner);
+				requireOwner();
+				handoff = await consumeSeatHistory(coordinate, claim, replayAbort.signal, (events) => {
+					requireOwner();
+					options.replaySeatEvents(events);
+				}, (error) => {
+					if (closed || epoch !== seatEpoch) return;
+					if (error instanceof SeatHistoryReproofRequiredError) {
+						if (promoted) receiveHistoryFailure(error);
+						else changed = true;
+					} else fenceSeatHistory(error);
+				}, (append) => {
+					if (!closed && epoch === seatEpoch) receiveVerifiedAppend(append);
+				}, (proof) => {
+					requireOwner();
+					options.replaySeatTransferProof(proof);
+				}, (proof) => {
+					requireOwner();
+					options.replaySeatMoveFreezeCancellationProof(proof);
+				});
+				requireOwner();
+				if (changed) throw new SeatHistoryIncompleteError("paired reproof cut advanced");
+				const promotedCore = await options.completeSeatReproof(coordinate, handoff.completion, requireOwner);
+				requireOwner();
+				if (!Number.isSafeInteger(promotedCore.acknowledgedEventCount) || promotedCore.acknowledgedEventCount < 0 || promotedCore.acknowledgedEventCount > options.seatEvents().length || pendingSeatEvents.length > 0 || currentAppend) throw new Error("paired reproof has no exact acknowledged transport offset");
+				seatObserved = promotedCore.acknowledgedEventCount;
+				replayHandoff = handoff;
+				handoff = null;
+				promoted = true;
+				seatReady = true;
+				promotedCore.publish();
+				if (changed) reproofPending = true;
+				capturePendingSeatEvents();
+				syncSeat();
+				return;
+			} catch (error) {
+				handoff?.close();
+				if (epoch === seatEpoch && producer === seatProducer) options.abortSeatReplay();
+				if (!(error instanceof SeatHistoryIncompleteError) || attempt + 1 === MAX_COLD_REPLAY_ATTEMPTS || closed || replayInvalidated || replayAbort.signal.aborted) throw error;
+			}
+		}
+	}
+	function appendMatches(frame, append) {
+		return frame.operation_id === append.operation_id && frame.producer_incarnation === append.producer_incarnation && frame.first_engine_seq === BigInt(append.first_engine_seq) && frame.last_engine_seq === BigInt(append.last_engine_seq) && frame.event_count === BigInt(append.event_count) && frame.payload_digest === append.payload_digest;
+	}
+	function receiveVerifiedAppend(frame) {
+		const known = currentAppend?.operation_id === frame.operation_id ? currentAppend : acknowledgedAppends.get(frame.operation_id);
+		if (!known || !appendMatches(frame, known)) throw new Error("verified seat append is not this producer's exact pending or acknowledged operation");
+		const receipt = acknowledgedReceipts.get(frame.operation_id);
+		if (receipt && (receipt.event_hash !== frame.event_hash || receipt.thread_seq !== frame.thread_seq)) throw new Error("verified seat append differs from its exact signed receipt");
+		const previous = verifiedAppends.get(frame.operation_id);
+		if (previous && (previous.event_hash !== frame.event_hash || previous.thread_seq !== frame.thread_seq)) throw new Error("verified seat append identity changed its retained position");
+		if (!previous) verifiedAppends.set(frame.operation_id, frame);
+		trimSettledAppendMemory();
+	}
+	function rememberAcknowledgedAppend(append, receipt) {
+		const verified = verifiedAppends.get(append.operation_id);
+		if (verified && (!appendMatches(verified, append) || verified.event_hash !== receipt.event_hash || verified.thread_seq !== receipt.thread_seq)) throw new UnknownDeliveryError("verified seat append differs from its exact acknowledgement");
+		acknowledgedAppends.set(append.operation_id, append);
+		acknowledgedReceipts.set(append.operation_id, receipt);
+		trimSettledAppendMemory();
+	}
+	function trimSettledAppendMemory() {
+		if ([...acknowledgedAppends.keys()].filter((id) => !verifiedAppends.has(id)).length > MAX_REMEMBERED_APPENDS) throw new Error("unverified seat append backlog exceeds bound; authenticated rebootstrap required");
+		const settled = [...acknowledgedAppends.keys()].filter((id) => verifiedAppends.has(id));
+		for (const id of settled.slice(0, Math.max(0, settled.length - MAX_REMEMBERED_APPENDS))) {
+			acknowledgedAppends.delete(id);
+			acknowledgedReceipts.delete(id);
+			verifiedAppends.delete(id);
+		}
+		if (verifiedAppends.size > 256) throw new Error("verified seat append backlog exceeds bound; authenticated rebootstrap required");
+	}
+	function attachSeat() {
+		if (replayInvalidated) return Promise.reject(/* @__PURE__ */ new Error("seat history handoff was invalidated; choose a new authenticated producer"));
+		if (attaching) return attaching;
+		const pending = performAttach();
+		attaching = pending;
+		pending.catch(() => {
+			if (attaching === pending) attaching = null;
+		});
+		return pending;
+	}
+	async function performAttach() {
+		if (closed || replayInvalidated) throw new Error("disposed or invalidated presentation cannot claim a producer");
 		const epoch = ++seatEpoch;
+		seatReady = false;
 		seatAttaching = true;
 		seatSyncBlocked = false;
-		const startupBaseline = options.seatEvents().slice();
-		seatObserved = startupBaseline.length;
+		requireNoProvisionalEvents();
+		if (!presentation) {
+			if (options.claim) throw new Error("replacement claim requires an exact prepared presentation");
+			const prepared = unwrapResult(await retrySeatControl("open", {
+				action: "prepare",
+				creation_request_id: creationRequestId,
+				...options.rootAttachment
+			}));
+			if (closed || epoch !== seatEpoch) return;
+			requireRootBinding(prepared.root_binding, options.rootAttachment);
+			presentation = seatCoordinate(prepared);
+			pendingStorageKey = storageKey(options.sessionId, presentation.presentation_id);
+		}
 		await reconcileRetainedAppend();
 		if (closed || epoch !== seatEpoch) return;
-		const opened = unwrapResult(await invokeSeat("open", options.surfaceAttachment));
+		if (replayInvalidated) throw new Error("seat history was invalidated during producer reconciliation");
+		if (claimRequest === null) {
+			const predecessor = options.claim ? controlPredecessor(options.claim.predecessor) : (await observeProducer()).control_predecessor;
+			if (closed || epoch !== seatEpoch) return;
+			if (replayInvalidated) throw new Error("seat history was invalidated during producer observation");
+			claimRequest = freezeControlRequest({
+				action: "claim",
+				schema: 2,
+				operation_id: "",
+				...presentation,
+				predecessor,
+				intent_nonce: claimIntentNonce,
+				claim: options.claim ? {
+					kind: options.claim.kind,
+					expected_producer_incarnation: options.claim.expected_producer_incarnation
+				} : { kind: "fresh" }
+			});
+		}
+		const operationId = claimRequest.operation_id;
+		const opened = unwrapResult(await retrySeatControl("open", claimRequest));
 		if (closed || epoch !== seatEpoch) return;
+		if (replayInvalidated) throw new Error("seat history was invalidated during producer claim");
+		requireSeatCoordinate(opened, presentation);
+		if (opened.operation_id !== operationId || opened.state !== "active") throw new Error("seat claim response does not match requested operation");
 		seatThreadId = stringField(opened, "thread_id");
 		if (!seatThreadId) throw new Error("seat/open returned no durable seat thread");
-		seatProducer = requiredStringField(opened, "producer_incarnation");
-		nextEngineSeq = exactIntegerField(opened, "next_engine_seq");
-		capturePendingSeatEvents();
+		const producer = requiredStringField(opened, "producer_incarnation");
+		if (!/^[0-9a-f]{64}$/.test(producer)) throw new Error("claim returned invalid producer incarnation");
+		const engineFrontier = exactU64Field(opened, "next_engine_seq");
+		if (engineFrontier === MAX_U64) throw new Error("producer engine sequence is exhausted");
+		seatProducer = producer;
+		nextEngineSeq = engineFrontier;
+		acknowledgedClaim = Object.freeze({
+			operation_id: operationId,
+			producer_incarnation: producer,
+			next_engine_seq: engineFrontier
+		});
+		requireNoProvisionalEvents();
 		if (heartbeat !== null) window.clearInterval(heartbeat);
 		heartbeat = window.setInterval(() => {
-			if (seatThreadId) invokeSeat("touch", { thread_id: seatThreadId });
-		}, 6e4);
-		if (opened.reattached === true) {
-			let cursor = null;
-			do {
-				const replay = unwrapResult(await invokeSeat("replay", {
-					chain_root_id: seatThreadId,
-					after_chain_seq: cursor,
-					limit: 500
-				}));
-				if (closed || epoch !== seatEpoch) return;
-				capturePendingSeatEvents();
-				const replayEvents = Array.isArray(replay.events) ? replay.events : [];
-				if (replayEvents.length > 0) options.replaySeatEvents(replayEvents);
-				seatObserved = options.seatEvents().length;
-				cursor = optionalExactIntegerField(replay, "next_cursor");
-			} while (cursor !== null);
-			if (nextEngineSeq === 0n) prependPendingSeatEvents(startupBaseline);
-			else if (pendingSeatEvents.length > 0) {
-				const rebased = wireSeatEvents(pendingSeatEvents, nextEngineSeq).map((event) => ({
-					event_type: event.event_type,
-					payload: {
-						seq: event.engine_seq,
-						payload: event.payload
-					}
-				}));
-				options.replaySeatEvents(rebased);
-				seatObserved = options.seatEvents().length;
+			const touchedPresentation = presentation?.presentation_id;
+			const touchedProducer = seatProducer;
+			const touchedEpoch = seatEpoch;
+			const touchedThreadId = seatThreadId;
+			if (!closed && seatReady && !seatTouchInflight && touchedThreadId && touchedProducer && touchedPresentation) {
+				seatTouchInflight = true;
+				invokeSeat("touch", {
+					presentation_id: touchedPresentation,
+					thread_id: touchedThreadId,
+					producer_incarnation: touchedProducer
+				}).then((response) => handleSeatTouchOutcome(classifySeatTouchResponse(response, touchedPresentation, touchedThreadId), null), (error) => handleSeatTouchOutcome(classifySeatTouchError(error), error)).finally(() => {
+					seatTouchInflight = false;
+				});
 			}
-		} else prependPendingSeatEvents(startupBaseline);
-		capturePendingSeatEvents();
+			function handleSeatTouchOutcome(outcome, error) {
+				if (closed || touchedEpoch !== seatEpoch || touchedProducer !== seatProducer || touchedThreadId !== seatThreadId || touchedPresentation !== presentation?.presentation_id) return;
+				if (outcome === "refused") reportSeatFailure(error, false);
+			}
+		}, 6e4);
+		if (replayInvalidated) throw new Error("seat history was invalidated before replay handoff");
+		replayHandoff?.close();
+		replayHandoff = null;
+		replayAbort?.abort();
+		replayAbort = new AbortController();
+		for (let attempt = 0; attempt < MAX_COLD_REPLAY_ATTEMPTS; attempt++) try {
+			await options.beginSeatReplay(presentation);
+			if (closed || epoch !== seatEpoch) throw new Error("seat replay owner changed before history read");
+			const handoff = await consumeSeatHistory(presentation, acknowledgedClaim, replayAbort.signal, options.replaySeatEvents, (error) => {
+				if (closed || epoch !== seatEpoch) return;
+				receiveHistoryFailure(error);
+			}, (append) => {
+				if (closed || epoch !== seatEpoch) return;
+				receiveVerifiedAppend(append);
+			}, options.replaySeatTransferProof, options.replaySeatMoveFreezeCancellationProof);
+			if (closed || epoch !== seatEpoch || replayInvalidated) {
+				handoff.close();
+				throw new Error("seat history changed before replay handoff");
+			}
+			replayHandoff = handoff;
+			break;
+		} catch (error) {
+			options.abortSeatReplay();
+			if (!(error instanceof SeatHistoryIncompleteError) || attempt + 1 === MAX_COLD_REPLAY_ATTEMPTS || closed || epoch !== seatEpoch || replayInvalidated || replayAbort.signal.aborted) throw error;
+		}
+		requireNoProvisionalEvents();
+		if (replayInvalidated) throw new Error("seat history was invalidated before producer readiness");
 		seatAttaching = false;
 		seatReady = true;
+		attachEvents();
 		syncSeat();
 	}
 	async function reconcileRetainedAppend() {
+		if (replayInvalidated) throw new Error("seat history was invalidated before append reconciliation");
+		if (!pendingStorageKey || !presentation) throw new Error("presentation must be prepared before reconciliation");
 		const retained = loadRetainedAppend(pendingStorageKey);
 		if (!retained) return;
-		if (retained.session_id !== options.sessionId) throw new Error("retained seat append belongs to a different browser session");
-		await appendWithExactRetry(retained.encoded_request, {
+		if (retained.session_id !== options.sessionId || retained.presentation_id !== presentation.presentation_id || retained.thread_id !== presentation.thread_id || retained.chain_root_id !== presentation.chain_root_id) throw new Error("retained seat append belongs to a different browser session");
+		const expected = {
 			producer: retained.producer_incarnation,
 			operationId: retained.operation_id,
 			firstEngineSeq: BigInt(retained.first_engine_seq),
 			lastEngineSeq: BigInt(retained.last_engine_seq),
 			eventCount: retained.event_count,
 			payloadDigest: retained.payload_digest
-		}, options.sessionId, options.surfaceAttachment);
-		clearRetainedAppend(pendingStorageKey);
+		};
+		if (options.deriveSeatAppendIdentity({
+			...presentation,
+			producer_incarnation: expected.producer,
+			first_engine_seq: expected.firstEngineSeq,
+			last_engine_seq: expected.lastEngineSeq,
+			event_count: BigInt(expected.eventCount),
+			payload_digest: expected.payloadDigest
+		}) !== expected.operationId) throw new Error("retained append uses an unsupported or conflicting transport identity");
+		const retainedRequest = retainedAppendEvents(retained, expected, presentation);
+		if (await sha256Hex(encodeSeatPayloadDigest(retainedRequest)) !== expected.payloadDigest) throw new Error("retained append payload differs from its exact commitment");
+		const observed = unwrapResult(await invokeSeat("replay", {
+			presentation_id: presentation.presentation_id,
+			chain_root_id: presentation.chain_root_id,
+			receipt: {
+				thread_id: retained.thread_id,
+				producer_incarnation: expected.producer,
+				operation_id: expected.operationId,
+				first_engine_seq: expected.firstEngineSeq,
+				last_engine_seq: expected.lastEngineSeq,
+				event_count: expected.eventCount,
+				payload_digest: expected.payloadDigest
+			}
+		}));
+		if (Object.keys(observed).length !== 2 || !Object.hasOwn(observed, "receipt_status") || !Object.hasOwn(observed, "receipt")) throw new UnknownDeliveryError("prior seat append receipt lookup has an unsupported response");
+		let receipt;
+		if (observed.receipt_status === "found" && isRecord(observed.receipt)) receipt = requireAppendAcknowledgement(observed.receipt, expected, retainedRequest, presentation);
+		else if (observed.receipt_status === "not_found" && observed.receipt === null) receipt = await appendWithExactRetry(retained.encoded_request, retainedRequest, expected, options.sessionId, options.rootAttachment, presentation);
+		else throw new UnknownDeliveryError("prior seat append receipt is not confirmed; replacement claim blocked");
+		if (replayInvalidated) throw new Error("seat history was invalidated during append reconciliation");
+		const epoch = seatEpoch;
+		const current = currentAppend;
+		if (seatProducer !== null) {
+			if (!current || current.encoded_request !== retained.encoded_request || current.operation_id !== retained.operation_id || current.payload_digest !== retained.payload_digest || seatProducer !== retained.producer_incarnation || seatThreadId !== retained.thread_id || nextEngineSeq !== expected.firstEngineSeq || expected.lastEngineSeq !== expected.firstEngineSeq + BigInt(expected.eventCount - 1) || pendingSeatEvents.length < expected.eventCount) throw new Error("retained receipt does not match the current producer's pending interval");
+			const prefix = pendingSeatEvents.slice(0, expected.eventCount);
+			const wire = wireSeatEvents(prefix, expected.firstEngineSeq);
+			const digest = await sha256Hex(encodeSeatPayloadDigest(wire));
+			const encoded = encodeJsonBody({
+				presentation_id: presentation.presentation_id,
+				thread_id: seatThreadId,
+				producer_incarnation: seatProducer,
+				operation_id: expected.operationId,
+				first_engine_seq: expected.firstEngineSeq,
+				last_engine_seq: expected.lastEngineSeq,
+				event_count: expected.eventCount,
+				payload_digest: digest,
+				events: wire
+			});
+			if (closed || replayInvalidated || epoch !== seatEpoch || currentAppend !== current || digest !== expected.payloadDigest || encoded !== retained.encoded_request || encodeSeatPayloadDigest(wireSeatEvents(pendingSeatEvents.slice(0, expected.eventCount), expected.firstEngineSeq)) !== encodeSeatPayloadDigest(wire)) throw new Error("retained receipt does not prove the exact queued prefix");
+			rememberAcknowledgedAppend(retained, receipt);
+			clearRetainedAppend(pendingStorageKey, retained.operation_id, retained.producer_incarnation, retained.encoded_request);
+			pendingSeatEvents.splice(0, expected.eventCount);
+			pendingSeatBytes -= prefix.reduce((total, event) => total + encodedSeatEventBytes(event), 0);
+			nextEngineSeq = expected.lastEngineSeq + 1n;
+			currentAppend = null;
+			seatSyncBlocked = false;
+			options.replayAcknowledgedSeatEvents({
+				presentation_id: presentation.presentation_id,
+				thread_id: retained.thread_id,
+				producer_incarnation: retained.producer_incarnation
+			}, prefix, receipt.events);
+			return;
+		}
+		if (replayInvalidated) throw new Error("seat history was invalidated before clearing retained append");
+		clearRetainedAppend(pendingStorageKey, retained.operation_id, retained.producer_incarnation, retained.encoded_request);
 	}
 	function attachEvents() {
 		if (!options.eventsUrl) return;
@@ -11123,6 +12708,7 @@ function createSessionRuntime(options) {
 		});
 	}
 	function observe(model) {
+		if (closed || !seatReady) return;
 		syncTail(model);
 		if (!seatSyncBlocked && (seatAttaching || seatReady)) capturePendingSeatEvents();
 		syncSeat();
@@ -11159,25 +12745,12 @@ function createSessionRuntime(options) {
 		pendingSeatBytes += encodedBytes;
 		return true;
 	}
-	function prependPendingSeatEvents(events) {
-		let encodedBytes;
-		try {
-			encodedBytes = events.reduce((total, event) => total + encodedSeatEventBytes(event), 0);
-		} catch (error) {
-			seatSyncBlocked = true;
-			reportSeatFailure(error, false);
-			return;
-		}
-		if (pendingSeatEvents.length + events.length > MAX_PENDING_SEAT_EVENTS || pendingSeatBytes + encodedBytes > MAX_PENDING_SEAT_BYTES) {
-			seatSyncBlocked = true;
-			reportSeatFailure(/* @__PURE__ */ new Error(`unsaved seat history exceeds the pending limit (${MAX_PENDING_SEAT_EVENTS} events / ${MAX_PENDING_SEAT_BYTES} bytes)`), false);
-			return;
-		}
-		pendingSeatEvents.unshift(...events);
-		pendingSeatBytes += encodedBytes;
+	function requireNoProvisionalEvents() {
+		if (options.seatEvents().length !== seatObserved || pendingSeatEvents.length !== 0) throw new Error("provisional seat events before authoritative replay completed are refused");
 	}
 	function syncTail(model) {
 		tailThreadId = model.tail_thread_id ?? model.tail_chain_root_id ?? null;
+		tailChainRootId = model.tail_chain_root_id ?? null;
 		const nextUrl = model.tail_url ?? null;
 		if (nextUrl === tailUrl) return;
 		tail?.close();
@@ -11190,12 +12763,14 @@ function createSessionRuntime(options) {
 		source.addEventListener("message", (event) => {
 			try {
 				const frame = decodeJsonBody(event.data);
-				if (!isRecord(frame) || typeof frame.event_type !== "string" || !tailThreadId) return;
+				if (source !== tail) return;
+				const focused = focusedThreadTailFrame(frame, tailChainRootId, tailThreadId);
+				if (!focused || !tailThreadId) return;
 				options.commitEvent({
 					type: "thread_tail",
 					thread_id: tailThreadId,
-					event_type: frame.event_type,
-					payload: frame.payload ?? null
+					event_type: focused.eventType,
+					payload: focused.payload
 				});
 			} catch (error) {
 				console.warn("Failed to process RyeOS thread tail", error);
@@ -11208,7 +12783,19 @@ function createSessionRuntime(options) {
 		source.addEventListener("error", () => commitTransport("focused_tail", "reconnecting"));
 	}
 	async function syncSeat() {
-		if (closed || !seatThreadId || !seatProducer || seatSyncing || seatSyncBlocked) return;
+		if (seatSyncPromise) return seatSyncPromise;
+		const frontier = nextEngineSeq;
+		const pending = syncSeatOnce();
+		seatSyncPromise = pending;
+		try {
+			await pending;
+		} finally {
+			if (seatSyncPromise === pending) seatSyncPromise = null;
+		}
+		if (!closed && !seatSyncBlocked && nextEngineSeq > frontier && pendingSeatEvents.length > 0) syncSeat();
+	}
+	async function syncSeatOnce() {
+		if (closed || !presentation || !pendingStorageKey || !seatThreadId || !seatProducer || seatSyncing || seatSyncBlocked) return;
 		capturePendingSeatEvents();
 		if (seatSyncBlocked) return;
 		if (pendingSeatEvents.length === 0) return;
@@ -11224,11 +12811,15 @@ function createSessionRuntime(options) {
 		const producer = seatProducer;
 		const epoch = seatEpoch;
 		try {
-			operationId = crypto.randomUUID();
+			const remainingEnginePositions = MAX_U64 - firstEngineSeq;
+			if (remainingEnginePositions <= 0n) throw new Error("producer engine interval is exhausted");
+			if (remainingEnginePositions < BigInt(batchEvents.length)) batchEvents = batchEvents.slice(0, Number(remainingEnginePositions));
+			operationId = "00000000-0000-8000-8000-000000000000";
 			while (batchEvents.length > 0) {
 				const candidate = wireSeatEvents(batchEvents, firstEngineSeq);
 				const candidateLast = firstEngineSeq + BigInt(candidate.length - 1);
 				if (encodedByteLength(encodeJsonBody({
+					presentation_id: presentation.presentation_id,
 					thread_id: threadId,
 					producer_incarnation: producer,
 					operation_id: operationId,
@@ -11237,14 +12828,25 @@ function createSessionRuntime(options) {
 					event_count: candidate.length,
 					payload_digest: "0".repeat(64),
 					events: candidate
-				})) <= MAX_SEAT_APPEND_BODY_BYTES) break;
+				})) <= maxSeatAppendBytes) break;
 				batchEvents = batchEvents.slice(0, -1);
 			}
-			if (batchEvents.length === 0) throw new Error(`one seat event exceeds the ${MAX_SEAT_APPEND_BODY_BYTES}-byte append route limit`);
+			if (batchEvents.length === 0) throw new Error(`one seat event exceeds the ${maxSeatAppendBytes}-byte append route limit`);
 			batch = wireSeatEvents(batchEvents, firstEngineSeq);
 			lastEngineSeq = firstEngineSeq + BigInt(batch.length - 1);
 			payloadDigest = await sha256Hex(encodeSeatPayloadDigest(batch));
+			if (closed || epoch !== seatEpoch || threadId !== seatThreadId || producer !== seatProducer) return;
+			operationId = options.deriveSeatAppendIdentity({
+				...presentation,
+				producer_incarnation: producer,
+				first_engine_seq: firstEngineSeq,
+				last_engine_seq: lastEngineSeq,
+				event_count: BigInt(batch.length),
+				payload_digest: payloadDigest
+			});
+			if (!/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) throw new Error("shared Rust seat append identity is invalid");
 			encodedRequest = encodeJsonBody({
+				presentation_id: presentation.presentation_id,
 				thread_id: threadId,
 				producer_incarnation: producer,
 				operation_id: operationId,
@@ -11254,10 +12856,12 @@ function createSessionRuntime(options) {
 				payload_digest: payloadDigest,
 				events: batch
 			});
-			if (encodedByteLength(encodedRequest) > MAX_SEAT_APPEND_BODY_BYTES) throw new Error("seat append exceeded its route limit after final encoding");
-			retainAppend(pendingStorageKey, {
-				schema_version: "ryeos.ui.seat.pending-append.v1",
+			if (encodedByteLength(encodedRequest) > maxSeatAppendBytes) throw new Error("seat append exceeded its route limit after final encoding");
+			const retained = {
+				schema_version: "ryeos.ui.seat.pending-append.v3",
 				session_id: options.sessionId,
+				presentation_id: presentation.presentation_id,
+				chain_root_id: presentation.chain_root_id,
 				thread_id: threadId,
 				producer_incarnation: producer,
 				operation_id: operationId,
@@ -11266,8 +12870,11 @@ function createSessionRuntime(options) {
 				event_count: batch.length,
 				payload_digest: payloadDigest,
 				encoded_request: encodedRequest
-			});
+			};
+			retainAppend(pendingStorageKey, retained);
+			currentAppend = retained;
 		} catch (error) {
+			if (closed || epoch !== seatEpoch || threadId !== seatThreadId || producer !== seatProducer) return;
 			seatSyncBlocked = true;
 			seatSyncing = false;
 			reportSeatFailure(error, false);
@@ -11275,20 +12882,28 @@ function createSessionRuntime(options) {
 		}
 		let acknowledged = false;
 		try {
-			await appendWithExactRetry(encodedRequest, {
+			const receipt = await appendWithExactRetry(encodedRequest, batch, {
 				producer,
 				operationId,
 				firstEngineSeq,
 				lastEngineSeq,
 				eventCount: batch.length,
 				payloadDigest
-			}, options.sessionId, options.surfaceAttachment);
+			}, options.sessionId, options.rootAttachment, presentation);
 			if (closed || epoch !== seatEpoch || threadId !== seatThreadId || producer !== seatProducer) return;
-			clearRetainedAppend(pendingStorageKey);
+			if (!currentAppend) throw new Error("seat append lost its retained identity before acknowledgement");
+			rememberAcknowledgedAppend(currentAppend, receipt);
+			clearRetainedAppend(pendingStorageKey, operationId, producer);
+			currentAppend = null;
 			pendingSeatEvents.splice(0, batch.length);
 			pendingSeatBytes -= batchEvents.reduce((total, event) => total + encodedSeatEventBytes(event), 0);
 			nextEngineSeq = lastEngineSeq + 1n;
 			acknowledged = true;
+			options.replayAcknowledgedSeatEvents({
+				presentation_id: presentation.presentation_id,
+				thread_id: threadId,
+				producer_incarnation: producer
+			}, batchEvents, receipt.events);
 		} catch (error) {
 			if (closed || epoch !== seatEpoch || threadId !== seatThreadId) return;
 			seatSyncBlocked = true;
@@ -11296,13 +12911,15 @@ function createSessionRuntime(options) {
 			console.warn("RyeOS seat sync stopped with unsaved history", error);
 		} finally {
 			if (epoch === seatEpoch) seatSyncing = false;
-			if (acknowledged && !closed) {
-				capturePendingSeatEvents();
-				if (pendingSeatEvents.length > 0) syncSeat();
-			}
+			if (acknowledged && !closed) capturePendingSeatEvents();
 		}
 	}
 	function reportSeatFailure(error, retryable) {
+		if (closed) return;
+		if (error instanceof HttpResponseError && (error.status === 403 || error.status === 404 || error.status === 409 || error.status === 410)) {
+			seatReady = false;
+			seatSyncBlocked = true;
+		}
 		const unknown = error instanceof UnknownDeliveryError;
 		options.commitEvent({
 			type: "transport_state_changed",
@@ -11318,35 +12935,254 @@ function createSessionRuntime(options) {
 				details: null
 			}
 		});
+		if (error instanceof HttpResponseError && (error.status === 403 || error.status === 404 || error.status === 409 || error.status === 410)) options.onUnavailable?.({
+			kind: "writer_refused",
+			error
+		});
+		else if (error instanceof UnknownDeliveryError && seatSyncBlocked) options.onUnavailable?.({
+			kind: "append_unknown",
+			error
+		});
 	}
 	function close() {
 		if (closed) return;
 		closed = true;
 		seatEpoch += 1;
+		replayAbort?.abort();
+		replayHandoff?.close();
+		options.abortSeatReplay();
 		events?.close();
 		tail?.close();
 		if (heartbeat !== null) window.clearInterval(heartbeat);
 		if (hintTimer !== null) window.clearTimeout(hintTimer);
-		if (seatThreadId && !seatSyncing && pendingSeatEvents.length === 0 && !hasRetainedAppend(pendingStorageKey)) {
-			const body = JSON.stringify({ thread_id: seatThreadId });
-			navigator.sendBeacon?.("/ui/api/session/seat/close", new Blob([body], { type: "application/json" }));
-		}
 		events = null;
 		tail = null;
 		heartbeat = null;
 		hintTimer = null;
 	}
-	attachEvents();
+	async function retrySeatControl(operation, body) {
+		const requestKey = `${operation}:${isRecord(body) ? String(body.action) : ""}`;
+		let encoded = controlRequests.get(requestKey);
+		if (encoded === void 0) {
+			encoded = encodeJsonBody(body);
+			controlRequests.set(requestKey, encoded);
+		}
+		for (let attempt = 1;; attempt += 1) {
+			if (closed) throw new Error("disposed presentation cannot retry seat control");
+			try {
+				return await postEncodedJson(`/ui/api/session/seat/${operation}`, encoded);
+			} catch (error) {
+				if (!isRetryableResponse(error) || attempt >= MAX_SEAT_APPEND_ATTEMPTS) throw error;
+				await new Promise((resolve) => globalThis.setTimeout(resolve, Math.min(2e3, 100 * 2 ** (attempt - 1))));
+			}
+		}
+	}
+	function freezeControlRequest(request) {
+		const operationId = options.deriveSeatControlIdentity(request);
+		if (!/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) throw new Error("shared Rust seat control identity is invalid");
+		return Object.freeze({
+			...request,
+			predecessor: Object.freeze({ ...request.predecessor }),
+			operation_id: operationId
+		});
+	}
+	function relinquish() {
+		if (relinquishing) return relinquishing;
+		const pending = performRelinquish();
+		relinquishing = pending;
+		pending.catch(() => {
+			if (relinquishing === pending) relinquishing = null;
+		});
+		return pending;
+	}
+	async function performRelinquish() {
+		if (closed || !presentation || !seatThreadId || !seatProducer || !seatReady && relinquishRequest === null) throw new Error("no active presentation producer to relinquish");
+		const epoch = seatEpoch;
+		const producer = seatProducer;
+		if (relinquishRequest === null) {
+			capturePendingSeatEvents();
+			if (seatSyncing || pendingSeatEvents.length > 0 || !pendingStorageKey || loadRetainedAppend(pendingStorageKey)) throw new Error("seat mutations must settle before producer relinquishment");
+			seatReady = false;
+			seatSyncBlocked = true;
+			let observation;
+			try {
+				observation = await observeProducer();
+			} catch (error) {
+				if (!closed && !replayInvalidated && epoch === seatEpoch && producer === seatProducer) {
+					seatReady = true;
+					seatSyncBlocked = false;
+				}
+				throw error;
+			}
+			if (closed || epoch !== seatEpoch || producer !== seatProducer) return;
+			if (replayInvalidated) throw new Error("seat history was invalidated during relinquishment observation");
+			if (observation.producer.kind !== "active" || observation.producer.producer_incarnation !== producer) throw new Error("relinquishment no longer names the observed active producer");
+			if (options.seatEvents().length !== seatObserved) {
+				if (!replayInvalidated) {
+					seatReady = true;
+					seatSyncBlocked = false;
+					capturePendingSeatEvents();
+					syncSeat();
+				}
+				throw new Error("new local mutations must settle before producer relinquishment");
+			}
+			relinquishRequest = freezeControlRequest({
+				action: "relinquish",
+				schema: 2,
+				operation_id: "",
+				...presentation,
+				producer_incarnation: producer,
+				predecessor: observation.control_predecessor,
+				intent_nonce: crypto.randomUUID()
+			});
+		}
+		const operationId = relinquishRequest.operation_id;
+		seatReady = false;
+		seatSyncBlocked = true;
+		const response = unwrapResult(await retrySeatControl("close", relinquishRequest));
+		if (closed || epoch !== seatEpoch || producer !== seatProducer) return;
+		requireSeatCoordinate(response, presentation);
+		if (response.operation_id !== operationId || response.producer_incarnation !== producer || response.state !== "relinquished") throw new UnknownDeliveryError("producer relinquishment acknowledgement is invalid");
+		close();
+	}
+	async function reconnect(choice) {
+		if (!presentation) throw new Error("reconnect requires an exact prepared presentation");
+		if (choice.kind !== "independent" && !/^[0-9a-f]{64}$/.test(choice.expected_producer_incarnation)) throw new Error("reconnect requires an exact predecessor producer incarnation");
+		const selectedClaim = choice.kind === "independent" ? void 0 : {
+			kind: choice.kind,
+			expected_producer_incarnation: choice.expected_producer_incarnation,
+			predecessor: controlPredecessor(choice.predecessor)
+		};
+		if (selectedClaim?.predecessor.kind === "initialization") throw new Error("replacement requires an observed control predecessor");
+		if (seatSyncing) throw new Error("seat append must settle before reconnect");
+		await reconcileRetainedAppend();
+		if (options.seatEvents().length !== seatObserved) throw new Error("uncaptured seat mutations must settle before reconnect");
+		if (!closed && !seatSyncBlocked) capturePendingSeatEvents();
+		if (pendingSeatEvents.length > 0 || currentAppend !== null || pendingStorageKey !== null && loadRetainedAppend(pendingStorageKey)) throw new Error("queued seat mutations must settle before reconnect");
+		const { presentation: _previousPresentation, claim: _previousClaim, ...sharedOptions } = options;
+		return createSessionRuntime({
+			...sharedOptions,
+			...selectedClaim === void 0 ? {} : {
+				presentation: { ...presentation },
+				claim: selectedClaim
+			}
+		});
+	}
+	async function observeProducer() {
+		if (closed || !presentation) throw new Error("producer observation requires a retained presentation");
+		const coordinate = { ...presentation };
+		const observation = unwrapResult(await invokeSeat("open", {
+			action: "observe",
+			...coordinate
+		}));
+		if (closed || !presentation || presentation.presentation_id !== coordinate.presentation_id) throw new Error("producer observation belongs to a disposed document");
+		requireSeatCoordinate(observation, coordinate);
+		requireRootBinding(observation.root_binding, options.rootAttachment);
+		const revision = exactIntegerField(observation, "revision");
+		const control_predecessor = controlPredecessor(observation.control_predecessor);
+		const producer = observation.producer;
+		if (!isRecord(producer)) throw new Error("producer observation state is invalid");
+		if (producer.kind === "unclaimed") {
+			if (Object.keys(producer).some((key) => key !== "kind") || control_predecessor.kind !== "initialization") throw new Error("unclaimed producer observation contains unexpected fields");
+			return {
+				...coordinate,
+				revision,
+				root_binding: { ...options.rootAttachment },
+				control_predecessor,
+				producer: { kind: "unclaimed" }
+			};
+		}
+		if (producer.kind !== "active" && producer.kind !== "relinquished" && producer.kind !== "closed") throw new Error("producer observation state is invalid");
+		if (Object.keys(producer).some((key) => key !== "kind" && key !== "producer_incarnation") || control_predecessor.kind !== "control" || typeof producer.producer_incarnation !== "string" || !/^[0-9a-f]{64}$/.test(producer.producer_incarnation)) throw new Error("producer observation incarnation is invalid");
+		return {
+			...coordinate,
+			revision,
+			root_binding: { ...options.rootAttachment },
+			control_predecessor,
+			producer: {
+				kind: producer.kind,
+				producer_incarnation: producer.producer_incarnation
+			}
+		};
+	}
 	return {
 		attachSeat,
 		observe,
-		close
+		relinquish,
+		reconnect,
+		close,
+		observeProducer,
+		async settle() {
+			if (!closed) throw new Error("session settlement requires document disposal");
+			await Promise.allSettled([
+				attaching,
+				reproofing,
+				seatSyncPromise,
+				relinquishing
+			]);
+		},
+		currentReplayCompletion: () => !closed && seatReady && !seatSyncBlocked && !replayInvalidated && replayHandoff ? { ...replayHandoff.completion } : null,
+		preparedPresentation: () => presentation ? { ...presentation } : null,
+		async reconcilePendingAppend() {
+			if (seatSyncing) throw new Error("seat append is still in flight");
+			await reconcileRetainedAppend();
+			if (!closed && !seatSyncBlocked) {
+				capturePendingSeatEvents();
+				syncSeat();
+			}
+		},
+		canAcceptMutations: () => !closed && seatReady && !seatSyncBlocked && engineBootstrapped,
+		currentProducer: () => !closed && seatReady && !seatSyncBlocked && presentation && seatThreadId && seatProducer ? {
+			presentation_id: presentation.presentation_id,
+			thread_id: seatThreadId,
+			producer_incarnation: seatProducer
+		} : null,
+		currentEngineFrontier: () => !closed && seatReady && !seatSyncBlocked ? nextEngineSeq : null,
+		currentPresentation: () => !closed && seatReady && presentation ? { ...presentation } : null,
+		completeEngineBootstrap() {
+			if (closed || !seatReady || engineBootstrapped) throw new Error("engine bootstrap requires one acknowledged presentation producer");
+			engineBootstrapped = true;
+			seatObserved = options.seatEvents().length;
+		}
 	};
 }
 async function invokeSeat(operation, body) {
 	return postJson(`/ui/api/session/seat/${operation}`, body);
 }
-async function appendWithExactRetry(encodedRequest, expected, sessionId, surfaceAttachment) {
+function classifySeatTouchResponse(value, presentationId, threadId) {
+	try {
+		const acknowledgement = unwrapResult(value);
+		return Object.keys(acknowledgement).length === 3 && acknowledgement.presentation_id === presentationId && acknowledgement.thread_id === threadId && acknowledgement.touched === true ? "renewed" : "retry";
+	} catch {
+		return "retry";
+	}
+}
+function classifySeatTouchError(error) {
+	return error instanceof HttpResponseError && [
+		403,
+		404,
+		409,
+		410
+	].includes(error.status) ? "refused" : "retry";
+}
+function storageKey(sessionId, presentationId) {
+	return `ryeos.ui.seat.pending.v2:${encodeURIComponent(sessionId)}:${encodeURIComponent(presentationId)}`;
+}
+function seatCoordinate(value) {
+	return {
+		presentation_id: requiredStringField(value, "presentation_id"),
+		thread_id: requiredStringField(value, "thread_id"),
+		chain_root_id: requiredStringField(value, "chain_root_id")
+	};
+}
+function requireSeatCoordinate(value, expected) {
+	const actual = seatCoordinate(value);
+	if (actual.presentation_id !== expected.presentation_id || actual.thread_id !== expected.thread_id || actual.chain_root_id !== expected.chain_root_id) throw new Error("seat response changed the retained presentation coordinate");
+}
+function requireRootBinding(value, expected) {
+	if (!isRecord(value) || value.binding_attachment_id !== expected.binding_attachment_id || exactIntegerField(value, "binding_generation") !== expected.binding_generation || value.binding_digest !== expected.binding_digest) throw new Error("prepared seat root binding differs from admitted attachment");
+}
+async function appendWithExactRetry(encodedRequest, stagedEvents, expected, sessionId, rootAttachment, presentation) {
 	const url = "/ui/api/session/seat/append";
 	let authenticationReconciled = false;
 	for (let attempt = 1;; attempt += 1) try {
@@ -11357,15 +13193,20 @@ async function appendWithExactRetry(encodedRequest, expected, sessionId, surface
 			if (error instanceof UnknownDeliveryError || error instanceof HttpResponseError) throw error;
 			throw new UnknownDeliveryError(`seat append acknowledgement is unreadable: ${errorMessage(error)}`);
 		}
-		requireAppendAcknowledgement(response, expected);
-		return;
+		try {
+			return requireAppendAcknowledgement(response, expected, stagedEvents, presentation);
+		} catch (error) {
+			if (error instanceof UnknownDeliveryError) throw error;
+			throw new UnknownDeliveryError(`seat append acknowledgement is invalid: ${errorMessage(error)}`);
+		}
 	} catch (error) {
 		if (isAuthenticationResponse(error) && !authenticationReconciled) {
-			await requireCurrentSession(sessionId, surfaceAttachment);
+			await requireCurrentSession(sessionId, rootAttachment, presentation);
 			authenticationReconciled = true;
 			continue;
 		}
-		if (!isRetryableResponse(error) || attempt >= MAX_SEAT_APPEND_ATTEMPTS) throw error;
+		const outcomeError = error instanceof HttpResponseError && (error.status === 408 || error.status === 429 || error.status >= 500) ? new UnknownDeliveryError(`seat append response leaves delivery unknown: ${errorMessage(error)}`) : error;
+		if (!isRetryableResponse(outcomeError) || attempt >= MAX_SEAT_APPEND_ATTEMPTS) throw outcomeError;
 		await new Promise((resolve) => {
 			globalThis.setTimeout(resolve, Math.min(2e3, 100 * 2 ** (attempt - 1)));
 		});
@@ -11374,12 +13215,18 @@ async function appendWithExactRetry(encodedRequest, expected, sessionId, surface
 function isAuthenticationResponse(error) {
 	return error instanceof HttpResponseError && (error.status === 401 || error.status === 403);
 }
-async function requireCurrentSession(expectedSessionId, expectedAttachment) {
+async function requireCurrentSession(expectedSessionId, expectedAttachment, expectedPresentation) {
 	const current = unwrapResult(await getJson("/ui/api/session/current"));
 	if (requiredStringField(current, "session_id") !== expectedSessionId) throw new Error("browser session changed while reconciling a seat append");
 	const attachments = current.binding_attachments;
 	if (!Array.isArray(attachments)) throw new Error("browser session attachments changed while reconciling a seat append");
-	if (attachments.filter((value) => isRecord(value) && value.binding_attachment_id === expectedAttachment.binding_attachment_id && exactIntegerField(value, "binding_generation") === BigInt(expectedAttachment.binding_generation) && value.binding_digest === expectedAttachment.binding_digest).length !== 1) throw new Error("browser surface attachment changed while reconciling a seat append");
+	const matches = attachments.filter((value) => isRecord(value) && value.binding_attachment_id === expectedAttachment.binding_attachment_id && exactIntegerField(value, "binding_generation") === BigInt(expectedAttachment.binding_generation) && value.binding_digest === expectedAttachment.binding_digest);
+	if (matches.length !== 1) throw new Error("browser root attachment changed while reconciling a seat append");
+	requireAttachmentSubject(matches[0]);
+	const memberships = current.presentations;
+	const matching = Array.isArray(memberships) ? memberships.filter((value) => isRecord(value) && value.presentation_id === expectedPresentation.presentation_id && value.thread_id === expectedPresentation.thread_id && value.chain_root_id === expectedPresentation.chain_root_id) : [];
+	if (matching.length !== 1 || !isRecord(matching[0])) throw new Error("browser presentation membership changed while reconciling a seat append");
+	requireRootBinding(matching[0].root_binding, expectedAttachment);
 }
 function isRetryableResponse(error) {
 	return error instanceof UnknownDeliveryError || error instanceof HttpResponseError && error.status >= 500;
@@ -11392,8 +13239,10 @@ async function sha256Hex(encoded) {
 function retainAppend(key, retained) {
 	localStorage.setItem(key, JSON.stringify(retained));
 }
-function clearRetainedAppend(key) {
-	localStorage.removeItem(key);
+function clearRetainedAppend(key, operationId, producer, expectedEncodedRequest) {
+	const retained = loadRetainedAppend(key);
+	if (retained && retained.operation_id === operationId && retained.producer_incarnation === producer && (expectedEncodedRequest === void 0 || retained.encoded_request === expectedEncodedRequest)) localStorage.removeItem(key);
+	else if (retained) throw new Error("pending seat append changed during acknowledgement reconciliation");
 }
 function loadRetainedAppend(key) {
 	const encoded = localStorage.getItem(key);
@@ -11404,18 +13253,86 @@ function loadRetainedAppend(key) {
 	} catch (error) {
 		throw new Error(`retained seat append is malformed: ${errorMessage(error)}`);
 	}
-	if (!isRecord(value) || value.schema_version !== "ryeos.ui.seat.pending-append.v1" || typeof value.session_id !== "string" || typeof value.thread_id !== "string" || typeof value.producer_incarnation !== "string" || typeof value.operation_id !== "string" || typeof value.first_engine_seq !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.first_engine_seq) || typeof value.last_engine_seq !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.last_engine_seq) || typeof value.event_count !== "number" || !Number.isSafeInteger(value.event_count) || value.event_count <= 0 || typeof value.payload_digest !== "string" || typeof value.encoded_request !== "string") throw new Error("retained seat append has an invalid schema");
+	if (!isRecord(value) || value.schema_version !== "ryeos.ui.seat.pending-append.v3" || typeof value.session_id !== "string" || typeof value.presentation_id !== "string" || typeof value.chain_root_id !== "string" || typeof value.thread_id !== "string" || typeof value.producer_incarnation !== "string" || typeof value.operation_id !== "string" || typeof value.first_engine_seq !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.first_engine_seq) || typeof value.last_engine_seq !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.last_engine_seq) || typeof value.event_count !== "number" || !Number.isSafeInteger(value.event_count) || value.event_count <= 0 || typeof value.payload_digest !== "string" || typeof value.encoded_request !== "string") throw new Error("retained seat append has an invalid schema");
 	return value;
 }
-function hasRetainedAppend(key) {
-	try {
-		return loadRetainedAppend(key) !== null;
-	} catch {
-		return true;
+function requireAppendAcknowledgement(response, expected, stagedEvents, coordinate) {
+	const acknowledgementFields = [
+		"producer_incarnation",
+		"operation_id",
+		"first_engine_seq",
+		"last_engine_seq",
+		"event_count",
+		"payload_digest",
+		"appended",
+		"chain_seq",
+		"receipt_thread_seq",
+		"receipt_event_hash",
+		"events_authority",
+		"events"
+	];
+	if (Object.keys(response).some((key) => !acknowledgementFields.includes(key)) || requiredStringField(response, "producer_incarnation") !== expected.producer || requiredStringField(response, "operation_id") !== expected.operationId || exactIntegerField(response, "first_engine_seq") !== expected.firstEngineSeq || exactIntegerField(response, "last_engine_seq") !== expected.lastEngineSeq || exactIntegerField(response, "event_count") !== BigInt(expected.eventCount) || exactIntegerField(response, "appended") !== BigInt(expected.eventCount) || requiredStringField(response, "payload_digest") !== expected.payloadDigest) throw new UnknownDeliveryError("seat append acknowledgement does not match the submitted operation");
+	if (response.events_authority !== "authoritative" || !Array.isArray(response.events) || response.events.length !== expected.eventCount || stagedEvents.length !== expected.eventCount) throw new UnknownDeliveryError("seat append acknowledgement omitted its authoritative event interval");
+	const receiptChainSeq = exactIntegerField(response, "chain_seq");
+	const receiptThreadSeq = exactIntegerField(response, "receipt_thread_seq");
+	const receiptHash = requiredStringField(response, "receipt_event_hash");
+	if (!/^[0-9a-f]{64}$/.test(receiptHash)) throw new UnknownDeliveryError("seat append acknowledgement receipt hash is invalid");
+	const firstChainSeq = receiptChainSeq - BigInt(expected.eventCount);
+	if (firstChainSeq < 0n) throw new UnknownDeliveryError("seat append acknowledgement event interval underflows");
+	let previous = null;
+	const hashes = /* @__PURE__ */ new Set();
+	for (let index = 0; index < stagedEvents.length; index += 1) {
+		const acknowledged = response.events[index];
+		const staged = stagedEvents[index];
+		if (staged === void 0 || !isRecord(acknowledged) || Object.keys(acknowledged).some((key) => ![
+			"event_hash",
+			"chain_root_id",
+			"chain_seq",
+			"thread_id",
+			"thread_seq",
+			"event_type",
+			"durability",
+			"ts",
+			"prev_chain_event_hash",
+			"prev_thread_event_hash",
+			"payload"
+		].includes(key)) || typeof acknowledged.event_hash !== "string" || !/^[0-9a-f]{64}$/.test(acknowledged.event_hash) || hashes.has(acknowledged.event_hash) || acknowledged.chain_root_id !== coordinate.chain_root_id || acknowledged.thread_id !== coordinate.thread_id || exactIntegerField(acknowledged, "chain_seq") !== firstChainSeq + BigInt(index) || acknowledged.event_type !== staged.event_type || acknowledged.durability !== "durable" || typeof acknowledged.ts !== "string" || acknowledged.ts.length === 0 || !canonicalOptionalHash(acknowledged.prev_chain_event_hash) || !canonicalOptionalHash(acknowledged.prev_thread_event_hash) || !isRecord(acknowledged.payload) || exactIntegerField(acknowledged.payload, "seq") !== staged.engine_seq || encodeSeatPayloadDigest(acknowledged.payload.payload) !== encodeSeatPayloadDigest(staged.payload)) throw new UnknownDeliveryError("seat append acknowledgement changed its authoritative event interval");
+		hashes.add(acknowledged.event_hash);
+		const threadSeq = exactIntegerField(acknowledged, "thread_seq");
+		if (previous !== null && (threadSeq !== exactIntegerField(previous, "thread_seq") + 1n || acknowledged.prev_chain_event_hash !== previous.event_hash || acknowledged.prev_thread_event_hash !== previous.event_hash)) throw new UnknownDeliveryError("seat append acknowledgement event links are not contiguous");
+		previous = acknowledged;
 	}
+	if (previous === null || receiptThreadSeq !== exactIntegerField(previous, "thread_seq") + 1n) throw new UnknownDeliveryError("seat append acknowledgement receipt is not adjacent to its event interval");
+	return {
+		event_hash: receiptHash,
+		thread_seq: receiptThreadSeq,
+		events: response.events
+	};
 }
-function requireAppendAcknowledgement(response, expected) {
-	if (requiredStringField(response, "producer_incarnation") !== expected.producer || requiredStringField(response, "operation_id") !== expected.operationId || exactIntegerField(response, "first_engine_seq") !== expected.firstEngineSeq || exactIntegerField(response, "last_engine_seq") !== expected.lastEngineSeq || exactIntegerField(response, "event_count") !== BigInt(expected.eventCount) || exactIntegerField(response, "appended") !== BigInt(expected.eventCount) || requiredStringField(response, "payload_digest") !== expected.payloadDigest) throw new UnknownDeliveryError("seat append acknowledgement does not match the submitted operation");
+function retainedAppendEvents(retained, expected, coordinate) {
+	const request = decodeJsonBody(retained.encoded_request);
+	if (!isRecord(request) || Object.keys(request).some((key) => ![
+		"presentation_id",
+		"thread_id",
+		"producer_incarnation",
+		"operation_id",
+		"first_engine_seq",
+		"last_engine_seq",
+		"event_count",
+		"payload_digest",
+		"events"
+	].includes(key)) || request.presentation_id !== coordinate.presentation_id || request.thread_id !== coordinate.thread_id || request.producer_incarnation !== expected.producer || request.operation_id !== expected.operationId || exactIntegerField(request, "first_engine_seq") !== expected.firstEngineSeq || exactIntegerField(request, "last_engine_seq") !== expected.lastEngineSeq || exactIntegerField(request, "event_count") !== BigInt(expected.eventCount) || request.payload_digest !== expected.payloadDigest || !Array.isArray(request.events) || request.events.length !== expected.eventCount) throw new Error("retained append request differs from its exact staged interval");
+	return request.events.map((event, index) => {
+		if (!isRecord(event) || exactIntegerField(event, "engine_seq") !== expected.firstEngineSeq + BigInt(index) || typeof event.event_type !== "string" || event.event_type.length === 0 || !("payload" in event)) throw new Error("retained append contains an invalid staged event interval");
+		return {
+			engine_seq: exactIntegerField(event, "engine_seq"),
+			event_type: event.event_type,
+			payload: event.payload
+		};
+	});
+}
+function canonicalOptionalHash(value) {
+	return value === null || typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 function unwrapResult(value) {
 	if (!isRecord(value)) throw new Error("seat service returned a non-object response");
@@ -11430,10 +13347,10 @@ function requiredStringField(value, name) {
 	if (field === null || field.length === 0) throw new Error(`seat service returned no ${name}`);
 	return field;
 }
-function optionalExactIntegerField(value, name) {
-	const field = value[name];
-	if (field === null || field === void 0) return null;
-	return parseExactInteger(field, name);
+function exactU64Field(value, name) {
+	const integer = exactIntegerField(value, name);
+	if (integer > MAX_U64) throw new Error(`seat service returned an out-of-range u64 for ${name}`);
+	return integer;
 }
 function exactIntegerField(value, name) {
 	const field = value[name];
@@ -11453,11 +13370,18 @@ function eventPayload(event) {
 	return event.payload;
 }
 function wireSeatEvents(events, firstEngineSeq) {
-	return events.map((event, offset) => ({
-		engine_seq: firstEngineSeq + BigInt(offset),
-		event_type: eventType(event),
-		payload: eventPayload(event)
-	}));
+	return events.map((event, offset) => {
+		const engineSeq = firstEngineSeq + BigInt(offset);
+		if (engineSeq < 0n || engineSeq >= MAX_U64) throw new Error("producer engine interval is exhausted");
+		const payload = eventPayload(event);
+		if (event.producer_engine_seq !== void 0 && event.producer_engine_seq !== null && parseExactInteger(event.producer_engine_seq, "producer_engine_seq") !== engineSeq) throw new Error("captured event cannot be rebased to another producer interval");
+		if (eventType(event) === "seat.presentation_operation.prepared" && (!isRecord(payload) || payload.schema !== 2 && payload.schema !== 2n || exactIntegerField(payload, "prepared_engine_seq") !== engineSeq)) throw new Error("prepared operation differs from its reserved producer position");
+		return {
+			engine_seq: engineSeq,
+			event_type: eventType(event),
+			payload
+		};
+	});
 }
 function encodedSeatEventBytes(event) {
 	return encodedByteLength(encodeJsonBody({
@@ -11471,6 +13395,137 @@ function encodedByteLength(encoded) {
 }
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function controlPredecessor(value) {
+	if (!isRecord(value) || value.kind !== "initialization" && value.kind !== "control" || Object.keys(value).some((key) => key !== "kind" && key !== "event_hash") || typeof value.event_hash !== "string" || !/^[0-9a-f]{64}$/.test(value.event_hash)) throw new Error("producer observation omitted its exact control predecessor");
+	return {
+		kind: value.kind,
+		event_hash: value.event_hash
+	};
+}
+//#endregion
+//#region browser/runtime/reconnect-controls.ts
+/** Mechanical choices from the authenticated owner; never diagnostic-text inference. */
+function replacementChoices(observation) {
+	const producer = observation.producer;
+	if (producer.kind === "relinquished") return [{
+		kind: "resume",
+		expected_producer_incarnation: producer.producer_incarnation,
+		predecessor: { ...observation.control_predecessor }
+	}, {
+		kind: "takeover",
+		expected_producer_incarnation: producer.producer_incarnation,
+		predecessor: { ...observation.control_predecessor }
+	}];
+	if (producer.kind === "active") return [{
+		kind: "takeover",
+		expected_producer_incarnation: producer.producer_incarnation,
+		predecessor: { ...observation.control_predecessor }
+	}];
+	return [];
+}
+/**
+* Reconcile the retained unknown append before observing its owner. This does
+* not await newly queued suffix writes: observation is read-only and may
+* coexist with sync. An explicit reconnect still refuses until that queue
+* settles; these choices are not evidence that replacement is already safe.
+*/
+async function observeReconnectChoices(runtime) {
+	await runtime.reconcilePendingAppend();
+	return runtime.observeProducer();
+}
+/** One failed bootstrap's mechanical decision frame, disposed with its document. */
+function awaitBootRecovery(root, runtime, failure, signal, options = {}) {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let busy = false;
+		let inFlightAction = null;
+		const listeners = [];
+		const main = document.createElement("main");
+		main.className = "ryeos-boot ryeos-boot-failed";
+		main.setAttribute("role", "alert");
+		const title = document.createElement("h1");
+		title.textContent = "Presentation needs your decision";
+		const diagnostic = document.createElement("pre");
+		diagnostic.className = "ryeos-boot-error-detail";
+		diagnostic.textContent = failure instanceof Error ? failure.message : String(failure);
+		const guidance = document.createElement("p");
+		guidance.textContent = options.allowExactRetry === false ? "This live presentation is fenced. Reconcile retained receipts, inspect the writer, then explicitly choose a replacement. No writer death is inferred." : "Retry keeps this document’s exact request. Reconcile checks retained receipts before showing explicit writer choices.";
+		main.append(title, diagnostic, guidance);
+		const cleanup = () => {
+			listeners.splice(0).forEach((remove) => remove());
+			signal?.removeEventListener("abort", abort);
+		};
+		const finish = (next) => {
+			if (settled) {
+				if (next !== runtime) next.close();
+				return;
+			}
+			settled = true;
+			cleanup();
+			resolve(next);
+		};
+		const abort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			const reason = signal?.reason ?? /* @__PURE__ */ new Error("document disposed");
+			(inFlightAction ?? Promise.resolve()).then(() => reject(reason), () => reject(reason));
+		};
+		const button = (label, action) => {
+			const control = document.createElement("button");
+			control.type = "button";
+			control.className = "ryeos-boot-retry";
+			control.textContent = label;
+			const click = () => {
+				if (busy || settled) return;
+				busy = true;
+				const running = Promise.resolve().then(() => {
+					if (settled) return;
+					return action();
+				}).catch((error) => {
+					if (!settled) diagnostic.textContent = error instanceof Error ? error.message : String(error);
+				}).finally(() => {
+					busy = false;
+				});
+				inFlightAction = running;
+				running.then(() => {
+					if (inFlightAction === running) inFlightAction = null;
+				}, () => {
+					if (inFlightAction === running) inFlightAction = null;
+				});
+				return running;
+			};
+			control.addEventListener("click", click);
+			listeners.push(() => control.removeEventListener("click", click));
+			main.append(control);
+			return control;
+		};
+		if (options.allowExactRetry !== false) button("Retry exact request", async () => {
+			finish(runtime);
+		});
+		if (runtime.preparedPresentation()) {
+			button("Reconcile and inspect writer", async () => {
+				main.querySelectorAll("[data-replacement-choice]").forEach((node) => node.remove());
+				const observation = await observeReconnectChoices(runtime);
+				if (settled) return;
+				guidance.textContent = `Observed writer: ${observation.producer.kind}. Replacement requires an explicit choice; the node checks the predecessor again.`;
+				for (const choice of replacementChoices(observation)) {
+					const control = button(choice.kind === "resume" ? "Resume relinquished presentation" : "Take over this presentation", async () => {
+						finish(await runtime.reconnect(choice));
+					});
+					control.dataset.replacementChoice = "true";
+				}
+			});
+			button("Open independent presentation", async () => {
+				if (!window.confirm("Open a distinct presentation? This does not resume or take over the existing writer. Unresolved local writes still must reconcile.")) return;
+				finish(await runtime.reconnect({ kind: "independent" }));
+			});
+		}
+		root.replaceChildren(main);
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+	});
 }
 //#endregion
 //#region browser/runtime/wasm-api.ts
@@ -11493,7 +13548,19 @@ function isWasmApi(value) {
 		"ryeos_apply_effect_result",
 		"ryeos_key",
 		"ryeos_seat_events",
-		"ryeos_replay_seat_events",
+		"ryeos_seat_append_identity",
+		"ryeos_seat_control_identity",
+		"ryeos_replay_acknowledged_seat_events",
+		"ryeos_begin_seat_replay",
+		"ryeos_stage_seat_replay_events",
+		"ryeos_stage_seat_transfer_proof",
+		"ryeos_stage_seat_move_freeze_cancellation_proof",
+		"ryeos_commit_seat_replay",
+		"ryeos_abort_seat_replay",
+		"ryeos_require_presentation_producer_ready",
+		"ryeos_begin_seat_reproof",
+		"ryeos_commit_seat_reproof",
+		"ryeos_acknowledged_seat_prefix_len",
 		"ryeos_layout_preference_key",
 		"ryeos_export_layout_preferences",
 		"ryeos_restore_layout_preferences",
@@ -11502,100 +13569,565 @@ function isWasmApi(value) {
 	].every((name) => typeof exports[name] === "function");
 }
 //#endregion
+//#region browser/runtime/presentation-document.js
+function preparedDocumentUrl(current, presentationId) {
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(presentationId)) throw new Error("prepared presentation identity is invalid");
+	const next = new URL("/ui/", current);
+	next.searchParams.set("presentation_id", presentationId);
+	return next;
+}
+/** One platform-effect frame. Retry repeats the exact supplied request.
+* Dismissal removes framing only, never the retained seat or its obligations. */
+function createPresentationDocumentHandoff(document, parent, current, prepare, onDismiss = () => {}) {
+	const frame = document.createElement("section");
+	frame.className = "ryeos-document-handoff";
+	frame.setAttribute("role", "status");
+	frame.setAttribute("aria-label", "Prepared presentation");
+	const status = document.createElement("p");
+	const link = document.createElement("a");
+	link.textContent = "Open Surface";
+	link.target = "_blank";
+	link.rel = "noopener noreferrer";
+	link.hidden = true;
+	const retry = document.createElement("button");
+	retry.type = "button";
+	retry.textContent = "Retry exact preparation";
+	retry.hidden = true;
+	const dismiss = document.createElement("button");
+	dismiss.type = "button";
+	dismiss.textContent = "Dismiss link";
+	frame.append(status, link, retry, dismiss);
+	parent.append(frame);
+	let disposed = false;
+	let inFlight = null;
+	function start() {
+		if (disposed || inFlight) return inFlight ?? Promise.resolve();
+		retry.hidden = true;
+		status.textContent = "Preparing an independent presentation. No producer is claimed.";
+		const running = Promise.resolve().then(prepare).then((presentationId) => {
+			const url = preparedDocumentUrl(current, presentationId);
+			if (disposed) return;
+			link.href = url.href;
+			link.hidden = false;
+			status.textContent = "Ready. Open the prepared Surface when you choose. The link remains available if opening is blocked.";
+		}).catch((error) => {
+			if (disposed) return;
+			status.textContent = `Preparation is not confirmed: ${error instanceof Error ? error.message : String(error)}. Retry reconciles the same request.`;
+			retry.hidden = false;
+		});
+		inFlight = running;
+		running.finally(() => {
+			if (inFlight === running) inFlight = null;
+		});
+		return running;
+	}
+	const retryClick = () => {
+		start();
+	};
+	const dismissClick = () => {
+		dispose();
+		onDismiss();
+	};
+	retry.addEventListener("click", retryClick);
+	dismiss.addEventListener("click", dismissClick);
+	function dispose() {
+		if (disposed) return;
+		disposed = true;
+		retry.removeEventListener("click", retryClick);
+		dismiss.removeEventListener("click", dismissClick);
+		frame.remove();
+	}
+	return {
+		ready: start(),
+		dispose,
+		settle: () => inFlight ?? Promise.resolve()
+	};
+}
+//#endregion
 //#region browser/runtime/boot.ts
 /** Enter the installed browser surface from the generated index document. */
-async function bootRyeOsDocument() {
+async function bootRyeOsDocument(signal, predecessorSettlement) {
 	const root = document.getElementById("app");
 	if (!root) throw new Error("RyeOS browser root #app is missing");
-	setBootStage("Joining node", "Opening the authenticated browser session and durable seat.");
+	setBootStage(predecessorSettlement ? "Settling previous presentation" : "Joining node", predecessorSettlement ? "Waiting for the previous document to release its runtime before attaching." : "Opening the authenticated browser session and durable seat.");
 	try {
-		return await bootRyeOs(root);
+		await predecessorSettlement;
+		signal?.throwIfAborted();
+		setBootStage("Joining node", "Opening the authenticated browser session and durable seat.");
+		return await bootRyeOs(root, signal);
 	} catch (error) {
-		renderBootFailure(root, error);
+		if (!signal?.aborted) renderBootFailure(root, error);
 		throw error;
 	}
 }
-async function bootRyeOs(root) {
+async function bootRyeOs(root, signal) {
+	signal?.throwIfAborted();
 	const wasm = await loadWasm();
+	signal?.throwIfAborted();
 	await wasm.default({ module_or_path: "/ui/assets/ryeos_web_bg.wasm" });
+	signal?.throwIfAborted();
 	const sessionUnknown = await getJson("/ui/api/session/current");
-	const surfaceAttachment = sessionSurfaceAttachment(sessionUnknown);
-	const initial = wasm.ryeos_start(sessionUnknown, viewport(), BigInt(Date.now()));
-	let runtime;
+	signal?.throwIfAborted();
+	const selection = preparedPresentationSelection(sessionUnknown, new URL(location.href));
+	const rootAttachment = selection?.rootAttachment ?? sessionRootAttachment(sessionUnknown);
+	let coreStarted = false;
+	let replaySessionIdentity = null;
+	let runtime = null;
 	let sessionRuntime = null;
 	let preferences = null;
-	let renderer;
+	let renderer = null;
+	let detachBrowserEvents = null;
+	let closePromise = null;
 	let closed = false;
+	const pendingDocuments = /* @__PURE__ */ new Set();
+	const documentSettlements = /* @__PURE__ */ new Set();
+	let recoveryTask = null;
+	const recoveryAbort = new AbortController();
 	let seatAttached = false;
-	const queuedUiEvents = [];
-	const dispatchUi = (event) => {
+	const queuedEvents = [];
+	let releaseEffects = () => {};
+	let documentEpoch = 0;
+	let recovering = false;
+	let effectsReady = new Promise((resolve) => {
+		releaseEffects = resolve;
+	});
+	const dispatchEvent = (event) => {
+		if (closed) return;
+		if (recovering) return;
 		if (!seatAttached) {
-			queuedUiEvents.push(event);
+			queuedEvents.push(event);
 			return;
 		}
-		runtime.enqueueEvent({
+		runtime?.enqueueEvent(event);
+	};
+	const dispatchUi = (event) => {
+		if (!sessionRuntime?.canAcceptMutations()) return;
+		dispatchEvent({
 			type: "ui",
 			event
 		});
 	};
-	renderer = mountRyeOsRenderer(root, initial, dispatchUi);
-	runtime = createCommitRuntime({
-		reduce: (event) => wasm.ryeos_dispatch(event),
-		applyEffectResult: (result) => wasm.ryeos_apply_effect_result(result),
-		startEffect: runEffect,
-		failedEffectResult,
-		async render(envelope) {
-			const browserState = captureBrowserPresentation(root);
-			renderer.replaceEnvelope(envelope);
-			await Promise.resolve();
-			restoreBrowserPresentation(root, browserState);
-			preferences?.observeAcceptedState();
-			sessionRuntime?.observe(envelope.view_model);
+	const abortBoot = () => {
+		close().catch((error) => console.error("RyeOS boot cleanup failed", error));
+	};
+	signal?.addEventListener("abort", abortBoot, { once: true });
+	function disposePendingDocuments() {
+		for (const frame of pendingDocuments) {
+			frame.dispose();
+			const settlement = frame.settle();
+			documentSettlements.add(settlement);
+			settlement.finally(() => documentSettlements.delete(settlement));
 		}
-	});
-	sessionRuntime = createSessionRuntime({
-		sessionId: sessionId(sessionUnknown),
-		eventsUrl: sessionEventsUrl(sessionUnknown),
-		surfaceAttachment,
-		seatEvents: () => wasm.ryeos_seat_events(),
-		commitEvent: (event) => runtime.enqueueEvent(event),
-		replaySeatEvents: (events) => runtime.commitMutation(() => wasm.ryeos_replay_seat_events(events))
-	});
-	runtime.enqueueEnvelope(initial);
-	await sessionRuntime.attachSeat();
-	seatAttached = true;
-	for (const event of queuedUiEvents.splice(0)) runtime.enqueueEvent({
-		type: "ui",
-		event
-	});
-	configurePreferences(wasm, runtime, (next) => {
-		preferences = next;
-	});
-	if (location.hash) runtime.enqueueEvent({
-		type: "route_changed",
-		route: location.hash.replace(/^#/, "")
-	});
-	const detachBrowserEvents = attachBrowserEvents(wasm, runtime);
-	return { async close() {
-		if (closed) return;
+		pendingDocuments.clear();
+	}
+	function close() {
+		if (closePromise) return closePromise;
 		closed = true;
-		detachBrowserEvents();
-		preferences?.flush();
-		sessionRuntime?.close();
-		await runtime.idle();
-		await renderer.destroy();
-	} };
+		disposePendingDocuments();
+		recoveryAbort.abort(/* @__PURE__ */ new Error("document disposed during presentation recovery"));
+		documentEpoch += 1;
+		signal?.removeEventListener("abort", abortBoot);
+		detachBrowserEvents?.();
+		queuedEvents.length = 0;
+		releaseEffects(false);
+		runtime?.close();
+		const closingSession = sessionRuntime;
+		closingSession?.close();
+		wasm.ryeos_abort_seat_replay();
+		const cleanup = (async () => {
+			try {
+				preferences?.flush();
+			} finally {
+				await renderer?.destroy();
+			}
+		})();
+		closePromise = (async () => {
+			const outcomes = await Promise.allSettled([
+				cleanup,
+				recoveryTask ?? Promise.resolve(),
+				closingSession?.settle() ?? Promise.resolve(),
+				...documentSettlements
+			]);
+			for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+		})();
+		return closePromise;
+	}
+	async function admitCurrent() {
+		if (!sessionRuntime) throw new Error("presentation transport is unavailable");
+		if (closed) throw new Error("document disposed during presentation admission");
+		signal?.throwIfAborted();
+		await sessionRuntime.attachSeat();
+		signal?.throwIfAborted();
+		const presentation = sessionRuntime.currentPresentation();
+		if (!presentation) throw new Error("presentation claim did not acknowledge a current producer");
+		const admittedSession = await getJson("/ui/api/session/current");
+		signal?.throwIfAborted();
+		if (closed) throw new Error("document disposed during presentation admission");
+		if (replaySessionIdentity !== encodeCanonicalJsonBody(admittedSession)) throw new Error("authenticated session changed after candidate history reconstruction");
+		const currentProducer = sessionRuntime.currentProducer();
+		if (!currentProducer || currentProducer.presentation_id !== presentation.presentation_id || currentProducer.thread_id !== presentation.thread_id) throw new Error("presentation producer became unavailable during core bootstrap");
+		if (sessionId(admittedSession) !== sessionId(sessionUnknown)) throw new Error("authenticated session changed during presentation admission");
+		const membershipUrl = new URL(location.href);
+		membershipUrl.searchParams.set("presentation_id", presentation.presentation_id);
+		const admitted = preparedPresentationSelection(admittedSession, membershipUrl);
+		if (!admitted || admitted.presentation.thread_id !== presentation.thread_id || admitted.presentation.chain_root_id !== presentation.chain_root_id || admitted.rootAttachment.binding_attachment_id !== rootAttachment.binding_attachment_id || admitted.rootAttachment.binding_generation !== rootAttachment.binding_generation || admitted.rootAttachment.binding_digest !== rootAttachment.binding_digest) throw new Error("acknowledged presentation membership changed before core construction");
+		return {
+			admittedSession,
+			presentation
+		};
+	}
+	function installCore(admittedPresentation) {
+		const activeSession = sessionRuntime;
+		if (!activeSession) throw new Error("presentation transport is unavailable");
+		disposePendingDocuments();
+		const installedEpoch = ++documentEpoch;
+		effectsReady = new Promise((resolve) => {
+			releaseEffects = resolve;
+		});
+		const completion = activeSession.currentReplayCompletion();
+		if (!completion) throw new Error("presentation replay has no authenticated completion fence");
+		const initial = wasm.ryeos_commit_seat_replay(completion);
+		coreStarted = true;
+		renderer = mountRyeOsRenderer(root, initial, dispatchUi);
+		runtime = createCommitRuntime({
+			reduce: (event) => wasm.ryeos_dispatch(event),
+			applyEffectResult: (result) => wasm.ryeos_apply_effect_result(result),
+			async startEffect(effect) {
+				if (effect.kind.type === "show_prepared_presentation_document") {
+					if (!await effectsReady || closed || installedEpoch !== documentEpoch) throw new Error("presentation document owner is obsolete");
+					const presentationId = effect.kind.presentation_id;
+					const frame = createPresentationDocumentHandoff(document, document.body, new URL(location.href), async () => presentationId, () => pendingDocuments.delete(frame));
+					pendingDocuments.add(frame);
+					await frame.ready;
+					return {
+						id: effect.id,
+						kind: "browser_only",
+						ok: true,
+						data: null,
+						error: null
+					};
+				}
+				if (effect.kind.type === "open_new_presentation_document") {
+					if (closed || installedEpoch !== documentEpoch) throw new Error("presentation document owner is obsolete");
+					const kind = effect.kind;
+					const encoded = encodeCanonicalJsonBody({
+						action: "prepare",
+						creation_request_id: crypto.randomUUID(),
+						...kind.root_binding
+					});
+					const frame = createPresentationDocumentHandoff(document, document.body, new URL(location.href), async () => {
+						if (!await effectsReady || closed || installedEpoch !== documentEpoch) throw new Error("presentation document owner was disposed");
+						const root = verifiedDocumentRoot(await getJson("/ui/api/session/current"), kind.expected_session_id, kind.root_binding);
+						if (closed || installedEpoch !== documentEpoch) throw new Error("presentation document owner was disposed");
+						const response = sessionRecord(await postEncodedJson("/ui/api/session/seat/open", encoded));
+						const prepared = sessionRecord(response.result ?? response);
+						const actual = sessionRecord(prepared.root_binding);
+						if (actual.binding_attachment_id !== root.binding_attachment_id || actual.binding_generation !== root.binding_generation || actual.binding_digest !== root.binding_digest) throw new Error("prepared document root changed");
+						const id = requiredNonEmptyString(prepared, "presentation_id");
+						requiredNonEmptyString(prepared, "thread_id");
+						requiredNonEmptyString(prepared, "chain_root_id");
+						return id;
+					}, () => {
+						pendingDocuments.delete(frame);
+						const settling = frame.settle();
+						documentSettlements.add(settling);
+						settling.finally(() => documentSettlements.delete(settling));
+					});
+					pendingDocuments.add(frame);
+					await frame.ready;
+					return {
+						id: effect.id,
+						kind: "browser_only",
+						ok: true,
+						data: null,
+						error: null
+					};
+				}
+				if (!await effectsReady || closed || installedEpoch !== documentEpoch) throw new Error("presentation bootstrap did not admit platform effects");
+				return runEffect(effect, sessionRuntime?.currentProducer() ?? null);
+			},
+			failedEffectResult,
+			async render(envelope) {
+				if (closed || installedEpoch !== documentEpoch) return;
+				const browserState = captureBrowserPresentation(root);
+				renderer?.replaceEnvelope(envelope);
+				await Promise.resolve();
+				if (closed || installedEpoch !== documentEpoch) return;
+				restoreBrowserPresentation(root, browserState);
+				preferences?.observeAcceptedState();
+				sessionRuntime?.observe(envelope.view_model);
+			}
+		});
+		runtime.enqueueEnvelope(initial);
+		activeSession.completeEngineBootstrap();
+		const readyProducer = activeSession.currentProducer();
+		const nextEngineSeq = activeSession.currentEngineFrontier();
+		if (!readyProducer || nextEngineSeq === null) throw new Error("presentation producer became unavailable before initial effects");
+		runtime.enqueueEvent({
+			type: "presentation_producer_ready",
+			producer: readyProducer,
+			next_engine_seq: nextEngineSeq
+		});
+		wasm.ryeos_require_presentation_producer_ready(readyProducer, nextEngineSeq);
+		seatAttached = true;
+		releaseEffects(true);
+		for (const event of queuedEvents.splice(0)) runtime.enqueueEvent(event);
+		configurePreferences(wasm, (next) => {
+			preferences = next;
+		});
+		if (location.hash && activeSession.canAcceptMutations()) runtime.enqueueEvent({
+			type: "route_changed",
+			route: location.hash.replace(/^#/, "")
+		});
+		detachBrowserEvents = attachBrowserEvents(wasm, runtime, () => sessionRuntime?.canAcceptMutations() ?? false);
+		history.replaceState(history.state, "", retainedPresentationUrl(new URL(location.href), admittedPresentation.presentation_id).href);
+	}
+	async function disposeInstalledCore() {
+		detachBrowserEvents?.();
+		detachBrowserEvents = null;
+		runtime?.close();
+		runtime = null;
+		releaseEffects(false);
+		try {
+			preferences?.flush();
+		} finally {
+			preferences = null;
+			await renderer?.destroy();
+			renderer = null;
+		}
+		coreStarted = false;
+	}
+	async function recoverLive(failure) {
+		if (closed || recovering || !seatAttached || !sessionRuntime) return;
+		recovering = true;
+		seatAttached = false;
+		disposePendingDocuments();
+		documentEpoch += 1;
+		detachBrowserEvents?.();
+		detachBrowserEvents = null;
+		runtime?.close();
+		runtime = null;
+		releaseEffects(false);
+		try {
+			preferences?.flush();
+			preferences = null;
+			await renderer?.destroy();
+			renderer = null;
+			if (closed) return;
+			const previous = sessionRuntime;
+			const replacement = await awaitBootRecovery(root, previous, failure, recoveryAbort.signal, { allowExactRetry: false });
+			if (closed || signal?.aborted) {
+				if (replacement !== previous) replacement.close();
+				return;
+			}
+			previous.close();
+			sessionRuntime = replacement;
+			coreStarted = false;
+			wasm.ryeos_abort_seat_replay();
+			replaySessionIdentity = null;
+			queuedEvents.length = 0;
+			for (;;) {
+				let attemptedInstall = false;
+				try {
+					const admitted = await admitCurrent();
+					if (closed) return;
+					attemptedInstall = true;
+					installCore(admitted.presentation);
+					break;
+				} catch (error) {
+					signal?.throwIfAborted();
+					if (closed) throw error;
+					seatAttached = false;
+					disposePendingDocuments();
+					documentEpoch += 1;
+					await disposeInstalledCore();
+					const current = sessionRuntime;
+					if (!current) throw new Error("presentation recovery lost its exact session owner");
+					const replacement = await awaitBootRecovery(root, current, error, recoveryAbort.signal, { allowExactRetry: !attemptedInstall });
+					if (closed || signal?.aborted) {
+						if (replacement !== current) replacement.close();
+						return;
+					}
+					sessionRuntime = replacement;
+					if (sessionRuntime !== current) {
+						current.close();
+						wasm.ryeos_abort_seat_replay();
+						replaySessionIdentity = null;
+						queuedEvents.length = 0;
+					}
+				}
+			}
+		} catch (error) {
+			close().catch((cleanupError) => console.error("RyeOS recovery cleanup failed", cleanupError));
+			if (!closed && !signal?.aborted) renderBootFailure(root, error);
+		} finally {
+			recovering = false;
+		}
+	}
+	async function reproofSession(presentation) {
+		const admittedSession = await getJson("/ui/api/session/current");
+		if (closed || signal?.aborted || sessionId(admittedSession) !== sessionId(sessionUnknown)) throw new Error("authenticated session changed during paired reproof");
+		const membershipUrl = new URL(location.href);
+		membershipUrl.searchParams.set("presentation_id", presentation.presentation_id);
+		const admitted = preparedPresentationSelection(admittedSession, membershipUrl);
+		if (!admitted || admitted.presentation.thread_id !== presentation.thread_id || admitted.presentation.chain_root_id !== presentation.chain_root_id || admitted.rootAttachment.binding_attachment_id !== rootAttachment.binding_attachment_id || admitted.rootAttachment.binding_generation !== rootAttachment.binding_generation || admitted.rootAttachment.binding_digest !== rootAttachment.binding_digest) throw new Error("paired reproof has no exact current presentation membership");
+		return admittedSession;
+	}
+	try {
+		sessionRuntime = createSessionRuntime({
+			sessionId: sessionId(sessionUnknown),
+			eventsUrl: sessionEventsUrl(sessionUnknown),
+			rootAttachment,
+			maxSeatAppendBytes: sessionSeatAppendBound(sessionUnknown, rootAttachment.binding_attachment_id),
+			onUnavailable: (failure) => {
+				if (closed || recoveryTask) return;
+				const task = recoverLive(failure.error);
+				recoveryTask = task;
+				task.then(() => {
+					if (recoveryTask === task) recoveryTask = null;
+				}, () => {
+					if (recoveryTask === task) recoveryTask = null;
+				});
+			},
+			...selection ? { presentation: selection.presentation } : {},
+			seatEvents: () => coreStarted ? wasm.ryeos_seat_events() : [],
+			deriveSeatAppendIdentity: (identity) => wasm.ryeos_seat_append_identity(identity),
+			deriveSeatControlIdentity: (request) => wasm.ryeos_seat_control_identity(request),
+			commitEvent: dispatchEvent,
+			replayAcknowledgedSeatEvents: (producer, captured, events) => {
+				if (!coreStarted || !runtime || closed) throw new Error("acknowledged seat evidence has no live Core owner");
+				runtime.enqueueEnvelope(wasm.ryeos_replay_acknowledged_seat_events(producer, captured, events));
+			},
+			async beginSeatReplay(presentation) {
+				const admittedSession = await getJson("/ui/api/session/current");
+				if (closed || signal?.aborted || sessionId(admittedSession) !== sessionId(sessionUnknown)) throw new Error("authenticated session changed before seat history");
+				const membershipUrl = new URL(location.href);
+				membershipUrl.searchParams.set("presentation_id", presentation.presentation_id);
+				const admitted = preparedPresentationSelection(admittedSession, membershipUrl);
+				if (!admitted || admitted.presentation.thread_id !== presentation.thread_id || admitted.presentation.chain_root_id !== presentation.chain_root_id || admitted.rootAttachment.binding_attachment_id !== rootAttachment.binding_attachment_id || admitted.rootAttachment.binding_generation !== rootAttachment.binding_generation || admitted.rootAttachment.binding_digest !== rootAttachment.binding_digest) throw new Error("seat history has no exact authenticated presentation membership");
+				wasm.ryeos_begin_seat_replay(admittedSession, presentation.presentation_id, viewport(), BigInt(Date.now()));
+				replaySessionIdentity = encodeCanonicalJsonBody(admittedSession);
+			},
+			async beginSeatReproof(presentation, requireOwner) {
+				if (!coreStarted || !runtime || closed || recovering) throw new Error("paired reproof has no live Core owner");
+				const admittedSession = await reproofSession(presentation);
+				requireOwner();
+				if (closed || recovering) throw new Error("paired reproof owner changed before staging");
+				wasm.ryeos_begin_seat_reproof(admittedSession, presentation.presentation_id, viewport(), BigInt(Date.now()));
+			},
+			async completeSeatReproof(presentation, completion, requireOwner) {
+				await reproofSession(presentation);
+				requireOwner();
+				if (!coreStarted || !runtime || closed || recovering) throw new Error("paired reproof owner changed before promotion");
+				const envelope = wasm.ryeos_commit_seat_reproof(completion);
+				const acknowledgedPrefix = wasm.ryeos_acknowledged_seat_prefix_len();
+				if (acknowledgedPrefix < 0n || acknowledgedPrefix > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("paired reproof acknowledged prefix cannot be represented exactly");
+				return {
+					acknowledgedEventCount: Number(acknowledgedPrefix),
+					publish: () => {
+						requireOwner();
+						if (!runtime || closed || recovering) throw new Error("paired reproof document changed before rendering");
+						runtime.enqueueEnvelope(envelope);
+					}
+				};
+			},
+			replaySeatEvents: (events) => wasm.ryeos_stage_seat_replay_events(events),
+			replaySeatTransferProof: (proof) => wasm.ryeos_stage_seat_transfer_proof(proof),
+			replaySeatMoveFreezeCancellationProof: (proof) => wasm.ryeos_stage_seat_move_freeze_cancellation_proof(proof),
+			abortSeatReplay: () => wasm.ryeos_abort_seat_replay()
+		});
+		let admittedPresentation;
+		for (;;) try {
+			admittedPresentation = (await admitCurrent()).presentation;
+			break;
+		} catch (error) {
+			signal?.throwIfAborted();
+			if (closed) throw error;
+			const previous = sessionRuntime;
+			if (!previous) throw new Error("presentation admission lost its exact session owner");
+			sessionRuntime = await awaitBootRecovery(root, previous, error, signal);
+			if (sessionRuntime !== previous) {
+				previous.close();
+				wasm.ryeos_abort_seat_replay();
+				replaySessionIdentity = null;
+				queuedEvents.length = 0;
+			}
+			signal?.throwIfAborted();
+			setBootStage("Joining node", "Claiming the selected presentation and replaying its retained history.");
+		}
+		signal?.throwIfAborted();
+		installCore(admittedPresentation);
+		return { close };
+	} catch (error) {
+		try {
+			await close();
+		} catch (cleanupError) {
+			console.error("RyeOS boot cleanup failed", cleanupError);
+		}
+		throw error;
+	}
+}
+function retainedPresentationUrl(current, presentationId) {
+	if (!presentationId || presentationId.trim() !== presentationId) throw new Error("installed presentation identity is invalid");
+	const next = preparedDocumentUrl(current, presentationId);
+	next.hash = current.hash;
+	return next;
+}
+function verifiedDocumentRoot(session, expectedSessionId, expected) {
+	if (sessionId(session) !== expectedSessionId) throw new Error("fresh presentation belongs to another authenticated session");
+	const actual = sessionAttachment(sessionRecord(session), expected.binding_attachment_id);
+	if (actual.binding_generation !== expected.binding_generation || actual.binding_digest !== expected.binding_digest) throw new Error("fresh presentation root attachment changed");
+	return actual;
+}
+/** Read only the selected retained signed root's projected append route bound. */
+function sessionSeatAppendBound(session, attachmentId) {
+	const record = sessionRecord(session);
+	sessionAttachment(record, attachmentId);
+	const bound = sessionRecord(record.binding_attachments.find((entry) => entry.binding_attachment_id === attachmentId).binding_request_bounds).max_seat_append_bytes;
+	if (typeof bound !== "bigint" || bound < 1n || bound > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("authenticated browser session signed seat append byte bound is invalid");
+	return bound;
 }
 /** Resolve the immutable authored launch attachment without treating array order as authority. */
-function sessionSurfaceAttachment(session) {
+function sessionRootAttachment(session) {
 	const record = sessionRecord(session);
-	const surfaceAttachmentId = requiredNonEmptyString(record, "surface_attachment_id");
+	return sessionAttachment(record, requiredNonEmptyString(record, "root_attachment_id"));
+}
+/**
+* Prepared links select retained membership under the existing cookie. They
+* contain no bearer grant and never request resume/takeover automatically.
+* Copying a live presentation link therefore reaches the owner's fresh-claim
+* conflict instead of rotating its producer.
+*/
+function preparedPresentationSelection(session, url) {
+	const selections = url.searchParams.getAll("presentation_id");
+	if (selections.length === 0) return null;
+	const selected = selections[0];
+	if (selections.length !== 1 || selected === void 0 || selected.length === 0) throw new Error("prepared presentation selection is ambiguous or empty");
+	const record = sessionRecord(session);
+	if (!Array.isArray(record.presentations)) throw new Error("authenticated presentation memberships are invalid");
+	const matches = record.presentations.filter((membership) => typeof membership === "object" && membership !== null && !Array.isArray(membership) && membership.presentation_id === selected);
+	if (matches.length !== 1) throw new Error("prepared presentation is not an exact authenticated membership");
+	const membership = matches[0];
+	const coordinate = sessionRecord(membership.root_binding);
+	const rootAttachment = sessionAttachment(record, requiredNonEmptyString(coordinate, "binding_attachment_id"));
+	if (coordinate.binding_generation !== rootAttachment.binding_generation || coordinate.binding_digest !== rootAttachment.binding_digest) throw new Error("prepared presentation root binding is stale or invalid");
+	return {
+		rootAttachment,
+		presentation: {
+			presentation_id: requiredNonEmptyString(membership, "presentation_id"),
+			thread_id: requiredNonEmptyString(membership, "thread_id"),
+			chain_root_id: requiredNonEmptyString(membership, "chain_root_id")
+		}
+	};
+}
+function sessionAttachment(record, attachmentId) {
 	if (!Array.isArray(record.binding_attachments)) throw new Error("authenticated browser session binding_attachments is invalid");
-	const matches = record.binding_attachments.filter((attachment) => typeof attachment === "object" && attachment !== null && !Array.isArray(attachment) && attachment.binding_attachment_id === surfaceAttachmentId);
-	if (matches.length !== 1) throw new Error("authenticated browser session does not contain exactly one surface attachment");
+	const matches = record.binding_attachments.filter((attachment) => typeof attachment === "object" && attachment !== null && !Array.isArray(attachment) && attachment.binding_attachment_id === attachmentId);
+	if (matches.length !== 1) throw new Error("authenticated browser session does not contain exactly one root attachment");
 	const attachment = matches[0];
+	requireAttachmentSubject(attachment);
 	const generation = attachment.binding_generation;
-	if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) throw new Error("authenticated browser session surface attachment generation is invalid");
+	if (typeof generation !== "bigint" || generation < 1n || generation > 18446744073709551615n) throw new Error("authenticated browser session root attachment generation is invalid");
 	return {
 		binding_attachment_id: requiredNonEmptyString(attachment, "binding_attachment_id"),
 		binding_generation: generation,
@@ -11623,34 +14155,34 @@ function sessionId(session) {
 	if (typeof value !== "string" || value.length === 0) throw new Error("authenticated browser session has no session_id");
 	return value;
 }
-function configurePreferences(wasm, runtime, assign) {
+function configurePreferences(wasm, assign) {
 	try {
-		const key = wasm.ryeos_layout_preference_key();
-		const saved = localStorage.getItem(key);
-		const reportError = (error) => console.warn("RyeOS layout preference was not applied", error);
-		if (saved !== null) try {
-			runtime.commitMutation(() => wasm.ryeos_restore_layout_preferences(saved));
-		} catch (error) {
-			reportError(error);
-		}
-		assign(createLayoutPreferencePersistence({
-			key,
-			persisted: saved,
+		const reportError = (error) => console.warn("RyeOS arrangement cache was not saved", error);
+		const preferences = createScopedLayoutPreferencePersistence({
+			readKey: wasm.ryeos_layout_preference_key,
 			readCurrent: wasm.ryeos_export_layout_preferences,
 			storage: localStorage,
 			reportError
-		}));
+		});
+		assign(preferences);
+		preferences.observeAcceptedState();
 	} catch (error) {
 		console.warn("RyeOS layout preference storage is unavailable", error);
 		assign(null);
 	}
 }
-function attachBrowserEvents(wasm, runtime) {
+function attachBrowserEvents(wasm, runtime, canAcceptMutations) {
 	const abort = new AbortController();
 	const options = { signal: abort.signal };
 	window.addEventListener("keydown", (event) => {
+		if (!canAcceptMutations()) return;
 		if (event.defaultPrevented) return;
-		if (isTypingTarget(event.target)) return;
+		if (event.isComposing) return;
+		if (isShellChromeEscape(event)) {
+			event.preventDefault();
+			return;
+		}
+		if (isTypingEvent(event) && !isLauncherChord(event)) return;
 		const key = keyEvent(event);
 		if (!key) return;
 		if ((event.key === "Enter" || event.key === " ") && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
@@ -11674,6 +14206,7 @@ function attachBrowserEvents(wasm, runtime) {
 		}, 120);
 	}, options);
 	window.addEventListener("hashchange", () => {
+		if (!canAcceptMutations()) return;
 		runtime.enqueueEvent({
 			type: "route_changed",
 			route: location.hash.replace(/^#/, "")
@@ -11722,7 +14255,45 @@ function renderBootFailure(root, error) {
 	root.replaceChildren(main);
 }
 //#endregion
+//#region browser/runtime/document-lifetime.ts
+function createDocumentLifetime(start) {
+	const abort = new AbortController();
+	let running = null;
+	let disposal = null;
+	let markDisposalRequested = () => {};
+	const disposalRequested = new Promise((resolve) => {
+		markDisposalRequested = resolve;
+	});
+	const ready = Promise.resolve().then(async () => {
+		if (abort.signal.aborted) return;
+		const runtime = await start(abort.signal);
+		if (abort.signal.aborted) await runtime.close();
+		else running = runtime;
+	});
+	return {
+		ready,
+		settled: (async () => {
+			await disposalRequested;
+			const outcomes = await Promise.allSettled([ready, disposal ?? Promise.resolve()]);
+			for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+		})(),
+		dispose() {
+			abort.abort();
+			if (!disposal) {
+				const runtime = running;
+				running = null;
+				disposal = runtime ? Promise.resolve().then(() => runtime.close()) : Promise.resolve();
+				markDisposalRequested();
+			}
+			return disposal;
+		}
+	};
+}
+//#endregion
 //#region browser/entry.ts
-bootRyeOsDocument();
+var predecessorSettlement = void 0;
+var lifetime = createDocumentLifetime((signal) => bootRyeOsDocument(signal, predecessorSettlement));
+lifetime.ready.catch(() => {});
+lifetime.settled.catch((error) => console.error("RyeOS document settlement failed", error));
 //#endregion
 export { bootRyeOs, bootRyeOsDocument, captureBrowserPresentation, createCommitRuntime, decodeJsonBody, encodeCanonicalJsonBody, encodeJsonBody, encodeSeatPayloadDigest, mountRyeOsRenderer, restoreBrowserPresentation };

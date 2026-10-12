@@ -3,6 +3,12 @@
 //! Browser sessions, `/ui` service handlers, and UI-specific route invokers
 //! live here so `ryeos-api` can remain generic HTTP/route substrate.
 
+#[cfg(test)]
+extern crate self as ryeos_ui;
+#[cfg(test)]
+#[path = "../tests/test_state.rs"]
+mod test_state;
+
 pub mod assets;
 pub mod browser_session;
 pub mod compiled_binding;
@@ -47,6 +53,10 @@ pub fn register_extensions(
         std::sync::Arc::new(
             invokers::session_events_invocation::SessionEventsSourceFactory { ui: ui.clone() },
         ),
+    );
+    response_modes.register_event_stream_source(
+        "ui_seat_history",
+        std::sync::Arc::new(invokers::seat_history_invocation::SeatHistorySourceFactory),
     );
     response_modes.register_event_stream_source(
         "browser_chain_tail",

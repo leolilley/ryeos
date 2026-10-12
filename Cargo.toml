@@ -9,6 +9,7 @@ members = [
     "crates/bin/daemon",
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
+    "crates/clients/presentation-contract",
     "crates/clients/terminal",
     "crates/clients/web",
     "crates/kinds/directive-definition",
@@ -31,6 +32,7 @@ members = [
     "crates/engine/ryeos-project-capture",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
+    "crates/engine/ryeos-node-runtime",
     "crates/state/ryeos-scheduler",
     "crates/state/ryeos-state",
     "crates/tools/core-tools",
@@ -102,9 +104,11 @@ ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
 ryeos-isolation-protocol = { path = "crates/engine/ryeos-isolation-protocol" }
 ryeos-provider-contract = { path = "crates/engine/ryeos-provider-contract" }
+ryeos-ui-presentation-contract = { path = "crates/clients/presentation-contract" }
 ryeos-project-capture = { path = "crates/engine/ryeos-project-capture" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
+ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
 ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }

@@ -15,8 +15,8 @@
 # Bundle sets:
 #   full            core + central-auth + standard + web + browser + ryeos-ui +
 #                   hosted-node + codex + render-sandbox + opencode + local-inference (default)
-#   central-host    core + central-auth + standard + web + tv-tracker-authoring —
-#                   standard node plus the rye/web/search tool and app authoring
+#   central-host    core + central-auth + standard + web —
+#                   standard node plus the rye/web/search tool
 #   standard        core + central-auth + standard — scheduler/graph/directive node
 #   local-inference core + central-auth + standard + local-inference — provider-neutral inference node
 #   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
@@ -240,7 +240,6 @@ CODEX="$ROOT/bundles/codex"
 RENDER_SANDBOX="$ROOT/bundles/render-sandbox"
 OPENCODE="$ROOT/bundles/opencode"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
-TVTA="$ROOT/bundles/tv-tracker-authoring"
 RELEASE_BUNDLE="$ROOT/bundles/bundle-release"
 BUNDLE_SOURCE="$ROOT/bundles/bundle-source"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
@@ -627,15 +626,6 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDL
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  # tv-tracker-authoring — source-only bundle (tool kind from core); ships the
-  # operator context-doc author/read wrappers. No compiled binary of its own.
-  ryeos_term_update "publishing tv-tracker-authoring bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$TVTA" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing browser bundle" "signed manifests"

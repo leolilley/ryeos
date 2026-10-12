@@ -61,11 +61,38 @@ fn collect_facet_dependencies(value: &Value, dependencies: &mut BTreeSet<String>
 
 /// Logical selection values a binding reads. Refresh declarations and UI
 /// writes are subscriptions/actions, not values that can define a pin.
-pub(crate) fn selection_dependencies(binding: &ViewBinding) -> BTreeSet<String> {
+/// Admission and mounted restoration use this same grammar; it describes
+/// dependencies only and does not admit or resolve any supplied subject.
+pub fn selection_dependencies(binding: &ViewBinding) -> BTreeSet<String> {
     facet_dependencies(binding)
         .into_iter()
         .filter(|path| is_selection_facet(path))
         .collect()
+}
+
+/// Construct bounded pin metadata after its caller has validated the exact
+/// subject/dependency relationship. This function admits no values or grants.
+pub(crate) fn bounded_subject_pin(
+    values: BTreeMap<String, Value>,
+    byte_limit: u64,
+) -> Result<SelectionAttachment, String> {
+    let encoded = serde_json::to_vec(&values).map_err(|error| error.to_string())?;
+    if byte_limit == 0 {
+        return Err("active session request byte bound is zero".into());
+    }
+    let byte_limit = usize::try_from(byte_limit)
+        .map_err(|_| "active session request byte bound exceeds this platform")?;
+    if encoded.len() > byte_limit {
+        return Err(format!(
+            "pinned selection is {} bytes (max {byte_limit})",
+            encoded.len()
+        ));
+    }
+    use sha2::{Digest, Sha256};
+    Ok(SelectionAttachment::Pinned {
+        values,
+        fingerprint: format!("{:x}", Sha256::digest(&encoded)),
+    })
 }
 
 /// Logical facet values a binding reads. Lens return frames use this broader
@@ -117,26 +144,37 @@ pub(crate) fn participates_in_selection(binding: &ViewBinding) -> bool {
         })
 }
 
-fn facet_candidates(path: &str) -> impl Iterator<Item = &str> {
-    let mut dots = path
-        .char_indices()
-        .filter_map(|(index, character)| (character == '.').then_some(index))
-        .collect::<Vec<_>>();
-    dots.reverse();
-    std::iter::once(path).chain(dots.into_iter().map(move |index| &path[..index]))
-}
-
 impl RyeOsCore {
     pub(crate) fn selection_attachment_for_instance(
         &self,
         instance: &RyeOsViewInstanceKey,
     ) -> Option<SelectionAttachment> {
+        self.mount_owner(instance)?;
+        // A selection-independent View has no semantic follower. Replay may
+        // retain its original default FollowViewSet after placement, but that
+        // address must not become a dependency or a saved FollowSet edge.
+        if self
+            .mounted_view_ref(instance)
+            .and_then(|view_ref| self.binding_for_instance(instance, view_ref))
+            .is_some_and(|binding| !participates_in_selection(binding))
+        {
+            return self.view_set_for_instance(instance).map(|set| {
+                SelectionAttachment::FollowViewSet {
+                    view_set_id: set.id,
+                }
+            });
+        }
         if let Some(attachment) = self.selection_attachments.get(instance) {
+            if let SelectionAttachment::FollowViewSet { view_set_id } = attachment
+                && !self.same_surface(instance, *view_set_id)
+            {
+                return None;
+            }
             return Some(attachment.clone());
         }
-        let index = self.view_set_index_for_instance(instance)?;
+        let view_set = self.view_set_for_instance(instance)?;
         Some(SelectionAttachment::FollowViewSet {
-            view_set_id: self.view_sets[index].id,
+            view_set_id: view_set.id,
         })
     }
 
@@ -144,17 +182,13 @@ impl RyeOsCore {
         &self,
         instance: &RyeOsViewInstanceKey,
     ) -> Option<ViewSetId> {
-        match self.selection_attachments.get(instance) {
+        match self.selection_attachment_for_instance(instance) {
             Some(SelectionAttachment::FollowViewSet { view_set_id }) => self
-                .view_sets
-                .iter()
-                .any(|view_set| view_set.id == *view_set_id)
-                .then_some(*view_set_id),
+                .same_surface(instance, view_set_id)
+                .then_some(view_set_id),
             Some(SelectionAttachment::Pinned { .. }) => None,
             Some(SelectionAttachment::RequiredSubject { .. }) => None,
-            None => self
-                .view_set_index_for_instance(instance)
-                .map(|index| self.view_sets[index].id),
+            None => None,
         }
     }
 
@@ -165,19 +199,51 @@ impl RyeOsCore {
         instance: &RyeOsViewInstanceKey,
         logical_facet: &str,
     ) -> Option<Value> {
-        let fold = self.seat.fold();
+        self.mount_owner(instance)?;
         if !is_selection_facet(logical_facet) {
-            return fold.get(logical_facet).cloned();
+            return self.seat.fold().get(logical_facet).cloned();
         }
-        match self.selection_attachments.get(instance) {
+        match self.selection_attachment_for_instance(instance) {
             Some(SelectionAttachment::Pinned { values, .. }) => values.get(logical_facet).cloned(),
             Some(SelectionAttachment::RequiredSubject { .. }) => None,
             Some(SelectionAttachment::FollowViewSet { .. }) | None => {
                 let view_set_id = self.followed_selection_view_set(instance)?;
-                let key = super::seat::selection_storage_key(view_set_id, logical_facet)?;
-                fold.get(&key).cloned()
+                self.selection_value_in_view_set(view_set_id, logical_facet)
             }
         }
+    }
+
+    /// A retained saved-tab subject is an admitted bootstrap seed, not a
+    /// synthetic seat event. Durable writes (including explicit null) win.
+    pub(crate) fn selection_value_in_view_set(
+        &self,
+        view_set_id: ViewSetId,
+        logical_facet: &str,
+    ) -> Option<Value> {
+        self.view_set(view_set_id)?;
+        let key = super::seat::selection_storage_key(view_set_id, logical_facet)?;
+        if let Some(value) = self.seat.fold().get(&key) {
+            return Some(value.clone());
+        }
+        if logical_facet != "selection.work" {
+            return None;
+        }
+        if let Some(work) = self.retained_work_selections.get(&view_set_id) {
+            return Some(work.clone());
+        }
+        let presentation = self.presentation.as_ref()?;
+        let (surface_id, _) = presentation
+            .view_sets()
+            .find(|(_, set)| set.id == view_set_id)?;
+        let work = presentation
+            .surfaces()
+            .get(surface_id)?
+            .admitted_saved_tab(view_set_id)?
+            .particular()?
+            .resolved
+            .resolved_selection_work
+            .as_ref()?;
+        Some(serde_json::json!({"thread":work.thread,"chain_root":work.chain_root}))
     }
 
     pub(crate) fn unresolved_required_subject(
@@ -207,16 +273,14 @@ impl RyeOsCore {
         view_set_id: ViewSetId,
         facets: &[String],
     ) -> Option<BTreeMap<String, Value>> {
-        if !self.view_sets.iter().any(|set| set.id == view_set_id) {
+        if self.view_set(view_set_id).is_none() {
             return None;
         }
-        let fold = self.seat.fold();
         let mut values = BTreeMap::new();
         for facet in facets {
             let reference = Value::String(format!("@facet:{facet}"));
             let value = super::content::resolve_params(&reference, |candidate| {
-                let key = super::seat::selection_storage_key(view_set_id, candidate)?;
-                fold.get(&key).cloned()
+                self.selection_value_in_view_set(view_set_id, candidate)
             });
             if value.is_null() {
                 return None;
@@ -231,31 +295,15 @@ impl RyeOsCore {
         instance: &RyeOsViewInstanceKey,
         values: BTreeMap<String, Value>,
     ) -> Result<SelectionAttachment, String> {
-        let encoded = serde_json::to_vec(&values).map_err(|error| error.to_string())?;
         let byte_limit = self
             .binding_attachment_for_instance(instance)
             .ok_or("active session request bounds are unavailable")?
             .binding_request_bounds
             .max_request_bytes;
-        if byte_limit == 0 {
-            return Err("active session request byte bound is zero".into());
-        }
-        let byte_limit = usize::try_from(byte_limit)
-            .map_err(|_| "active session request byte bound exceeds this platform")?;
-        if encoded.len() > byte_limit {
-            return Err(format!(
-                "pinned selection is {} bytes (max {byte_limit})",
-                encoded.len()
-            ));
-        }
-        use sha2::{Digest, Sha256};
-        Ok(SelectionAttachment::Pinned {
-            values,
-            fingerprint: format!("{:x}", Sha256::digest(&encoded)),
-        })
+        bounded_subject_pin(values, byte_limit)
     }
 
-    /// Capture only selection roots actually read by the mounted binding. The
+    /// Capture only exact selection dependencies read by the mounted binding. The
     /// values come from the current effective attachment, never from a client
     /// payload, and remain bounded runtime state.
     pub(crate) fn capture_pinned_selection(
@@ -277,12 +325,13 @@ impl RyeOsCore {
         }
         let mut values = BTreeMap::new();
         for dependency in dependencies {
-            if let Some((key, value)) = facet_candidates(&dependency).find_map(|candidate| {
+            let reference = Value::String(format!("@facet:{dependency}"));
+            let value = super::content::resolve_params(&reference, |candidate| {
                 self.facet_value_for_instance(instance, candidate)
-                    .map(|value| (candidate.to_string(), value))
-            }) {
-                values.insert(key, value);
-            }
+            });
+            // Keep unresolved/null dependencies explicitly: a later selection
+            // cannot fill them, and admission checks this exact dependency set.
+            values.insert(dependency, value);
         }
         self.bounded_pinned_subject(instance, values)
     }
@@ -293,22 +342,41 @@ mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
 
+    #[test]
+    fn pure_pin_constructor_uses_the_exact_admitted_byte_boundary() {
+        let values = BTreeMap::from([(
+            "selection.work".into(),
+            serde_json::json!({"thread":"T-one"}),
+        )]);
+        let bytes = serde_json::to_vec(&values).unwrap();
+        assert!(bounded_subject_pin(values.clone(), 0).is_err());
+        assert!(bounded_subject_pin(values.clone(), bytes.len() as u64 - 1).is_err());
+        let exact = bounded_subject_pin(values.clone(), bytes.len() as u64).unwrap();
+        assert_eq!(
+            exact,
+            bounded_subject_pin(values, bytes.len() as u64 + 1).unwrap()
+        );
+        let SelectionAttachment::Pinned { fingerprint, .. } = exact else {
+            panic!("bounded constructor returns pin metadata only");
+        };
+        assert_eq!(fingerprint.len(), 64);
+    }
+
     fn mounted_selection_view() -> (RyeOsCore, RyeOsViewInstanceKey) {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        seed_view_value(
-            &mut core,
-            "view:test/selection",
-            serde_json::json!({
+        // Pin capture is a mounted-subject test, not an insertion test. Admit
+        // the exact selected View in the initial manifest before bootstrapping.
+        let core = core(session_with_surface(serde_json::json!({
+            "name":"Selection", "tiles":["view:test/selection"],
+            "views":{"view:test/selection":{
                 "widget": "rows",
                 "sources": {"default": {
                     "ref": "service:test/source",
                     "params": {"thread": "@facet:selection.work.thread"}
                 }}
-            }),
-        );
-        core.add_center_tile(ViewSpec::bound("view:test/selection"));
-        let tile = core.view_sets[core.active_view_set].focused_tile;
-        let instance = core.view_sets[core.active_view_set].tiles[&tile]
+            }}
+        })));
+        let tile = core.active_view_set().unwrap().focused_tile;
+        let instance = core.active_view_set().unwrap().tiles[&tile]
             .instance_key
             .clone();
         (core, instance)
@@ -317,7 +385,7 @@ mod tests {
     #[test]
     fn absent_attachment_follows_the_containing_view_set() {
         let (mut core, instance) = mounted_selection_view();
-        let owner = core.view_sets[core.active_view_set].id;
+        let owner = core.active_view_set().unwrap().id;
         let key = super::super::seat::selection_storage_key(owner, "selection.work").unwrap();
         core.seat
             .append_facet(key, serde_json::json!({"thread": "T-one"}));
@@ -335,44 +403,54 @@ mod tests {
     #[test]
     fn pinned_capture_is_exact_and_independent_of_later_selection() {
         let (mut core, instance) = mounted_selection_view();
-        let owner = core.view_sets[core.active_view_set].id;
+        let owner = core.active_view_set().unwrap().id;
         let key = super::super::seat::selection_storage_key(owner, "selection.work").unwrap();
-        core.seat
-            .append_facet(key.clone(), serde_json::json!({"thread": "T-one"}));
+        core.seat.append_facet(
+            key.clone(),
+            serde_json::json!({"thread": "T-one", "unrelated":"not captured"}),
+        );
         let pinned = core.capture_pinned_selection(&instance).unwrap();
+        let SelectionAttachment::Pinned { values, .. } = &pinned else {
+            panic!("capture returns pinned values");
+        };
+        assert_eq!(
+            values,
+            &BTreeMap::from([("selection.work.thread".into(), serde_json::json!("T-one"))]),
+            "capture uses exactly the declaration, never its broader parent object"
+        );
         core.selection_attachments
             .insert(instance.clone(), pinned.clone());
         core.seat
             .append_facet(key, serde_json::json!({"thread": "T-two"}));
 
         assert_eq!(
-            core.facet_value_for_instance(&instance, "selection.work"),
-            Some(serde_json::json!({"thread": "T-one"}))
+            core.facet_value_for_instance(&instance, "selection.work.thread"),
+            Some(serde_json::json!("T-one"))
         );
         assert!(matches!(pinned, SelectionAttachment::Pinned { .. }));
         assert!(core.followed_selection_view_set(&instance).is_none());
-        let preferences = core.export_layout_preferences().unwrap();
-        assert!(!preferences.contains("selection_attachments"));
-        assert!(!preferences.contains("T-one"));
+        // Plain layout preferences cannot silently discard a pinned subject;
+        // reusable capture has its own explicit RequiredSubject contract.
+        assert_eq!(
+            core.export_layout_preferences().unwrap_err(),
+            "layout preferences cannot preserve pinned or cross-set subject relationships"
+        );
     }
 
     #[test]
     fn pin_refuses_writer_only_binding() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        seed_view_value(
-            &mut core,
-            "view:test/writer",
-            serde_json::json!({
+        let core = core(session_with_surface(serde_json::json!({
+            "name":"Writer", "tiles":["view:test/writer"],
+            "views":{"view:test/writer":{
                 "widget": "rows",
                 "affordances": [{
                     "id": "select",
                     "invoke": {"plane": "ui", "facet": "selection", "value": {}}
                 }]
-            }),
-        );
-        core.add_center_tile(ViewSpec::bound("view:test/writer"));
-        let tile = core.view_sets[core.active_view_set].focused_tile;
-        let instance = core.view_sets[core.active_view_set].tiles[&tile]
+            }}
+        })));
+        let tile = core.active_view_set().unwrap().focused_tile;
+        let instance = core.active_view_set().unwrap().tiles[&tile]
             .instance_key
             .clone();
 
@@ -381,22 +459,103 @@ mod tests {
             "view has no readable selection dependency to pin"
         );
         assert!(participates_in_selection(
-            core.binding_for_insertion(core.view_sets[core.active_view_set].id, "view:test/writer")
+            core.binding_for_insertion(core.active_view_set().unwrap().id, "view:test/writer")
                 .unwrap()
         ));
     }
 
     #[test]
     fn unrelated_binding_has_no_selection_participation() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let mut core = core(session());
         seed_view(&mut core, "view:test/unrelated");
         assert!(!participates_in_selection(
-            core.binding_for_insertion(
-                core.view_sets[core.active_view_set].id,
-                "view:test/unrelated"
-            )
-            .unwrap()
+            core.binding_for_insertion(core.active_view_set().unwrap().id, "view:test/unrelated")
+                .unwrap()
         ));
+    }
+
+    #[test]
+    fn contextual_dialog_explicit_follow_stays_with_its_own_surface() {
+        let mut session =
+            super::super::reducer::test_support::session_with_surface(serde_json::json!({
+                "name":"Work", "tiles":["view:test/subject"],
+                "dialogs":[{"id":"inspect","title":"Inspect","view":"view:test/inspect"}],
+                "views":{
+                    "view:test/subject":{"widget":"text","body":"Subject"},
+                    "view:test/inspect":{"widget":"text","body":"@facet:selection.thread_id"}
+                }
+            }));
+        let mut sibling = session.presentations[0].surfaces[0].clone();
+        sibling.surface_instance_id = "00000000-0000-4000-8000-000000000099".into();
+        sibling.ordinal = 2;
+        sibling.mount_manifest =
+            super::super::composition_identity::UiSurfaceMountManifest::allocate(
+                crate::ids::PresentationId::try_new(
+                    session.presentations[0].presentation_id.clone(),
+                )
+                .unwrap(),
+                crate::ids::SurfaceInstanceId::try_new(sibling.surface_instance_id.clone())
+                    .unwrap(),
+                session.presentations[0].next_mount_id,
+                sibling
+                    .mount_manifest
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.seed.clone(), tab.binding.clone()))
+                    .collect(),
+                sibling
+                    .mount_manifest
+                    .tabs
+                    .first()
+                    .map(|tab| tab.seed.id.as_str()),
+            )
+            .unwrap();
+        session.presentations[0].next_mount_id = sibling.mount_manifest.next_mount_id;
+        session.presentations[0].surfaces.push(sibling);
+        let mut core = core(session);
+        let composition = core.presentation.as_ref().unwrap();
+        let mut surfaces = composition.ordered_surfaces();
+        let first = surfaces.next().unwrap();
+        let second = surfaces.next().unwrap();
+        let owner_set = first.active_view_set().unwrap().id;
+        let sibling_set = second.active_view_set().unwrap().id;
+        let instance =
+            RyeOsViewInstanceKey::surface_dialog(composition.id(), first.id(), "inspect").unwrap();
+        assert!(
+            core.view_set_for_instance(&instance).is_none(),
+            "dialog must not invent a tab owner"
+        );
+        assert!(core.same_surface(&instance, owner_set));
+        assert!(!core.same_surface(&instance, sibling_set));
+        assert!(
+            core.selection_attachment_for_instance(&instance).is_none(),
+            "no implicit selection follow"
+        );
+        core.selection_attachments.insert(
+            instance.clone(),
+            SelectionAttachment::FollowViewSet {
+                view_set_id: owner_set,
+            },
+        );
+        core.seat.append_facet(
+            super::super::seat::selection_storage_key(owner_set, "selection").unwrap(),
+            serde_json::json!({"thread_id":"T-own"}),
+        );
+        assert_eq!(
+            core.facet_value_for_instance(&instance, "selection"),
+            Some(serde_json::json!({"thread_id":"T-own"}))
+        );
+        core.selection_attachments.insert(
+            instance.clone(),
+            SelectionAttachment::FollowViewSet {
+                view_set_id: sibling_set,
+            },
+        );
+        assert!(core.selection_attachment_for_instance(&instance).is_none());
+        assert!(
+            core.facet_value_for_instance(&instance, "selection")
+                .is_none()
+        );
     }
 
     #[test]
@@ -405,7 +564,7 @@ mod tests {
         let pinned = core.capture_pinned_selection(&instance).unwrap();
         core.selection_attachments.insert(instance.clone(), pinned);
 
-        let owner = core.view_sets[core.active_view_set].id;
+        let owner = core.active_view_set().unwrap().id;
         let key = super::super::seat::selection_storage_key(owner, "selection.work").unwrap();
         core.seat
             .append_facet(key, serde_json::json!({"thread": "T-later"}));
@@ -413,6 +572,11 @@ mod tests {
         assert_eq!(
             core.facet_value_for_instance(&instance, "selection.work"),
             None
+        );
+        assert_eq!(
+            core.facet_value_for_instance(&instance, "selection.work.thread"),
+            Some(Value::Null),
+            "the exact unresolved dependency remains explicitly absent"
         );
     }
 
@@ -433,14 +597,14 @@ mod tests {
         core.binding_attachments.remove("fixture-attachment");
         assert_eq!(
             core.capture_pinned_selection(&instance).unwrap_err(),
-            "active session request bounds are unavailable"
+            "view binding is unavailable"
         );
     }
 
     #[test]
     fn pin_accepts_the_exact_byte_limit_and_rejects_one_byte_over() {
         let (mut core, instance) = mounted_selection_view();
-        let owner = core.view_sets[core.active_view_set].id;
+        let owner = core.active_view_set().unwrap().id;
         let key = super::super::seat::selection_storage_key(owner, "selection.work").unwrap();
         core.seat
             .append_facet(key, serde_json::json!({"thread": "T-bounded"}));

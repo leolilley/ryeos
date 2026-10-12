@@ -35,9 +35,22 @@ fn resolve_allowed_root(
     caller: &crate::seat_auth::SeatCaller,
     operator_project_path: Option<&str>,
 ) -> Result<PinnedDirectory> {
+    if matches!(caller, crate::seat_auth::SeatCaller::Attachment(_))
+        && let Some(hint) = operator_project_path
+    {
+        let admitted = caller.project_query_identity()?;
+        anyhow::ensure!(
+            admitted.as_deref() == Some(Path::new(hint)),
+            "project path does not match the admitted attachment"
+        );
+    }
     let project = match caller.project_access()? {
         Some(project) => project.try_clone_directory()?,
         None => {
+            anyhow::ensure!(
+                matches!(caller, crate::seat_auth::SeatCaller::Operator { .. }),
+                "no project bound to this invocation"
+            );
             let path = operator_project_path
                 .ok_or_else(|| anyhow::anyhow!("no project bound to this invocation"))?;
             PinnedDirectory::open(Path::new(path))?
@@ -47,7 +60,7 @@ fn resolve_allowed_root(
     match root_type {
         "project" => Ok(project),
         "project_ai" => project
-            .open_child_directory(std::ffi::OsStr::new(".ai"))?
+            .open_child_directory(std::ffi::OsStr::new(ryeos_engine::AI_DIR))?
             .ok_or_else(|| anyhow::anyhow!("project .ai directory does not exist")),
         _ => anyhow::bail!(
             "unknown root type '{}': allowed roots are 'project' and 'project_ai'",
@@ -340,10 +353,10 @@ pub async fn handle_files_read(
     let file = allowed_root
         .open_pinned_regular_descendant(Path::new(&req.path), false)?
         .ok_or_else(|| HandlerError::BadRequest("path is not a regular file".into()))?;
-    let size = file.size()?;
+    let observation = file.observation()?;
+    let size = observation.size();
     let truncated = size > MAX_READ_BYTES as u64;
-    let mut buf = file.read_bounded(MAX_READ_BYTES as u64 + 1)?;
-    buf.truncate(MAX_READ_BYTES);
+    let buf = file.read_stable_prefix(&observation, MAX_READ_BYTES as u64)?;
     let content = String::from_utf8_lossy(&buf).into_owned();
 
     Ok(serde_json::json!({

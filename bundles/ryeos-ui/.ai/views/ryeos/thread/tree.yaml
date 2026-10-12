@@ -5,14 +5,14 @@ version: "1.0.0"
 description: >-
   Focused execution ancestry across continuations and spawned child chains.
   Open it from a thread row; fold branches with left/right and enter any row to
-  inspect that thread's live transcript.
+  inspect that thread's retained execution detail without changing a conversation.
 
 widget: table
 sources:
   default:
     ref: service:ui/ryeos-ui/thread/tree
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.thread_id"
       max_depth: 32
       max_nodes: 500
     collection: threads
@@ -68,14 +68,13 @@ selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: inspect
     label: Inspect
@@ -87,4 +86,5 @@ affordances:
       open_view: view:ryeos/threads/detail
 
 refresh:
+  on_facet: selection
   on_hint: [thread, activity]

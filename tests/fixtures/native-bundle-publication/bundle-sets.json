@@ -1,7 +1,7 @@
 {
   "sets": {
     "bundle-source": ["core", "central-auth", "bundle-source"],
-    "central-host": ["core", "central-auth", "standard", "web", "tv-tracker-authoring"],
+    "central-host": ["core", "central-auth", "standard", "web"],
     "full": ["core", "central-auth", "standard", "web", "browser", "ryeos-ui", "hosted-node", "codex", "opencode", "local-inference"],
     "hosted-node": ["core", "central-auth", "hosted-node"],
     "hosted-workflow": ["core", "central-auth", "standard", "hosted-node", "codex", "opencode"],

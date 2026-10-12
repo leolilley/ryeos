@@ -1,0 +1,14 @@
+tokens:
+- web
+- surface
+description: Open an explicitly selected signed Surface as the browser presentation root.
+forms:
+- slots:
+  - field: surface
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

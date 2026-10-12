@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import string
 from pathlib import Path
 
@@ -123,6 +124,11 @@ def main() -> None:
         raise SystemExit("--check and --refresh-digests are mutually exclusive")
     manifest = load_manifest()
     if args.refresh_digests:
+        source = (ROOT / "../../clients/base/src/lib.rs").read_text()
+        revision = re.search(r'pub const UI_BINDING_CONTRACT_REVISION: &str = "([^"]+)";', source)
+        if revision is None:
+            raise SystemExit("Rust UI binding revision declaration is absent")
+        manifest["ui_binding_revision"] = revision.group(1)
         for asset in manifest["assets"]:
             asset["sha256"] = hashlib.sha256(
                 (PACKAGE / asset["filename"]).read_bytes()

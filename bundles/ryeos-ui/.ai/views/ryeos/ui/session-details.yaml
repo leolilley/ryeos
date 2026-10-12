@@ -1,0 +1,6 @@
+name: presentation-session-details
+title: Session details
+version: "1.0.0"
+description: Retained acting principal and presentation membership; no credentials, grants or inferred remote identity.
+widget: rows
+local_projection: session_details

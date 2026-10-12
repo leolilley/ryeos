@@ -16,15 +16,20 @@ sources:
       canonical_ref: "@facet:selection.item"
       include_raw: false
       include_effective: true
-      project_path: "@session:project_root"
-    requires_project: true
 projections:
   detail:
-    - canonical_ref
-    - kind
-    - signer
-    - version
-    - description
+    - item.canonical_ref
+    - item.item_kind
+    - item.space
+    - item.executable
+    - item.trust
+    - item.shadowed
+    - effective
+    - effective_coverage.state
+    - effective_coverage.reason
+    - raw_coverage.state
+    - raw_coverage.reason
+    # Inline event summaries use a separate response shape.
     - title
     - detail
 refresh:

@@ -278,13 +278,31 @@ mod tests {
                 binding_attachment_id: "fixture".into(),
                 binding_generation: 1,
                 binding_digest: "fixture".into(),
-                view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
-                buffer: ryeos_client_base::ui::model::InputBufferKey::new(
-                    ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(
+                owner: ryeos_client_base::ui::model::RyeOsInputOwner::Surface {
+                    presentation_id: ryeos_client_base::ids::PresentationId::try_new(
+                        "fixture-seat",
+                    )
+                    .unwrap(),
+                    surface_instance_id: ryeos_client_base::ids::SurfaceInstanceId::try_new(
+                        "fixture-surface",
+                    )
+                    .unwrap(),
+                    view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
+                },
+                buffer: ryeos_client_base::ui::model::InputBufferKey::from_binding_coordinate(
+                    ryeos_client_base::ids::RyeOsViewInstanceKey::surface_tile(
+                        &ryeos_client_base::ids::PresentationId::try_new("fixture-seat").unwrap(),
+                        &ryeos_client_base::ids::SurfaceInstanceId::try_new("fixture-surface")
+                            .unwrap(),
                         ryeos_client_base::ids::TileId::new(1),
                     ),
                     "view:test/input",
                     "line",
+                    &ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
+                        binding_attachment_id: "fixture".into(),
+                        binding_generation: 1,
+                        binding_digest: "fixture".into(),
+                    },
                 ),
             },
             cursor: 0,

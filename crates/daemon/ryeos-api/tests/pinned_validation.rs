@@ -7,7 +7,7 @@ use ryeos_api::routes::compile::{CompiledLimits, CompiledRoute, RouteDispatchCon
 use ryeos_api::routes::invocation::RoutePrincipal;
 use ryeos_api::routes::response_modes::execute_mode::CompiledExecuteMode;
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectTree};
 use ryeos_state::project_sync::{PROJECT_SNAPSHOT_CONFIG_RELATIVE, ProjectSyncScope};
 use serde_json::{Value, json};

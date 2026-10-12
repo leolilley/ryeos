@@ -9,7 +9,7 @@ use ryeos_runtime::authorizer::AuthorizationPolicy;
 use ryeos_scheduler::types::{ScheduleExecution, ScheduleExecutionAuthority};
 
 use crate::handler_context::HandlerContext;
-use crate::identity::{
+use ryeos_node_runtime::identity::{
     AuthorizedKeyPrincipalClass, FORWARDED_OPERATOR_ATTESTATION_SCOPE, load_verified_authorized_key,
 };
 use crate::state::AppState;

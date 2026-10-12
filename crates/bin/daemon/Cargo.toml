@@ -29,6 +29,7 @@ crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"
 handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-support"]
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 ryeos-runtime = { workspace = true }
 async-stream = { workspace = true }
@@ -77,6 +78,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 url = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-node = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-api = { workspace = true, features = ["handoff-test-support"] }

@@ -635,9 +635,10 @@ fn read_regular_file_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::
     loop {
         #[cfg(unix)]
         let result = std::os::unix::fs::FileExt::read_at(file, bytes, offset);
-        #[cfg(windows)]
-        let result = std::os::windows::fs::FileExt::seek_read(file, bytes, offset);
-        #[cfg(not(any(unix, windows)))]
+        // Windows seek_read changes the shared file cursor. It cannot satisfy
+        // this helper's concurrent positional-read contract. A future backend
+        // must provide independent-offset IO, not save/restore that cursor.
+        #[cfg(not(unix))]
         let result = {
             let _ = (file, &bytes, offset);
             Err(std::io::Error::new(
@@ -1746,6 +1747,32 @@ impl PinnedRegularFile {
     ) -> Result<Vec<u8>> {
         let mut file = self.file.try_clone()?;
         read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
+    }
+
+    /// Read at most `max_bytes` from the start of this exact observed file.
+    /// Unlike a complete bounded read, larger files are deliberately accepted.
+    /// The caller must label the result as a prefix when observation.size()
+    /// exceeds the ceiling. This observes mutable content, not an immutable
+    /// snapshot or a digest proof. Positional reads do not move shared cursors.
+    pub fn read_stable_prefix(
+        &self,
+        observation: &OpenRegularFileObservation,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        let length = usize::try_from(observation.size().min(max_bytes))
+            .map_err(|_| anyhow::anyhow!("regular file prefix does not fit this platform"))?;
+        let mut bytes = vec![0_u8; length];
+        let mut offset = 0;
+        while offset < length {
+            let count = read_regular_file_at(&self.file, &mut bytes[offset..], offset as u64)?;
+            if count == 0 {
+                anyhow::bail!("regular file ended before its observed prefix length");
+            }
+            offset += count;
+        }
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        Ok(bytes)
     }
 
     /// Capture exactly this prior descriptor observation, refusing an
@@ -6441,8 +6468,34 @@ fn ensure_entry_matches(
     display_path: &Path,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
-    let current = open_regular_at(parent, name, display_path)?;
-    match (expected, current.as_ref()) {
+    // Conditional mutation compares identity only. Opening a data descriptor
+    // here could disturb a live SQLite inode's process-wide POSIX locks.
+    let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut observed,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    let current = if result == 0 {
+        anyhow::ensure!(
+            observed.st_mode & libc::S_IFMT == libc::S_IFREG,
+            "secure target is not a regular file: {}",
+            display_path.display()
+        );
+        Some((observed.st_dev as u64, observed.st_ino as u64))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).with_context(|| {
+                format!("inspect secure regular identity {}", display_path.display())
+            });
+        }
+        None
+    };
+    match (expected, current) {
         (None, None) => Ok(()),
         (None, Some(_)) => anyhow::bail!(
             "secure target appeared before publication: {}",
@@ -6454,8 +6507,7 @@ fn ensure_entry_matches(
         ),
         (Some(expected), Some(current)) => {
             let expected = expected.metadata()?;
-            let current = current.metadata()?;
-            if expected.dev() != current.dev() || expected.ino() != current.ino() {
+            if (expected.dev(), expected.ino()) != current {
                 anyhow::bail!(
                     "secure target changed before mutation: {}",
                     display_path.display()
@@ -7411,6 +7463,34 @@ fn restore_quarantined_regular(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_prefix_is_bounded_cursor_independent_and_rejects_changed_file() {
+        use std::io::{Seek, SeekFrom};
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let mut file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        file.seek(SeekFrom::Start(7)).unwrap();
+        assert_eq!(file.read_stable_prefix(&observation, 4).unwrap(), b"0123");
+        assert_eq!(file.stream_position().unwrap(), 7);
+        assert_eq!(
+            file.read_stable_prefix(&observation, 10).unwrap(),
+            b"0123456789"
+        );
+        assert_eq!(
+            file.read_stable_prefix(&observation, 40).unwrap(),
+            b"0123456789"
+        );
+        assert!(file.read_stable_prefix(&observation, 0).unwrap().is_empty());
+        std::fs::write(&path, b"short").unwrap();
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
 
     #[cfg(unix)]
     #[test]

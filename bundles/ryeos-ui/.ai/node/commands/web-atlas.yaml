@@ -2,9 +2,9 @@
 tokens:
 - web
 - atlas
-description: Open the browser RyeOS UI Atlas surface.
+description: Open the RyeOS browser presentation with its authored observation-only Atlas Surface.
 defaults:
-  surface: surface:ryeos/ui/atlas
+  presentation: config:ryeos/ui/atlas-presentation
 project:
   resolution: optional
   bind_parameter: project

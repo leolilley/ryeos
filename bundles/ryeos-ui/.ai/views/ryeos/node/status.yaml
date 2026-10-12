@@ -10,11 +10,17 @@ sources:
     params: {}
 projections:
   detail:
+    - node_id
     - version
     - revision
+    - build_date
     - started_at
     - uptime_seconds
     - active_threads
     - bind
+    - isolation
+    - thread_projection
+    - pending_head_transitions
+    - accounting
 refresh:
   on_hint: [thread, activity]

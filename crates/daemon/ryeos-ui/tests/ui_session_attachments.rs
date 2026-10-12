@@ -3,9 +3,7 @@ mod test_state;
 use std::sync::Arc;
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::browser_session::{
-    BindingAttachmentCandidate, BindingAttachmentCoordinate, LaunchContext,
-};
+use ryeos_ui::browser_session::{BindingAttachmentCoordinate, LaunchContext};
 use ryeos_ui::state::get_ui_state;
 
 use test_state::{build_test_state, launch_context, mint_launch};
@@ -19,11 +17,15 @@ fn context(surface: &str) -> LaunchContext {
     )
 }
 
-fn request(coordinate: &BindingAttachmentCoordinate) -> serde_json::Value {
+fn request(
+    coordinate: &BindingAttachmentCoordinate,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+) -> serde_json::Value {
     serde_json::json!({
         "binding_attachment_id": coordinate.binding_attachment_id,
         "binding_generation": coordinate.binding_generation,
         "binding_digest": coordinate.binding_digest,
+        "producer": producer,
     })
 }
 
@@ -38,70 +40,102 @@ fn activate(state: &ryeos_app::state::AppState, launch: LaunchContext) -> (Strin
     (session_id, handler)
 }
 
-fn secondary_attachment(
-    state: &ryeos_app::state::AppState,
-    session_id: &str,
-) -> BindingAttachmentCoordinate {
-    let ui = get_ui_state(state).unwrap();
-    let session = ui.browser_sessions.get_session(session_id).unwrap();
-    let origin = session
-        .attachments
-        .get(&session.surface_attachment_id)
-        .unwrap()
-        .coordinate();
-    let mut candidate = context("surface:ryeos/test/secondary");
-    Arc::make_mut(&mut candidate.compiled_binding)
-        .binding
-        .node_policy_generation_digest = state.node_policy.generation_digest().to_owned();
-    ui.browser_sessions
-        .publish_attachment(
-            session_id,
-            &origin,
-            BindingAttachmentCandidate {
-                registered_project_id: None,
-                compiled_binding: candidate.compiled_binding,
-                effective_surface: candidate.effective_surface,
-                project_authority: None,
-            },
-            16,
-            state.node_policy.generation_digest(),
-        )
-        .unwrap()
-        .coordinate()
-}
-
 #[tokio::test]
-async fn detach_refuses_surface_attachment() {
-    let (_tmp, state) = build_test_state();
-    let (session_id, ctx) = activate(&state, context("surface:ryeos/ui/base"));
-    let session = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .get_session(&session_id)
-        .unwrap();
-    let coordinate = session
-        .attachments
-        .get(&session.surface_attachment_id)
-        .unwrap()
-        .coordinate();
+#[ignore = "requires populated signed bundle handler binaries and development publisher key"]
+async fn detach_refuses_root_attachment_with_current_producer() {
+    let (_tmp, state) = test_state::build_test_state_with_live_bundles();
+    let (_session_id, ctx, producer, coordinate) = test_state::live_presentation(&state).await;
     let result = (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(
-        request(&coordinate),
+        request(&coordinate, &producer),
         ctx,
         Arc::new(state),
     )
     .await;
-    assert!(format!("{:#}", result.unwrap_err()).contains("surface_attachment_immutable"));
+    assert!(format!("{:#}", result.unwrap_err()).contains("root_attachment_immutable"));
 }
 
 #[tokio::test]
-async fn detach_is_session_exact_fences_dispatch_and_replays() {
+async fn surface_open_requires_existing_presentation_producer_and_rejects_browser_project_authority()
+ {
     let (_tmp, state) = build_test_state();
-    let (owner_id, owner_ctx) = activate(&state, context("surface:ryeos/ui/base"));
-    let coordinate = secondary_attachment(&state, &owner_id);
-    let (_other_id, other_ctx) = activate(&state, context("surface:ryeos/ui/base"));
+    let (id, ctx) = activate(&state, context("surface:ryeos/ui/base"));
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&id)
+        .unwrap();
+    let params = serde_json::json!({
+        "creation_request_id": "00000000-0000-4000-8000-000000000002",
+        "selection": {"kind":"authored", "surface_ref": "surface:ryeos/ui/base"},
+    });
+    let descriptor = &ryeos_ui::handlers::ui_session_attachments::OPEN_SURFACE_DESCRIPTOR;
+    (descriptor.handler)(params.clone(), ctx.clone(), Arc::new(state.clone()))
+        .await
+        .expect_err("a cookie and root attachment do not create presentation producer authority");
+    let mut predecessor = params.clone();
+    predecessor["root_binding"] =
+        serde_json::to_value(session.attachments[&session.root_attachment_id].coordinate())
+            .unwrap();
+    predecessor["producer"] = serde_json::json!({
+        "presentation_id":"00000000-0000-4000-8000-000000000001",
+        "thread_id":"T-not-a-seat", "producer_incarnation":"11".repeat(32)
+    });
+    let error = (descriptor.handler)(predecessor, ctx.clone(), Arc::new(state.clone()))
+        .await
+        .expect_err("predecessor browser-selected root/producer grammar is rejected");
+    assert!(format!("{error:#}").contains("unknown field"));
+    let mut project_params = params.clone();
+    project_params["project_path"] = serde_json::json!("/another-project");
+    let error = (descriptor.handler)(project_params, ctx, Arc::new(state.clone()))
+        .await
+        .expect_err("Surface open never accepts a browser-selected project path");
+    assert!(format!("{error:#}").contains("unknown field"));
+    (descriptor.handler)(
+        params,
+        HandlerContext::new("fp:operator".into(), vec!["*".into()], true),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect_err("operator scope is not a browser presentation association");
+    let after = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&id)
+        .unwrap();
+    assert_eq!(after.attachments.len(), 1);
+    assert!(after.presentations.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires populated signed bundle handler binaries and development publisher key"]
+async fn detach_is_session_exact_fences_dispatch_and_replays() {
+    let (_tmp, state) = test_state::build_test_state_with_live_bundles();
+    let (owner_id, owner_ctx, producer, coordinate) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/base").await;
+    let (_other_id, other_ctx, other_producer, _other_root) =
+        test_state::live_presentation(&state).await;
+
+    let mut missing = request(&coordinate, &producer);
+    missing.as_object_mut().unwrap().remove("producer");
+    (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(
+        missing,
+        owner_ctx.clone(),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect_err("attachment authority does not substitute a current producer proof");
+    let mut stale = producer.clone();
+    stale.producer_incarnation = "99".repeat(32);
+    (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(
+        request(&coordinate, &stale),
+        owner_ctx.clone(),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect_err("noncurrent producer cannot revoke a live attachment");
 
     let other = (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(
-        request(&coordinate),
+        request(&coordinate, &other_producer),
         other_ctx,
         Arc::new(state.clone()),
     )
@@ -118,7 +152,7 @@ async fn detach_is_session_exact_fences_dispatch_and_replays() {
     );
 
     let detached = (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(
-        request(&coordinate),
+        request(&coordinate, &producer),
         owner_ctx.clone(),
         Arc::new(state.clone()),
     )
@@ -135,11 +169,29 @@ async fn detach_is_session_exact_fences_dispatch_and_replays() {
     );
 
     let replay = (ryeos_ui::handlers::ui_session_attachments::DETACH_DESCRIPTOR.handler)(
-        request(&coordinate),
-        owner_ctx,
-        Arc::new(state),
+        request(&coordinate, &producer),
+        owner_ctx.clone(),
+        Arc::new(state.clone()),
     )
     .await
     .expect("lost-response replay");
     assert_eq!(replay["detached"], false);
+    assert_eq!(
+        state
+            .state_store
+            .get_thread(&producer.thread_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "running",
+        "attachment revocation does not own presentation seat settlement"
+    );
+    let touched = (ryeos_ui::handlers::ui_seat::TOUCH_DESCRIPTOR.handler)(
+        serde_json::to_value(&producer).unwrap(),
+        owner_ctx,
+        Arc::new(state),
+    )
+    .await
+    .expect("same producer remains current after attachment revocation");
+    assert_eq!(touched["touched"], true);
 }

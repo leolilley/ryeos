@@ -46,6 +46,7 @@ pub use ryeos_state::queries::{ThreadListFilter, ThreadSort};
 
 mod direct_execution;
 pub mod managed_runtime_identity;
+pub mod presentation_transfer;
 mod sealed_request;
 mod validation;
 
@@ -89,6 +90,26 @@ pub struct ThreadLifecycleService {
     current_site_id: String,
     scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
     scheduler_runtime_gate: std::sync::RwLock<Option<Arc<tokio::sync::RwLock<()>>>>,
+    ui_seat_append_bound: std::sync::RwLock<Option<AdmittedUiSeatAppendBound>>,
+    /// Bounded process-local scheduling hints for claimed-seat positive
+    /// transfer discovery. Never settlement or absence authority.
+    claimed_transfer_scan_cursors: std::sync::Mutex<
+        std::collections::BTreeMap<String, presentation_transfer::ClaimedSeatTransferDiscovery>,
+    >,
+    claimed_transfer_settlement_cursors:
+        std::sync::Mutex<presentation_transfer::ClaimedTransferSettlementCursors>,
+    claimed_seat_finalization_cursors: std::sync::Mutex<
+        std::collections::BTreeMap<String, presentation_transfer::ClaimedSeatFinalizationCursor>,
+    >,
+    terminal_seat_retirement_cursors:
+        std::sync::Mutex<presentation_transfer::TerminalSeatRetirementCursors>,
+    claimed_finalization_prune_turn: std::sync::atomic::AtomicUsize,
+    /// Process-local keyset scheduling hint for bounded lease maintenance.
+    claimed_seat_maintenance_scan: std::sync::Mutex<Option<(String, Option<String>)>>,
+    claimed_seat_recovery_scan: std::sync::Mutex<Option<(String, Option<String>)>>,
+    /// Rotate the first claimed-seat discovery turn across GC runs. This is
+    /// scheduling only, never transfer evidence or retirement authority.
+    claimed_seat_discovery_start: std::sync::atomic::AtomicUsize,
     app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
     /// Operator live-input staging, shared with `AppState`. Wired once after
     /// construction (`set_live_input_queue`) so the existing constructor call
@@ -98,6 +119,22 @@ pub struct ThreadLifecycleService {
     /// that don't wire it — the persist-path running-guard still prevents any
     /// `cognition_in` append after terminal regardless.
     live_input: std::sync::RwLock<Option<Arc<crate::live_input_queue::LiveInputQueue>>>,
+}
+
+/// Startup-admitted UI append route limit, never supplied by a settlement
+/// caller. The original signed descriptor may make the effective cap smaller.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdmittedUiSeatAppendBound(u64);
+
+impl AdmittedUiSeatAppendBound {
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(bound: u64) -> Self {
+        Self(bound)
+    }
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -3768,7 +3805,7 @@ impl ThreadLifecycleService {
         event_hub: Arc<ThreadEventHub>,
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        crate::identity::validate_canonical_site_id(current_site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)
             .context("node identity produced a non-canonical site id")?;
 
         Ok(Self::new_with_site_id(
@@ -3790,7 +3827,7 @@ impl ThreadLifecycleService {
         event_hub: Arc<ThreadEventHub>,
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        crate::identity::validate_canonical_site_id(current_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)?;
         Ok(Self::new_with_site_id(
             state_store,
             engine,
@@ -3818,6 +3855,15 @@ impl ThreadLifecycleService {
             current_site_id,
             scheduler_db: std::sync::RwLock::new(None),
             scheduler_runtime_gate: std::sync::RwLock::new(None),
+            ui_seat_append_bound: std::sync::RwLock::new(None),
+            claimed_transfer_scan_cursors: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            claimed_transfer_settlement_cursors: std::sync::Mutex::new(Default::default()),
+            claimed_seat_finalization_cursors: std::sync::Mutex::new(Default::default()),
+            terminal_seat_retirement_cursors: std::sync::Mutex::new(Default::default()),
+            claimed_finalization_prune_turn: std::sync::atomic::AtomicUsize::new(0),
+            claimed_seat_maintenance_scan: std::sync::Mutex::new(None),
+            claimed_seat_recovery_scan: std::sync::Mutex::new(None),
+            claimed_seat_discovery_start: std::sync::atomic::AtomicUsize::new(0),
             app_root: std::sync::RwLock::new(None),
             live_input: std::sync::RwLock::new(None),
         }
@@ -3862,6 +3908,35 @@ impl ThreadLifecycleService {
         *self.scheduler_db.write().unwrap() = Some(db);
         *self.scheduler_runtime_gate.write().unwrap() = Some(runtime_gate);
         *self.app_root.write().unwrap() = Some(app_root);
+    }
+
+    /// Bind the admitted startup UI seat append route exactly once. Missing,
+    /// duplicate or zero limits leave UI lifecycle settlement unavailable,
+    /// without preventing ordinary direct-seat daemon startup.
+    pub fn set_ui_seat_append_route_from_node_config(
+        &self,
+        snapshot: &crate::node_config::NodeConfigSnapshot,
+    ) -> Result<()> {
+        const SERVICE: &str = "service:ui/seat/append";
+        let mut routes = snapshot
+            .routes
+            .iter()
+            .filter(|route| route.response.source.as_deref() == Some(SERVICE));
+        let Some(route) = routes.next() else {
+            return Ok(());
+        };
+        if routes.next().is_some() || route.limits.body_bytes_max == 0 {
+            return Ok(());
+        }
+        let mut bound = self
+            .ui_seat_append_bound
+            .write()
+            .map_err(|_| anyhow!("UI seat append route bound lock poisoned"))?;
+        if bound.is_some() {
+            bail!("UI seat append route bound was already attached");
+        }
+        *bound = Some(AdmittedUiSeatAppendBound(route.limits.body_bytes_max));
+        Ok(())
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
@@ -5915,6 +5990,29 @@ impl ThreadLifecycleService {
         Ok(self.decorate_list_items_with_enrichment(items, enrichment))
     }
 
+    /// Minimal display decoration for a caller that has already verified each
+    /// candidate against its exact signed subject. This deliberately avoids
+    /// follow-parent expansion and projection/runtime enrichment: those lanes
+    /// must be authorized independently before a UI can disclose them.
+    pub fn display_verified_thread_list_items(
+        &self,
+        items: Vec<ThreadListItem>,
+    ) -> Vec<ThreadListView> {
+        items
+            .into_iter()
+            .map(|item| ThreadListView {
+                execution: self.execution_facts(&item.kind),
+                item,
+                follow: None,
+                project: None,
+                pending: 0,
+                facets: Default::default(),
+                current_node: None,
+                error: None,
+            })
+            .collect()
+    }
+
     fn decorate_list_items_with_enrichment(
         &self,
         items: Vec<ThreadListItem>,
@@ -6320,6 +6418,92 @@ impl ThreadLifecycleService {
             self.publish_records(records);
         }
         Ok(persisted)
+    }
+
+    /// Persist and publish only while both the runtime lifecycle gate and the
+    /// caller's exact authenticated history anchor remain current.
+    pub fn append_thread_events_if_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<crate::state_store::RunningConditionalEventAppendResult> {
+        let outcome = self
+            .state_store
+            .append_events_if_thread_running_and_anchor(
+                chain_root_id,
+                thread_id,
+                events,
+                expected,
+            )?;
+        if let crate::state_store::RunningConditionalEventAppendResult::Committed(records) =
+            &outcome
+        {
+            self.publish_records(records);
+        }
+        Ok(outcome)
+    }
+
+    /// Publish a browser seat producer batch with its exact lease renewed in
+    /// the same signed-chain critical section.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_seat_events_and_renew_if_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<crate::state_store::RunningConditionalEventAppendResult> {
+        let outcome = self.state_store.append_seat_events_and_renew_if_anchor(
+            chain_root_id,
+            thread_id,
+            owner,
+            surface,
+            client_ref,
+            events,
+            expected,
+        )?;
+        if let crate::state_store::RunningConditionalEventAppendResult::Committed(records) =
+            &outcome
+        {
+            self.publish_records(records);
+        }
+        Ok(outcome)
+    }
+
+    /// Publish a seat batch only while every completed paired dependency cut
+    /// remains exact under the StateStore's sorted chain exclusions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_seat_events_and_renew_if_anchors(
+        &self, chain_root_id: &str, thread_id: &str, owner: &str,
+        surface: &str, client_ref: &str, events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+    ) -> Result<crate::state_store::RunningConditionalEventAppendResult> {
+        self.append_seat_events_and_renew_if_mixed_cut(
+            chain_root_id, thread_id, owner, surface, client_ref, events, expected, anchors, &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_seat_events_and_renew_if_mixed_cut(
+        &self, chain_root_id: &str, thread_id: &str, owner: &str,
+        surface: &str, client_ref: &str, events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredSeatPositivePrefix],
+    ) -> Result<crate::state_store::RunningConditionalEventAppendResult> {
+        let outcome = self.state_store.append_seat_events_and_renew_if_mixed_cut(
+            chain_root_id, thread_id, owner, surface, client_ref, events, expected, anchors, retired,
+        )?;
+        if let crate::state_store::RunningConditionalEventAppendResult::Committed(records) = &outcome {
+            self.publish_records(records);
+        }
+        Ok(outcome)
     }
 
     pub fn append_thread_events_owned(

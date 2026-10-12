@@ -85,6 +85,8 @@ pub enum TransitionPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingChainHeadTransition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_retirement_manifest_hash: Option<String>,
     pub schema: u32,
     pub transition_id: String,
     pub chain_root_id: String,
@@ -99,6 +101,15 @@ pub struct PendingChainHeadTransition {
 
 impl PendingChainHeadTransition {
     pub fn validate(&self) -> Result<()> {
+        validate_optional_hash(
+            "terminal_retirement_manifest_hash",
+            self.terminal_retirement_manifest_hash.as_deref(),
+        )?;
+        if self.operation != HeadOperation::Remove
+            && self.terminal_retirement_manifest_hash.is_some()
+        {
+            anyhow::bail!("retirement manifest may only accompany terminal Remove");
+        }
         if self.schema != PENDING_SCHEMA {
             anyhow::bail!("unsupported pending transition schema: {}", self.schema);
         }
@@ -204,6 +215,61 @@ fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 3
 const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
 const THREAD_HISTORY_DISCARD_MARKER_BYTES: &[u8] =
     br#"{"kind":"thread_history_discard","schema":1}"#;
+const RETIRED_SEAT_DIRECTORY: &str = "retired-seats";
+
+fn retired_seat_marker_name(chain_root_id: &str) -> String {
+    format!("{}.json", lillux::sha256_hex(chain_root_id.as_bytes()))
+}
+
+/// Immutable exact-seat identity fence. It is outside the pending transition
+/// journal and survives acknowledgement and explicit chain-ref discard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetiredSeatMarker {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_retirement_manifest_hash: Option<String>,
+    pub schema: u32,
+    pub kind: String,
+    pub chain_root_id: String,
+    pub remove_transition_id: String,
+    pub expected_head_hash: String,
+}
+
+impl RetiredSeatMarker {
+    fn validate(&self, chain_root_id: &str) -> Result<()> {
+        validate_optional_hash(
+            "terminal_retirement_manifest_hash",
+            self.terminal_retirement_manifest_hash.as_deref(),
+        )?;
+        validate_chain_root_id(chain_root_id)?;
+        validate_hash("expected_head_hash", &self.expected_head_hash)?;
+        if self.schema != 1
+            || self.kind != "retired_seat_identity"
+            || self.chain_root_id != chain_root_id
+            || self.remove_transition_id.is_empty()
+        {
+            anyhow::bail!("retired seat identity marker is invalid for {chain_root_id}");
+        }
+        Ok(())
+    }
+}
+
+/// Permanent proof that a particular marker's temporary CAS closure no longer
+/// has a live counterpart owner. Separate from the immutable no-rebirth marker;
+/// collecting the manifest must not make a later GC forget why it was released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetiredSeatClosureRelease {
+    pub schema: u32,
+    pub chain_root_id: String,
+    pub marker_digest: String,
+    pub manifest_hash: String,
+    /// Commitment to the exhaustive ordered marker witnesses checked by the
+    /// release owner under all root exclusions. This is not admission proof
+    /// from a supplied hash; only the durable owner may publish this record.
+    pub counterpart_count: u64,
+    pub counterpart_marker_digest: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1756,6 +1822,222 @@ fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> R
 }
 
 impl RecoveryStore {
+    /// Read the one-shot no-rebirth marker without creating a directory.
+    /// A malformed or noncanonical file is an error, never marker absence.
+    pub(crate) fn read_retired_seat_marker(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<Option<RetiredSeatMarker>> {
+        validate_chain_root_id(chain_root_id)?;
+        let Some(directory) = self.open_child_directory(RETIRED_SEAT_DIRECTORY)? else {
+            return Ok(None);
+        };
+        let name = retired_seat_marker_name(chain_root_id);
+        let Some(file) = directory.open_regular(std::ffi::OsStr::new(&name), false)? else {
+            return Ok(None);
+        };
+        let bytes = lillux::read_open_regular_file_bounded(file, 1024)?;
+        let marker: RetiredSeatMarker =
+            serde_json::from_slice(&bytes).context("decode retired seat identity marker")?;
+        marker.validate(chain_root_id)?;
+        let canonical = lillux::canonical_json(&serde_json::to_value(&marker)?)?;
+        if canonical.as_bytes() != bytes {
+            anyhow::bail!("retired seat identity marker is not canonical");
+        }
+        Ok(Some(marker))
+    }
+
+    pub(crate) fn retired_marker_digest(marker: &RetiredSeatMarker) -> Result<String> {
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(marker)?)?.as_bytes(),
+        ))
+    }
+
+    /// Exhaustive local-maintenance namespace inspection. Each marker is
+    /// bounded and opened alone; permanent identity count is not a lifetime
+    /// work or file-descriptor ceiling. GC holds its existing exclusion.
+    pub(crate) fn retained_seat_markers(&self) -> Result<Vec<RetiredSeatMarker>> {
+        let Some(directory) = self.open_child_directory(RETIRED_SEAT_DIRECTORY)? else {
+            return Ok(Vec::new());
+        };
+        let mut markers = Vec::new();
+        for entry_name in directory.entry_names()? {
+            let name = entry_name
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("retired marker filename is not UTF8"))?;
+            if name.ends_with(".released.json") {
+                continue;
+            }
+            let entry = directory.open_regular(&entry_name, false)?.ok_or_else(|| {
+                anyhow::anyhow!("retired marker namespace changed during inspection")
+            })?;
+            let bytes = lillux::read_open_regular_file_bounded(entry, 1024)?;
+            let marker: RetiredSeatMarker = serde_json::from_slice(&bytes)?;
+            marker.validate(&marker.chain_root_id)?;
+            if retired_seat_marker_name(&marker.chain_root_id) != name
+                || lillux::canonical_json(&serde_json::to_value(&marker)?)?.as_bytes() != bytes
+            {
+                anyhow::bail!("retired marker namespace or canonical bytes differ");
+            }
+            markers.push(marker);
+        }
+        Ok(markers)
+    }
+
+    pub(crate) fn read_retired_closure_release(
+        &self,
+        marker: &RetiredSeatMarker,
+    ) -> Result<Option<RetiredSeatClosureRelease>> {
+        let Some(directory) = self.open_child_directory(RETIRED_SEAT_DIRECTORY)? else {
+            return Ok(None);
+        };
+        let name = format!(
+            "{}.released.json",
+            lillux::sha256_hex(marker.chain_root_id.as_bytes())
+        );
+        let Some(file) = directory.open_regular(std::ffi::OsStr::new(&name), false)? else {
+            return Ok(None);
+        };
+        let bytes = lillux::read_open_regular_file_bounded(
+            file,
+            crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+        )?;
+        let release: RetiredSeatClosureRelease = serde_json::from_slice(&bytes)?;
+        if release.schema != 2
+            || release.chain_root_id != marker.chain_root_id
+            || release.marker_digest != Self::retired_marker_digest(marker)?
+            || marker.terminal_retirement_manifest_hash.as_deref()
+                != Some(release.manifest_hash.as_str())
+            || lillux::canonical_json(&serde_json::to_value(&release)?)?.as_bytes() != bytes
+        {
+            anyhow::bail!("retired closure release differs from immutable marker");
+        }
+        anyhow::ensure!(
+            lillux::cas::valid_hash(&release.counterpart_marker_digest)
+                && !release
+                    .counterpart_marker_digest
+                    .bytes()
+                    .any(|byte| byte.is_ascii_uppercase()),
+            "retirement release witness commitment invalid"
+        );
+        // No-rebirth markers are permanent. The trusted immutable release
+        // owner has already checked every witness before this durable commit;
+        // later GC need not retain an unbounded witness list or collected CAS.
+        Ok(Some(release))
+    }
+
+    pub(crate) fn publish_retired_closure_release(
+        &self,
+        marker: &RetiredSeatMarker,
+        counterpart_markers: BTreeMap<String, String>,
+    ) -> Result<()> {
+        use sha2::{Digest as _, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"ryeos.terminal-seat-retirement.release-witnesses.v2\0");
+        for (root, witness) in &counterpart_markers {
+            anyhow::ensure!(
+                root != &marker.chain_root_id,
+                "retirement release names its owner as counterpart"
+            );
+            let current = self.read_retired_seat_marker(root)?.ok_or_else(|| {
+                anyhow::anyhow!("retirement release counterpart has no permanent marker")
+            })?;
+            anyhow::ensure!(
+                Self::retired_marker_digest(&current)? == *witness,
+                "retirement release counterpart marker changed"
+            );
+            let value = lillux::canonical_json(&serde_json::json!([root, witness]))?;
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+        let counterpart_marker_digest = format!("{:x}", digest.finalize());
+        let release = RetiredSeatClosureRelease {
+            schema: 2,
+            chain_root_id: marker.chain_root_id.clone(),
+            marker_digest: Self::retired_marker_digest(marker)?,
+            manifest_hash: marker
+                .terminal_retirement_manifest_hash
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("retirement release has no manifest"))?,
+            counterpart_count: u64::try_from(counterpart_markers.len())?,
+            counterpart_marker_digest,
+        };
+        if let Some(existing) = self.read_retired_closure_release(marker)? {
+            if existing != release {
+                anyhow::bail!("retirement release retry differs");
+            }
+            return Ok(());
+        }
+        let bytes = lillux::canonical_json(&serde_json::to_value(&release)?)?;
+        anyhow::ensure!(
+            bytes.len() <= crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES,
+            "retirement release exceeds existing object byte bound"
+        );
+        let directory = self
+            .open_child_directory(RETIRED_SEAT_DIRECTORY)?
+            .ok_or_else(|| anyhow::anyhow!("retirement release lost marker directory"))?;
+        let name = format!(
+            "{}.released.json",
+            lillux::sha256_hex(marker.chain_root_id.as_bytes())
+        );
+        directory.atomic_create_regular(std::ffi::OsStr::new(&name), bytes.as_bytes(), 0o600)?;
+        anyhow::ensure!(
+            self.read_retired_closure_release(marker)?.as_ref() == Some(&release),
+            "retirement release did not durably publish"
+        );
+        Ok(())
+    }
+
+    /// Durable immutable marker before the signed head's unlink. The exact
+    /// prepared Remove binds retries; a different marker is corruption.
+    pub(crate) fn publish_retired_seat_marker(
+        &self,
+        chain_lock: &crate::chain::ChainLock,
+        pending: &PendingChainHeadTransition,
+    ) -> Result<RetiredSeatMarker> {
+        self.ensure_chain_lock(chain_lock, &pending.chain_root_id)?;
+        if pending.operation != HeadOperation::Remove {
+            anyhow::bail!("retired seat marker requires a pending Remove");
+        }
+        let current_pending = self
+            .read_pending(&pending.chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("retired seat marker has no durable pending Remove"))?;
+        if current_pending != *pending {
+            anyhow::bail!("retired seat marker differs from durable pending Remove");
+        }
+        let marker = RetiredSeatMarker {
+            terminal_retirement_manifest_hash: pending.terminal_retirement_manifest_hash.clone(),
+            schema: 1,
+            kind: "retired_seat_identity".into(),
+            chain_root_id: pending.chain_root_id.clone(),
+            remove_transition_id: pending.transition_id.clone(),
+            expected_head_hash: pending
+                .expected_previous_hash
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("pending Remove has no expected head"))?,
+        };
+        marker.validate(&pending.chain_root_id)?;
+        if let Some(existing) = self.read_retired_seat_marker(&pending.chain_root_id)? {
+            if existing != marker {
+                anyhow::bail!("retired seat identity marker differs from pending Remove");
+            }
+            return Ok(existing);
+        }
+        let directory = self
+            .directory
+            .open_or_create_child(std::ffi::OsStr::new(RETIRED_SEAT_DIRECTORY), 0o700)?;
+        let name = retired_seat_marker_name(&pending.chain_root_id);
+        let bytes = lillux::canonical_json(&serde_json::to_value(&marker)?)?;
+        directory.atomic_create_regular(std::ffi::OsStr::new(&name), bytes.as_bytes(), 0o600)?;
+        let published = self
+            .read_retired_seat_marker(&pending.chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("retired seat marker did not publish"))?;
+        if published != marker {
+            anyhow::bail!("retired seat identity marker changed during publication");
+        }
+        Ok(published)
+    }
+
     pub fn from_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
         let runtime = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
             .context("pin recovery runtime-state directory")?;
@@ -1802,7 +2084,7 @@ impl RecoveryStore {
         Self::from_pinned_directories(runtime, directory)
     }
 
-    fn ensure_chain_lock(
+    pub(crate) fn ensure_chain_lock(
         &self,
         chain_lock: &crate::chain::ChainLock,
         chain_root_id: &str,
@@ -2492,6 +2774,7 @@ impl RecoveryStore {
         }
 
         let record = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: None,
             schema: PENDING_SCHEMA,
             transition_id: unique_id("transition"),
             chain_root_id: chain_root_id.to_string(),
@@ -2512,6 +2795,25 @@ impl RecoveryStore {
         chain_root_id: &str,
         expected_previous_hash: &str,
     ) -> Result<PendingChainHeadTransition> {
+        self.prepare_remove_with_retirement_manifest(
+            chain_lock,
+            chain_root_id,
+            expected_previous_hash,
+            None,
+        )
+    }
+
+    pub(crate) fn prepare_remove_with_retirement_manifest(
+        &self,
+        chain_lock: &crate::chain::ChainLock,
+        chain_root_id: &str,
+        expected_previous_hash: &str,
+        terminal_retirement_manifest_hash: Option<&str>,
+    ) -> Result<PendingChainHeadTransition> {
+        validate_optional_hash(
+            "terminal_retirement_manifest_hash",
+            terminal_retirement_manifest_hash,
+        )?;
         self.ensure_chain_lock(chain_lock, chain_root_id)?;
         validate_chain_root_id(chain_root_id)?;
         validate_hash("expected_previous_hash", expected_previous_hash)?;
@@ -2523,7 +2825,9 @@ impl RecoveryStore {
                 ),
                 HeadOperation::Remove
                     if existing.expected_previous_hash.as_deref()
-                        == Some(expected_previous_hash) =>
+                        == Some(expected_previous_hash)
+                        && existing.terminal_retirement_manifest_hash.as_deref()
+                            == terminal_retirement_manifest_hash =>
                 {
                     Ok(existing)
                 }
@@ -2534,6 +2838,7 @@ impl RecoveryStore {
         }
 
         let record = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: terminal_retirement_manifest_hash.map(str::to_owned),
             schema: PENDING_SCHEMA,
             transition_id: unique_id("transition"),
             chain_root_id: chain_root_id.to_string(),
@@ -2563,6 +2868,9 @@ impl RecoveryStore {
         target_hash: &str,
     ) -> Result<PendingChainHeadTransition> {
         self.ensure_chain_lock(chain_lock, chain_root_id)?;
+        if self.read_retired_seat_marker(chain_root_id)?.is_some() {
+            anyhow::bail!("marked retired seat Remove cannot become a repair Set");
+        }
         validate_chain_root_id(chain_root_id)?;
         validate_hash("target_hash", target_hash)?;
 
@@ -2584,6 +2892,7 @@ impl RecoveryStore {
         }
 
         let replacement = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: None,
             schema: PENDING_SCHEMA,
             transition_id: unique_id("transition"),
             chain_root_id: chain_root_id.to_string(),
@@ -2665,17 +2974,25 @@ impl RecoveryStore {
     /// A Set protects its not-yet-published target; a Remove protects the old
     /// closure after unlink until runtime/projection cleanup is acknowledged.
     pub fn pending_transition_object_roots(&self) -> Result<Vec<String>> {
-        self.list_pending()?
-            .into_iter()
-            .map(|record| match record.operation {
-                HeadOperation::Set => record
-                    .target_hash
-                    .ok_or_else(|| anyhow::anyhow!("pending Set is missing target_hash")),
-                HeadOperation::Remove => record.expected_previous_hash.ok_or_else(|| {
-                    anyhow::anyhow!("pending Remove is missing expected_previous_hash")
-                }),
-            })
-            .collect()
+        let pending = self.list_pending()?;
+        let mut roots = pending
+            .iter()
+            .filter_map(|record| record.terminal_retirement_manifest_hash.clone())
+            .collect::<Vec<_>>();
+        roots.extend(
+            pending
+                .into_iter()
+                .map(|record| match record.operation {
+                    HeadOperation::Set => record
+                        .target_hash
+                        .ok_or_else(|| anyhow::anyhow!("pending Set is missing target_hash")),
+                    HeadOperation::Remove => record.expected_previous_hash.ok_or_else(|| {
+                        anyhow::anyhow!("pending Remove is missing expected_previous_hash")
+                    }),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
+        Ok(roots)
     }
 
     pub(crate) fn new_projection_instance_id(&self) -> String {
@@ -2875,7 +3192,7 @@ fn decode_durable_upload_bytes(bytes: &[u8], path: &Path) -> Result<DurableCasUp
     Ok(record)
 }
 
-fn validate_chain_root_id(value: &str) -> Result<()> {
+pub(crate) fn validate_chain_root_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 255
         || value == "."
@@ -3485,6 +3802,7 @@ mod tests {
     #[test]
     fn recovery_wire_timestamps_require_canonical_whole_second_utc() {
         let pending = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: None,
             schema: PENDING_SCHEMA,
             transition_id: "transition-1".into(),
             chain_root_id: "T-root".into(),
@@ -3509,6 +3827,7 @@ mod tests {
     #[test]
     fn pending_transition_wire_requires_both_nullable_hash_keys() {
         let pending = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: None,
             schema: PENDING_SCHEMA,
             transition_id: "transition-1".into(),
             chain_root_id: "T-root".into(),
@@ -3610,6 +3929,50 @@ mod tests {
         );
         assert_eq!(set.target_hash.as_deref(), Some(hash("b").as_str()));
         assert_eq!(store.read_pending("T-root").unwrap().unwrap(), set);
+    }
+
+    #[test]
+    fn retired_seat_marker_is_immutable_and_bound_to_exact_remove() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-root");
+        let remove = store.prepare_remove(&lock, "T-root", &hash("a")).unwrap();
+        let marker = store.publish_retired_seat_marker(&lock, &remove).unwrap();
+        assert_eq!(
+            store.publish_retired_seat_marker(&lock, &remove).unwrap(),
+            marker
+        );
+        assert_eq!(
+            store.read_retired_seat_marker("T-root").unwrap(),
+            Some(marker)
+        );
+        let mut wrong = remove.clone();
+        wrong.transition_id.push_str("-different");
+        assert!(store.publish_retired_seat_marker(&lock, &wrong).is_err());
+        let path = store
+            .root()
+            .join(RETIRED_SEAT_DIRECTORY)
+            .join(retired_seat_marker_name("T-root"));
+        fs::write(path, b"corrupt").unwrap();
+        assert!(store.read_retired_seat_marker("T-root").is_err());
+    }
+
+    #[test]
+    fn released_sidecar_namespace_growth_does_not_cap_permanent_marker_inspection() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        let lock = chain_lock(temp.path(), "T-root");
+        let remove = store.prepare_remove(&lock, "T-root", &hash("a")).unwrap();
+        let marker = store.publish_retired_seat_marker(&lock, &remove).unwrap();
+        let directory = store.root().join(RETIRED_SEAT_DIRECTORY);
+        // Namespace fixture only: these sidecars grant no release authority;
+        // release readback still independently requires its exact owning marker.
+        for index in 0..=crate::object_closure::DEFAULT_MAX_OBJECTS {
+            fs::write(directory.join(format!("{index:064x}.released.json")), b"{}").unwrap();
+        }
+        assert_eq!(store.retained_seat_markers().unwrap(), vec![marker]);
+        fs::write(directory.join("not-a-marker.json"), b"{}").unwrap();
+        assert!(store.retained_seat_markers().is_err());
     }
 
     #[test]

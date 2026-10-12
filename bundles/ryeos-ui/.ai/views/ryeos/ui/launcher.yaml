@@ -1,0 +1,10 @@
+name: presentation-launcher
+title: Launch
+version: "1.0.0"
+description: Rust-projected presentation actions from exact admitted mounts and the captured insertion destination.
+widget: rows
+local_projection: launcher
+input:
+  id: filter
+  placeholder: Find a view or presentation action
+  local_filter: true

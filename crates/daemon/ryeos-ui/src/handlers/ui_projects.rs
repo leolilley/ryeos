@@ -14,6 +14,9 @@ use ryeos_app::principal::{
     HostedPrincipalResolver, LOCAL_PRINCIPAL_ID, LockedPrincipalStore, PrincipalStore,
 };
 use ryeos_app::state::AppState;
+pub use ryeos_client_base::surface::saved_surfaces::{
+    ParticularSurfaceRecord, ReusableSurfaceRecord, SavedSurfaceOrigin,
+};
 use ryeos_client_base::surface::view_sets::{
     ParticularViewSetResume, SavedViewSetTemplate, validate_particular_view_set_resumes,
     validate_saved_view_set_templates,
@@ -24,8 +27,63 @@ use crate::seat_auth::require_seat_caller;
 use crate::state::get_ui_state;
 
 const PROJECTS_VERSION: u32 = 1;
-const RYEOS_UI_CONFIG_VERSION: u32 = 4;
+const RYEOS_UI_CONFIG_VERSION: u32 = 6;
 const RECENT_VERSION: u32 = 1;
+
+pub(crate) mod reusable_surface;
+
+pub(crate) fn completed_admission_append_limit(state: &AppState) -> Result<u64> {
+    state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref() == Some(super::ui_seat::APPEND_DESCRIPTOR.service_ref)
+        })
+        .map(|route| route.limits.body_bytes_max)
+        .ok_or_else(|| HandlerError::Internal("UI seat append route is absent".into()).into())
+}
+
+/// Charge the complete single-event wire envelope, not only the returned
+/// descriptor. Decimal-string sequences conservatively include browser wire
+/// encoding overhead; the append UUID is always canonical (36 bytes).
+pub(crate) fn validate_completed_admission_size(
+    result: &Value,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+    operation_id: &str,
+    max_result_bytes: u64,
+    max_append_bytes: u64,
+) -> std::result::Result<(), crate::browser_session::AttachmentStoreError> {
+    use crate::browser_session::AttachmentStoreError;
+    let payload = ryeos_client_base::ui::admission_operation::UiCompletedPresentationOperation {
+        operation_id: operation_id.to_owned(),
+        result: result.clone(),
+    };
+    let result_size = serde_json::to_vec(&payload)
+        .map_err(|_| AttachmentStoreError::Capacity)?
+        .len();
+    let envelope = json!({
+        "presentation_id":producer.presentation_id,"thread_id":producer.thread_id,
+        "producer_incarnation":producer.producer_incarnation,
+        "operation_id":operation_id,"first_engine_seq":u64::MAX.to_string(),
+        "last_engine_seq":u64::MAX.to_string(),"event_count":1,"payload_digest":"f".repeat(64),
+        "events":[{"engine_seq":u64::MAX.to_string(),
+            "event_type":ryeos_client_base::ui::admission_operation::COMPLETED_EVENT,"payload":payload}]
+    });
+    let append_size = serde_json::to_vec(&envelope)
+        .map_err(|_| AttachmentStoreError::Capacity)?
+        .len();
+    if max_result_bytes == 0
+        || max_append_bytes == 0
+        || u64::try_from(result_size).map_err(|_| AttachmentStoreError::Capacity)?
+            > max_result_bytes
+        || u64::try_from(append_size).map_err(|_| AttachmentStoreError::Capacity)?
+            > max_append_bytes
+    {
+        return Err(AttachmentStoreError::Capacity);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +125,12 @@ pub struct RyeOsConfigFile {
     pub particular_view_set_library_revision: u64,
     #[serde(default)]
     pub particular_view_sets: Vec<ParticularViewSetResume>,
+    pub reusable_surface_library_revision: u64,
+    #[serde(default)]
+    pub reusable_surfaces: Vec<ReusableSurfaceRecord>,
+    pub particular_surface_library_revision: u64,
+    #[serde(default)]
+    pub particular_surfaces: Vec<ParticularSurfaceRecord>,
 }
 
 impl Default for RyeOsConfigFile {
@@ -79,6 +143,10 @@ impl Default for RyeOsConfigFile {
             saved_view_sets: Vec::new(),
             particular_view_set_library_revision: 0,
             particular_view_sets: Vec::new(),
+            reusable_surface_library_revision: 0,
+            reusable_surfaces: Vec::new(),
+            particular_surface_library_revision: 0,
+            particular_surfaces: Vec::new(),
         }
     }
 }
@@ -136,6 +204,38 @@ pub struct ResolveProjectRequest {
 #[serde(deny_unknown_fields)]
 pub struct OpenProjectRequest {
     pub local_id: String,
+    pub selection: ryeos_client_base::surface::opening::SurfaceOpenSelection,
+    pub creation_request_id: String,
+    pub placement: ryeos_client_base::surface::opening::SurfaceOpenPlacement,
+}
+
+/// Only the existing registered-project owner constructs this proof, after
+/// rechecking the selected entry under its principal registry lock. It cannot
+/// be supplied by browser request data or converted into new session grants.
+pub(crate) struct RegisteredProjectSurfaceAdmission {
+    principal_id: String,
+    local_id: String,
+    root: String,
+    authority: Arc<lillux::PinnedDirectory>,
+}
+
+impl RegisteredProjectSurfaceAdmission {
+    pub(crate) fn matches_candidate(
+        &self,
+        principal_id: &str,
+        candidate: &crate::browser_session::BindingAttachmentCandidate,
+    ) -> bool {
+        self.principal_id == principal_id
+            && candidate.registered_project_id.as_deref() == Some(self.local_id.as_str())
+            && candidate.compiled_binding.binding.project_root.as_deref()
+                == Some(self.root.as_str())
+            && candidate
+                .project_authority
+                .as_ref()
+                .is_some_and(|authority| Arc::ptr_eq(authority, &self.authority))
+            && self.authority.path() == std::path::Path::new(&self.root)
+            && self.authority.ensure_path_binding().is_ok()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +255,24 @@ pub struct UpdateConfigRequest {
     pub view_set_library: Option<ViewSetLibraryUpdate>,
     #[serde(default)]
     pub particular_view_set_library: Option<ParticularViewSetLibraryUpdate>,
+    #[serde(default)]
+    pub reusable_surface_library: Option<ReusableSurfaceLibraryUpdate>,
+    #[serde(default)]
+    pub particular_surface_library: Option<ParticularSurfaceLibraryUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReusableSurfaceLibraryUpdate {
+    pub expected_revision: u64,
+    pub reusable_surfaces: Vec<ReusableSurfaceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticularSurfaceLibraryUpdate {
+    pub expected_revision: u64,
+    pub particular_surfaces: Vec<ParticularSurfaceRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +293,571 @@ pub struct ParticularViewSetLibraryUpdate {
 #[serde(deny_unknown_fields)]
 pub struct ResumeParticularViewSetRequest {
     pub id: String,
+    pub expected_revision: u64,
+    pub surface_ref: String,
+    pub creation_request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeParticularSurfaceRequest {
+    pub id: String,
+    pub expected_revision: u64,
+    pub view_set_expected_revision: u64,
+    pub creation_request_id: String,
+}
+
+pub(crate) struct SavedSurfaceAdmission {
+    principal_id: String,
+    origin_project: Option<RegisteredProjectSurfaceAdmission>,
+    receipt: crate::browser_session::SavedSurfaceRequestIdentity,
+    tabs: Vec<SavedSurfaceTabAdmission>,
+}
+
+enum SavedSurfaceTabAdmission {
+    Particular(ParticularSurfaceAdmission),
+    Reusable {
+        principal_id: String,
+        origin: SavedSurfaceOrigin,
+        project: Option<RegisteredProjectSurfaceAdmission>,
+    },
+}
+
+impl SavedSurfaceTabAdmission {
+    fn matches_candidate(
+        &self,
+        principal: &str,
+        candidate: &crate::browser_session::BindingAttachmentCandidate,
+    ) -> bool {
+        match self {
+            Self::Particular(proof) => proof.matches_candidate(principal, candidate),
+            Self::Reusable {
+                principal_id,
+                origin,
+                project,
+            } => {
+                principal_id == principal
+                    && candidate
+                        .compiled_binding
+                        .binding
+                        .root
+                        .identity()
+                        .canonical_ref
+                        == origin.surface_ref
+                    && match project {
+                        Some(proof) => {
+                            origin
+                                .project
+                                .as_ref()
+                                .is_some_and(|reference| reference.local_id == proof.local_id)
+                                && proof.matches_candidate(principal, candidate)
+                        }
+                        None => {
+                            origin.project.is_none()
+                                && candidate.registered_project_id.is_none()
+                                && candidate.project_authority.is_none()
+                                && candidate.compiled_binding.binding.project_root.is_none()
+                        }
+                    }
+            }
+        }
+    }
+}
+
+impl SavedSurfaceAdmission {
+    #[cfg(test)]
+    pub(crate) fn projectless_fixture(
+        principal: &str,
+        receipt: crate::browser_session::SavedSurfaceRequestIdentity,
+    ) -> Self {
+        let crate::browser_session::SavedSurfaceRequestBody::Particular { tabs: saved_tabs } =
+            &receipt.body
+        else {
+            panic!("particular fixture requires particular receipt")
+        };
+        let tabs =
+            saved_tabs
+                .iter()
+                .cloned()
+                .map(|receipt| {
+                    SavedSurfaceTabAdmission::Particular(ParticularSurfaceAdmission {
+                principal_id: principal.into(),
+                project: None,
+                receipt,
+                max_receipt_bytes:
+                    ryeos_client_base::surface::view_sets::MAX_PARTICULAR_VIEW_SET_LIBRARY_BYTES,
+            })
+                })
+                .collect();
+        Self {
+            principal_id: principal.into(),
+            origin_project: None,
+            receipt,
+            tabs,
+        }
+    }
+    pub(crate) fn receipt(&self) -> &crate::browser_session::SavedSurfaceRequestIdentity {
+        &self.receipt
+    }
+    pub(crate) fn reusable(
+        principal: String,
+        receipt: crate::browser_session::SavedSurfaceRequestIdentity,
+        origin_project: Option<RegisteredProjectSurfaceAdmission>,
+        tab_projects: Vec<Option<RegisteredProjectSurfaceAdmission>>,
+    ) -> Result<Self> {
+        let (crate::browser_session::SavedSurfaceRequestBody::Reusable { tabs }
+        | crate::browser_session::SavedSurfaceRequestBody::Composed { tabs }) = &receipt.body
+        else {
+            return Err(HandlerError::BadRequest(
+                "reusable admission requires reusable receipt".into(),
+            )
+            .into());
+        };
+        if tabs.len() != tab_projects.len() {
+            return Err(HandlerError::BadRequest(
+                "reusable admission proof count differs from ordered tabs".into(),
+            )
+            .into());
+        }
+        let tabs = tabs
+            .iter()
+            .zip(tab_projects)
+            .map(|(tab, project)| SavedSurfaceTabAdmission::Reusable {
+                principal_id: principal.clone(),
+                origin: tab.origin.clone(),
+                project,
+            })
+            .collect();
+        Ok(Self {
+            principal_id: principal,
+            origin_project,
+            receipt,
+            tabs,
+        })
+    }
+    pub(crate) fn matches_origin(
+        &self,
+        principal: &str,
+        candidate: &crate::browser_session::BindingAttachmentCandidate,
+    ) -> bool {
+        principal == self.principal_id
+            && candidate
+                .compiled_binding
+                .binding
+                .root
+                .identity()
+                .canonical_ref
+                == self.receipt.origin.surface_ref
+            && match &self.origin_project {
+                Some(project) => project.matches_candidate(principal, candidate),
+                None => {
+                    candidate.registered_project_id.is_none()
+                        && candidate.project_authority.is_none()
+                        && candidate.compiled_binding.binding.project_root.is_none()
+                }
+            }
+    }
+    pub(crate) fn matches_tab(
+        &self,
+        index: usize,
+        principal: &str,
+        candidate: &crate::browser_session::BindingAttachmentCandidate,
+    ) -> bool {
+        self.tabs
+            .get(index)
+            .is_some_and(|tab| tab.matches_candidate(principal, candidate))
+    }
+}
+
+pub(crate) struct ParticularSurfaceAdmission {
+    principal_id: String,
+    project: Option<RegisteredProjectSurfaceAdmission>,
+    receipt: crate::browser_session::ParticularSurfaceReceipt,
+    max_receipt_bytes: usize,
+}
+
+fn compile_saved_surface_context(
+    state: &AppState,
+    session: &crate::browser_session::BrowserSession,
+    origin: &SavedSurfaceOrigin,
+    projects: &ProjectsFile,
+) -> Result<(
+    crate::browser_session::BindingAttachmentCandidate,
+    Option<RegisteredProjectSurfaceAdmission>,
+)> {
+    let project = origin
+        .project
+        .as_ref()
+        .map(|reference| {
+            projects
+                .projects
+                .iter()
+                .find(|entry| entry.local_id == reference.local_id)
+                .cloned()
+                .ok_or(HandlerError::NotFound)
+        })
+        .transpose()?;
+    let canonical = project
+        .as_ref()
+        .map(|project| canonical_project_root(&project.root))
+        .transpose()?;
+    let authority = canonical
+        .as_ref()
+        .map(|path| {
+            lillux::PinnedDirectory::open(path)
+                .and_then(|directory| directory.context("saved Surface project disappeared"))
+                .map(Arc::new)
+        })
+        .transpose()?;
+    let request = super::ui_launch_mint::Request {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
+        composition: ryeos_client_base::presentation::UiCompositionSelection::Surface {
+            surface_ref: origin.surface_ref.clone(),
+        },
+        project_path: canonical.as_ref().map(|path| path.display().to_string()),
+        user_principal_id: None,
+    };
+    let context = HandlerContext::new(
+        session.principal_id.clone(),
+        session.granted_caps.clone(),
+        true,
+    );
+    let (compiled, presentation) = super::ui_launch_mint::compile_session_binding(
+        &request,
+        &context,
+        state,
+        authority.as_deref(),
+    )?;
+    let proof = match (&project, &canonical, &authority) {
+        (Some(project), Some(path), Some(authority)) => Some(RegisteredProjectSurfaceAdmission {
+            principal_id: session.principal_id.clone(),
+            local_id: project.local_id.clone(),
+            root: path.display().to_string(),
+            authority: authority.clone(),
+        }),
+        (None, None, None) => None,
+        _ => {
+            return Err(
+                HandlerError::Internal("saved Surface project authority mismatch".into()).into(),
+            );
+        }
+    };
+    Ok((
+        crate::browser_session::BindingAttachmentCandidate {
+            registered_project_id: project.map(|project| project.local_id),
+            compiled_binding: Arc::new(compiled),
+            presentation,
+            project_authority: authority,
+        },
+        proof,
+    ))
+}
+
+fn validate_saved_tab_binding(
+    saved: &ParticularViewSetResume,
+    candidate: &crate::browser_session::BindingAttachmentCandidate,
+    admitted_collection_ids: &std::collections::BTreeSet<&str>,
+) -> Result<()> {
+    use ryeos_client_base::surface::view_sets::{
+        LayoutSeedSpec, SavedViewMountRef, SavedViewSelectionSource,
+    };
+    fn refs(layout: &LayoutSeedSpec, out: &mut Vec<String>) {
+        match layout {
+            LayoutSeedSpec::Group { views, .. } => {
+                out.extend(views.iter().map(|view| view.0.clone()))
+            }
+            LayoutSeedSpec::Split { first, second, .. } => {
+                refs(first, out);
+                refs(second, out);
+            }
+        }
+    }
+    let mut views = Vec::new();
+    if let Some(root) = &saved.composition.root {
+        refs(root, &mut views);
+    }
+    let parsed = ryeos_client_base::ui::content::views_from_surface(Some(
+        &json!({"views":candidate.presentation.views}),
+    ));
+    for view in &views {
+        if !matches!(
+            candidate.compiled_binding.binding.views.get(view),
+            Some(ryeos_api::surface_views::EmbeddedViewIdentity::Resolved { .. })
+        ) {
+            return Err(HandlerError::Forbidden(
+                "saved tab contains a View outside its admitted Surface closure".into(),
+            )
+            .into());
+        }
+    }
+    for relationship in &saved.relationships {
+        let SavedViewMountRef::Tile { index } = &relationship.mount;
+        let view = views
+            .get(*index)
+            .and_then(|reference| parsed.get(reference))
+            .ok_or_else(|| {
+                HandlerError::Forbidden("saved tab mount has no admitted View".into())
+            })?;
+        match &relationship.source {
+            SavedViewSelectionSource::FollowOwnSet => {}
+            SavedViewSelectionSource::RequiredSubject { facets, .. } => {
+                if ryeos_client_base::ui::attachment::selection_dependencies(view)
+                    != facets.iter().cloned().collect()
+                {
+                    return Err(HandlerError::Conflict(
+                        "saved subject differs from current View dependencies".into(),
+                    )
+                    .into());
+                }
+            }
+            SavedViewSelectionSource::FollowSet { saved_view_set_id }
+                if !admitted_collection_ids.contains(saved_view_set_id.as_str()) =>
+            {
+                return Err(HandlerError::Conflict(
+                    "particular Surface follower leaves its exact admitted collection".into(),
+                )
+                .into());
+            }
+            SavedViewSelectionSource::FollowSet { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the entire saved collection under one principal config snapshot,
+/// then publish one membership after all origin/tab closures pass one final
+/// checked generation. No tab is independently published on failure.
+pub async fn handle_particular_surface_resume(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = require_seat_caller(&ctx, &state)?;
+    let req: ResumeParticularSurfaceRequest = parse_request(params)?;
+    if !uuid::Uuid::parse_str(&req.creation_request_id)
+        .is_ok_and(|id| id.to_string() == req.creation_request_id)
+    {
+        return Err(
+            HandlerError::BadRequest("creation_request_id must be canonical UUID".into()).into(),
+        );
+    }
+    let (session, origin) = crate::seat_auth::require_compiled_ui_session(&ctx, &state)?;
+    let producer = crate::seat_auth::require_compiled_ui_producer()?;
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let membership = ui
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &producer.presentation_id,
+            Some(&producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    ui.browser_sessions
+        .require_presentation_attachment(
+            &session.session_id,
+            &producer.presentation_id,
+            &origin.coordinate(),
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let root = ui
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &membership.root_coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let store = locked_principal_store(&ctx, &state).await?;
+    let config = store.load_ui_config()?;
+    require_particular_surface_revisions(&config, &req)?;
+    let record = config
+        .particular_surfaces
+        .iter()
+        .find(|record| record.id == req.id)
+        .cloned()
+        .ok_or(HandlerError::NotFound)?;
+    let projects = store.load_projects()?;
+    let (origin_candidate, origin_project) =
+        compile_saved_surface_context(&state, &session, &record.origin, &projects)?;
+    let mut candidates = Vec::with_capacity(record.view_set_ids.len());
+    let mut proofs = Vec::with_capacity(record.view_set_ids.len());
+    let mut saved_sets = Vec::with_capacity(record.view_set_ids.len());
+    let admitted_collection_ids = record
+        .view_set_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+    use sha2::{Digest, Sha256};
+    for id in &record.view_set_ids {
+        let saved = config
+            .particular_view_sets
+            .iter()
+            .find(|set| &set.id == id)
+            .cloned()
+            .ok_or(HandlerError::NotFound)?;
+        let context = SavedSurfaceOrigin {
+            surface_ref: saved.context.surface_ref.clone(),
+            project: saved.context.project.clone(),
+        };
+        let (candidate, project) =
+            compile_saved_surface_context(&state, &session, &context, &projects)?;
+        validate_saved_tab_binding(&saved, &candidate, &admitted_collection_ids)?;
+        proofs.push(ParticularSurfaceAdmission {
+            principal_id: session.principal_id.clone(),
+            project,
+            receipt: crate::browser_session::ParticularSurfaceReceipt {
+                saved_id: saved.id.clone(),
+                library_revision: config.particular_view_set_library_revision,
+                record_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(&saved)?)),
+                surface_ref: context.surface_ref,
+                registered_project_id: candidate.registered_project_id.clone(),
+                resolved: ryeos_client_base::surface::view_sets::ResolvedParticularViewSet {
+                    id: saved.id.clone(),
+                    name: saved.name.clone(),
+                    composition: saved.composition.clone(),
+                    relationships: saved.relationships.clone(),
+                    resolved_selection_work: None,
+                },
+            },
+            max_receipt_bytes: usize::try_from(bounds.max_request_bytes)?,
+        });
+        candidates.push(candidate);
+        saved_sets.push(saved);
+    }
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+    )?;
+    let append_limit = completed_admission_append_limit(&state)?.min(bounds.max_seat_append_bytes);
+    let ingress =
+        super::ui_seat::read_completed_seat_ingress(state.clone(), &session, &producer).await?;
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let checked = ingress.authorize(&state, &session, &producer)?;
+    let action_anchor = &checked.action;
+    ui.browser_sessions
+        .require_presentation_attachment(
+            &session.session_id,
+            &producer.presentation_id,
+            &origin.coordinate(),
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let mut admitted_result = None;
+    state.engine.with_checked_bundle_generation(|generation|->Result<()> {
+        let current=generation.request_engine_generation_identity();
+        for attachment in std::iter::once(root.compiled_binding.as_ref()).chain(std::iter::once(origin_candidate.compiled_binding.as_ref()))
+            .chain(candidates.iter().map(|candidate|candidate.compiled_binding.as_ref())) {
+            if attachment.binding.request_engine_generation_identity!=current {
+                return Err(HandlerError::Conflict("UI generation changed during saved Surface resume".into()).into());
+            }
+        }
+        let root_resolution=root.project_authority.as_ref().map(|authority|authority.descriptor_path()).transpose()?;
+        super::ui_launch_mint::revalidate_binding_authority(generation,&state,root.compiled_binding.as_ref(),root_resolution.as_deref(),root.project_authority.as_deref())?;
+        for candidate in std::iter::once(&origin_candidate).chain(&candidates) {
+            let resolution=candidate.project_authority.as_ref().map(|authority|authority.descriptor_path()).transpose()?;
+            super::ui_launch_mint::revalidate_binding_authority(generation,&state,candidate.compiled_binding.as_ref(),resolution.as_deref(),candidate.project_authority.as_deref())?;
+        }
+        for ((saved,proof),candidate) in saved_sets.iter().zip(&mut proofs).zip(&candidates) {
+            proof.receipt.resolved.resolved_selection_work=saved.context.work.as_ref().map(|work|
+                resolve_particular_work(&state,caller.principal_id(),candidate.project_authority.as_ref().map(|authority|authority.path()),&work.chain_root_id)
+                    .and_then(|value|serde_json::from_value(value).map_err(Into::into))).transpose()?;
+        }
+        let receipt=crate::browser_session::SavedSurfaceRequestIdentity {
+            provenance: ryeos_client_base::ui::binding::UiSurfaceCompositionProvenance::Library {
+                saved_id:record.id.clone(),library_revision:req.expected_revision,
+                record_digest:format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"record":record,"sets":saved_sets}))?)),
+            },
+            title:record.title.clone(),origin:record.origin.clone(),active_view_set_id:record.active_view_set_id.clone(),
+            body:crate::browser_session::SavedSurfaceRequestBody::Particular { tabs:proofs.iter().map(|proof|proof.receipt.clone()).collect() },
+        };
+        let admission=SavedSurfaceAdmission {principal_id:session.principal_id.clone(),origin_project,receipt,tabs:proofs.into_iter().map(SavedSurfaceTabAdmission::Particular).collect()};
+        let published = state.state_store.with_exact_seat_action_if_mixed_cut(
+            &producer.thread_id, &producer.thread_id, &action_anchor.anchor,
+            &checked.anchors,
+            &checked.retired,
+            &action_anchor.owner, &action_anchor.item_ref, &action_anchor.executor_ref, || {
+        ui.browser_sessions.reconcile_presentation_mount_frontier(
+            &session.session_id, &producer.presentation_id, &membership.root_coordinate,
+            state.node_policy.generation_digest(), ingress.next_mount_id(),
+        ).map_err(|error| HandlerError::Conflict(error.to_string()))?;
+        ui.browser_sessions.publish_saved_surface(&session.session_id,&producer.presentation_id,&req.creation_request_id,
+            &membership.root_coordinate,origin_candidate,candidates,&admission,
+            usize::try_from(policy.max_live_binding_attachments_per_session)?,usize::try_from(policy.max_surface_instances_per_presentation)?,
+            usize::try_from(policy.shared_presentation.max_label_bytes)?,state.node_policy.generation_digest(),
+            |surface,origin,tabs| {
+                let retained=surface.saved_resume.as_ref().ok_or(crate::browser_session::AttachmentStoreError::PresentationInvalid)?;
+                let selection=retained.particular_selection().ok_or(crate::browser_session::AttachmentStoreError::PresentationInvalid)?;
+                let result=json!({"particular_surface":retained.public_descriptor(),"particular_selection":selection,
+                    "ui_transition":{"kind":"resume_particular_surface","presentation_id":producer.presentation_id,
+                        "surface":surface.public_descriptor(),"attachment":origin.public_descriptor(bounds),
+                        "tab_attachments":tabs.iter().map(|attachment|attachment.public_descriptor(bounds)).collect::<Vec<_>>(),
+                        "creation_request_id":req.creation_request_id}});
+                validate_completed_admission_size(&result,&producer,&req.creation_request_id,bounds.max_request_bytes,append_limit)?;
+                admitted_result=Some(result);Ok(())
+            }).map_err(|error| anyhow::Error::from(HandlerError::Conflict(error.to_string())))
+            })?;
+        if published.is_none() {
+            return Err(HandlerError::Conflict("seat action anchor changed before publication".into()).into());
+        }
+        Ok(())
+    })?;
+    admitted_result.ok_or_else(|| {
+        HandlerError::Internal("saved Surface publication result missing".into()).into()
+    })
+}
+
+fn require_particular_surface_revisions(
+    config: &RyeOsConfigFile,
+    req: &ResumeParticularSurfaceRequest,
+) -> Result<()> {
+    if config.particular_surface_library_revision != req.expected_revision {
+        return Err(
+            HandlerError::Conflict("particular Surface library revision changed".into()).into(),
+        );
+    }
+    if config.particular_view_set_library_revision != req.view_set_expected_revision {
+        return Err(
+            HandlerError::Conflict("particular view-set library revision changed".into()).into(),
+        );
+    }
+    Ok(())
+}
+
+impl ParticularSurfaceAdmission {
+    pub(crate) fn receipt(&self) -> &crate::browser_session::ParticularSurfaceReceipt {
+        &self.receipt
+    }
+    pub(crate) fn max_receipt_bytes(&self) -> usize {
+        self.max_receipt_bytes
+    }
+    pub(crate) fn matches_candidate(
+        &self,
+        principal_id: &str,
+        candidate: &crate::browser_session::BindingAttachmentCandidate,
+    ) -> bool {
+        if principal_id != self.principal_id
+            || candidate
+                .compiled_binding
+                .binding
+                .root
+                .identity()
+                .canonical_ref
+                != self.receipt.surface_ref
+        {
+            return false;
+        }
+        match &self.project {
+            Some(project) => project.matches_candidate(principal_id, candidate),
+            None => {
+                candidate.registered_project_id.is_none()
+                    && candidate.project_authority.is_none()
+                    && candidate.compiled_binding.binding.project_root.is_none()
+            }
+        }
+    }
 }
 
 pub async fn handle_projects_list(
@@ -189,7 +872,9 @@ pub async fn handle_projects_list(
     let current_project = retained_project.as_deref();
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
-    let mut rows = projects.projects;
+    drop(store);
+    let registered_rows = projects.projects;
+    let mut rows = registered_rows.clone();
     if let Some(current) = current_project
         && !rows
             .iter()
@@ -207,13 +892,231 @@ pub async fn handle_projects_list(
             },
         );
     }
-    Ok(json!({
+    let mut result = json!({
         "version": projects.version,
+        "project_surfaces": [],
+        "project_surface_notices": [],
         "projects": rows.into_iter().map(|project| {
             let registered = project.local_id != "current";
             project_view(project, current_project, registered)
         }).collect::<Vec<_>>()
-    }))
+    });
+    let remaining_bytes = crate::handlers::ui_field::MAX_FIELD_FACT_DOCUMENT_BYTES
+        .saturating_sub(serde_json::to_vec(&result)?.len());
+    let (project_surfaces, project_surface_notices) =
+        discover_project_launch_entries(&ctx, &state, &registered_rows, remaining_bytes)?;
+    result["project_surfaces"] = json!(project_surfaces);
+    result["project_surface_notices"] = json!(project_surface_notices);
+    Ok(result)
+}
+
+/// Discovery is a hint, never an opening grant. Every offered project-owned
+/// Surface is recompiled by `handle_projects_open` at exact publication time.
+fn discover_project_launch_entries(
+    ctx: &HandlerContext,
+    state: &AppState,
+    projects: &[ProjectEntry],
+    response_budget_bytes: usize,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    if response_budget_bytes == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let Ok((session, _origin)) = crate::seat_auth::require_compiled_ui_session(ctx, state) else {
+        let mut notices = Vec::new();
+        push_discovery_notice(
+            &[],
+            &mut notices,
+            "Project Surface opening requires an active compiled UI session",
+            response_budget_bytes,
+        )?;
+        return Ok((Vec::new(), notices));
+    };
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+    )?;
+    // A candidate can consume one full admitted Surface declaration. Charge
+    // that worst-case root body against the existing Field source-document
+    // ceiling before performing repeated project compilation.
+    let per_candidate = usize::try_from(policy.shared_presentation.max_declaration_bytes)?;
+    let mut remaining = response_budget_bytes
+        .checked_div(per_candidate)
+        .ok_or_else(|| HandlerError::Internal("Surface discovery bound is zero".into()))?;
+    let mut entries = Vec::new();
+    let mut notices = Vec::new();
+    for project in projects {
+        if remaining == 0 {
+            push_discovery_notice(
+                &entries,
+                &mut notices,
+                "Project Surface discovery reached its source bound",
+                response_budget_bytes,
+            )?;
+            break;
+        }
+        // Even an unavailable or oversized project consumes one traversal
+        // slot, so many registered roots cannot multiply the work bound.
+        remaining -= 1;
+        if remaining == 0 {
+            push_discovery_notice(
+                &entries,
+                &mut notices,
+                "Project Surface discovery reached its source bound",
+                response_budget_bytes,
+            )?;
+            break;
+        }
+        let canonical = match canonical_project_root(&project.root) {
+            Ok(root) => root,
+            Err(_) => {
+                push_discovery_notice(
+                    &entries,
+                    &mut notices,
+                    &format!("{}: project root unavailable", project.name),
+                    response_budget_bytes,
+                )?;
+                continue;
+            }
+        };
+        let Ok(Some(authority)) = lillux::PinnedDirectory::open(&canonical) else {
+            push_discovery_notice(
+                &entries,
+                &mut notices,
+                &format!("{}: project content unavailable", project.name),
+                response_budget_bytes,
+            )?;
+            continue;
+        };
+        let Ok(root) = authority.descriptor_path() else {
+            push_discovery_notice(
+                &entries,
+                &mut notices,
+                &format!("{}: project content unavailable", project.name),
+                response_budget_bytes,
+            )?;
+            continue;
+        };
+        let discovered = state.engine.with_checked_bundle_generation(|generation| {
+            Ok::<_, anyhow::Error>((
+                generation.request_engine_generation_identity().to_owned(),
+                generation
+                    .enumerate_project_kind_refs_bounded("surface", &root, &authority, remaining)?,
+            ))
+        });
+        let Ok((generation_id, candidates)) = discovered else {
+            push_discovery_notice(
+                &entries,
+                &mut notices,
+                &format!(
+                    "{}: Surface discovery unavailable or exceeds source bound",
+                    project.name
+                ),
+                response_budget_bytes,
+            )?;
+            // A failed bounded traversal may have inspected every permitted
+            // file before finding one more; spend the remaining scan budget.
+            break;
+        };
+        remaining -= candidates.len();
+        let compile_context = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        let mut project_entries = Vec::new();
+        let mut generation_changed = false;
+        for candidate in candidates {
+            let surface_ref = candidate.to_string();
+            let request = super::ui_launch_mint::Request {
+                ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
+                composition: ryeos_client_base::presentation::UiCompositionSelection::Surface {
+                    surface_ref: surface_ref.clone(),
+                },
+                project_path: Some(root.display().to_string()),
+                user_principal_id: None,
+            };
+            let Ok((binding, presentation)) = super::ui_launch_mint::compile_session_binding(
+                &request,
+                &compile_context,
+                state,
+                Some(&authority),
+            ) else {
+                continue;
+            };
+            if binding.binding.request_engine_generation_identity != generation_id {
+                generation_changed = true;
+                break;
+            }
+            let Some(surface) = presentation.definition.surface() else {
+                continue;
+            };
+            if surface.launch_entry {
+                project_entries.push(json!({
+                    "local_id": project.local_id,
+                    "project_name": project.name,
+                    "surface_ref": surface_ref,
+                    "title": surface.display_title(),
+                    "description": surface.description,
+                    "creation_request_id": uuid::Uuid::new_v4().to_string(),
+                }));
+            }
+        }
+        let current_generation = state.engine.with_checked_bundle_generation(|generation| {
+            Ok::<_, anyhow::Error>(generation.request_engine_generation_identity().to_owned())
+        });
+        if generation_changed
+            || !current_generation
+                .as_ref()
+                .is_ok_and(|current| current == &generation_id)
+        {
+            push_discovery_notice(
+                &entries,
+                &mut notices,
+                &format!("{}: Surface discovery changed generation", project.name),
+                response_budget_bytes,
+            )?;
+            continue;
+        }
+        for entry in project_entries {
+            entries.push(entry);
+            if !discovery_fits(&entries, &notices, response_budget_bytes)? {
+                entries.pop();
+                push_discovery_notice(
+                    &entries,
+                    &mut notices,
+                    "Project Surface choices reached the Field source-document bound",
+                    response_budget_bytes,
+                )?;
+                return Ok((entries, notices));
+            }
+        }
+    }
+    Ok((entries, notices))
+}
+
+fn discovery_fits(entries: &[Value], notices: &[Value], budget: usize) -> Result<bool> {
+    let baseline = serde_json::to_vec(&json!({
+        "project_surfaces": [], "project_surface_notices": []
+    }))?
+    .len();
+    let bytes = serde_json::to_vec(&json!({
+        "project_surfaces": entries, "project_surface_notices": notices
+    }))?
+    .len();
+    Ok(bytes.saturating_sub(baseline) <= budget)
+}
+
+fn push_discovery_notice(
+    entries: &[Value],
+    notices: &mut Vec<Value>,
+    label: &str,
+    budget: usize,
+) -> Result<()> {
+    notices.push(json!({"label": label}));
+    if !discovery_fits(entries, notices, budget)? {
+        notices.pop();
+    }
+    Ok(())
 }
 
 pub async fn handle_projects_add(
@@ -335,115 +1238,239 @@ pub async fn handle_projects_open(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: OpenProjectRequest = parse_request(params)?;
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let origin = crate::seat_auth::compiled_ui_attachment()
-        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))?;
+    if !matches!(
+        &req.placement,
+        ryeos_client_base::surface::opening::SurfaceOpenPlacement::NewSurface
+    ) {
+        return Err(HandlerError::BadRequest(
+            "registered-project opening requires new_surface placement".into(),
+        )
+        .into());
+    }
+    let surface_ref = match &req.selection {
+        ryeos_client_base::surface::opening::SurfaceOpenSelection::Authored { surface_ref } => {
+            surface_ref.clone()
+        }
+        ryeos_client_base::surface::opening::SurfaceOpenSelection::Reusable { .. }
+        | ryeos_client_base::surface::opening::SurfaceOpenSelection::Composed(_) => {
+            return Err(HandlerError::BadRequest("registered-project opening requires an authored Surface; reusable Surfaces use their retained origins".into()).into());
+        }
+    };
+    ryeos_client_base::surface::opening::SurfaceOpenRequest {
+        creation_request_id: req.creation_request_id.clone(),
+        selection: req.selection.clone(),
+        placement: req.placement.clone(),
+    }
+    .validate()
+    .map_err(HandlerError::BadRequest)?;
+    if uuid::Uuid::parse_str(&req.creation_request_id)
+        .ok()
+        .map(|value| value.to_string())
+        .as_deref()
+        != Some(req.creation_request_id.as_str())
+    {
+        return Err(HandlerError::BadRequest(
+            "creation_request_id must be a canonical UUID".into(),
+        )
+        .into());
+    }
+    let (session, origin) = crate::seat_auth::require_compiled_ui_session(&ctx, &state)?;
+    let producer = crate::seat_auth::require_compiled_ui_producer()?;
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let membership = ui
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &producer.presentation_id,
+            Some(&producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    // The dispatch attachment must itself belong to this exact presentation.
+    ui.browser_sessions
+        .require_presentation_attachment(
+            &session.session_id,
+            &producer.presentation_id,
+            &origin.coordinate(),
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let root_attachment = ui
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &membership.root_coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let project = {
         let store = locked_principal_store(&ctx, &state).await?;
         store
             .load_projects()?
             .projects
             .into_iter()
-            .find(|p| p.local_id == req.local_id)
+            .find(|entry| entry.local_id == req.local_id)
             .ok_or(HandlerError::NotFound)?
     };
-
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
     let project_authority = Arc::new(
         lillux::PinnedDirectory::open(&canonical)?
             .context("selected UI project root disappeared")?,
     );
-    let ui =
-        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
-    let session = ui
-        .browser_sessions
-        .get_session(session_id)
-        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
     let compile_context = HandlerContext::new(
         session.principal_id.clone(),
         session.granted_caps.clone(),
         true,
     );
     let compile_request = super::ui_launch_mint::Request {
-        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
-        surface_ref: origin.surface_ref.clone(),
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
+        composition: ryeos_client_base::presentation::UiCompositionSelection::Surface {
+            surface_ref,
+        },
         project_path: Some(root.clone()),
         user_principal_id: None,
     };
-    let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+    let (compiled_binding, presentation) = super::ui_launch_mint::compile_session_binding(
         &compile_request,
         &compile_context,
         &state,
         Some(project_authority.as_ref()),
     )?;
-
-    // Reacquire the existing principal-registry gate after compilation. Both
-    // publish and forget take registry -> session-store in this order, making
-    // the live-attachment predicate atomic with registry mutation.
+    // Registry -> seat-transition -> session-store is the one publication order.
+    // Retain the registry gate through the atomic membership/attachment commit.
     let store = locked_principal_store(&ctx, &state).await?;
-    let still_registered = store
+    if !store
         .load_projects()?
         .projects
         .into_iter()
-        .any(|entry| entry.local_id == project.local_id && entry.root == project.root);
-    if !still_registered {
+        .any(|entry| entry.local_id == project.local_id && entry.root == project.root)
+    {
         return Err(
             HandlerError::Conflict("project registration changed during open".into()).into(),
         );
     }
+    project_authority.ensure_path_binding()?;
+    let admission = RegisteredProjectSurfaceAdmission {
+        principal_id: session.principal_id.clone(),
+        local_id: project.local_id.clone(),
+        root: root.clone(),
+        authority: project_authority.clone(),
+    };
     let policy = state
         .node_policy
         .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
     )?;
     let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
-    let attachment = ui.browser_sessions.publish_attachment(
-        session_id,
-        &origin.coordinate(),
-        crate::browser_session::BindingAttachmentCandidate {
-            registered_project_id: Some(project.local_id.clone()),
-            compiled_binding: Arc::new(compiled_binding),
-            effective_surface,
-            project_authority: Some(project_authority),
-        },
-        usize::try_from(policy.max_live_binding_attachments_per_session)?,
-        state.node_policy.generation_digest(),
-    )?;
-    let descriptor = attachment.public_descriptor(request_bounds);
-    // Recent history is presentation metadata, not attachment authority. Once
-    // publication succeeds, a recent-file failure must not turn the admitted
-    // attachment into an unreturned/stranded capability.
-    let recent = match store.touch_recent_project(&project.local_id) {
-        Ok(recent) => recent,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                local_id = %project.local_id,
-                "binding attachment admitted but recent project history was not updated"
-            );
-            store.load_recent().unwrap_or_default()
-        }
+    let append_limit = completed_admission_append_limit(&state)?;
+    let mut admitted_result = None;
+    let root_resolution = root_attachment
+        .project_authority
+        .as_ref()
+        .map(|authority| authority.descriptor_path())
+        .transpose()?;
+    let project_resolution = project_authority.descriptor_path()?;
+    let ingress =
+        super::ui_seat::read_completed_seat_ingress(state.clone(), &session, &producer).await?;
+    let _publication = {
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        let checked = ingress.authorize(&state, &session, &producer)?;
+        let action_anchor = &checked.action;
+        ui.browser_sessions
+            .require_presentation_attachment(
+                &session.session_id,
+                &producer.presentation_id,
+                &origin.coordinate(),
+                state.node_policy.generation_digest(),
+            )
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        state
+            .engine
+            .with_checked_bundle_generation(|generation| -> Result<_> {
+                let current = generation.request_engine_generation_identity();
+                if current
+                    != root_attachment
+                        .compiled_binding
+                        .binding
+                        .request_engine_generation_identity
+                    || current != compiled_binding.binding.request_engine_generation_identity
+                {
+                    return Err(HandlerError::Conflict(
+                        "UI engine generation changed during project Surface admission".into(),
+                    )
+                    .into());
+                }
+                super::ui_launch_mint::revalidate_binding_authority(
+                    generation,
+                    &state,
+                    root_attachment.compiled_binding.as_ref(),
+                    root_resolution.as_deref(),
+                    root_attachment.project_authority.as_deref(),
+                )?;
+                super::ui_launch_mint::revalidate_binding_authority(
+                    generation,
+                    &state,
+                    &compiled_binding,
+                    Some(project_resolution.as_path()),
+                    Some(project_authority.as_ref()),
+                )?;
+                let published = state.state_store.with_exact_seat_action_if_mixed_cut(
+                    &producer.thread_id, &producer.thread_id, &action_anchor.anchor,
+                    &checked.anchors,
+                    &checked.retired,
+                    &action_anchor.owner, &action_anchor.item_ref, &action_anchor.executor_ref, || {
+                ui.browser_sessions.reconcile_presentation_mount_frontier(
+                    &session.session_id, &producer.presentation_id, &membership.root_coordinate,
+                    state.node_policy.generation_digest(), ingress.next_mount_id(),
+                ).map_err(|error| HandlerError::Conflict(error.to_string()))?;
+                ui.browser_sessions
+                    .publish_registered_project_surface(
+                        &session.session_id,
+                        &producer.presentation_id,
+                        &req.creation_request_id,
+                        &membership.root_coordinate,
+                        crate::browser_session::BindingAttachmentCandidate {
+                            registered_project_id: Some(project.local_id.clone()),
+                            compiled_binding: Arc::new(compiled_binding),
+                            presentation,
+                            project_authority: Some(project_authority.clone()),
+                        },
+                        usize::try_from(policy.max_live_binding_attachments_per_session)?,
+                        usize::try_from(policy.max_surface_instances_per_presentation)?,
+                        usize::try_from(policy.shared_presentation.max_label_bytes)?,
+                        state.node_policy.generation_digest(),
+                        &admission,
+                        |surface, attachment| {
+                            let result = json!({
+                                "project":project_view(ProjectEntry {root:root.clone(),..project.clone()},Some(&root),true),
+                                "ui_transition":{"kind":"open_surface","presentation_id":producer.presentation_id,
+                                    "opening":{"creation_request_id":req.creation_request_id,"selection":req.selection,"placement":req.placement},
+                                    "creation_request_id":req.creation_request_id,"tab_attachments":[],
+                                    "surface":surface.public_descriptor(),"attachment":attachment.public_descriptor(request_bounds)}
+                            });
+                            validate_completed_admission_size(&result,&producer,&req.creation_request_id,
+                                request_bounds.max_request_bytes,append_limit.min(request_bounds.max_seat_append_bytes))?;
+                            admitted_result = Some(result);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|error| anyhow::Error::from(HandlerError::Conflict(error.to_string())))
+                    })?;
+                published.ok_or_else(|| anyhow::Error::from(HandlerError::Conflict("seat action anchor changed before publication".into())))
+            })?
     };
-
-    Ok(json!({
-        "project": project_view(
-            ProjectEntry { root: root.clone(), ..project.clone() },
-            Some(&root),
-            true
-        ),
-        "recent": recent.recent_projects,
-        "ui_transition": {
-            "kind": "admit_binding_attachment",
-            "attachment": descriptor,
-        }
-    }))
+    // Recent metadata cannot undo an already committed admission.
+    if let Err(error) = store.touch_recent_project(&project.local_id) {
+        tracing::warn!(%error, local_id = %project.local_id, "Surface admitted but recent project history was not updated");
+    }
+    admitted_result
+        .ok_or_else(|| HandlerError::Internal("Surface publication result missing".into()).into())
 }
 
 /// Resume one durable particular view set without reviving any prior session
 /// authority. Stable project/work identities are resolved again; a project
-/// context receives a freshly compiled retained attachment, while projectless
-/// work remains on the exact invoking attachment.
+/// context receives a newly admitted Surface; projectless work compiles that
+/// Surface explicitly without project authority, never on the invoking root.
 pub async fn handle_particular_view_set_resume(
     params: Value,
     ctx: HandlerContext,
@@ -451,49 +1478,92 @@ pub async fn handle_particular_view_set_resume(
 ) -> Result<Value> {
     let caller = require_seat_caller(&ctx, &state)?;
     let req: ResumeParticularViewSetRequest = parse_request(params)?;
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let origin = crate::seat_auth::compiled_ui_attachment()
-        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))?;
-
+    if uuid::Uuid::parse_str(&req.creation_request_id)
+        .ok()
+        .map(|id| id.to_string())
+        .as_deref()
+        != Some(req.creation_request_id.as_str())
+    {
+        return Err(HandlerError::BadRequest(
+            "creation_request_id must be a canonical UUID".into(),
+        )
+        .into());
+    }
+    let (session, origin) = crate::seat_auth::require_compiled_ui_session(&ctx, &state)?;
+    let producer = crate::seat_auth::require_compiled_ui_producer()?;
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let membership = ui
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &producer.presentation_id,
+            Some(&producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    ui.browser_sessions
+        .require_presentation_attachment(
+            &session.session_id,
+            &producer.presentation_id,
+            &origin.coordinate(),
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let root_attachment = ui
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &membership.root_coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let (resume, project) = {
         let store = locked_principal_store(&ctx, &state).await?;
         let config = store.load_ui_config()?;
+        if config.particular_view_set_library_revision != req.expected_revision {
+            return Err(HandlerError::Conflict(
+                "particular-view-set library revision changed".into(),
+            )
+            .into());
+        }
         let resume = config
             .particular_view_sets
             .into_iter()
-            .find(|candidate| candidate.id == req.id)
+            .find(|entry| entry.id == req.id)
             .ok_or(HandlerError::NotFound)?;
+        validate_particular_view_set_resumes(std::slice::from_ref(&resume))
+            .map_err(HandlerError::BadRequest)?;
+        if req.surface_ref != resume.context.surface_ref {
+            return Err(HandlerError::Conflict(
+                "requested Surface differs from the saved logical Surface".into(),
+            )
+            .into());
+        }
         let projects = store.load_projects()?;
         let project = resume
             .context
             .project
             .as_ref()
-            .map(|project_ref| {
+            .map(|project| {
                 projects
                     .projects
                     .into_iter()
-                    .find(|candidate| candidate.local_id == project_ref.local_id)
+                    .find(|entry| entry.local_id == project.local_id)
                     .ok_or(HandlerError::NotFound)
             })
             .transpose()?;
         (resume, project)
     };
-
     let canonical_project = project
         .as_ref()
         .map(|project| canonical_project_root(&project.root))
         .transpose()?;
-    if canonical_project.is_none()
-        && (origin.project_query_identity.is_some()
-            || origin.project_authority.is_some()
-            || origin.registered_project_id.is_some())
-    {
-        return Err(HandlerError::Forbidden(
-            "projectless particular view sets require a projectless invoking attachment".into(),
-        )
-        .into());
-    }
+    let project_authority = canonical_project
+        .as_ref()
+        .map(|canonical| {
+            lillux::PinnedDirectory::open(canonical)
+                .and_then(|directory| directory.context("particular project disappeared"))
+                .map(Arc::new)
+        })
+        .transpose()?;
     let resolved_work = resume
         .context
         .work
@@ -505,115 +1575,307 @@ pub async fn handle_particular_view_set_resume(
                 canonical_project.as_deref(),
                 &work.chain_root_id,
             )
+            .and_then(|value| serde_json::from_value(value).map_err(Into::into))
         })
         .transpose()?;
-
-    let ui =
-        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
-    let session = ui
-        .browser_sessions
-        .get_session(session_id)
-        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    let (attachment, insertion_attachment_id) = if let (Some(project), Some(canonical)) =
-        (project.as_ref(), canonical_project.as_ref())
+    let resolved = ryeos_client_base::surface::view_sets::ResolvedParticularViewSet {
+        id: resume.id.clone(),
+        name: resume.name.clone(),
+        composition: resume.composition.clone(),
+        relationships: resume.relationships.clone(),
+        resolved_selection_work: resolved_work,
+    };
+    use sha2::{Digest, Sha256};
+    let receipt = crate::browser_session::ParticularSurfaceReceipt {
+        saved_id: resume.id.clone(),
+        library_revision: req.expected_revision,
+        record_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(&resume)?)),
+        surface_ref: req.surface_ref.clone(),
+        registered_project_id: project.as_ref().map(|project| project.local_id.clone()),
+        resolved,
+    };
+    let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+    let append_limit = completed_admission_append_limit(&state)?;
+    let mut admitted_result = None;
+    if serde_json::to_vec(&receipt)?.len() > usize::try_from(bounds.max_request_bytes)? {
+        return Err(HandlerError::BadRequest(
+            "particular resume receipt exceeds current request bounds".into(),
+        )
+        .into());
+    }
+    let compile_request = super::ui_launch_mint::Request {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
+        composition: ryeos_client_base::presentation::UiCompositionSelection::Surface {
+            surface_ref: req.surface_ref,
+        },
+        project_path: canonical_project
+            .as_ref()
+            .map(|root| root.display().to_string()),
+        user_principal_id: None,
+    };
+    let compile_context = HandlerContext::new(
+        session.principal_id.clone(),
+        session.granted_caps.clone(),
+        true,
+    );
+    let (binding, presentation) = super::ui_launch_mint::compile_session_binding(
+        &compile_request,
+        &compile_context,
+        &state,
+        project_authority.as_deref(),
+    )?;
+    if resume.relationships.iter().any(|relationship| {
+        matches!(
+            relationship.source,
+            ryeos_client_base::surface::view_sets::SavedViewSelectionSource::FollowSet { .. }
+        )
+    }) {
+        return Err(HandlerError::Conflict("particular resume cannot prove a saved-set follower until retained composition admission is available".into()).into());
+    }
+    fn admitted_layout(
+        root: &ryeos_client_base::surface::view_sets::LayoutSeedSpec,
+        views: &std::collections::BTreeMap<String, ryeos_api::surface_views::EmbeddedViewIdentity>,
+    ) -> bool {
+        use ryeos_client_base::surface::view_sets::LayoutSeedSpec;
+        match root {
+            LayoutSeedSpec::Group { views: refs, .. } => refs.iter().all(|reference| {
+                matches!(
+                    views.get(&reference.0),
+                    Some(ryeos_api::surface_views::EmbeddedViewIdentity::Resolved { .. })
+                )
+            }),
+            LayoutSeedSpec::Split { first, second, .. } => {
+                admitted_layout(first, views) && admitted_layout(second, views)
+            }
+        }
+    }
+    if resume
+        .composition
+        .root
+        .as_ref()
+        .is_some_and(|root| !admitted_layout(root, &binding.binding.views))
     {
-        let root = canonical.display().to_string();
-        let project_authority = Arc::new(
-            lillux::PinnedDirectory::open(canonical)?
-                .context("selected UI project root disappeared")?,
-        );
-        let compile_context = HandlerContext::new(
-            session.principal_id.clone(),
-            session.granted_caps.clone(),
-            true,
-        );
-        let compile_request = super::ui_launch_mint::Request {
-            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
-            surface_ref: origin.surface_ref.clone(),
-            project_path: Some(root),
-            user_principal_id: None,
+        return Err(HandlerError::Forbidden(
+            "particular composition contains a View outside the selected Surface binding".into(),
+        )
+        .into());
+    }
+    fn layout_refs(
+        root: &ryeos_client_base::surface::view_sets::LayoutSeedSpec,
+        refs: &mut Vec<String>,
+    ) {
+        use ryeos_client_base::surface::view_sets::LayoutSeedSpec;
+        match root {
+            LayoutSeedSpec::Group { views, .. } => {
+                refs.extend(views.iter().map(|view| view.0.clone()))
+            }
+            LayoutSeedSpec::Split { first, second, .. } => {
+                layout_refs(first, refs);
+                layout_refs(second, refs);
+            }
+        }
+    }
+    let mut refs = Vec::new();
+    if let Some(root) = &resume.composition.root {
+        layout_refs(root, &mut refs);
+    }
+    let parsed_views = ryeos_client_base::ui::content::views_from_surface(Some(
+        &json!({"views":presentation.views}),
+    ));
+    for relationship in &resume.relationships {
+        use ryeos_client_base::surface::view_sets::{SavedViewMountRef, SavedViewSelectionSource};
+        let SavedViewMountRef::Tile { index } = &relationship.mount;
+        let view = refs
+            .get(*index)
+            .and_then(|reference| parsed_views.get(reference))
+            .ok_or_else(|| HandlerError::Forbidden("saved mount has no admitted View".into()))?;
+        let expected = ryeos_client_base::ui::attachment::selection_dependencies(view);
+        let declared = match &relationship.source {
+            SavedViewSelectionSource::RequiredSubject { facets, .. } => {
+                facets.iter().cloned().collect()
+            }
+            SavedViewSelectionSource::FollowOwnSet => continue,
+            SavedViewSelectionSource::FollowSet { .. } => unreachable!("rejected before admission"),
         };
-        let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
-            &compile_request,
-            &compile_context,
-            &state,
-            Some(project_authority.as_ref()),
-        )?;
-
-        // Compilation happens outside the principal-store gate. Reacquire and
-        // revalidate both durable records before publishing the new authority.
-        let store = locked_principal_store(&ctx, &state).await?;
-        let config_unchanged = store
-            .load_ui_config()?
+        if expected != declared {
+            return Err(HandlerError::Conflict(
+                "saved subject declaration differs from the current View dependencies".into(),
+            )
+            .into());
+        }
+    }
+    let store = locked_principal_store(&ctx, &state).await?;
+    let config = store.load_ui_config()?;
+    if config.particular_view_set_library_revision != req.expected_revision
+        || !config
             .particular_view_sets
-            .into_iter()
-            .any(|candidate| candidate == resume);
-        let project_unchanged = store
+            .iter()
+            .any(|entry| entry == &resume)
+    {
+        return Err(
+            HandlerError::Conflict("particular saved record changed during resume".into()).into(),
+        );
+    }
+    if let Some(project) = &project {
+        if !store
             .load_projects()?
             .projects
-            .into_iter()
-            .any(|candidate| {
-                candidate.local_id == project.local_id && candidate.root == project.root
-            });
-        if !config_unchanged || !project_unchanged {
-            return Err(HandlerError::Conflict(
-                "particular view-set context changed during resume".into(),
-            )
-            .into());
-        }
-        let policy = state
-            .node_policy
-            .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
-            )?;
-        let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
-        let retained = ui.browser_sessions.publish_attachment(
-            session_id,
-            &origin.coordinate(),
-            crate::browser_session::BindingAttachmentCandidate {
-                registered_project_id: Some(project.local_id.clone()),
-                compiled_binding: Arc::new(compiled_binding),
-                effective_surface,
-                project_authority: Some(project_authority),
-            },
-            usize::try_from(policy.max_live_binding_attachments_per_session)?,
-            state.node_policy.generation_digest(),
-        )?;
-        let descriptor = retained.public_descriptor(request_bounds);
-        let insertion = descriptor.binding_attachment_id.clone();
-        (Some(descriptor), insertion)
-    } else {
-        // A projectless particular set cannot mint new authority. Its current
-        // compiled origin is the only valid insertion context.
-        let store = locked_principal_store(&ctx, &state).await?;
-        if !store
-            .load_ui_config()?
-            .particular_view_sets
-            .into_iter()
-            .any(|candidate| candidate == resume)
+            .iter()
+            .any(|entry| entry.local_id == project.local_id && entry.root == project.root)
         {
             return Err(HandlerError::Conflict(
-                "particular view-set context changed during resume".into(),
+                "particular project registration changed during resume".into(),
             )
             .into());
         }
-        (None, origin.binding_attachment_id.clone())
-    };
-
-    Ok(json!({
-        "particular_view_set": {
-            "id": resume.id,
-            "name": resume.name,
-            "composition": resume.composition,
-            "relationships": resume.relationships,
-            "resolved_selection_work": resolved_work,
+    }
+    if let Some(authority) = &project_authority {
+        authority.ensure_path_binding()?;
+    }
+    let mut proof = ParticularSurfaceAdmission {
+        principal_id: session.principal_id.clone(),
+        project: match (&project, &canonical_project, &project_authority) {
+            (Some(project), Some(root), Some(authority)) => {
+                Some(RegisteredProjectSurfaceAdmission {
+                    principal_id: session.principal_id.clone(),
+                    local_id: project.local_id.clone(),
+                    root: root.display().to_string(),
+                    authority: authority.clone(),
+                })
+            }
+            (None, None, None) => None,
+            _ => {
+                return Err(
+                    HandlerError::Internal("particular project authority mismatch".into()).into(),
+                );
+            }
         },
-        "ui_transition": {
-            "kind": "resume_particular_view_set",
-            "attachment": attachment,
-            "insertion_attachment_id": insertion_attachment_id,
-        }
-    }))
+        receipt,
+        max_receipt_bytes: usize::try_from(bounds.max_request_bytes)?,
+    };
+    let root_resolution = root_attachment
+        .project_authority
+        .as_ref()
+        .map(|authority| authority.descriptor_path())
+        .transpose()?;
+    let project_resolution = project_authority
+        .as_ref()
+        .map(|authority| authority.descriptor_path())
+        .transpose()?;
+    let ingress =
+        super::ui_seat::read_completed_seat_ingress(state.clone(), &session, &producer).await?;
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+    )?;
+    let _publication = {
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        let checked = ingress.authorize(&state, &session, &producer)?;
+        let action_anchor = &checked.action;
+        ui.browser_sessions
+            .require_presentation_attachment(
+                &session.session_id,
+                &producer.presentation_id,
+                &origin.coordinate(),
+                state.node_policy.generation_digest(),
+            )
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        proof.receipt.resolved.resolved_selection_work = resume
+            .context
+            .work
+            .as_ref()
+            .map(|work| {
+                resolve_particular_work(
+                    &state,
+                    caller.principal_id(),
+                    canonical_project.as_deref(),
+                    &work.chain_root_id,
+                )
+                .and_then(|value| serde_json::from_value(value).map_err(Into::into))
+            })
+            .transpose()?;
+        state
+            .engine
+            .with_checked_bundle_generation(|generation| -> Result<_> {
+                let current = generation.request_engine_generation_identity();
+                if current
+                    != root_attachment
+                        .compiled_binding
+                        .binding
+                        .request_engine_generation_identity
+                    || current != binding.binding.request_engine_generation_identity
+                {
+                    return Err(HandlerError::Conflict(
+                        "UI engine generation changed during particular resume".into(),
+                    )
+                    .into());
+                }
+                super::ui_launch_mint::revalidate_binding_authority(
+                    generation,
+                    &state,
+                    root_attachment.compiled_binding.as_ref(),
+                    root_resolution.as_deref(),
+                    root_attachment.project_authority.as_deref(),
+                )?;
+                super::ui_launch_mint::revalidate_binding_authority(
+                    generation,
+                    &state,
+                    &binding,
+                    project_resolution.as_deref(),
+                    project_authority.as_deref(),
+                )?;
+                let published = state.state_store.with_exact_seat_action_if_mixed_cut(
+                    &producer.thread_id, &producer.thread_id, &action_anchor.anchor,
+                    &checked.anchors,
+                    &checked.retired,
+                    &action_anchor.owner, &action_anchor.item_ref, &action_anchor.executor_ref, || {
+                ui.browser_sessions.reconcile_presentation_mount_frontier(
+                    &session.session_id, &producer.presentation_id, &membership.root_coordinate,
+                    state.node_policy.generation_digest(), ingress.next_mount_id(),
+                ).map_err(|error| HandlerError::Conflict(error.to_string()))?;
+                ui.browser_sessions
+                    .publish_particular_surface(
+                        &session.session_id,
+                        &producer.presentation_id,
+                        &req.creation_request_id,
+                        &membership.root_coordinate,
+                        crate::browser_session::BindingAttachmentCandidate {
+                            registered_project_id: project
+                                .as_ref()
+                                .map(|project| project.local_id.clone()),
+                            compiled_binding: Arc::new(binding),
+                            presentation,
+                            project_authority: project_authority.clone(),
+                        },
+                        usize::try_from(policy.max_live_binding_attachments_per_session)?,
+                        usize::try_from(policy.max_surface_instances_per_presentation)?,
+                        usize::try_from(policy.shared_presentation.max_label_bytes)?,
+                        state.node_policy.generation_digest(),
+                        &proof,
+                        |surface, attachment| {
+                            let retained = surface.particular_resume.as_ref()
+                                .ok_or(crate::browser_session::AttachmentStoreError::PresentationInvalid)?;
+                            let result = json!({"particular_view_set":retained.resolved,
+                                "particular_selection":retained.particular_selection(),
+                                "ui_transition":{"kind":"resume_particular_view_set","presentation_id":producer.presentation_id,
+                                    "surface":surface.public_descriptor(),"attachment":attachment.public_descriptor(bounds),
+                                    "creation_request_id":req.creation_request_id}});
+                            validate_completed_admission_size(&result,&producer,&req.creation_request_id,
+                                bounds.max_request_bytes,append_limit.min(bounds.max_seat_append_bytes))?;
+                            admitted_result = Some(result);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|error| anyhow::Error::from(HandlerError::Conflict(error.to_string())))
+                    })?;
+                published.ok_or_else(|| anyhow::Error::from(HandlerError::Conflict("seat action anchor changed before publication".into())))
+            })?
+    };
+    admitted_result.ok_or_else(|| {
+        HandlerError::Internal("particular publication result missing".into()).into()
+    })
 }
 
 fn resolve_particular_work(
@@ -683,9 +1945,29 @@ pub async fn handle_config_get(
     require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let config = store.load_ui_config()?;
-    let registered_project_id = crate::seat_auth::compiled_ui_attachment()
-        .and_then(|attachment| attachment.registered_project_id.clone());
     let mut response = json!(config);
+    // Each ordinary selection row carries the revision actually observed by
+    // this source and its saved logical Surface. Neither is ambient authority.
+    if let Some(rows) = response["particular_view_sets"].as_array_mut() {
+        for row in rows {
+            row["expected_revision"] = json!(config.particular_view_set_library_revision);
+            row["surface_ref"] = row["context"]["surface_ref"].clone();
+        }
+    }
+    if let Some(rows) = response["particular_surfaces"].as_array_mut() {
+        for row in rows {
+            row["expected_revision"] = json!(config.particular_surface_library_revision);
+            row["view_set_expected_revision"] = json!(config.particular_view_set_library_revision);
+        }
+    }
+    if let Some(rows) = response["reusable_surfaces"].as_array_mut() {
+        for row in rows {
+            row["expected_revision"] = json!(config.reusable_surface_library_revision);
+            // Missing fresh subjects intentionally reopen as unresolved; this
+            // source projection neither restores old values nor grants access.
+            row["fresh_subjects"] = json!({});
+        }
+    }
     // Response-only row for the ordinary sections renderer. The durable file
     // remains the bounded config contract, with no duplicated library state.
     response["view_set_save_context"] = json!([{
@@ -701,8 +1983,25 @@ pub async fn handle_config_get(
         "description": "Stores stable project and logical-work references; authority and live placement are resolved again on resume",
         "context": {
             "expected_revision": config.particular_view_set_library_revision,
-            "particular_view_sets": config.particular_view_sets,
-            "project_local_id": registered_project_id
+            "particular_view_sets": config.particular_view_sets
+        }
+    }]);
+    response["reusable_surface_save_context"] = json!([{
+        "label": "Save current Surface",
+        "description": "Captures its ordered tabs and original logical origin; subjects are supplied afresh when reused",
+        "context": {
+            "expected_revision": config.reusable_surface_library_revision,
+            "reusable_surfaces": config.reusable_surfaces
+        }
+    }]);
+    response["particular_surface_save_context"] = json!([{
+        "label": "Retain current Surface",
+        "description": "Atomically retains all ordered particular tabs with their independent logical subjects",
+        "context": {
+            "expected_revision": config.particular_surface_library_revision,
+            "particular_surfaces": config.particular_surfaces,
+            "view_set_expected_revision": config.particular_view_set_library_revision,
+            "particular_view_sets": config.particular_view_sets
         }
     }]);
     Ok(response)
@@ -723,6 +2022,19 @@ pub async fn handle_config_update(
 }
 
 fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -> Result<()> {
+    // Validate the complete proposed file before replacing any library. This
+    // includes references to particular sets updated in the same transaction,
+    // and checked revision increments across independent namespaces.
+    let mut staged = config.clone();
+    apply_config_update_staged(&mut staged, req)?;
+    *config = staged;
+    Ok(())
+}
+
+fn apply_config_update_staged(
+    config: &mut RyeOsConfigFile,
+    req: UpdateConfigRequest,
+) -> Result<()> {
     if let Some(theme) = req.theme.as_deref() {
         validate_choice("theme", theme, &["system", "light", "dark"])?;
     }
@@ -751,6 +2063,22 @@ fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -
             .into());
         }
     }
+    if let Some(update) = &req.reusable_surface_library {
+        if update.expected_revision != config.reusable_surface_library_revision {
+            return Err(HandlerError::Conflict(
+                "reusable-surface library revision advanced".into(),
+            )
+            .into());
+        }
+    }
+    if let Some(update) = &req.particular_surface_library {
+        if update.expected_revision != config.particular_surface_library_revision {
+            return Err(HandlerError::Conflict(
+                "particular-surface library revision advanced".into(),
+            )
+            .into());
+        }
+    }
     if let Some(theme) = req.theme {
         config.theme = theme;
     }
@@ -773,6 +2101,24 @@ fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -
             })?;
         config.particular_view_sets = update.particular_view_sets;
     }
+    if let Some(update) = req.reusable_surface_library {
+        config.reusable_surface_library_revision = config
+            .reusable_surface_library_revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                HandlerError::Conflict("reusable-surface library revision exhausted".into())
+            })?;
+        config.reusable_surfaces = update.reusable_surfaces;
+    }
+    if let Some(update) = req.particular_surface_library {
+        config.particular_surface_library_revision = config
+            .particular_surface_library_revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                HandlerError::Conflict("particular-surface library revision exhausted".into())
+            })?;
+        config.particular_surfaces = update.particular_surfaces;
+    }
     validate_ui_config(config)
 }
 
@@ -788,17 +2134,6 @@ fn canonical_project_root(root: &str) -> Result<PathBuf> {
         return Err(HandlerError::BadRequest("project root is not a directory".into()).into());
     }
     Ok(canonical)
-}
-
-fn project_root_locator_for_forget(root: &str) -> Result<String> {
-    let path = PathBuf::from(root);
-    if !path.is_absolute() {
-        return Err(HandlerError::BadRequest("project root must be absolute".into()).into());
-    }
-    match path.canonicalize() {
-        Ok(canonical) => Ok(canonical.display().to_string()),
-        Err(_) => Ok(path.display().to_string()),
-    }
 }
 
 trait RyeOsPrincipalStoreExt {
@@ -892,15 +2227,16 @@ fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
         return Ok(None);
     };
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     let principal_id = &attachment.compiled_binding.binding.principal_id;
     Ok((principal_id.as_str() != operator.principal_id().as_str()).then(|| principal_id.clone()))
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
     if let Some(attachment) = crate::seat_auth::compiled_ui_attachment() {
-        let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.config.operator_signing_key_path,
+        )?;
         if attachment.compiled_binding.binding.principal_id != operator.principal_id() {
             return Err(HandlerError::Forbidden(
                 "UI session has no retained local-operator store authority".into(),
@@ -936,7 +2272,46 @@ fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
     validate_choice("landing_view", &config.landing_view, &["projects"])?;
     validate_saved_view_set_templates(&config.saved_view_sets).map_err(HandlerError::BadRequest)?;
     validate_particular_view_set_resumes(&config.particular_view_sets)
-        .map_err(|error| HandlerError::BadRequest(error).into())
+        .map_err(HandlerError::BadRequest)?;
+    validate_surface_libraries(config)
+}
+
+fn validate_surface_libraries(config: &RyeOsConfigFile) -> Result<()> {
+    ryeos_client_base::surface::saved_surfaces::validate_saved_surface_libraries(
+        &config.reusable_surfaces,
+        &config.particular_surfaces,
+        &config.particular_view_sets,
+    )
+    .map_err(HandlerError::BadRequest)?;
+    // Canonical reference interpretation stays with the engine; the shared
+    // data contract never grants admission from its logical origin strings.
+    for origin in config
+        .reusable_surfaces
+        .iter()
+        .map(|record| &record.origin)
+        .chain(
+            config
+                .particular_surfaces
+                .iter()
+                .map(|record| &record.origin),
+        )
+        .chain(
+            config
+                .reusable_surfaces
+                .iter()
+                .flat_map(|record| record.tab_origins.values()),
+        )
+    {
+        if !ryeos_engine::canonical_ref::CanonicalRef::parse(&origin.surface_ref)
+            .is_ok_and(|reference| reference.kind == "surface")
+        {
+            return Err(HandlerError::BadRequest(
+                "saved Surface origin is not a canonical Surface reference".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_choice(field: &str, value: &str, allowed: &[&str]) -> Result<()> {
@@ -948,10 +2323,6 @@ fn validate_choice(field: &str, value: &str, allowed: &[&str]) -> Result<()> {
         allowed.join(", ")
     ))
     .into())
-}
-
-fn session_id_from_context(ctx: &HandlerContext) -> Option<&str> {
-    ctx.fingerprint.strip_prefix("session:")
 }
 
 fn inferred_project_name(root: &Path) -> String {
@@ -1057,11 +2428,14 @@ fn same_existing_dir(left: &str, right: &str) -> bool {
 
 macro_rules! descriptor {
     ($name:ident, $service_ref:literal, $endpoint:literal, $handler:ident) => {
+        descriptor!($name, $service_ref, $endpoint, $handler, &[]);
+    };
+    ($name:ident, $service_ref:literal, $endpoint:literal, $handler:ident, $caps:expr) => {
         pub const $name: ServiceDescriptor = ServiceDescriptor {
             service_ref: $service_ref,
             endpoint: $endpoint,
             availability: ServiceAvailability::DaemonOnly,
-            required_caps: &[],
+            required_caps: $caps,
             handler: |params, ctx, state| {
                 Box::pin(async move { $handler(params, ctx, state).await })
             },
@@ -1079,7 +2453,8 @@ descriptor!(
     PROJECTS_ADD_DESCRIPTOR,
     "service:projects/add",
     "projects.add",
-    handle_projects_add
+    handle_projects_add,
+    &["ryeos.execute.service.projects/add"]
 );
 descriptor!(
     PROJECTS_FORGET_DESCRIPTOR,
@@ -1097,7 +2472,8 @@ descriptor!(
     PROJECTS_OPEN_DESCRIPTOR,
     "service:projects/open",
     "projects.open",
-    handle_projects_open
+    handle_projects_open,
+    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     UI_PROJECTS_LIST_DESCRIPTOR,
@@ -1109,7 +2485,8 @@ descriptor!(
     UI_PROJECTS_ADD_DESCRIPTOR,
     "service:ui/projects/add",
     "ui.projects.add",
-    handle_projects_add
+    handle_projects_add,
+    &["ryeos.execute.service.projects/add"]
 );
 descriptor!(
     UI_PROJECTS_FORGET_DESCRIPTOR,
@@ -1127,7 +2504,8 @@ descriptor!(
     UI_PROJECTS_OPEN_DESCRIPTOR,
     "service:ui/projects/open",
     "ui.projects.open",
-    handle_projects_open
+    handle_projects_open,
+    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RYEOS_UI_PROJECTS_LIST_DESCRIPTOR,
@@ -1139,7 +2517,8 @@ descriptor!(
     RYEOS_UI_PROJECTS_ADD_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/add",
     "ui.ryeos.projects.add",
-    handle_projects_add
+    handle_projects_add,
+    &["ryeos.execute.service.projects/add"]
 );
 descriptor!(
     RYEOS_UI_PROJECTS_FORGET_DESCRIPTOR,
@@ -1157,7 +2536,8 @@ descriptor!(
     RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/open",
     "ui.ryeos.projects.open",
-    handle_projects_open
+    handle_projects_open,
+    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RECENT_TOUCH_DESCRIPTOR,
@@ -1181,18 +2561,167 @@ descriptor!(
     CONFIG_UPDATE_DESCRIPTOR,
     "service:ui/ryeos-ui/config/update",
     "ui.ryeos.config.update",
-    handle_config_update
+    handle_config_update,
+    &["ryeos.execute.service.ui/ryeos-ui/config/update"]
 );
 descriptor!(
     PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
     "service:ui/ryeos-ui/view-sets/resume",
     "ui.ryeos.view-sets.resume",
-    handle_particular_view_set_resume
+    handle_particular_view_set_resume,
+    &["ryeos.execute.service.ui/ryeos-ui/view-sets/resume"]
+);
+descriptor!(
+    PARTICULAR_SURFACE_RESUME_DESCRIPTOR,
+    "service:ui/ryeos-ui/surfaces/resume",
+    "ui.ryeos.surfaces.resume",
+    handle_particular_surface_resume,
+    &["ryeos.execute.service.ui/ryeos-ui/surfaces/resume"]
 );
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_mutation_descriptors_and_signed_definitions_require_exact_operation_caps() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/services");
+        for (descriptor, operation) in [
+            (&PROJECTS_ADD_DESCRIPTOR, "projects/add"),
+            (&UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
+            (&RYEOS_UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
+            (&PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
+            (&UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
+            (&RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
+            (&CONFIG_UPDATE_DESCRIPTOR, "ui/ryeos-ui/config/update"),
+            (
+                &PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
+                "ui/ryeos-ui/view-sets/resume",
+            ),
+            (
+                &PARTICULAR_SURFACE_RESUME_DESCRIPTOR,
+                "ui/ryeos-ui/surfaces/resume",
+            ),
+            (
+                &super::super::ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
+                "ui/session/surfaces/open",
+            ),
+        ] {
+            let cap = format!("ryeos.execute.service.{operation}");
+            assert_eq!(
+                descriptor.required_caps,
+                &[cap.as_str()],
+                "{}",
+                descriptor.service_ref
+            );
+            let path = root.join(format!(
+                "{}.yaml",
+                descriptor.service_ref.strip_prefix("service:").unwrap()
+            ));
+            let definition: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(
+                definition["required_caps"],
+                json!([cap]),
+                "{}",
+                descriptor.service_ref
+            );
+            assert_eq!(definition["endpoint"], descriptor.endpoint);
+            // Preserve each existing dispatch class, including aliases.
+            if matches!(
+                descriptor.service_ref,
+                "service:projects/add"
+                    | "service:projects/open"
+                    | "service:ui/session/surfaces/open"
+                    | "service:ui/ryeos-ui/view-sets/resume"
+                    | "service:ui/ryeos-ui/surfaces/resume"
+            ) {
+                assert_eq!(definition["ui_dispatch"], "session_local");
+            } else {
+                assert!(definition.get("ui_dispatch").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_choices_and_notices_share_one_response_delta_bound() {
+        let mut notices = Vec::new();
+        push_discovery_notice(&[], &mut notices, "unavailable", 0).unwrap();
+        assert!(notices.is_empty());
+        let notice = json!({"label":"unavailable"});
+        let charge = serde_json::to_vec(&json!({
+            "project_surfaces": [], "project_surface_notices": [notice]
+        }))
+        .unwrap()
+        .len()
+            - serde_json::to_vec(&json!({
+                "project_surfaces": [], "project_surface_notices": []
+            }))
+            .unwrap()
+            .len();
+        push_discovery_notice(&[], &mut notices, "unavailable", charge).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            !discovery_fits(
+                &[json!({"surface_ref":"surface:test/entry"})],
+                &notices,
+                charge
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn admission_size_charges_completion_and_full_append_envelope() {
+        let producer = ryeos_client_base::ui::UiPresentationProducer {
+            presentation_id: uuid::Uuid::new_v4().to_string(),
+            thread_id: "T-presentation".into(),
+            producer_incarnation: uuid::Uuid::new_v4().to_string(),
+        };
+        let operation = uuid::Uuid::new_v4().to_string();
+        let result = json!({"escaped":"\"\\\n".repeat(100)});
+        let completed =
+            ryeos_client_base::ui::admission_operation::UiCompletedPresentationOperation {
+                operation_id: operation.clone(),
+                result: result.clone(),
+            };
+        let result_bytes = serde_json::to_vec(&result).unwrap().len() as u64;
+        let completed_bytes = serde_json::to_vec(&completed).unwrap().len() as u64;
+        assert!(
+            validate_completed_admission_size(
+                &result,
+                &producer,
+                &operation,
+                result_bytes,
+                u64::MAX
+            )
+            .is_err()
+        );
+        assert!(
+            validate_completed_admission_size(
+                &result,
+                &producer,
+                &operation,
+                completed_bytes,
+                completed_bytes
+            )
+            .is_err()
+        );
+        assert!(
+            validate_completed_admission_size(
+                &result,
+                &producer,
+                &operation,
+                completed_bytes,
+                65536
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_completed_admission_size(&result, &producer, &operation, 0, 65536).is_err()
+        );
+    }
 
     #[test]
     fn projects_file_defaults_to_version_one() {
@@ -1204,11 +2733,15 @@ mod tests {
     #[test]
     fn ui_config_defaults_to_empty_revisioned_view_set_library() {
         let config = RyeOsConfigFile::default();
-        assert_eq!(config.version, 4);
+        assert_eq!(config.version, 6);
         assert_eq!(config.view_set_library_revision, 0);
         assert!(config.saved_view_sets.is_empty());
         assert_eq!(config.particular_view_set_library_revision, 0);
         assert!(config.particular_view_sets.is_empty());
+        assert_eq!(config.reusable_surface_library_revision, 0);
+        assert!(config.reusable_surfaces.is_empty());
+        assert_eq!(config.particular_surface_library_revision, 0);
+        assert!(config.particular_surfaces.is_empty());
         validate_ui_config(&config).unwrap();
     }
 
@@ -1220,14 +2753,14 @@ mod tests {
                     "id": "development",
                     "name": "Development",
                     "composition": {
+                        "schema": 2,
                         "id": "development",
                         "title": "Development",
                         "root": {
                             "type": "group",
                             "views": ["view:ryeos/development"],
                             "active": 0
-                        },
-                        "slots": {}
+                        }
                     },
                     "relationships": [{
                         "mount": {"kind": "tile", "index": 0},
@@ -1260,20 +2793,21 @@ mod tests {
                     "id": "development-current",
                     "name": "Development current",
                     "composition": {
+                        "schema": 2,
                         "id": "development-current",
                         "title": "Development current",
                         "root": {
                             "type": "group",
                             "views": ["view:ryeos/development"],
                             "active": 0
-                        },
-                        "slots": {}
+                        }
                     },
                     "relationships": [{
                         "mount": {"kind": "tile", "index": 0},
                         "source": {"mode": "follow_own_set"}
                     }],
                     "context": {
+                        "surface_ref": "surface:test/particular",
                         "project": {"local_id": "prj_example"},
                         "work": {"chain_root_id": "T-root"}
                     }
@@ -1297,17 +2831,194 @@ mod tests {
         assert_eq!(config, before);
     }
 
+    fn reusable_surface_update(expected_revision: u64) -> UpdateConfigRequest {
+        let template = saved_view_set_update(0)
+            .view_set_library
+            .unwrap()
+            .saved_view_sets
+            .remove(0);
+        serde_json::from_value(json!({"reusable_surface_library": {
+            "expected_revision":expected_revision,
+            "reusable_surfaces":[{"id":"development","title":"Development","origin":{"surface_ref":"surface:test/origin"},
+                "view_sets":[template],"tab_origins":{"development":{"surface_ref":"surface:test/origin"}},"active_view_set_id":"development"}]
+        }}))
+        .unwrap()
+    }
+
+    fn particular_surface_update(expected_revision: u64, set: &str) -> UpdateConfigRequest {
+        serde_json::from_value(json!({"particular_surface_library": {
+            "expected_revision":expected_revision,
+            "particular_surfaces":[{"id":"development","title":"Development current","origin":{"surface_ref":"surface:test/origin"},
+                "view_set_ids":[set],"active_view_set_id":set}]
+        }}))
+        .unwrap()
+    }
+
+    #[test]
+    fn saved_surface_libraries_have_separate_ids_and_atomic_revision_fences() {
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, reusable_surface_update(0)).unwrap();
+        apply_config_update(&mut config, particular_view_set_update(0)).unwrap();
+        apply_config_update(
+            &mut config,
+            particular_surface_update(0, "development-current"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.reusable_surfaces[0].id,
+            config.particular_surfaces[0].id
+        );
+        assert_eq!(config.reusable_surface_library_revision, 1);
+        assert_eq!(config.particular_surface_library_revision, 1);
+        let before = config.clone();
+        assert!(apply_config_update(&mut config, reusable_surface_update(0)).is_err());
+        assert_eq!(config, before);
+        let mut combined = reusable_surface_update(1);
+        combined.particular_surface_library =
+            particular_surface_update(0, "development-current").particular_surface_library;
+        assert!(apply_config_update(&mut config, combined).is_err());
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn particular_surface_resume_rejects_tab_only_library_advance() {
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, particular_view_set_update(0)).unwrap();
+        apply_config_update(
+            &mut config,
+            particular_surface_update(0, "development-current"),
+        )
+        .unwrap();
+        let request = ResumeParticularSurfaceRequest {
+            id: "development".into(),
+            expected_revision: config.particular_surface_library_revision,
+            view_set_expected_revision: config.particular_view_set_library_revision,
+            creation_request_id: uuid::Uuid::new_v4().to_string(),
+        };
+        assert!(require_particular_surface_revisions(&config, &request).is_ok());
+        let mut changed_tabs = particular_view_set_update(1);
+        changed_tabs
+            .particular_view_set_library
+            .as_mut()
+            .unwrap()
+            .particular_view_sets[0]
+            .name = "Changed development tab".into();
+        apply_config_update(&mut config, changed_tabs).unwrap();
+        assert_eq!(
+            config.particular_view_sets[0].name,
+            "Changed development tab"
+        );
+        assert_eq!(
+            config.particular_surface_library_revision,
+            request.expected_revision
+        );
+        assert!(
+            require_particular_surface_revisions(&config, &request)
+                .unwrap_err()
+                .to_string()
+                .contains("particular view-set library revision changed")
+        );
+    }
+
+    #[test]
+    fn final_config_references_are_checked_without_partial_mutation() {
+        let mut config = RyeOsConfigFile::default();
+        let before = config.clone();
+        assert!(apply_config_update(&mut config, particular_surface_update(0, "missing")).is_err());
+        assert_eq!(config, before);
+        let mut combined = particular_view_set_update(0);
+        combined.particular_surface_library =
+            particular_surface_update(0, "development-current").particular_surface_library;
+        apply_config_update(&mut config, combined).unwrap();
+        let before = config.clone();
+        let remove = serde_json::from_value(json!({"particular_view_set_library": {
+            "expected_revision":1,"particular_view_sets":[]
+        }}))
+        .unwrap();
+        assert!(apply_config_update(&mut config, remove).is_err());
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn saved_surface_records_preserve_order_and_reject_invalid_active_tabs_or_authority() {
+        let mut update = reusable_surface_update(0);
+        let record = &mut update
+            .reusable_surface_library
+            .as_mut()
+            .unwrap()
+            .reusable_surfaces[0];
+        let mut second = record.view_sets[0].clone();
+        second.id = "review".into();
+        second.composition.id = "review".into();
+        record.view_sets.push(second);
+        record
+            .tab_origins
+            .insert("review".into(), record.origin.clone());
+        record.active_view_set_id = "review".into();
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, update).unwrap();
+        let encoded = serde_json::to_value(&config).unwrap();
+        let decoded: RyeOsConfigFile = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, config);
+        assert_eq!(decoded.reusable_surfaces[0].view_sets[0].id, "development");
+        assert_eq!(decoded.reusable_surfaces[0].active_view_set_id, "review");
+        let mut invalid = reusable_surface_update(1);
+        invalid
+            .reusable_surface_library
+            .as_mut()
+            .unwrap()
+            .reusable_surfaces[0]
+            .active_view_set_id = "missing".into();
+        let before = config.clone();
+        assert!(apply_config_update(&mut config, invalid).is_err());
+        assert_eq!(config, before);
+        assert!(
+            serde_json::from_value::<ParticularSurfaceRecord>(json!({
+                "id":"private","title":"Private","view_set_ids":["development-current"],
+                "origin":{"surface_ref":"surface:test/origin"},
+                "active_view_set_id":"development-current", "binding_generation":9
+            }))
+            .is_err()
+        );
+        let mut predecessor = serde_json::to_value(RyeOsConfigFile::default()).unwrap();
+        predecessor["version"] = json!(5);
+        assert!(validate_ui_config(&serde_json::from_value(predecessor).unwrap()).is_err());
+    }
+
+    #[test]
+    fn revision_exhaustion_and_tab_bounds_leave_all_libraries_unchanged() {
+        let mut config = RyeOsConfigFile::default();
+        config.particular_surface_library_revision = u64::MAX;
+        let before = config.clone();
+        let mut combined = reusable_surface_update(0);
+        combined.particular_surface_library =
+            particular_surface_update(u64::MAX, "missing").particular_surface_library;
+        assert!(apply_config_update(&mut config, combined).is_err());
+        assert_eq!(config, before);
+        let mut update = reusable_surface_update(0);
+        let record = &mut update
+            .reusable_surface_library
+            .as_mut()
+            .unwrap()
+            .reusable_surfaces[0];
+        let original = record.view_sets[0].clone();
+        for index in 1..=ryeos_client_base::surface::view_sets::MAX_VIEW_SETS {
+            let mut tab = original.clone();
+            tab.id = format!("tab-{index}");
+            tab.composition.id = tab.id.clone();
+            record
+                .tab_origins
+                .insert(tab.id.clone(), record.origin.clone());
+            record.view_sets.push(tab);
+        }
+        assert!(apply_config_update(&mut config, update).is_err());
+        assert_eq!(config, before);
+    }
+
     #[test]
     fn relative_project_root_is_rejected() {
         let err = canonical_project_root("relative/path").unwrap_err();
         assert!(err.to_string().contains("project root must be absolute"));
-    }
-
-    #[test]
-    fn forget_root_locator_accepts_missing_absolute_paths() {
-        let locator = project_root_locator_for_forget("/definitely/missing/ryeos/project")
-            .expect("missing absolute path should still be usable for forget");
-        assert_eq!(locator, "/definitely/missing/ryeos/project");
     }
 
     #[test]

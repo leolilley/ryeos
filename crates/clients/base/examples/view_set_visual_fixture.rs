@@ -2,7 +2,8 @@
 //! no daemon, credentials, installed state or execution requests are involved.
 use ryeos_client_base::ui::{
     BrowserSession, BrowserViewport, RyeOsCore, RyeOsEvent, RyeOsSourceInstanceKey, RyeOsUiEvent,
-    RyeOsUiIntent, UiBindingAttachment, UiBindingRequestBounds,
+    RyeOsUiIntent, UiBindingAttachment, UiBindingAttachmentCoordinate, UiBindingRequestBounds,
+    UiPresentationMembership, UiSurfaceMembership,
 };
 use serde_json::{Value, json};
 
@@ -13,10 +14,10 @@ fn dispatch(core: &mut RyeOsCore, intent: RyeOsUiIntent) {
 }
 
 fn populate(core: &mut RyeOsCore, data: &Value) {
-    let view_set = &core.view_sets[core.active_view_set];
-    let mut mounts: Vec<_> = view_set
-        .tiles
-        .values()
+    let mut mounts: Vec<_> = core
+        .active_view_set()
+        .into_iter()
+        .flat_map(|set| set.tiles.values())
         .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone()))
         .collect();
     mounts.extend(core.visible_dock_views());
@@ -52,18 +53,18 @@ fn main() {
     conversation["projections"]["event_kinds"]["author"] =
         json!({"primary":"text","meta":"label","role":"line"});
     let surface = json!({
-        "name":"visual-qualification", "style":{"view_set_tabs":true,"border":"thin"},
+        "name":"visual-qualification", "title":"Visual fixture", "style":{"view_set_tabs":true,"border":"thin"},
         "library":[{"group":"Work","views":["view:fixture/conversation","view:fixture/changes","view:fixture/execution"]},
             {"group":"Explore","views":["view:fixture/projects","view:fixture/overview"]}],
         "view_sets":[
-            {"id":"overview","title":"Overview","root":{"type":"group","views":["view:fixture/overview","view:fixture/projects"],"active":0}},
-            {"id":"development","title":"Development","slots":{"left":{"content":"view:fixture/projects","open":true,"size":26}},
+            {"schema":2,"id":"overview","title":"Overview","root":{"type":"group","views":["view:fixture/overview","view:fixture/projects"],"active":0}},
+            {"schema":2,"id":"development","title":"Development",
              "root":{"type":"split","axis":"horizontal","ratio":0.72,
                 "first":{"type":"group","views":["view:fixture/conversation","view:fixture/activity","view:fixture/evidence"],"active":0},
                 "second":{"type":"split","axis":"vertical","ratio":0.525,
                     "first":{"type":"group","views":["view:fixture/changes"],"active":0},
                     "second":{"type":"group","views":["view:fixture/execution"],"active":0}}}},
-            {"id":"review","title":"Review","root":{"type":"group","views":["view:fixture/changes","view:fixture/evidence"],"active":0}}
+            {"schema":2,"id":"review","title":"Review","root":{"type":"group","views":["view:fixture/changes","view:fixture/evidence"],"active":0}}
         ],
         "views":{
             "view:fixture/conversation":conversation,
@@ -139,28 +140,106 @@ fn main() {
             {"title":"Draft restoration","state":"◈ Running  24s","glyph":""}]},
         "view:fixture/evidence":{"rows":[{"title":"Sample evidence only","detail":"No execution or qualification is claimed by this preview","state":"FIXTURE"}]}
     });
+    let surface_attachment = UiBindingAttachment {
+        binding_attachment_id: "visual-fixture-attachment".into(),
+        binding_generation: 1,
+        binding_digest: "visual-fixture-binding".into(),
+        root_ref: "surface:fixture/visual".into(),
+        root_generation: "visual-fixture-surface".into(),
+        presentation:
+            ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
+                surface.clone(),
+            )
+            .unwrap(),
+        project_path: None,
+        subject: ryeos_client_base::ui::UiBindingSubject::Projectless,
+        posture: Default::default(),
+        binding_request_bounds: UiBindingRequestBounds {
+            max_request_bytes: 64 * 1024,
+            max_input_bytes: 16 * 1024,
+            max_seat_append_bytes: 64 * 1024,
+        },
+    };
+    let shared_attachment = UiBindingAttachment {
+        binding_attachment_id: "visual-shared-attachment".into(),
+        binding_generation: 2,
+        binding_digest: "visual-shared-binding".into(),
+        root_ref: "config:fixture/presentation".into(),
+        root_generation: "visual-shared-config".into(),
+        presentation: serde_json::from_value(json!({
+            "definition":{"kind":"shared_presentation","config":{
+                "category":"ui","shared_presentation":{
+                    "schema":1,"title":"Visual fixture","launcher":"launch",
+                    "dialogs":[{"id":"launch","title":"Fixture launch","view":"view:fixture/launch"}],
+                    "docks":{"left":{"content":"view:fixture/projects","open":true,"size":32}},
+                    "capabilities":{"sources":[],"affordances":[]}
+                }
+            }},
+            "views":{
+                "view:fixture/projects":surface["views"]["view:fixture/projects"],
+                "view:fixture/launch":{"widget":"text","title":"Fixture launch",
+                    "body":{"lines":["Visual fixture only — no live launch operation."]}}
+            }
+        })).unwrap(),
+        project_path: None, subject: ryeos_client_base::ui::UiBindingSubject::Projectless, posture: Default::default(),
+        binding_request_bounds: surface_attachment.binding_request_bounds,
+    };
+    let coordinate = |attachment: &UiBindingAttachment| UiBindingAttachmentCoordinate {
+        binding_attachment_id: attachment.binding_attachment_id.clone(),
+        binding_generation: attachment.binding_generation,
+        binding_digest: attachment.binding_digest.clone(),
+    };
+    let presentation_id = "11111111-1111-4111-8111-111111111111";
+    let seeds = surface_attachment
+        .presentation
+        .definition
+        .surface()
+        .unwrap()
+        .to_mount_seeds()
+        .expect("fixture mount seeds");
+    let active_seed = seeds.first().map(|seed| seed.id.clone());
+    let mount_manifest =
+        ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest::allocate(
+            ryeos_client_base::ids::PresentationId::try_new(presentation_id).unwrap(),
+            ryeos_client_base::ids::SurfaceInstanceId::try_new(
+                "22222222-2222-4222-8222-222222222222",
+            )
+            .unwrap(),
+            1,
+            seeds
+                .into_iter()
+                .map(|seed| (seed, coordinate(&surface_attachment)))
+                .collect(),
+            active_seed.as_deref(),
+        )
+        .expect("fixture mount manifest");
+    let membership = UiPresentationMembership {
+        next_mount_id: mount_manifest.next_mount_id,
+        initialization_digest: "a".repeat(64),
+        presentation_id: presentation_id.into(),
+        root_binding: coordinate(&shared_attachment),
+        thread_id: None,
+        chain_root_id: None,
+        surfaces: vec![UiSurfaceMembership {
+            mount_manifest,
+            saved_surface: None,
+            surface_instance_id: "22222222-2222-4222-8222-222222222222".into(),
+            ordinal: 1,
+            title: "Visual fixture".into(),
+            binding: coordinate(&surface_attachment),
+        }],
+    };
     let mut core = RyeOsCore::new(
         BrowserSession {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
             session_id: "visual-fixture".into(),
             user_principal_id: Some("fixture".into()),
-            surface_attachment_id: "visual-fixture-attachment".into(),
-            binding_attachments: vec![UiBindingAttachment {
-                binding_attachment_id: "visual-fixture-attachment".into(),
-                binding_generation: 1,
-                binding_digest: "visual-fixture-binding".into(),
-                surface_ref: "surface:fixture/visual".into(),
-                surface_generation: "visual-fixture-surface".into(),
-                effective_surface: surface,
-                project_path: None,
-                posture: Default::default(),
-                binding_request_bounds: UiBindingRequestBounds {
-                    max_request_bytes: 64 * 1024,
-                    max_input_bytes: 16 * 1024,
-                },
-            }],
+            root_attachment_id: shared_attachment.binding_attachment_id.clone(),
+            binding_attachments: vec![surface_attachment, shared_attachment],
+            presentations: vec![membership],
             ..Default::default()
         },
+        presentation_id,
         BrowserViewport {
             width: 1600,
             height: 1000,
@@ -175,20 +254,10 @@ fn main() {
     populate(&mut core, &data);
     let overview = core.envelope(vec![]);
     dispatch(&mut core, RyeOsUiIntent::SwitchTab { index: 1 });
-    let active_view_set_id = core.view_sets[core.active_view_set].id;
-    core.view_sets[core.active_view_set].dock_local.insert(
-        ryeos_client_base::ui::model::dock_view_instance_key(
-            active_view_set_id,
-            ryeos_client_base::ui::model::RyeOsDockEdge::Left,
-        ),
-        ryeos_client_base::view_set::ViewSpec::bound("view:fixture/projects").initial_local_state(),
-    );
     populate(&mut core, &data);
     let work = core.envelope(vec![]);
     let _ = core.dispatch(RyeOsEvent::Ui {
-        event: RyeOsUiEvent::OpenOverlay {
-            overlay_id: "views".into(),
-        },
+        event: RyeOsUiEvent::OpenLauncher,
     });
     let launcher = core.envelope(vec![]);
     println!(

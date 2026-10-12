@@ -56,7 +56,7 @@ impl HostRuntimeBinding {
             .open_pinned_regular_descendant(&identity_path, false)?
             .context("OCI app root has no node public identity")?;
         let observation = identity_file.observation()?;
-        let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+        let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
             &identity_file.read_stable_bounded(&observation, MAX_HOST_RUNTIME_DOCUMENT_BYTES)?,
         )?;
         Ok(Self {
@@ -140,7 +140,7 @@ impl HostRuntimeBinding {
             .open_pinned_regular_descendant(&identity_path, false)?
             .context("host-runtime node public identity is absent")?;
         let observation = identity_file.observation()?;
-        let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+        let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
             &identity_file.read_stable_bounded(&observation, MAX_HOST_RUNTIME_DOCUMENT_BYTES)?,
         )?;
         if identity.verified_fingerprint()? != self.node_fingerprint {
@@ -164,7 +164,7 @@ impl HostRuntimeBinding {
 
     pub fn verify_loaded_node_identity(
         &self,
-        identity: &ryeos_app::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<()> {
         self.account.require_current_process()?;
         self.validate(&self.app_root)?;

@@ -59,6 +59,7 @@ pub mod source_manifest;
 pub mod state_anchor;
 pub mod state_manifest;
 pub mod thread_event;
+pub mod terminal_seat_retirement;
 pub mod thread_snapshot;
 pub mod worker_session_restore;
 pub mod workspace_output_capture;

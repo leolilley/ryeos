@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ryeos_api::handlers::external_content_activate::{Request, handle};
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::AuthorizedKeyPrincipalClass;
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use ryeos_app::managed_external_content_operation::AcquisitionMode;
 
 fn context(class: AuthorizedKeyPrincipalClass, origin_site_id: Option<String>) -> HandlerContext {

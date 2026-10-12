@@ -89,6 +89,14 @@ pub(crate) struct AuthoritativeThreadEventChainReadback {
     pub(crate) events: Vec<(String, ThreadEvent)>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AuthoritativeThreadEventReadAnchorReadback {
+    pub(crate) chain_head_hash: String,
+    pub(crate) snapshot_hash: String,
+    pub(crate) thread_last_event_hash: Option<String>,
+    pub(crate) thread_last_seq: u64,
+}
+
 /// Validate through an already-pinned CAS root so every object in the closure
 /// is read from the same authority inode.
 pub(crate) fn validate_authoritative_history_with_cas(
@@ -204,6 +212,46 @@ pub struct AppendEventsInput<'a> {
     pub events: Vec<ThreadEvent>,
     pub snapshot_updates: Vec<SnapshotUpdate>,
     pub signer: &'a dyn Signer,
+}
+
+pub(crate) struct ExpectedThreadAppendAnchor<'a> {
+    pub(crate) chain_head_hash: &'a str,
+    pub(crate) thread_last_event_hash: Option<&'a str>,
+    pub(crate) thread_last_seq: u64,
+}
+
+pub(crate) enum ConditionalAppendResult {
+    Appended(AppendResult),
+    Conflict,
+}
+
+pub(crate) fn thread_append_anchor_matches_under_lock(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_root_id: &str,
+    thread_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+    expected: ExpectedThreadAppendAnchor<'_>,
+) -> anyhow::Result<bool> {
+    let Some((head_hash, state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(false);
+    };
+    let Some(entry) = state.threads.get(thread_id) else {
+        return Ok(false);
+    };
+    Ok(head_hash == expected.chain_head_hash
+        && entry.last_event_hash.as_deref() == expected.thread_last_event_hash
+        && entry.last_thread_seq == expected.thread_last_seq)
 }
 
 /// File lock for a chain.
@@ -448,6 +496,29 @@ impl ChainLock {
         signed_ref: SignedRef,
         signer: &dyn Signer,
     ) -> anyhow::Result<()> {
+        let recovery = self
+            .recovery
+            .as_ref()
+            .ok_or_else(|| anyhow!("chain head publication lacks pinned recovery authority"))?;
+        self.write_signed_head_with_recovery(signed_ref, signer, recovery)
+    }
+
+    /// The direct adapter supplies its pinned path-recovered authority;
+    /// StateDb supplies the one retained by this exact chain lock. Neither
+    /// path may skip the marker check.
+    pub(crate) fn write_signed_head_with_recovery(
+        &self,
+        signed_ref: SignedRef,
+        signer: &dyn Signer,
+        recovery: &crate::recovery::RecoveryStore,
+    ) -> anyhow::Result<()> {
+        recovery.ensure_chain_lock(self, &self.chain_root_id)?;
+        if recovery
+            .read_retired_seat_marker(&self.chain_root_id)?
+            .is_some()
+        {
+            anyhow::bail!("retired seat identity cannot publish another chain head");
+        }
         refs::write_signed_ref_in_directory(
             &self.lock_directory,
             std::ffi::OsStr::new("head"),
@@ -1202,6 +1273,43 @@ pub(crate) fn read_authoritative_thread_append_anchor_with_trust(
     }))
 }
 
+/// Capture one immutable thread-event frontier from a trust-verified signed
+/// head. Callers may release the chain lock after this returns: later pages
+/// authenticate the fixed CAS predecessor path rather than re-reading a moving
+/// head.
+pub(crate) fn capture_authoritative_thread_event_read_anchor_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<AuthoritativeThreadEventReadAnchorReadback>> {
+    validate_chain_root_id(chain_root_id)?;
+    chain_lock.ensure_protects(refs_root, chain_root_id)?;
+    let Some((chain_head_hash, chain_state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(entry) = chain_state.threads.get(thread_id) else {
+        return Ok(None);
+    };
+    Ok(Some(AuthoritativeThreadEventReadAnchorReadback {
+        chain_head_hash,
+        snapshot_hash: entry.snapshot_hash.clone(),
+        thread_last_event_hash: entry.last_event_hash.clone(),
+        thread_last_seq: entry.last_thread_seq,
+    }))
+}
+
 /// Read one thread's complete event chain and current append position from the
 /// same trust-verified signed head. This is the commit-qualified readback used
 /// only after an append returned an error that may have followed head
@@ -1494,6 +1602,10 @@ fn publish_chain_head(
             &path_recovery
         }
     };
+    recovery.ensure_chain_lock(chain_lock, chain_root_id)?;
+    if recovery.read_retired_seat_marker(chain_root_id)?.is_some() {
+        anyhow::bail!("retired seat identity cannot publish another chain head");
+    }
     let pending = recovery
         .prepare_set(
             chain_lock,
@@ -1510,7 +1622,7 @@ fn publish_chain_head(
         signer.fingerprint().to_string(),
     );
     chain_lock
-        .write_signed_head(signed_ref, signer)
+        .write_signed_head_with_recovery(signed_ref, signer, recovery)
         .context("failed to publish signed chain head")?;
     if pending.phase == crate::recovery::TransitionPhase::Prepared {
         recovery.advance_phase(
@@ -1980,6 +2092,29 @@ pub(crate) fn append_events_with_trust_under_lock(
     head_cache: &mut HeadCache,
     lock: &ChainLock,
 ) -> anyhow::Result<AppendResult> {
+    match append_events_with_trust_under_lock_inner(input, trust_store, head_cache, lock, None)? {
+        ConditionalAppendResult::Appended(result) => Ok(result),
+        ConditionalAppendResult::Conflict => unreachable!("unconditional append cannot conflict"),
+    }
+}
+
+pub(crate) fn append_events_with_trust_under_lock_if_anchor(
+    input: AppendEventsInput<'_>,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+    expected: ExpectedThreadAppendAnchor<'_>,
+) -> anyhow::Result<ConditionalAppendResult> {
+    append_events_with_trust_under_lock_inner(input, trust_store, head_cache, lock, Some(expected))
+}
+
+fn append_events_with_trust_under_lock_inner(
+    input: AppendEventsInput<'_>,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+    expected: Option<ExpectedThreadAppendAnchor<'_>>,
+) -> anyhow::Result<ConditionalAppendResult> {
     let AppendEventsInput {
         cas_root,
         refs_root,
@@ -1997,15 +2132,16 @@ pub(crate) fn append_events_with_trust_under_lock(
     crate::signer::ensure_signer_trusted(signer, trust_store)?;
 
     // Read current chain head
-    let current_chain_state = read_chain_head_for_mutation(
+    let (current_chain_head_hash, current_chain_state) = read_chain_state_with_verified_head(
         cas_root,
         refs_root,
-        Some(lock),
+        lock,
         chain_root_id,
         trust_store,
         head_cache,
     )
-    .context("failed to read current chain head")?;
+    .context("failed to read current chain head")?
+    .ok_or_else(|| anyhow::anyhow!("signed ref not found for chain {chain_root_id}"))?;
 
     // Verify thread exists in chain
     if !current_chain_state.threads.contains_key(thread_id) {
@@ -2013,6 +2149,14 @@ pub(crate) fn append_events_with_trust_under_lock(
     }
 
     let current_thread_entry = &current_chain_state.threads[thread_id];
+    if let Some(expected) = expected {
+        if current_chain_head_hash != expected.chain_head_hash
+            || current_thread_entry.last_event_hash.as_deref() != expected.thread_last_event_hash
+            || current_thread_entry.last_thread_seq != expected.thread_last_seq
+        {
+            return Ok(ConditionalAppendResult::Conflict);
+        }
+    }
 
     // Validate every snapshot update and load its authoritative predecessor
     // before serializing or writing any prospective event object.
@@ -2238,13 +2382,13 @@ pub(crate) fn append_events_with_trust_under_lock(
         crate::CachedHead::new(chain_state_hash.clone(), new_chain_state),
     );
 
-    Ok(AppendResult {
+    Ok(ConditionalAppendResult::Appended(AppendResult {
         chain_state_hash,
         first_chain_seq: first_chain_seq_result,
         event_count,
         events: stored_events,
         snapshot_updates,
-    })
+    }))
 }
 
 /// Add a new thread to an existing chain.

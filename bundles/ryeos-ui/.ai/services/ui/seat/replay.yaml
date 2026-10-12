@@ -2,7 +2,7 @@
 kind: service
 name: seat-replay
 version: "1.0.0"
-description: Replay the session's seat braid so seat state folds from history - live and replay are the same fold
+description: Resolve one exact retained seat-append receipt for idempotent retry; fixed-anchor cold history uses the authenticated seat stream
 endpoint: ui.seat.replay
 ui_read_only: true
 # Lifecycle routes preserve the authenticated browser context directly.

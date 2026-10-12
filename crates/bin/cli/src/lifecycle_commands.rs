@@ -346,7 +346,7 @@ fn run_node_policy_generation_reset_command(
         return Ok(());
     };
     args.validate()?;
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
@@ -409,13 +409,13 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let Some(args) = parse_or_render_help::<NodePolicyApplyArgs>(argv, console)? else {
         return Ok(());
     };
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node location for policy apply")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("node policy apply requires the daemon to be stopped")?;
 
@@ -437,7 +437,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         }
     }
 
-    let identity = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for policy apply")?;
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
         .context("load trust store for current node policies")?;
@@ -509,13 +509,13 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     if !args.confirm {
         anyhow::bail!("resetting predecessor replay indexes requires --confirm");
     }
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node configuration for replay-index reset")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("replay-index reset requires the daemon to be stopped")?;
     let path = config
@@ -598,7 +598,7 @@ fn run_node_external_content_reset_command(
     if !args.dry_run && !args.confirm {
         anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
     }
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
@@ -651,19 +651,19 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     if !args.confirm {
         anyhow::bail!("resetting every authorized key requires --confirm");
     }
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node configuration for authorization reset")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("authorization reset requires the daemon to be stopped")?;
 
-    let node = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for authorization reset")?;
-    let operator = ryeos_app::identity::NodeIdentity::load(&config.operator_signing_key_path)
+    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
         .context("load operator identity for authorization reset")?;
     let parent = config
         .authorized_keys_dir
@@ -691,7 +691,7 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
         &base64::engine::general_purpose::STANDARD,
         operator.verifying_key().as_bytes(),
     );
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &staging,
         operator.fingerprint(),
         &operator_key,
@@ -700,7 +700,7 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
         operator.fingerprint(),
         &lillux::time::iso8601_now(),
         node.signing_key(),
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
     lillux::sync_tree_durable(&staging)
         .context("durably flush reset authorized-key namespace before publication")?;

@@ -12,6 +12,7 @@ launch:
   mode: cli_exec
   binary_ref: bin/{triple}/web
   args:
+    presentation: "--presentation"
     surface: "--surface"
     print_url: "--print-url"
     no_open: "--no-open"

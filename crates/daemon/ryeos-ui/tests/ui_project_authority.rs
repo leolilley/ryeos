@@ -108,7 +108,9 @@ async fn mint_compiled_project_session(
     let minted = ryeos_ui::handlers::ui_launch_mint::handle(
         ryeos_ui::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ui/base".to_string(),
+            composition: ryeos_client_base::presentation::UiCompositionSelection::Surface {
+                surface_ref: "surface:ryeos/ui/base".to_string(),
+            },
             project_path: Some(project_root.to_string_lossy().into_owned()),
             user_principal_id: None,
         },
@@ -136,7 +138,7 @@ async fn mint_compiled_project_session(
         .expect("active compiled project session");
     let attachment = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("surface attachment");
     assert!(
         attachment
@@ -159,7 +161,7 @@ async fn dispatch_project_threads(
 ) -> serde_json::Value {
     let coordinate = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("surface attachment")
         .coordinate();
     (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
@@ -207,7 +209,7 @@ async fn compiled_project_sources_query_only_the_canonical_session_project() {
 
     let attachment = session
         .attachments
-        .get(&session.surface_attachment_id)
+        .get(&session.root_attachment_id)
         .expect("surface attachment")
         .clone();
     ryeos_ui::seat_auth::with_compiled_ui_attachment(attachment, async {
@@ -287,14 +289,14 @@ async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isol
     assert_eq!(
         first_session
             .attachments
-            .get(&first_session.surface_attachment_id)
+            .get(&first_session.root_attachment_id)
             .and_then(|attachment| attachment.project_query_identity.as_deref()),
         Some(canonical_first.to_string_lossy().as_ref())
     );
     assert_eq!(
         second_session
             .attachments
-            .get(&second_session.surface_attachment_id)
+            .get(&second_session.root_attachment_id)
             .and_then(|attachment| attachment.project_query_identity.as_deref()),
         Some(canonical_second.to_string_lossy().as_ref())
     );

@@ -685,7 +685,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
     let runtime_state_dir = tmpdir.path().join(".ai/state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity/node-key.pem");
-    let config = ryeos_app::config::Config {
+    let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
         uds_path: tmpdir.path().join("test.sock"),
@@ -694,7 +694,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
-    let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -755,7 +755,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
     };
 
     let controller_lifetime =
-        ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),

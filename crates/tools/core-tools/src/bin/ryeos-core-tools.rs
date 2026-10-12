@@ -1090,7 +1090,7 @@ fn run_doctor(
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
     let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
 
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: Some(app_root.clone()),
         ..Default::default()
     })

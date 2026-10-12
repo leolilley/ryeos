@@ -275,7 +275,7 @@ impl AdmittedWorkloadClientGrant {
                 .owner_principal
                 .strip_prefix("fp:")
                 .is_none_or(|fingerprint| !lillux::valid_hash(fingerprint))
-            || crate::identity::validate_canonical_site_id(&self.origin_site_id).is_err()
+            || ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id).is_err()
             || self.worker_instance_id.is_empty()
             || self.worker_instance_id.len() > 256
             || self.worker_boot_epoch == 0
@@ -1863,7 +1863,7 @@ mod tests {
             "fp:operator".to_string(),
             vec!["cap:a".to_string(), "cap:b".to_string()],
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
             Some("site:source".to_string()),
         );
         let state = store
@@ -1885,7 +1885,7 @@ mod tests {
         assert_eq!(narrowed.scopes, vec!["cap:a"]);
         assert_eq!(
             narrowed.authorized_key_class,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
         );
         assert_eq!(
             narrowed.authenticated_origin_site_id.as_deref(),

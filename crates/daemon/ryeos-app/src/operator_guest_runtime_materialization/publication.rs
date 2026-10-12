@@ -426,7 +426,7 @@ fn require_matching_operator(
         current == source.operator_authority
             && context.authorized_key_class == Some(current.principal_class)
             && (current.principal_class
-                == crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+                == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
                 || context.authenticated_origin_site_id.as_deref()
                     == Some(current.origin_site_id.as_str())),
         "materialization operator authority changed after preparation"

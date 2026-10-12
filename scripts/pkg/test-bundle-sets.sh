@@ -71,7 +71,7 @@ done
 for forbidden in hosted-node codex render-sandbox opencode web browser ryeos-ui; do
   ! contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference tv-tracker-authoring bundle-source bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
 [[ "${release_authority[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-release" ]]
 [[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"

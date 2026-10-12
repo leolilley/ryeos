@@ -44,7 +44,12 @@ pub fn draw_sections(
             break;
         }
         let glyph = if section.collapsed { "▸" } else { "▾" };
-        let header = format!("{glyph} {} ({})", section.title, section.count);
+        let count = if section.source_status.is_some() {
+            "?".to_string()
+        } else {
+            section.count.to_string()
+        };
+        let header = format!("{glyph} {} ({count})", section.title);
         // A collapsed section's header is the point that re-expands it; when
         // it carries the cursor, highlight the full line like a selected row.
         let header_style = if section.header_selected {
@@ -57,6 +62,19 @@ pub fn draw_sections(
         }
         surface.draw_text(left, y, &truncate(&header, width), header_style);
         y += 1;
+
+        if let Some(status) = &section.source_status {
+            if y < bottom {
+                let prefix = if status.stale {
+                    "Last observation (stale) · "
+                } else {
+                    ""
+                };
+                let message = format!("{prefix}{}: {}", status.state, status.message);
+                surface.draw_text(left, y, &truncate(&message, width), style_muted());
+                y += 1;
+            }
+        }
 
         if section.collapsed {
             continue;
@@ -157,6 +175,7 @@ mod tests {
             id: title.to_string(),
             cursor: 0,
             title: title.to_string(),
+            source_status: None,
             count: rows.len(),
             collapsed,
             header_selected: false,
@@ -178,6 +197,35 @@ mod tests {
                 h: h as u16,
             },
         )
+    }
+
+    #[test]
+    fn failed_collapsed_section_never_reports_successful_zero_count() {
+        let (mut s, rect) = surface(90, 4);
+        let mut failed = section("Remotes", true, vec![]);
+        failed.source_status = Some(ryeos_client_base::ui::view_model::RyeOsSourceStatusVm {
+            state: "failed".into(),
+            message: "service_cap_denied: Access denied".into(),
+            stale: false,
+        });
+        draw_sections(&mut s, rect, &[failed], 0);
+        assert!(row_text(&s, 90, 0).contains("(?)"));
+        assert!(!row_text(&s, 90, 0).contains("(0)"));
+        assert!(row_text(&s, 90, 1).contains("service_cap_denied"));
+    }
+
+    #[test]
+    fn stale_section_labels_retained_rows() {
+        let (mut s, rect) = surface(90, 5);
+        let mut stale = section("Threads", false, vec![row("T-old", None)]);
+        stale.source_status = Some(ryeos_client_base::ui::view_model::RyeOsSourceStatusVm {
+            state: "failed".into(),
+            message: "Refresh failed".into(),
+            stale: true,
+        });
+        draw_sections(&mut s, rect, &[stale], 0);
+        assert!(row_text(&s, 90, 1).contains("Last observation (stale)"));
+        assert!(row_text(&s, 90, 2).contains("T-old"));
     }
 
     #[test]

@@ -361,10 +361,16 @@ view:ryeos/threads/history          view:ryeos/node/threads/history
 view:ryeos/files/list               view:ryeos/project/files
 view:ryeos/items/space              view:ryeos/project/items
 view:ryeos/schedules/list           view:ryeos/project/schedules
-view:ryeos/remotes/list             view:ryeos/node/remotes
-view:ryeos/bundles/list             view:ryeos/node/bundles
-view:ryeos/gc/status                view:ryeos/node/gc
 ```
+
+Node bundles, remotes, and garbage collection each have one authored View,
+under `view:ryeos/node/`. Saved arrangements re-resolve their exact authored
+origins. A removed origin fails resolution; it is not silently redirected to
+a different View or granted a replacement attachment. Reopen the current
+authored View explicitly when an old saved arrangement reports a missing origin.
+
+The remote table reports configured remote nodes. Selecting a row does not
+retarget a conversation, change input routing, or establish remote authority.
 
 `view:ryeos/threads/history` is project-scoped by default:
 

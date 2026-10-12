@@ -240,8 +240,9 @@ pub enum UiDispatchMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiResultEffect {
-    AdmitBindingAttachment,
+    OpenSurface,
     ResumeParticularViewSet,
+    ResumeParticularSurface,
 }
 
 /// Renderer effect a signed service is allowed to return through compiled UI
@@ -252,14 +253,17 @@ pub fn extract_ui_result_effect(
 ) -> Result<Option<UiResultEffect>> {
     match metadata_extra.get("ui_result_effect") {
         None => Ok(None),
-        Some(Value::String(value)) if value == "admit_binding_attachment" => {
-            Ok(Some(UiResultEffect::AdmitBindingAttachment))
+        Some(Value::String(value)) if value == "open_surface" => {
+            Ok(Some(UiResultEffect::OpenSurface))
         }
         Some(Value::String(value)) if value == "resume_particular_view_set" => {
             Ok(Some(UiResultEffect::ResumeParticularViewSet))
         }
+        Some(Value::String(value)) if value == "resume_particular_surface" => {
+            Ok(Some(UiResultEffect::ResumeParticularSurface))
+        }
         Some(Value::String(other)) => anyhow::bail!(
-            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected admit_binding_attachment or resume_particular_view_set"
+            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected open_surface, resume_particular_view_set or resume_particular_surface"
         ),
         Some(_) => anyhow::bail!("service YAML field 'ui_result_effect' must be a string"),
     }

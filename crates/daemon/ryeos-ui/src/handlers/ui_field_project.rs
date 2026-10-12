@@ -60,9 +60,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .map(|access| access.path().to_string_lossy().into_owned());
     let project_query_identity = caller.project_query_identity()?;
     let root_surface = match &caller {
-        crate::seat_auth::SeatCaller::Attachment(attachment) => {
-            Some(attachment.surface_ref.clone())
-        }
+        crate::seat_auth::SeatCaller::Attachment(attachment) => Some(attachment.root_ref.clone()),
         crate::seat_auth::SeatCaller::Operator { .. } => None,
     };
     let topology = super::ui_graph_topology::build_topology(
@@ -134,9 +132,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         })
         .unwrap_or_else(|| "project:node".to_string());
     let admission = project_root.as_deref().map(|root| {
-        ryeos_app::admission_events::read_admission_events(
+        ryeos_app::admission_events::read_admission_events_for_principal(
             &state.state_store,
             std::path::Path::new(root),
+            caller.principal_id(),
             MAX_ADMISSION_FACTS,
         )
     });
@@ -159,7 +158,7 @@ fn project_facts(
     project_identity: String,
     projections: &BTreeMap<String, EffectiveProgramProjection>,
     projection_warnings: Vec<String>,
-    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
+    admission: Option<anyhow::Result<ryeos_app::admission_events::PrincipalAdmissionEvents>>,
 ) -> Result<super::ui_field::FieldFactsDocument> {
     let subject = FieldFactSubject {
         kind: "project".to_string(),
@@ -398,28 +397,34 @@ const MAX_ADMISSION_FACTS: usize = 50;
 /// warning — admission evidence must never take the project document down.
 fn add_admission_facts(
     builder: &mut FieldFactsBuilder,
-    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
+    admission: Option<anyhow::Result<ryeos_app::admission_events::PrincipalAdmissionEvents>>,
 ) -> Result<()> {
     let Some(read) = admission else {
         return Ok(());
     };
     let page = match read {
         Ok(page) => page,
-        Err(error) => {
+        Err(_error) => {
+            // The chain is shared by project principals. Do not relay read
+            // errors containing its cursor, sequence or unrelated records.
             builder.warn(
                 "admission_history_unavailable",
-                format!("admission history was not projected: {error}"),
+                "own-principal admission history is unavailable",
             );
             return Ok(());
         }
     };
-    if page.next_cursor.is_some() {
-        builder.mark_truncated();
-        builder.warn(
-            "admission_history_truncated",
-            format!("newest {MAX_ADMISSION_FACTS} admission events projected"),
-        );
-    }
+    // An admitted browser caller must not learn whether other principals
+    // filled the bounded chain scan from a conditional truncation flag. This
+    // is always an observed own-principal slice; emission gaps mean even a
+    // fully traversed chain is not proof that no attempt occurred.
+    builder.mark_truncated();
+    builder.warn(
+        "admission_history_observed",
+        format!(
+            "newest own-principal admission events are bounded to {MAX_ADMISSION_FACTS}; absence is not proof of no attempt"
+        ),
+    );
     for record in &page.records {
         let payload = &record.event.payload;
         let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or("");
@@ -442,7 +447,6 @@ fn add_admission_facts(
             attributes: json!({
                 "event_type": record.event.event_type,
                 "created_at": record.event.created_at,
-                "chain_seq": record.event.chain_seq,
                 "payload": payload,
             }),
             provenance: builder.provenance(Vec::new()),
@@ -452,31 +456,40 @@ fn add_admission_facts(
             continue;
         }
         if recorded && !text("effective_definition_digest").is_empty() {
-            builder.add_relation(FieldFactRelation {
-                id: format!("admission-admits:{}", record.event_hash),
-                kind: "admits".to_string(),
-                source_id: id.clone(),
-                target_id: format!(
-                    "definition:{}@{}",
-                    canonical,
-                    text("effective_definition_digest")
-                ),
-                status: None,
-                directed: true,
-                attributes: json!({}),
-                provenance: builder.provenance(Vec::new()),
-            })?;
+            let target_id = format!(
+                "definition:{}@{}",
+                canonical,
+                text("effective_definition_digest")
+            );
+            // An admission can outlive the currently projected definition.
+            // Keep its signed digest on the admission fact, but never invent
+            // historical geometry or point a relation at a missing entity.
+            if builder.has_entity(&target_id) {
+                builder.add_relation(FieldFactRelation {
+                    id: format!("admission-admits:{}", record.event_hash),
+                    kind: "admits".to_string(),
+                    source_id: id.clone(),
+                    target_id,
+                    status: None,
+                    directed: true,
+                    attributes: json!({}),
+                    provenance: builder.provenance(Vec::new()),
+                })?;
+            }
         } else if !recorded {
-            builder.add_relation(FieldFactRelation {
-                id: format!("admission-refused:{}", record.event_hash),
-                kind: "refused".to_string(),
-                source_id: id.clone(),
-                target_id: format!("definition-family:{canonical}"),
-                status: None,
-                directed: true,
-                attributes: json!({}),
-                provenance: builder.provenance(Vec::new()),
-            })?;
+            let target_id = format!("definition-family:{canonical}");
+            if builder.has_entity(&target_id) {
+                builder.add_relation(FieldFactRelation {
+                    id: format!("admission-refused:{}", record.event_hash),
+                    kind: "refused".to_string(),
+                    source_id: id.clone(),
+                    target_id,
+                    status: None,
+                    directed: true,
+                    attributes: json!({}),
+                    provenance: builder.provenance(Vec::new()),
+                })?;
+            }
         }
     }
     Ok(())
@@ -604,6 +617,149 @@ mod tests {
         TopologyViewFilters, TopologyViewHints,
     };
     use super::*;
+
+    #[test]
+    fn own_historical_admission_keeps_digest_without_shared_position_or_dangling_relation() {
+        let digest = "a".repeat(64);
+        let mut builder = FieldFactsBuilder::new(
+            "project",
+            SERVICE_REF,
+            FieldFactSubject {
+                kind: "project".to_string(),
+                id: "project:test".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+        );
+        let event = ryeos_state::BundleEventObject {
+            schema: 1,
+            kind: "bundle_event".to_string(),
+            bundle_id: "core".to_string(),
+            event_kind: "admission".to_string(),
+            event_type: ryeos_app::admission_events::ADMISSION_RECORDED_EVENT_TYPE.to_string(),
+            schema_version: 1,
+            chain_id: "shared".to_string(),
+            chain_seq: 57,
+            prev_chain_event_hash: None,
+            created_at: "2026-10-07T00:00:00Z".to_string(),
+            attribution: Default::default(),
+            idempotency_key: None,
+            request_fingerprint: None,
+            correlation_id: None,
+            causation_id: None,
+            attachments: Vec::new(),
+            payload: json!({
+                "acting_principal": "owner",
+                "canonical_ref": "graph:test/build",
+                "effective_definition_digest": digest.as_str(),
+            }),
+        };
+        let current = event.clone();
+        let mut refusal = event.clone();
+        refusal.event_type = ryeos_app::admission_events::ADMISSION_REFUSED_EVENT_TYPE.to_string();
+        refusal.payload = json!({
+            "acting_principal": "owner",
+            "canonical_ref": "graph:test/removed",
+            "reason_code": "not_admitted",
+        });
+        add_admission_facts(
+            &mut builder,
+            Some(Ok(ryeos_app::admission_events::PrincipalAdmissionEvents {
+                records: vec![ryeos_state::BundleEventRecord {
+                    event_hash: "own-event-hash".to_string(),
+                    event,
+                }],
+                incomplete: false,
+            })),
+        )
+        .unwrap();
+        let document = builder.finish().unwrap();
+        let encoded = serde_json::to_value(&document).unwrap();
+        assert!(!encoded.to_string().contains("chain_seq"));
+        assert!(!encoded.to_string().contains("shared"));
+        assert!(document.entities.iter().any(|entity| {
+            entity.id == "admission:own-event-hash"
+                && entity.effective_definition_digest.as_deref() == Some(digest.as_str())
+        }));
+        assert!(document.relations.is_empty());
+
+        let mut refused_builder = FieldFactsBuilder::new(
+            "project",
+            SERVICE_REF,
+            FieldFactSubject {
+                kind: "project".to_string(),
+                id: "project:test".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+        );
+        add_admission_facts(
+            &mut refused_builder,
+            Some(Ok(ryeos_app::admission_events::PrincipalAdmissionEvents {
+                records: vec![ryeos_state::BundleEventRecord {
+                    event_hash: "own-refusal-hash".to_string(),
+                    event: refusal,
+                }],
+                incomplete: false,
+            })),
+        )
+        .unwrap();
+        let refused = refused_builder.finish().unwrap();
+        assert!(refused.entities.iter().any(|entity| {
+            entity.id == "admission:own-refusal-hash" && entity.status.as_deref() == Some("refused")
+        }));
+        assert!(refused.relations.is_empty());
+
+        let mut current_builder = FieldFactsBuilder::new(
+            "project",
+            SERVICE_REF,
+            FieldFactSubject {
+                kind: "project".to_string(),
+                id: "project:test".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+        );
+        current_builder
+            .add_entity(FieldFactEntity {
+                id: format!("definition:graph:test/build@{digest}"),
+                kind: "graph_definition".to_string(),
+                label: "build".to_string(),
+                parent_id: None,
+                status: Some("current".to_string()),
+                canonical_ref: Some("graph:test/build".to_string()),
+                source_content_digest: None,
+                effective_definition_digest: Some(digest.clone()),
+                admitted_launch_capsule_hash: None,
+                event_ref: None,
+                artifact_ref: None,
+                attributes: json!({}),
+                provenance: current_builder.provenance(Vec::new()),
+            })
+            .unwrap();
+        add_admission_facts(
+            &mut current_builder,
+            Some(Ok(ryeos_app::admission_events::PrincipalAdmissionEvents {
+                records: vec![ryeos_state::BundleEventRecord {
+                    event_hash: "current-event-hash".to_string(),
+                    event: current,
+                }],
+                incomplete: false,
+            })),
+        )
+        .unwrap();
+        assert!(
+            current_builder
+                .finish()
+                .unwrap()
+                .relations
+                .iter()
+                .any(|relation| {
+                    relation.id == "admission-admits:current-event-hash"
+                        && relation.target_id == format!("definition:graph:test/build@{digest}")
+                })
+        );
+    }
 
     #[test]
     fn project_facts_are_versioned_and_never_expose_host_paths() {

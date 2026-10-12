@@ -79,7 +79,7 @@ fn reach_target_handoff_crash_boundary(
 fn authenticated_remote_node_site(ctx: &HandlerContext) -> Result<&str, HandlerError> {
     if !ctx.verified
         || ctx.authorized_key_class
-            != Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+            != Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode)
     {
         return Err(HandlerError::Forbidden(
             "authenticated source-node authority required".into(),
@@ -3293,7 +3293,7 @@ fn returning_local_operator_anchor(
     chain_root_id: &str,
     source_chain_head_hash: &str,
 ) -> Result<Option<String>> {
-    if admitted.principal_class != ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient {
+    if admitted.principal_class != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient {
         return Ok(None);
     }
     state
@@ -5052,7 +5052,7 @@ mod authority_tests {
     use super::*;
 
     fn context(
-        class: ryeos_app::identity::AuthorizedKeyPrincipalClass,
+        class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass,
         fingerprint: &str,
         site_id: Option<&str>,
     ) -> HandlerContext {
@@ -5068,7 +5068,7 @@ mod authority_tests {
     #[test]
     fn placement_transport_requires_the_exact_configured_remote_node() {
         let admitted = context(
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             "fp:source-node",
             Some("site:source"),
         );
@@ -5076,17 +5076,17 @@ mod authority_tests {
 
         for rejected in [
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 "fp:operator",
                 Some("site:source"),
             ),
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
                 "fp:other-node",
                 Some("site:source"),
             ),
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
                 "fp:source-node",
                 Some("site:other"),
             ),

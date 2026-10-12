@@ -1231,7 +1231,7 @@ mod tests {
             "fp:operator".to_string(),
             vec!["cap:verified".to_string()],
             true,
-            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
             Some("site:source".to_string()),
         );
         let selected = select_service_handler_context(
@@ -1245,7 +1245,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             selected.authorized_key_class,
-            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
         );
         assert_eq!(
             selected.authenticated_origin_site_id.as_deref(),

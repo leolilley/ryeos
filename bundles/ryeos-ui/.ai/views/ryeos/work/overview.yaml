@@ -33,20 +33,24 @@ sections:
     source_channel: detail
     collection: thread
     projection:
-      primary: project.name
-      meta: project.path
+      primary: project_root
+      meta: current_site_id
   - title: Placement
     source_channel: detail
     collection: thread
     projection:
       primary: current_site_id
       meta: origin_site_id
-  - title: Usage
+  - title: Evidence coverage
     source_channel: detail
-    collection: usage
+    collection: evidence_coverage
     projection:
-      primary: value
-      meta: label
+      primary: subject
+      meta: reason
+      tone:
+        field: state
+        map: { unavailable: warn, available: good }
+        default: neutral
   - title: Outcome
     source_channel: detail
     collection: result

@@ -328,5 +328,14 @@ policies:
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
   ui_browser_sessions:
-    schema: 1
+    schema: 3
+    max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
+    max_presentations_per_session: 16
+    max_surface_instances_per_presentation: 16
+    shared_presentation:
+      max_declaration_bytes: 65536
+      max_dialogs: 16
+      max_initial_surfaces: 16
+      max_label_bytes: 128
+      max_mount_id_bytes: 64

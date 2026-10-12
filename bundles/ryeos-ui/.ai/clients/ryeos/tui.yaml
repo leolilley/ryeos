@@ -2,7 +2,7 @@
 kind: client
 name: tui
 version: "1.0.0"
-description: Terminal surface renderer for RyeOS
+description: Terminal renderer for an admitted RyeOS shared presentation
 
 serves:
   kind: surface
@@ -12,9 +12,7 @@ launch:
   mode: cli_exec
   binary_ref: bin/{triple}/ryeos-tui
   args:
-    surface: "--surface"
-    surface_file: "--surface-file"
-    mock: "--mock"
+    presentation: "--presentation"
     project: "--project"
 
 capabilities:

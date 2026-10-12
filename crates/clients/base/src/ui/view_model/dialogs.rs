@@ -2,8 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use super::super::event::RyeOsUiIntent;
 
+/// An ordinary admitted View mounted in the presentation's shared dialog region.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsOverlayChoice {
+pub struct RyeOsDialogVm {
+    pub instance_key: crate::ids::RyeOsViewInstanceKey,
+    pub title: String,
+    pub view: super::RyeOsViewVm,
+    pub input: Option<super::RyeOsInputVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsCommandChoice {
     pub label: String,
     pub hint: String,
     pub intent: RyeOsUiIntent,
@@ -23,46 +32,4 @@ pub struct RyeOsTileIntentVm {
     pub label: String,
     pub title: String,
     pub intent: RyeOsUiIntent,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsOverlayVm {
-    pub id: String,
-    pub title: String,
-    pub widget: String,
-    #[serde(default)]
-    pub columns: Vec<String>,
-    pub query: String,
-    pub selected: usize,
-    pub hint: String,
-    pub items: Vec<RyeOsOverlayItemVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct RyeOsOverlayItemVm {
-    /// Stable semantic identity used by pointer events. It deliberately does
-    /// not depend on the row's filtered position or transient fold state.
-    #[serde(default)]
-    pub id: String,
-    pub category: String,
-    pub primary: String,
-    pub secondary: String,
-    pub meta: String,
-    pub enabled: bool,
-    /// Exact reason an otherwise visible item is disabled. Presentation
-    /// adapters expose this independently of ordinary secondary copy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disabled_reason: Option<String>,
-    pub intent: Option<RyeOsUiIntent>,
-    pub secondary_intent: Option<RyeOsUiIntent>,
-    /// Tree indent level: 0 for flat items and group headers, 1 for a
-    /// header's children.
-    #[serde(default)]
-    pub depth: u8,
-    /// A launcher group header row — its intent folds the group, and
-    /// renderers draw the fold glyph from `expanded`.
-    #[serde(default)]
-    pub header: bool,
-    #[serde(default)]
-    pub expanded: bool,
 }

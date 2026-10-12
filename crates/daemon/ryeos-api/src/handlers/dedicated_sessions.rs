@@ -286,7 +286,7 @@ async fn candidate_result(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    ryeos_app::identity::validate_forwarding_origin_assertion(
+    ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
         Some(&req.source_site_id),
         ctx.authorized_key_class,
         ctx.authenticated_origin_site_id.as_deref(),

@@ -2,7 +2,7 @@
 kind: service
 name: ryeos-ui/gc/status
 version: "1.0.0"
-description: Read-only GC state — running status, current phase, and recent GC event history from the JSONL log.
+description: Read-only bounded node GC sidecar and log observations; live ownership is unknown, not inferred from file presence.
 endpoint: ui.ryeos.gc.status
 ui_read_only: true
 state_access: read_only_existing

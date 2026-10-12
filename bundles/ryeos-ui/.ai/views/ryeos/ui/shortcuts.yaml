@@ -1,0 +1,6 @@
+name: presentation-shortcuts
+title: Shortcuts
+version: "1.0.0"
+description: Current shared Rust keymap; labels are presentation data, not execution authority.
+widget: rows
+local_projection: shortcuts

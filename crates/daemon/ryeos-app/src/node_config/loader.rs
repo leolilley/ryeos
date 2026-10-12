@@ -330,7 +330,7 @@ fn verify_and_parse(
         path.display()
     ))?;
 
-    let content = file.read_bounded(crate::node_document::MAX_ITEM_BYTES)?;
+    let content = file.read_bounded(ryeos_node_runtime::node_document::MAX_ITEM_BYTES)?;
     let content = std::str::from_utf8(&content)
         .with_context(|| format!("node config item at {} is not UTF-8", path.display()))?;
 
@@ -574,7 +574,7 @@ pub(crate) fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
         .join("node")
         .join("identity")
         .join("private_key.pem");
-    let identity = crate::identity::NodeIdentity::load(&key_path).with_context(|| {
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&key_path).with_context(|| {
         format!(
             "load node identity for node-owned command registration policy from {}",
             key_path.display()
@@ -829,7 +829,7 @@ mod tests {
         )
         .unwrap();
         let system = temp_system_with_command_registration_policy(&workspace);
-        let identity = crate::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &system.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
@@ -899,7 +899,7 @@ mod tests {
         let write = |body: &Value| {
             fs::write(
                 &path,
-                crate::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
+                ryeos_node_runtime::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
                     .unwrap(),
             )
             .unwrap()

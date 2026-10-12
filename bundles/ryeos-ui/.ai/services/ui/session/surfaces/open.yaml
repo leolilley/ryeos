@@ -1,0 +1,13 @@
+kind: service
+required_caps: ["ryeos.execute.service.ui/session/surfaces/open"]
+name: session/surfaces/open
+version: "1.0.0"
+description: Admit an explicitly selected authored, reusable or composed Surface collection into a new Surface or exact existing Surface tab destination under fresh admission.
+endpoint: ui.session.surfaces.open
+availability: daemon_only
+ui_dispatch: session_local
+ui_result_effect: surface_opening
+schema:
+  creation_request_id: string
+  selection: object
+  placement: object

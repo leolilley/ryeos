@@ -86,7 +86,7 @@ composed_value_contract:
     ui_result_effect:
       type: single
       prim: string
-      enum: [admit_binding_attachment, resume_particular_view_set]
+      enum: [surface_opening, resume_particular_view_set, resume_particular_surface]
     schema: { type: single, prim: mapping }
 metadata:
   rules:

@@ -2,7 +2,7 @@
 name: items-space
 title: Item Space
 version: "1.0.0"
-description: The item space - signed content across system, user, and project
+description: Content visible to the admitted attachment, including its project only when present
 
 widget: table
 sources:
@@ -10,9 +10,8 @@ sources:
     ref: service:ui/ryeos-ui/items/list
     params:
       limit: 500
-      project_path: "@session:project_root"
     collection: items
-    requires_project: true
+    coverage: coverage
 projections:
   columns:
     - label: item
@@ -41,6 +40,8 @@ affordances:
       facet: selection
       value:
         item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
   # Explain swaps the center lens to the item's "why" read: write the selected
   # item FIRST (the explain sources read @facet:selection.item), then open the
   # lens — the open_view ordering guarantees the facet is set before the new

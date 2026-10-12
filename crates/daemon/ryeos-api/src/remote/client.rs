@@ -12,7 +12,7 @@ use lillux::crypto::Verifier;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-use ryeos_app::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::state::AppState;
 use ryeos_state::ignore::IgnoreConfig;
 
@@ -1864,7 +1864,7 @@ impl PublicKeyResponse {
                 self.principal_id,
             );
         }
-        ryeos_app::identity::validate_canonical_site_id(&self.site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.site_id)
             .context("remote /public-key site_id is not canonical")?;
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote /public-key vault_fingerprint must not be empty");

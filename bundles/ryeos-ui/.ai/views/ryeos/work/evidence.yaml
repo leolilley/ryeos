@@ -12,6 +12,16 @@ sources:
       thread_id: "@facet:selection.work.thread"
 
 sections:
+  - title: Evidence coverage
+    source_channel: detail
+    collection: evidence_coverage
+    projection:
+      primary: subject
+      meta: reason
+      tone:
+        field: state
+        map: { unavailable: warn, available: good }
+        default: neutral
   - title: Execution posture coverage
     source_channel: detail
     collection: execution_coverage
@@ -28,6 +38,14 @@ sections:
     projection:
       primary: value
       meta: label
+  - title: Outcome coverage
+    source_channel: detail
+    collection: outcome_coverage
+    projection:
+      primary: state
+      meta: reason
+      expand:
+        fields: [state, reason, thread_status]
   - title: Outcome
     source_channel: detail
     collection: result
@@ -42,31 +60,11 @@ sections:
     source_channel: detail
     collection: artifacts
     projection:
+      identity: artifact_id
       primary: artifact_type
-      meta: uri
-  - title: Follow
-    source_channel: detail
-    collection: follow
-    projection:
-      primary: value
-      meta: label
-  - title: Children
-    source_channel: detail
-    collection: children
-    projection:
-      primary: item_ref
-      meta: status
-      tone:
-        field: status
-        map:
-          running: accent
-          created: accent
-          failed: danger
-          killed: danger
-          timed_out: danger
-          cancelled: warn
-          completed: good
-        default: neutral
+      meta: artifact_id
+      expand:
+        fields: [artifact_id, artifact_type, metadata]
 
 refresh:
   on_facet: selection

@@ -41,13 +41,19 @@ include!("generated_web_assets.rs");
 /// Web UI static asset provider — owns the embedded web client assets.
 pub struct WebAssetProvider;
 
+fn asset_contract_is_current(schema: &str, revision: &str) -> bool {
+    schema == "ryeos.ui.asset-manifest.v1"
+        && revision == ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+}
+
 impl StaticAssetProvider for WebAssetProvider {
     fn get(&self, path: &str) -> Option<StaticAsset> {
-        debug_assert_eq!(ASSET_MANIFEST_SCHEMA, "ryeos.ui.asset-manifest.v1");
-        debug_assert_eq!(
-            ASSET_UI_BINDING_REVISION,
-            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
-        );
+        // Embedded assets are one closed contract generation. Release builds
+        // must refuse a stale inventory too, rather than serve a client that
+        // cannot interpret the authenticated session contract.
+        if !asset_contract_is_current(ASSET_MANIFEST_SCHEMA, ASSET_UI_BINDING_REVISION) {
+            return None;
+        }
         let entry = asset_entry(path)?;
         debug_assert!(entry.imports.iter().all(|imported| {
             WEB_ASSETS
@@ -156,6 +162,36 @@ mod tests {
             .find(|entry| entry.filename == filename)
             .unwrap_or_else(|| panic!("missing embedded asset {filename}"))
             .bytes
+    }
+
+    #[test]
+    fn asset_contract_gate_rejects_other_generations() {
+        let current = ryeos_client_base::UI_BINDING_CONTRACT_REVISION;
+        assert!(asset_contract_is_current(
+            "ryeos.ui.asset-manifest.v1",
+            current
+        ));
+        assert!(!asset_contract_is_current("ryeos.ui.asset-manifest.v1", ""));
+        assert!(!asset_contract_is_current(
+            "ryeos.ui.asset-manifest.v1",
+            "incompatible"
+        ));
+        assert!(!asset_contract_is_current("unknown", current));
+    }
+
+    #[test]
+    fn incompatible_embedded_inventory_is_not_served() {
+        if asset_contract_is_current(ASSET_MANIFEST_SCHEMA, ASSET_UI_BINDING_REVISION) {
+            // Current inventories are exercised by the normal asset tests.
+            return;
+        }
+        let provider = WebAssetProvider;
+        for entry in WEB_ASSETS {
+            assert!(
+                provider.get(entry.route).is_none(),
+                "an incompatible generation must refuse every embedded route"
+            );
+        }
     }
 
     #[test]

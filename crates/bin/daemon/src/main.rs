@@ -13,11 +13,12 @@ use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
 use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
-use ryeos_app::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadLifecycleService;
 use ryeos_app::{command_service, event_store_service, thread_lifecycle};
-use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
+use ryeos_app::{kind_profiles, process, state, state_store};
+use ryeos_node_runtime::state_lock;
 use ryeos_executor::executor as service_executor;
 use ryeos_node::lifecycle_marker;
 use ryeosd::config::{self, Cli, Config};
@@ -1155,6 +1156,7 @@ async fn run(
                 scheduler_runtime_gate.clone(),
                 config.app_root.clone(),
             );
+            threads.set_ui_seat_append_route_from_node_config(&node_config_snapshot)?;
             // Operator live-input queue, shared between the `threads.input` enqueue
             // path (via AppState) and lifecycle finalization (closes a thread's entry).
             let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
@@ -1588,8 +1590,12 @@ async fn run(
                 app_state.clone(),
             )));
             let scheduler_reconcile_guard =
-                app_state.scheduler_runtime_gate.clone().write_owned().await;
+                app_state.threads.acquire_ui_seat_startup_exclusion().await?;
             let scheduler_intents = scheduler::reconcile::reconcile(&scheduler_ctx).await?;
+            let seat_recovery = app_state.threads
+                .recover_claimed_ui_seats_at_startup(&scheduler_reconcile_guard)
+                .context("retry durably fenced UI seat settlement")?;
+            tracing::info!(?seat_recovery, "startup UI seat recovery pass complete");
             if ryeosd::shutdown_requested() {
                 tracing::info!("startup shutdown requested after scheduler reconciliation");
                 return Ok(());
@@ -1680,7 +1686,7 @@ async fn run(
                 let outcome = scheduler::timer::dispatch_recovery_fire_under_startup_guard(
                     scheduler_ctx.clone(),
                     intent,
-                    &scheduler_reconcile_guard,
+                    scheduler_reconcile_guard.guard(),
                 )
                 .await
                 .with_context(|| format!("durably enqueue recovered scheduler fire {fire_id}"))?;
@@ -2623,6 +2629,10 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
     }
     ryeos_app::cascade::repair_cancelled_window_members(state)
         .context("periodic cancelled launch-window repair")?;
+
+    let seat_recovery = state.threads.recover_claimed_ui_seats().await
+        .context("periodic durably fenced UI seat recovery")?;
+    tracing::debug!(?seat_recovery, "periodic UI seat recovery pass complete");
 
     let active = reconcile::reconcile_live_threads(state)
         .await
@@ -3627,7 +3637,7 @@ fn standalone_operator_handler_context(
         operator.principal_id(),
         vec![], // Existing standalone filesystem authority does not mint live scopes.
         true,
-        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
         None,
     )
 }
@@ -3789,6 +3799,7 @@ async fn run_service_standalone(
         event_streams.clone(),
         &identity.site_id(),
     )?);
+    threads.set_ui_seat_append_route_from_node_config(&node_config_snapshot)?;
     let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
     threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(command_service::CommandService::new(
@@ -3989,14 +4000,14 @@ mod shutdown_mapping_tests {
     fn standalone_ingress_carries_only_the_loaded_local_operator_authority() {
         let root = tempfile::tempdir().unwrap();
         let operator =
-            ryeos_app::identity::NodeIdentity::create(&root.path().join("operator.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("operator.pem")).unwrap();
         let context = super::standalone_operator_handler_context(&operator);
         assert!(context.verified);
         assert_eq!(context.fingerprint, operator.principal_id());
         assert!(context.scopes.is_empty());
         assert_eq!(
             context.authorized_key_class,
-            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient)
         );
         assert!(context.authenticated_origin_site_id.is_none());
         context

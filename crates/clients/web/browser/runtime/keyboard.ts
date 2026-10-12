@@ -33,9 +33,31 @@ export function hasModifiers(event: RyeOsKeyEvent): boolean {
   return ctrl || alt || shift || meta;
 }
 
+/** The launcher is a shell control even while an editable view owns focus. */
+export function isLauncherChord(event: KeyboardEvent): boolean {
+  return !event.isComposing && event.key.toLowerCase() === "k"
+    && !event.shiftKey && !event.metaKey
+    && (event.ctrlKey !== event.altKey);
+}
+
 export function isTypingTarget(target: EventTarget | null): boolean {
-  return target instanceof Element
-    && target.closest("input, textarea, select, [contenteditable='true']") !== null;
+  if (!(target instanceof Element)) return false;
+  if (target.closest("input, textarea, select")) return true;
+  // The effective DOM state includes empty/plaintext-only attributes and
+  // inheritance, while an explicit false descendant must stay non-editable.
+  // A focused SVG descendant can inherit from its nearest HTML ancestor.
+  let element: Element | null = target;
+  while (element) {
+    if (element instanceof HTMLElement) return element.isContentEditable;
+    element = element.parentElement;
+  }
+  return false;
+}
+
+/** Key events from an open shadow tree may be retargeted to its host. */
+export function isTypingEvent(event: KeyboardEvent): boolean {
+  const inner = event.composedPath().find((entry): entry is Element => entry instanceof Element);
+  return isTypingTarget(inner ?? event.target);
 }
 
 export function isNativeActivationTarget(target: EventTarget | null): boolean {

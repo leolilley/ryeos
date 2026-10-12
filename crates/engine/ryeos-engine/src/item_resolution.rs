@@ -508,7 +508,18 @@ pub fn enumerate_kind_refs(
     kind_schema: &KindSchema,
     kind: &str,
 ) -> Vec<CanonicalRef> {
-    enumerate_kind_refs_inner(roots, kind_schema, kind, None).unwrap_or_default()
+    try_enumerate_kind_refs(roots, kind_schema, kind).unwrap_or_default()
+}
+
+/// Discover candidates while preserving traversal/budget failures for callers
+/// that report inventory coverage. This is a bounded live filesystem read, not
+/// an authenticated or atomic snapshot of the installed corpus.
+pub fn try_enumerate_kind_refs(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    enumerate_kind_refs_inner(roots, kind_schema, kind, None)
 }
 
 /// Enumerate the installed item corpus whose signed kind schemas select one
@@ -545,6 +556,41 @@ pub fn enumerate_kind_refs_under_project_authority(
     )
 }
 
+/// Project-owned candidates only, charged against the caller's existing
+/// result budget before any content is resolved or presented as available.
+pub fn enumerate_project_kind_refs_bounded(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    max_entries: usize,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    if max_entries == 0 || max_entries > MAX_CORPUS_ENUMERATION_FILES {
+        return Err(EngineError::Internal("invalid project item discovery bound".into()));
+    }
+    let project_roots = ResolutionRoots {
+        ordered: roots
+            .ordered
+            .iter()
+            .filter(|root| root.space == ItemSpace::Project)
+            .cloned()
+            .collect(),
+    };
+    if project_roots.ordered.len() != 1 {
+        return Err(EngineError::Internal(
+            "project discovery requires one admitted project root".into(),
+        ));
+    }
+    enumerate_kind_refs_inner_with_limit(
+        &project_roots,
+        kind_schema,
+        kind,
+        Some((project_root, project_content)),
+        max_entries,
+    )
+}
+
 const MAX_CORPUS_ENUMERATION_FILES: usize = 100_000;
 const MAX_CORPUS_TRAVERSAL_ENTRIES: usize = MAX_CORPUS_ENUMERATION_FILES * 2;
 const MAX_CORPUS_TRAVERSAL_DEPTH: usize = 64;
@@ -557,6 +603,25 @@ fn enumerate_kind_refs_inner(
         &std::path::Path,
         &dyn crate::project_content::AuthoritativeProjectContent,
     )>,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    enumerate_kind_refs_inner_with_limit(
+        roots,
+        kind_schema,
+        kind,
+        project_authority,
+        MAX_CORPUS_ENUMERATION_FILES,
+    )
+}
+
+fn enumerate_kind_refs_inner_with_limit(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+    max_entries: usize,
 ) -> Result<Vec<CanonicalRef>, EngineError> {
     use std::collections::HashSet;
 
@@ -577,7 +642,7 @@ fn enumerate_kind_refs_inner(
                 let prefix = Path::new(crate::AI_DIR).join(&kind_schema.directory);
                 relative_files.extend(
                     content
-                        .list_files(&prefix, true, MAX_CORPUS_ENUMERATION_FILES)?
+                        .list_files(&prefix, true, max_entries)?
                         .into_iter()
                         .map(|entry| entry.relative_path),
                 );
@@ -722,6 +787,62 @@ mod tests {
     use ryeos_tracing::test as trace_test;
     use std::fs;
     use std::path::Path;
+
+    struct DiscoveryContent;
+
+    impl crate::project_content::AuthoritativeProjectContent for DiscoveryContent {
+        fn list_files(
+            &self,
+            _prefix: &Path,
+            _recursive: bool,
+            max_entries: usize,
+        ) -> Result<Vec<crate::project_content::ProjectContentEntry>, EngineError> {
+            if max_entries < 2 {
+                return Err(EngineError::Internal("discovery inventory exceeds bound".into()));
+            }
+            Ok(["app.yaml", "other.yaml"]
+                .into_iter()
+                .map(|name| crate::project_content::ProjectContentEntry {
+                    relative_path: PathBuf::from(name),
+                    content_hash: "a".repeat(64),
+                    size: 1,
+                    normalized_mode: 0o644,
+                })
+                .collect())
+        }
+
+        fn read_file(&self, _: &Path, _: u64) -> Result<Option<Vec<u8>>, EngineError> {
+            unreachable!("enumeration cannot read source bodies")
+        }
+
+        fn validates_file(&self, _: &Path, _: &str) -> Result<bool, EngineError> {
+            unreachable!("enumeration cannot grant source validity")
+        }
+
+        fn validates_absence(&self, _: &Path) -> Result<bool, EngineError> {
+            unreachable!("enumeration cannot prove absence")
+        }
+    }
+
+    #[test]
+    fn bounded_project_discovery_excludes_bundle_and_refuses_incomplete_inventory() {
+        let roots = ResolutionRoots::from_flat(
+            Some(PathBuf::from("/project/.ai")),
+            vec![PathBuf::from("/bundle/.ai")],
+        );
+        let schema = make_kind_schema("surfaces", vec![(".yaml", "yaml")]);
+        let refs = enumerate_project_kind_refs_bounded(
+            &roots, &schema, "surface", Path::new("/project"), &DiscoveryContent, 2,
+        )
+        .unwrap();
+        assert_eq!(
+            refs.into_iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+            vec!["surface:app".to_string(), "surface:other".to_string()]
+        );
+        assert!(enumerate_project_kind_refs_bounded(
+            &roots, &schema, "surface", Path::new("/project"), &DiscoveryContent, 1,
+        ).is_err());
+    }
 
     #[test]
     fn authoritative_roots_select_typed_identity_not_nested_path_prefix() {
@@ -875,6 +996,23 @@ mod tests {
     }
 
     #[test]
+    fn fallible_enumeration_preserves_traversal_budget_failure() {
+        let root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        let mut nested = root.join("tools");
+        for _ in 0..(MAX_CORPUS_TRAVERSAL_DEPTH + 2) {
+            nested.push("nested");
+        }
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("item.yaml"), "name: item").unwrap();
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        assert!(try_enumerate_kind_refs(&roots, &schema, "tool").is_err());
+        // Existing best-effort clients retain their deliberate old contract.
+        assert!(enumerate_kind_refs(&roots, &schema, "tool").is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn enumeration_skips_schema_excluded_directories() {
         let root = tempdir();
         let mut schema = make_kind_schema(
@@ -893,6 +1031,11 @@ mod tests {
 
         let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
         let refs = enumerate_kind_refs(&roots, &schema, "tool");
+        let observed = try_enumerate_kind_refs(&roots, &schema, "tool").unwrap();
+        assert_eq!(
+            observed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            refs.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
         assert_eq!(
             refs.iter()
                 .map(|item| item.bare_id.as_str())

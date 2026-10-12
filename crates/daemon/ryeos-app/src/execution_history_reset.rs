@@ -12,9 +12,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::config::{Config, ConfigSources};
+use ryeos_node_runtime::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
-use crate::state_lock::{StateLock, default_lock_path};
+use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
 pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str =
     "ryeos node reset execution-history --include-project-heads --confirm --confirm-project-heads";
@@ -210,7 +210,7 @@ fn run_execution_history_reset_inner(
     // Signed chain heads belong to the node-identity trust domain, matching
     // ordinary daemon startup. Item/publisher trust is a separate domain and
     // must never be substituted for head authority here.
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for signed-head verification")?;
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
@@ -900,7 +900,7 @@ mod tests {
         })
         .unwrap();
         let identity =
-            crate::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
         let identity_bytes = std::fs::read(&config.node_signing_key_path).unwrap();
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());

@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 serde_yaml = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-api = { workspace = true }

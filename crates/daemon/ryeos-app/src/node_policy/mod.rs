@@ -223,7 +223,7 @@ pub fn load_snapshot(
     table: &NodePolicyTable,
 ) -> anyhow::Result<NodePolicySnapshot> {
     let generation = generation::load_policy_generation(app_root, trust_store, table)?;
-    let fingerprint = crate::identity::NodeIdentity::load(
+    let fingerprint = ryeos_node_runtime::identity::NodeIdentity::load(
         &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).node_signing_key_path(),
     )?
     .fingerprint()

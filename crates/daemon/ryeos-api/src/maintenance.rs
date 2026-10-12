@@ -12,7 +12,7 @@
 //! If quiesce times out, GC is aborted without running.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -20,9 +20,24 @@ use ryeos_state::gc::{self, GcParams, GcResult};
 
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::NodeIdentitySigner;
+use ryeos_app::thread_lifecycle::presentation_transfer::UiTransferSettlementWriteOutcome;
 
 /// Default quiesce timeout: 30 seconds.
 const DEFAULT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
+// Signed event reads happen under the existing GC flock, before the write
+// barrier is quiesced. Bound settlement turns per run, not per seat; lease
+// claim collection is separately bounded to one 16-row slice. Each turn
+// reads at most one 512 KiB event (with a 1 MiB page request).
+const MAX_CLAIMED_SETTLEMENT_TURNS_PER_GC: usize = 1024;
+const MAX_CLAIMED_SETTLEMENT_TIME_PER_GC: Duration = Duration::from_millis(250);
+
+fn claimed_discovery_root(roots: &[String], start: usize, turn: usize) -> Option<&str> {
+    (!roots.is_empty()).then(|| roots[(start.wrapping_add(turn)) % roots.len()].as_str())
+}
+
+fn claimed_settlement_has_work(discovery_roots: usize, pending_readers: bool) -> bool {
+    discovery_roots != 0 || pending_readers
+}
 
 enum GcWorkerCommand {
     Run(WriteBarrierResume),
@@ -125,9 +140,127 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     let mut deleted_thread_runtime_rows = 0usize;
     let mut deleted_thread_runtime_files = 0usize;
     let mut pending_retirements_recovered = 0usize;
-    // Every scheduler mutation and dispatch takes this gate. Keep its write
-    // side across terminal-chain pin inspection and both fire-history stores,
-    // so maintenance observes and publishes one closed scheduler state.
+    // Avoid claiming leases when this run already knows the scheduler
+    // projection cannot satisfy its later retention admission. The writer
+    // rechecks under its own read gate; the GC pass rechecks under write.
+    if (params.deep || params.prune_runtime_history || fire_retention.is_some())
+        && !state.scheduler_db.fire_projection_is_current()?
+    {
+        anyhow::bail!(
+            "maintenance GC requires a current scheduler fire projection before pin inspection"
+        );
+    }
+    if !params.dry_run
+        && let Some(grace_ms) = seat_lease_grace_ms
+    {
+        let now_ms = lillux::time::timestamp_millis();
+        let cutoff = now_ms.saturating_sub(grace_ms);
+        let mut claimed_seat_roots = Vec::new();
+        for thread_id in state.threads.next_expired_ui_seat_lease_slice(cutoff, 16)? {
+            if !state
+                .state_store
+                .claim_expired_seat_lease(&thread_id, cutoff)?
+            {
+                continue;
+            }
+            // The projection can be absent or stale; signed-root discovery
+            // must still run for every surviving exact claim.
+            claimed_seat_roots.push(thread_id.clone());
+            let Some(detail) = state.state_store.get_thread(&thread_id)? else {
+                // Projection absence is not signed terminality. Retain a
+                // claimed fence unless the exact seat root proves terminal.
+                if state
+                    .state_store
+                    .remove_terminal_seat_lease_if_proved(&thread_id)?
+                {
+                    state
+                        .threads
+                        .discard_claimed_ui_seat_transfer_scan(&thread_id)?;
+                    claimed_seat_roots.pop();
+                    reaped_seats += 1;
+                }
+                continue;
+            };
+            // The claimed lease row is the structural authority that this
+            // thread participates in lease expiry. Maintenance must not
+            // rediscover that relationship from an authored kind string.
+            if detail.status != "running" {
+                if state
+                    .state_store
+                    .remove_terminal_seat_lease_if_proved(&thread_id)?
+                {
+                    state
+                        .threads
+                        .discard_claimed_ui_seat_transfer_scan(&thread_id)?;
+                    claimed_seat_roots.pop();
+                    reaped_seats += 1;
+                }
+                continue;
+            }
+            // The common finalizer deliberately refuses signed seats until
+            // exact lifecycle transfer clearance exists. Settlement may
+            // advance retained testimony, but even an empty local scan does
+            // not prove absence of inbound source-only Prepared elsewhere.
+            // Keep the claimed lease and Running seat for retry/clearance.
+        }
+        // Give both positive discovery and exact anchored settlement readers
+        // repeated fair turns. Advancing only the decoder would leave an old
+        // transfer identity undiscovered for one daily GC per history event.
+        let discovery_start = state
+            .threads
+            .next_claimed_ui_seat_discovery_start(claimed_seat_roots.len());
+        // Claim/projection I/O must not consume the discovery budget before
+        // the first signed-history turn. The claim slice is bounded above.
+        let settlement_deadline = Instant::now() + MAX_CLAIMED_SETTLEMENT_TIME_PER_GC;
+        for turn in 0..MAX_CLAIMED_SETTLEMENT_TURNS_PER_GC {
+            if Instant::now() >= settlement_deadline
+                || !claimed_settlement_has_work(
+                    claimed_seat_roots.len(),
+                    state.threads.has_pending_claimed_ui_transfer_settlement()?,
+                )
+            {
+                break;
+            }
+            if let Some(seat_root_id) =
+                claimed_discovery_root(&claimed_seat_roots, discovery_start, turn)
+            {
+                if let Err(error) = settle_claimed_seat_transfers(state, seat_root_id).await {
+                    tracing::warn!(%seat_root_id, %error, "claimed UI seat transfer discovery deferred");
+                }
+            }
+            match state
+                .threads
+                .advance_claimed_ui_transfer_settlement_once()
+                .await
+            {
+                Ok(Some(UiTransferSettlementWriteOutcome::Deferred(_)))
+                | Ok(Some(UiTransferSettlementWriteOutcome::Conflict)) => {
+                    tracing::debug!("claimed seat transfer settlement retained for retry");
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "claimed seat transfer settlement retained for retry");
+                }
+            }
+        }
+        for seat_root_id in &claimed_seat_roots {
+            match state
+                .threads
+                .finalize_claimed_ui_seat_if_cleared(seat_root_id)
+                .await
+            {
+                Ok(true) => reaped_seats += 1,
+                Ok(false) => {}
+                Err(error) => tracing::debug!(%seat_root_id, %error,
+                    "claimed signed seat exhaustive finalization deferred"),
+            }
+        }
+    }
+
+    // Every scheduler mutation and dispatch takes this gate. Settlement above
+    // acquires its read side itself, so it must run before this write side.
+    // Keep the write side across terminal-chain pin inspection and both
+    // fire-history stores for a closed scheduler state during GC.
     let _scheduler_retention_guard =
         if params.deep || params.prune_runtime_history || fire_retention.is_some() {
             Some(state.scheduler_runtime_gate.clone().write_owned().await)
@@ -140,7 +273,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         );
     }
     if params.deep || params.prune_runtime_history {
-        let retirement = state.state_store.retire_due_terminal_chains(
+        let mut retirement = state.state_store.retire_due_terminal_chains(
             &lillux::time::iso8601_now(),
             params.dry_run,
             |thread_ids| {
@@ -155,52 +288,21 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                 Ok(pins)
             },
         )?;
+        let signed = state
+            .threads
+            .advance_terminal_ui_seat_retirement(&lillux::time::iso8601_now(), params.dry_run)?;
+        retirement.candidate_chains += signed.candidate_chains;
+        retirement.retired_chains += signed.retired_chains;
+        retirement.deleted_projection_rows += signed.deleted_projection_rows;
+        retirement.deleted_runtime_rows += signed.deleted_runtime_rows;
+        retirement.deleted_runtime_files += signed.deleted_runtime_files;
+        retirement.pending_retirements_recovered += signed.pending_retirements_recovered;
         terminal_chain_candidates = retirement.candidate_chains;
         retired_terminal_chains = retirement.retired_chains;
         deleted_thread_projection_rows = retirement.deleted_projection_rows;
         deleted_thread_runtime_rows = retirement.deleted_runtime_rows;
         deleted_thread_runtime_files = retirement.deleted_runtime_files;
         pending_retirements_recovered = retirement.pending_retirements_recovered;
-    }
-    if !params.dry_run
-        && let Some(grace_ms) = seat_lease_grace_ms
-    {
-        let now_ms = lillux::time::timestamp_millis();
-        let cutoff = now_ms.saturating_sub(grace_ms);
-        for thread_id in state.state_store.expired_seat_leases(cutoff)? {
-            if !state
-                .state_store
-                .claim_expired_seat_lease(&thread_id, cutoff)?
-            {
-                continue;
-            }
-            let Some(detail) = state.state_store.get_thread(&thread_id)? else {
-                state.state_store.remove_seat_lease(&thread_id)?;
-                continue;
-            };
-            // The claimed lease row is the structural authority that this
-            // thread participates in lease expiry. Maintenance must not
-            // rediscover that relationship from an authored kind string.
-            if detail.status != "running" {
-                state.state_store.remove_seat_lease(&thread_id)?;
-                continue;
-            }
-            state
-                .threads
-                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id,
-                    status: "completed".to_string(),
-                    outcome_code: Some("seat_lease_expired".to_string()),
-                    result: None,
-                    error: None,
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                })?;
-            state.state_store.remove_seat_lease(&detail.thread_id)?;
-            reaped_seats += 1;
-        }
     }
 
     // The global mutation order is cross-process CAS guard, then in-process
@@ -330,6 +432,14 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     gc_result.pending_retirements_recovered = pending_retirements_recovered;
 
     Ok(gc_result)
+}
+
+/// Advance only known transfer testimony on this already-claimed exact seat.
+/// Discovery is only a bounded-page locator. Each known identity is proved
+/// again by the exact two-seat writer; a partial scan is never absence proof.
+/// This pass does not clear the signed-seat finalization veto.
+async fn settle_claimed_seat_transfers(state: &AppState, seat_root_id: &str) -> Result<()> {
+    state.threads.queue_next_claimed_ui_seat_transfer(seat_root_id)
 }
 
 /// Run GC and append event log. Called inside `spawn_blocking`.
@@ -676,5 +786,18 @@ mod tests {
         // Verify the default timeout is reasonable for production use
         assert!(DEFAULT_QUIESCE_TIMEOUT >= Duration::from_secs(10));
         assert!(DEFAULT_QUIESCE_TIMEOUT <= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn claimed_settlement_turns_keep_old_readers_when_current_slice_is_empty() {
+        assert!(claimed_settlement_has_work(0, true));
+        assert!(claimed_settlement_has_work(1, false));
+        assert!(!claimed_settlement_has_work(0, false));
+        let roots = vec!["T-one".to_string(), "T-two".to_string()];
+        assert_eq!(claimed_discovery_root(&roots, 0, 0), Some("T-one"));
+        assert_eq!(claimed_discovery_root(&roots, 0, 1), Some("T-two"));
+        assert_eq!(claimed_discovery_root(&roots, 1, 0), Some("T-two"));
+        assert_eq!(claimed_discovery_root(&roots, 1, 1), Some("T-one"));
+        assert_eq!(claimed_discovery_root(&[], 0, 0), None);
     }
 }

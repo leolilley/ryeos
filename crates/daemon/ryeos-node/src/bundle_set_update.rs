@@ -223,7 +223,7 @@ pub fn prepare_offline_deployment_selection(
     input: OfflineDeploymentSelectionInput,
 ) -> anyhow::Result<OfflineDeploymentSelection> {
     require_explicit_private_key(operator_key_path)?;
-    let signer = ryeos_app::identity::NodeIdentity::load(operator_key_path)
+    let signer = ryeos_node_runtime::identity::NodeIdentity::load(operator_key_path)
         .context("load explicit offline deployment-selection signer")?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&signer);
     let selection = NodeBundleSelection {

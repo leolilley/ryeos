@@ -181,25 +181,89 @@ pub fn append_admission_refused(
     )
 }
 
-/// Read the newest admission events for a project (for the field projection).
-pub fn read_admission_events(
+/// Principal-scoped, bounded observation of one project's daemon-authored
+/// admissions. Other principals' payloads never leave this owner for UI
+/// projection. A signed chain cursor locates older pages; it is not an
+/// assertion that missing admissions were never attempted or emitted.
+pub struct PrincipalAdmissionEvents {
+    pub records: Vec<ryeos_state::BundleEventRecord>,
+    pub incomplete: bool,
+}
+
+fn admission_payload_owned_by(payload: &Value, principal: &str) -> bool {
+    payload.get("acting_principal").and_then(Value::as_str) == Some(principal)
+}
+
+pub fn read_admission_events_for_principal(
     state_store: &StateStore,
     project_path: &Path,
+    principal: &str,
     limit: usize,
-) -> Result<ryeos_state::BundleEventChainPage> {
-    state_store.read_bundle_event_chain_page(
-        ADMISSION_BUNDLE_ID,
-        ADMISSION_EVENT_KIND,
-        &admission_chain_id(project_path),
-        None,
-        limit,
-        MAX_ADMISSION_PAYLOAD_BYTES * limit.max(1),
-    )
+) -> Result<PrincipalAdmissionEvents> {
+    anyhow::ensure!(!principal.is_empty(), "admission principal must be present");
+    anyhow::ensure!((1..=50).contains(&limit), "admission limit is invalid");
+    const MAX_SCANNED: usize = 500;
+    const PAGE_SIZE: usize = 50;
+    let chain_id = admission_chain_id(project_path);
+    let mut cursor = None;
+    let mut scanned = 0usize;
+    let mut records = Vec::new();
+    let mut extra_owned = false;
+    while scanned < MAX_SCANNED && records.len() < limit {
+        let page_limit = PAGE_SIZE.min(MAX_SCANNED - scanned);
+        let page = state_store.read_bundle_event_chain_page(
+            ADMISSION_BUNDLE_ID,
+            ADMISSION_EVENT_KIND,
+            &chain_id,
+            cursor.as_ref(),
+            page_limit,
+            MAX_ADMISSION_PAYLOAD_BYTES * page_limit,
+        )?;
+        if page.records.is_empty() && page.next_cursor.is_some() {
+            anyhow::bail!("admission history page made no progress");
+        }
+        scanned += page.records.len();
+        for record in page.records {
+            if !admission_payload_owned_by(&record.event.payload, principal) {
+                continue;
+            }
+            if records.len() < limit {
+                records.push(record);
+            } else {
+                extra_owned = true;
+            }
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() || extra_owned {
+            break;
+        }
+    }
+    Ok(PrincipalAdmissionEvents {
+        records,
+        incomplete: cursor.is_some() || extra_owned,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_reader_accepts_only_exact_payload_principal() {
+        assert!(admission_payload_owned_by(
+            &json!({"acting_principal":"owner"}),
+            "owner"
+        ));
+        assert!(!admission_payload_owned_by(
+            &json!({"acting_principal":"other","detail":"private refusal"}),
+            "owner"
+        ));
+        assert!(!admission_payload_owned_by(&json!({}), "owner"));
+        assert!(!admission_payload_owned_by(
+            &json!({"acting_principal":"owner-extra"}),
+            "owner"
+        ));
+    }
 
     #[test]
     fn chain_id_is_stable_and_path_free() {

@@ -80,8 +80,8 @@ pub fn apply_stopped_bundle_set<F>(
 where
     F: Fn(&BundleSetJournal) -> anyhow::Result<()>,
 {
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
     )
     .context("bundle-set apply requires the daemon to be stopped")?;
     let registry_lock =

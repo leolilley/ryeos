@@ -305,6 +305,10 @@ impl FieldFactsBuilder {
         Ok(())
     }
 
+    pub fn has_entity(&self, id: &str) -> bool {
+        self.entities.contains_key(id)
+    }
+
     pub fn add_relation(&mut self, relation: FieldFactRelation) -> Result<()> {
         validate_stable_id("field relation", &relation.id)?;
         validate_attributes("field relation attributes", &relation.attributes)?;

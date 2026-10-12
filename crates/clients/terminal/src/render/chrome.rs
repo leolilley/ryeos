@@ -14,51 +14,85 @@ use super::text::{display_width, letterspace, truncate};
 use super::theme::{ACCENT, BG, FG, MUTED, WARN, border_for, mix_toward, style_muted, tone_style};
 
 pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
-    // Breadcrumb: when a drill is open, prefix the return trail (root-first)
-    // onto the current level so the operator sees the execution path they
-    // stepped down and that Backspace walks back up. The current level reads its
-    // own label (the cognition stepped into, e.g. `study`) when known, else the
-    // focused view's title.
-    let current = vm
-        .view_set
-        .lens_label
-        .clone()
-        .unwrap_or_else(|| vm.presentation.chrome.top_bar.focused_title.clone());
-    let crumb = if vm.view_set.lens_trail.is_empty() {
-        current
+    let tabs = &vm.presentation.chrome.top_bar.tabs;
+    let title = vm
+        .session
+        .surface_ordinal
+        .map(|ordinal| format!("{ordinal:02} {}", vm.session.title))
+        .unwrap_or_else(|| vm.session.title.clone());
+    let show_status = surface.width >= 36;
+    let status = if show_status {
+        truncate(
+            &format!(" {} ", vm.chrome.health_label),
+            (surface.width / 4).min(18),
+        )
     } else {
-        format!("{} ▸ {}", vm.view_set.lens_trail.join(" ▸ "), current)
+        String::new()
     };
-    let navigation = vm
-        .navigation
-        .items
-        .iter()
-        .map(|item| {
-            if item.selected {
-                format!("[{}]", item.label)
-            } else {
-                item.label.clone()
+    // The native client uses the same projected view-set strip as the web
+    // client. Keep authored order when it fits; on narrow widths start at the
+    // active set so its identity remains visible without reordering the
+    // displayed subsequence or inventing a second navigation owner.
+    draw_bar(surface, 0, "", MUTED);
+    let status_start = if show_status {
+        surface.width.saturating_sub(display_width(&status))
+    } else {
+        surface.width
+    };
+    let title_budget = if tabs.is_empty() {
+        status_start
+    } else {
+        (status_start / 3).min(24)
+    };
+    let title = truncate(&title, title_budget);
+    let mut x = surface.draw_text(0, 0, &title, Style::new().fg(MUTED).bg(BG));
+    if !tabs.is_empty() && x + 3 < status_start {
+        x += surface.draw_text(x, 0, " │ ", Style::new().fg(MUTED).bg(BG));
+        let tab_budget = status_start.saturating_sub(x);
+        let full_width = tabs
+            .iter()
+            .map(|tab| display_width(&format!(" {:02} {} ", tab.number, tab.title)))
+            .fold(0usize, usize::saturating_add)
+            .saturating_add(tabs.len().saturating_sub(1).saturating_mul(3));
+        let start = if full_width <= tab_budget {
+            0
+        } else {
+            tabs.iter().position(|tab| tab.active).unwrap_or(0)
+        };
+        for tab in tabs.iter().skip(start) {
+            let available = status_start.saturating_sub(x);
+            if available < 4 {
+                break;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let text = if navigation.is_empty() {
-        format!(
-            " {}  {}  {} ",
-            vm.presentation.chrome.version_label,
-            crumb,
-            vm.presentation.chrome.top_bar.layout_symbol
-        )
-    } else {
-        format!(
-            " {}  {}  {}  {} ",
-            vm.presentation.chrome.version_label,
-            navigation,
-            crumb,
-            vm.presentation.chrome.top_bar.layout_symbol
-        )
-    };
-    draw_bar(surface, 0, &text, ACCENT);
+            let label = format!(" {:02} {} ", tab.number, tab.title);
+            let width = display_width(&label);
+            if !tab.active && width > available {
+                break;
+            }
+            let style = if tab.active {
+                Style::new().fg(BG).bg(ACCENT)
+            } else {
+                Style::new().fg(FG).bg(BG)
+            };
+            let rendered = if tab.active {
+                truncate(&label, available)
+            } else {
+                label
+            };
+            x += surface.draw_text(x, 0, &rendered, style);
+            if x + 2 < status_start {
+                x += surface.draw_text(x, 0, " · ", Style::new().fg(MUTED).bg(BG));
+            }
+        }
+    }
+    if show_status {
+        surface.draw_text(
+            status_start,
+            0,
+            &status,
+            tone_style(vm.chrome.health_tone).bg(BG),
+        );
+    }
 }
 
 pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
@@ -92,8 +126,17 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     // squeezing the hint out entirely when the bar is tight.
     let key_hint = &vm.presentation.chrome.status_bar.key_hint;
     let hint_width = display_width(key_hint);
-    let hint_reserve = if hint_width > 0 { hint_width + 3 } else { 0 };
-    let segments_end = surface.width.saturating_sub(hint_reserve);
+    let badge_start = if surface.width >= 7 {
+        surface.width - 7
+    } else {
+        surface.width
+    };
+    let hint_reserve = if hint_width > 0 && hint_width + 3 < badge_start {
+        hint_width + 3
+    } else {
+        0
+    };
+    let segments_end = badge_start.saturating_sub(hint_reserve);
 
     for segment in &vm.presentation.chrome.status_bar.segments {
         if x >= segments_end {
@@ -101,23 +144,24 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
         }
         if let Some(label) = &segment.label {
             let label = format!("{}: ", letterspace(label));
-            surface.draw_text(
+            x += surface.draw_text(
                 x,
                 y,
                 &truncate(&label, segments_end - x),
                 style_muted().bg(bg),
             );
-            x = x.saturating_add(display_width(&label));
         }
         let value = truncate(&segment.value, segments_end.saturating_sub(x));
-        surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg));
-        x = x.saturating_add(display_width(&value) + 2);
+        x += surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg)) + 2;
     }
 
-    if hint_width > 0 && x + hint_width < surface.width {
+    if hint_reserve > 0 && x + 2 + hint_width <= badge_start {
         surface.draw_text(x, y, "·", style_muted().bg(bg));
         x += 2;
         surface.draw_text(x, y, key_hint, style_muted().bg(bg));
+    }
+    if surface.width >= 7 {
+        surface.draw_text(badge_start, y, " RyeOS ", Style::new().fg(BG).bg(ACCENT));
     }
 }
 
@@ -134,7 +178,7 @@ fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
 pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &RyeOsViewModel) -> Rect {
     let border = border_for(&vm.presentation.chrome.border);
     let project_path = vm.session.project_path.as_deref();
-    let (dock_rects, center) = carve_docks(body, &vm.view_set.docks);
+    let (dock_rects, center) = carve_docks(body, &vm.docks);
     for (dock, rect) in dock_rects {
         draw_dock_tile(surface, rect, dock, project_path, border, vm.now_ms);
     }
@@ -153,7 +197,7 @@ fn carve_docks(body: Rect, docks: &RyeOsDockPlaneVm) -> (Vec<(&RyeOsDockTileVm, 
     let mut out = Vec::new();
 
     if let Some(left) = &docks.left {
-        let w = left.size.min(center.w.saturating_sub(8));
+        let w = left.size.min(center.w.saturating_sub(9));
         if w > 0 {
             out.push((left, Rect::new(center.x, center.y, w, center.h)));
             center.x = center.x.saturating_add(w.saturating_add(1));
@@ -162,7 +206,7 @@ fn carve_docks(body: Rect, docks: &RyeOsDockPlaneVm) -> (Vec<(&RyeOsDockTileVm, 
     }
 
     if let Some(right) = &docks.right {
-        let w = right.size.min(center.w.saturating_sub(8));
+        let w = right.size.min(center.w.saturating_sub(9));
         if w > 0 {
             let x = center.x.saturating_add(center.w.saturating_sub(w));
             out.push((right, Rect::new(x, center.y, w, center.h)));
@@ -171,7 +215,7 @@ fn carve_docks(body: Rect, docks: &RyeOsDockPlaneVm) -> (Vec<(&RyeOsDockTileVm, 
     }
 
     if let Some(top) = &docks.top {
-        let h = top.size.min(center.h.saturating_sub(6));
+        let h = top.size.min(center.h.saturating_sub(7));
         if h > 0 {
             out.push((top, Rect::new(center.x, center.y, center.w, h)));
             center.y = center.y.saturating_add(h.saturating_add(1));
@@ -180,7 +224,7 @@ fn carve_docks(body: Rect, docks: &RyeOsDockPlaneVm) -> (Vec<(&RyeOsDockTileVm, 
     }
 
     if let Some(bottom) = &docks.bottom {
-        let h = bottom.size.min(center.h.saturating_sub(6));
+        let h = bottom.size.min(center.h.saturating_sub(7));
         if h > 0 {
             let y = center.y.saturating_add(center.h.saturating_sub(h));
             out.push((bottom, Rect::new(center.x, y, center.w, h)));
@@ -406,10 +450,19 @@ mod tests {
 
     fn dock(edge: RyeOsDockEdge, size: u16) -> RyeOsDockTileVm {
         RyeOsDockTileVm {
-            instance_key: ryeos_client_base::ui::model::dock_view_instance_key(
-                ryeos_client_base::ids::ViewSetId::new(1),
-                edge,
-            ),
+            instance_key: ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dock(
+                &ryeos_client_base::ids::PresentationId::try_new(
+                    "11111111-1111-4111-8111-111111111111",
+                )
+                .unwrap(),
+                match edge {
+                    RyeOsDockEdge::Top => "top",
+                    RyeOsDockEdge::Bottom => "bottom",
+                    RyeOsDockEdge::Left => "left",
+                    RyeOsDockEdge::Right => "right",
+                },
+            )
+            .unwrap(),
             edge,
             title: "t".into(),
             attachment_label: None,
@@ -471,8 +524,10 @@ mod tests {
         use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
         let view = RyeOsViewVm::Table {
             title: "threads".into(),
+            source_status: None,
             columns: vec!["thread".into()],
             total_rows: 1,
+            coverage: None,
             provenance: None,
             affordance_hints: vec![],
             rows: vec![RyeOsTableRowVm {
@@ -498,13 +553,31 @@ mod tests {
                 binding_attachment_id: "fixture".into(),
                 binding_generation: 1,
                 binding_digest: "fixture".into(),
-                view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
-                buffer: ryeos_client_base::ui::model::InputBufferKey::new(
-                    ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(
+                owner: ryeos_client_base::ui::model::RyeOsInputOwner::Surface {
+                    presentation_id: ryeos_client_base::ids::PresentationId::try_new(
+                        "fixture-seat",
+                    )
+                    .unwrap(),
+                    surface_instance_id: ryeos_client_base::ids::SurfaceInstanceId::try_new(
+                        "fixture-surface",
+                    )
+                    .unwrap(),
+                    view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
+                },
+                buffer: ryeos_client_base::ui::model::InputBufferKey::from_binding_coordinate(
+                    ryeos_client_base::ids::RyeOsViewInstanceKey::surface_tile(
+                        &ryeos_client_base::ids::PresentationId::try_new("fixture-seat").unwrap(),
+                        &ryeos_client_base::ids::SurfaceInstanceId::try_new("fixture-surface")
+                            .unwrap(),
                         ryeos_client_base::ids::TileId::new(1),
                     ),
                     "view:test/input",
                     "line",
+                    &ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
+                        binding_attachment_id: "fixture".into(),
+                        binding_generation: 1,
+                        binding_digest: "fixture".into(),
+                    },
                 ),
             },
             cursor: 3,
@@ -521,7 +594,9 @@ mod tests {
         draw_tile(
             &mut surface,
             Rect::new(0, 0, 40, 10),
-            &ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(
+            &ryeos_client_base::ids::RyeOsViewInstanceKey::surface_tile(
+                &ryeos_client_base::ids::PresentationId::try_new("fixture-seat").unwrap(),
+                &ryeos_client_base::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
                 ryeos_client_base::ids::TileId::new(1),
             ),
             "t",
@@ -552,8 +627,30 @@ mod tests {
         };
         let body = Rect::new(0, 0, 10, 6);
         let (rects, center) = carve_docks(body, &docks);
-        // size 50 clamped to w-8 = 2.
-        assert_eq!(rects[0].1.w, 2);
-        assert!(center.w >= 7, "center keeps room");
+        // Reserve both the centre minimum and the one-cell gap.
+        assert_eq!(rects[0].1.w, 1);
+        assert_eq!(center.w, 8);
+    }
+
+    #[test]
+    fn carve_docks_reserves_both_gaps_and_center_minima() {
+        let docks = RyeOsDockPlaneVm {
+            left: Some(dock(RyeOsDockEdge::Left, 50)),
+            right: Some(dock(RyeOsDockEdge::Right, 50)),
+            top: Some(dock(RyeOsDockEdge::Top, 50)),
+            bottom: Some(dock(RyeOsDockEdge::Bottom, 50)),
+        };
+        for width in 0..25 {
+            for height in 0..20 {
+                let body = Rect::new(3, 4, width, height);
+                let (rects, center) = carve_docks(body, &docks);
+                assert!(center.w >= width.min(8));
+                assert!(center.h >= height.min(6));
+                assert!(center.x >= body.x && center.y >= body.y);
+                assert!(center.x + center.w <= body.x + body.w);
+                assert!(center.y + center.h <= body.y + body.h);
+                assert!(rects.len() <= 4);
+            }
+        }
     }
 }

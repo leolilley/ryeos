@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ryeos_api::surface_views::{
-    EffectiveUiItemIdentity, EmbeddedSurfaceIdentity, EmbeddedViewIdentity,
+    EffectiveUiItemIdentity, EmbeddedUiCompositionIdentity, EmbeddedViewIdentity,
+    UiCompositionRootIdentity,
 };
+use ryeos_client_base::presentation::{UiCompositionDefinition, UiCompositionPresentation};
 
 /// Informational summary derived from the compiled grant. It is never an
 /// authorization input.
@@ -34,8 +36,9 @@ pub enum CompiledUiDispatchClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompiledUiResultEffect {
-    AdmitBindingAttachment,
+    SurfaceOpening,
     ResumeParticularViewSet,
+    ResumeParticularSurface,
 }
 
 /// Exact execution target resolved from a signed source or affordance.
@@ -120,7 +123,7 @@ pub struct CompiledUiBinding {
     pub project_root: Option<String>,
     pub request_engine_generation_identity: String,
     pub node_policy_generation_digest: String,
-    pub surface: EffectiveUiItemIdentity,
+    pub root: UiCompositionRootIdentity,
     pub views: BTreeMap<String, EmbeddedViewIdentity>,
     pub sources: BTreeMap<String, BTreeMap<String, CompiledUiSource>>,
     pub affordances: BTreeMap<String, BTreeMap<String, CompiledUiAffordance>>,
@@ -144,24 +147,41 @@ pub struct BindingCompileContext<'a> {
     pub caller_scopes: &'a [String],
     pub project_root: Option<&'a str>,
     pub node_policy_generation_digest: &'a str,
-    pub identities: EmbeddedSurfaceIdentity,
+    pub identities: EmbeddedUiCompositionIdentity,
 }
 
 impl SessionCompiledUiBinding {
     pub fn compile(
         context: BindingCompileContext<'_>,
-        effective_surface: &Value,
+        presentation: &UiCompositionPresentation,
         mut resolve_target: impl FnMut(&str) -> Result<CompiledUiTarget>,
     ) -> Result<Self> {
-        validate_navigation(effective_surface)?;
-        ryeos_client_base::surface::view_sets::validate_effective_view_sets(effective_surface)
-            .map_err(anyhow::Error::msg)?;
-        let views = effective_surface
-            .get("views")
-            .and_then(Value::as_object)
-            .context("effective surface has no embedded views mapping")?;
-        let source_ceiling = capability_lane(effective_surface, "sources")?;
-        let affordance_ceiling = capability_lane(effective_surface, "affordances")?;
+        if context.identities.root.expected_kind() != presentation.definition.expected_kind() {
+            bail!("composition declaration does not match admitted root kind");
+        }
+        let root_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(
+            &context.identities.root.identity().canonical_ref,
+        )
+        .context("invalid resolved UI composition root identity")?;
+        if root_ref.kind != context.identities.root.expected_kind() {
+            bail!("composition root identity kind does not match its discriminant");
+        }
+        let surface_value = presentation
+            .definition
+            .surface()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let effective_surface = surface_value.as_ref();
+        if let Some(surface) = effective_surface {
+            validate_navigation(surface)?;
+            ryeos_client_base::surface::view_sets::validate_effective_view_sets(surface)
+                .map_err(anyhow::Error::msg)?;
+        }
+        let views = &presentation.views;
+        let capabilities =
+            serde_json::json!({ "capabilities": presentation.definition.capabilities() });
+        let source_ceiling = capability_lane(&capabilities, "sources")?;
+        let affordance_ceiling = capability_lane(&capabilities, "affordances")?;
 
         let mut sources = BTreeMap::new();
         let mut affordances = BTreeMap::new();
@@ -170,9 +190,12 @@ impl SessionCompiledUiBinding {
         // Shell-wide observations are authored by the surface itself. They
         // use the surface's canonical identity as their coordinate namespace,
         // rather than living in a hard-coded browser bootstrap API.
-        if let Some(source_map) = effective_surface.get("sources").and_then(Value::as_object) {
-            let surface_ref = context.identities.surface.canonical_ref.clone();
-            let trusted_surface = is_trusted(&context.identities.surface);
+        if let Some(source_map) = effective_surface
+            .and_then(|surface| surface.get("sources"))
+            .and_then(Value::as_object)
+        {
+            let surface_ref = context.identities.root.identity().canonical_ref.clone();
+            let trusted_surface = is_trusted(context.identities.root.identity());
             compile_sources(
                 &surface_ref,
                 source_map,
@@ -198,7 +221,8 @@ impl SessionCompiledUiBinding {
             // canonical ref remains inside `identity`; substituting it here
             // would break aliases and let two declared aliases collide.
             let coordinate_view_ref = declared_view_ref.clone();
-            let trusted_view = is_trusted(&context.identities.surface) && is_trusted(identity);
+            let trusted_view =
+                is_trusted(context.identities.root.identity()) && is_trusted(identity);
             let dynamic_parameters = view
                 .get("input")
                 .and_then(|input| input.get("feeds"))
@@ -299,16 +323,16 @@ impl SessionCompiledUiBinding {
         // or privileged endpoint names. A child surface can remove the whole
         // lane with `affordances: []`.
         if let Some(items) = effective_surface
-            .get("affordances")
+            .and_then(|surface| surface.get("affordances"))
             .and_then(Value::as_array)
         {
-            let surface_ref = context.identities.surface.canonical_ref.clone();
+            let surface_ref = context.identities.root.identity().canonical_ref.clone();
             compile_affordances(
                 &surface_ref,
                 items,
                 None,
                 context.project_root.is_some(),
-                is_trusted(&context.identities.surface),
+                is_trusted(context.identities.root.identity()),
                 &affordance_ceiling,
                 context.caller_scopes,
                 &mut resolve_target,
@@ -317,15 +341,17 @@ impl SessionCompiledUiBinding {
             )?;
         }
 
-        let surface_route = compile_surface_route(
-            effective_surface,
-            context.project_root.is_some(),
-            is_trusted(&context.identities.surface),
-            &affordance_ceiling,
-            context.caller_scopes,
-            &mut resolve_target,
-            &mut attenuated,
-        );
+        let surface_route = effective_surface.and_then(|surface| {
+            compile_surface_route(
+                surface,
+                context.project_root.is_some(),
+                is_trusted(context.identities.root.identity()),
+                &affordance_ceiling,
+                context.caller_scopes,
+                &mut resolve_target,
+                &mut attenuated,
+            )
+        });
         let binding = CompiledUiBinding {
             contract_revision: context.contract_revision.to_string(),
             principal_id: context.principal_id.to_string(),
@@ -335,7 +361,7 @@ impl SessionCompiledUiBinding {
                 .request_engine_generation_identity
                 .clone(),
             node_policy_generation_digest: context.node_policy_generation_digest.to_string(),
-            surface: context.identities.surface,
+            root: context.identities.root,
             views: context.identities.views,
             sources,
             affordances,
@@ -365,55 +391,63 @@ impl SessionCompiledUiBinding {
     /// by dispatch. Signed content may describe entries which the caller or
     /// trust lane attenuates; those entries must not remain renderer-local
     /// behavior merely because they do not cross the execution transport.
-    pub fn sanitize_effective_surface(&self, effective_surface: &Value) -> Result<Value> {
-        let mut surface = effective_surface.clone();
-        let surface_fields = surface
-            .as_object_mut()
-            .context("effective surface presentation is not an object")?;
-        sanitize_sources(
-            surface_fields,
-            self.binding
-                .sources
-                .get(&self.binding.surface.canonical_ref),
-        );
-        sanitize_affordances(
-            surface_fields,
-            self.binding
-                .affordances
-                .get(&self.binding.surface.canonical_ref),
-        );
-        if self.binding.surface_route.is_none() {
-            if let Some(input) = surface_fields
-                .get_mut("input")
-                .and_then(Value::as_object_mut)
-            {
-                input.remove("route");
-            }
+    pub fn sanitize_presentation(
+        &self,
+        presentation: &UiCompositionPresentation,
+    ) -> Result<UiCompositionPresentation> {
+        if self.binding.root.expected_kind() != presentation.definition.expected_kind() {
+            bail!("presentation root kind does not match compiled binding");
         }
-
-        if let Some(views) = surface_fields
-            .get_mut("views")
-            .and_then(Value::as_object_mut)
+        let mut sanitized = presentation.clone();
+        if let UiCompositionDefinition::Surface {
+            surface: declaration,
+        } = &mut sanitized.definition
         {
-            for (view_ref, view) in views {
-                let Some(fields) = view.as_object_mut() else {
-                    continue;
-                };
-                sanitize_sources(fields, self.binding.sources.get(view_ref));
-                sanitize_affordances(fields, self.binding.affordances.get(view_ref));
-                let retained = self.binding.affordances.get(view_ref);
-                if let Some(input) = fields.get_mut("input").and_then(Value::as_object_mut) {
-                    if input
-                        .get("submit")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| !retained.is_some_and(|items| items.contains_key(id)))
-                    {
-                        input.remove("submit");
-                    }
+            let mut surface = serde_json::to_value(&*declaration)?;
+            let surface_fields = surface
+                .as_object_mut()
+                .context("effective surface presentation is not an object")?;
+            sanitize_sources(
+                surface_fields,
+                self.binding
+                    .sources
+                    .get(&self.binding.root.identity().canonical_ref),
+            );
+            sanitize_affordances(
+                surface_fields,
+                self.binding
+                    .affordances
+                    .get(&self.binding.root.identity().canonical_ref),
+            );
+            if self.binding.surface_route.is_none() {
+                if let Some(input) = surface_fields
+                    .get_mut("input")
+                    .and_then(Value::as_object_mut)
+                {
+                    input.remove("route");
+                }
+            }
+
+            *declaration = serde_json::from_value(surface)?;
+        }
+        for (view_ref, view) in &mut sanitized.views {
+            let Some(fields) = view.as_object_mut() else {
+                continue;
+            };
+            sanitize_sources(fields, self.binding.sources.get(view_ref));
+            sanitize_affordances(fields, self.binding.affordances.get(view_ref));
+            let retained = self.binding.affordances.get(view_ref);
+            if let Some(input) = fields.get_mut("input").and_then(Value::as_object_mut) {
+                if input
+                    .get("submit")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !retained.is_some_and(|items| items.contains_key(id)))
+                {
+                    input.remove("submit");
                 }
             }
         }
-        Ok(surface)
+        Ok(sanitized)
     }
 }
 
@@ -481,6 +515,26 @@ fn sanitize_affordances(
         };
         item.get("invoke").is_none() || retained.is_some_and(|entries| entries.contains_key(id))
     });
+    for item in items {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        item.remove("presentation_operation");
+        let operation = item
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| retained.and_then(|entries| entries.get(id)))
+            .and_then(|entry| match entry {
+                CompiledUiAffordance::Execution { target, .. } => target.result_effect,
+                CompiledUiAffordance::Local { .. } => None,
+            });
+        if let Some(operation) = operation {
+            item.insert(
+                "presentation_operation".into(),
+                serde_json::to_value(operation).expect("closed presentation operation enum"),
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -894,10 +948,13 @@ fn capability_lane(surface: &Value, lane: &str) -> Result<Vec<String>> {
     values
         .iter()
         .map(|value| {
-            value
+            let pattern = value
                 .as_str()
-                .map(str::to_string)
-                .with_context(|| format!("effective surface `{lane}` capability is not a string"))
+                .with_context(|| format!("composition `{lane}` capability is not a string"))?;
+            ryeos_runtime::authorizer::validate_scope_pattern(pattern)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("composition `{lane}` capability pattern is invalid"))?;
+            Ok(pattern.to_string())
         })
         .collect()
 }
@@ -954,18 +1011,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn composition_discriminant_cannot_disguise_a_different_canonical_kind() {
+        let presentation = UiCompositionPresentation::from_effective_surface(
+            serde_json::json!({"name": "Fixture"}),
+        )
+        .unwrap();
+        let result = SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &[],
+                project_root: None,
+                node_policy_generation_digest: "policy:test",
+                identities: EmbeddedUiCompositionIdentity {
+                    request_engine_generation_identity: "engine:test".into(),
+                    root: UiCompositionRootIdentity::Surface {
+                        identity: identity("config:test/root", 'a'),
+                    },
+                    views: BTreeMap::new(),
+                },
+            },
+            &presentation,
+            |_| panic!("wrong root must fail before target resolution"),
+        )
+        .unwrap_err();
+        assert!(result.to_string().contains("discriminant"));
+    }
+
     fn compile(surface: Value) -> SessionCompiledUiBinding {
         let view_ref = "view:test/input";
         SessionCompiledUiBinding::compile(
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
-                caller_scopes: &["cap.read".into(), "cap.write".into()],
+                caller_scopes: &[
+                    "ryeos.execute.service.test/read".into(),
+                    "ryeos.execute.service.test/write".into(),
+                ],
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
-                identities: EmbeddedSurfaceIdentity {
+                identities: EmbeddedUiCompositionIdentity {
                     request_engine_generation_identity: "engine:test".into(),
-                    surface: identity("surface:test/root", 'a'),
+                    root: UiCompositionRootIdentity::Surface {
+                        identity: identity("surface:test/root", 'a'),
+                    },
                     views: BTreeMap::from([(
                         view_ref.into(),
                         EmbeddedViewIdentity::Resolved {
@@ -974,12 +1064,19 @@ mod tests {
                     )]),
                 },
             },
-            &surface,
+            &UiCompositionPresentation::from_effective_surface(surface).unwrap(),
             |item_ref| {
                 let read_only = item_ref.ends_with("/read");
                 Ok(CompiledUiTarget {
                     identity: identity(item_ref, if read_only { 'c' } else { 'd' }),
-                    required_caps: vec![if read_only { "cap.read" } else { "cap.write" }.into()],
+                    required_caps: vec![
+                        if read_only {
+                            "ryeos.execute.service.test/read"
+                        } else {
+                            "ryeos.execute.service.test/write"
+                        }
+                        .into(),
+                    ],
                     source_safe: read_only,
                     dispatch_class: CompiledUiDispatchClass::Verified,
                     result_effect: None,
@@ -996,7 +1093,8 @@ mod tests {
 
     fn surface(affordance_caps: Value) -> Value {
         serde_json::json!({
-            "capabilities": {"sources":["cap.read"], "affordances":affordance_caps},
+            "name": "Test Surface",
+            "capabilities": {"sources":["ryeos.execute.service.test/read"], "affordances":affordance_caps},
             "sources": {
                 "shell": {
                     "ref":"service:test/read",
@@ -1021,6 +1119,297 @@ mod tests {
                 "params":{}
             }}
         })
+    }
+
+    #[test]
+    fn presentation_operation_markers_come_only_from_retained_targets() {
+        let compiled = compile(surface(serde_json::json!([
+            "ryeos.execute.service.test/write"
+        ])));
+        let mut retained = compiled.binding.affordances["view:test/input"].clone();
+        let mut fields = serde_json::json!({"affordances":[{"id":"run",
+            "presentation_operation":"resume_particular_view_set", "invoke":{"plane":"rye"}}]})
+        .as_object()
+        .unwrap()
+        .clone();
+        sanitize_affordances(&mut fields, Some(&retained));
+        assert!(
+            fields["affordances"][0]
+                .get("presentation_operation")
+                .is_none()
+        );
+        let CompiledUiAffordance::Execution { target, .. } = retained.get_mut("run").unwrap()
+        else {
+            panic!("execution fixture");
+        };
+        target.result_effect = Some(CompiledUiResultEffect::SurfaceOpening);
+        sanitize_affordances(&mut fields, Some(&retained));
+        assert_eq!(
+            fields["affordances"][0]["presentation_operation"],
+            "surface_opening"
+        );
+    }
+
+    #[test]
+    fn shared_config_compiles_views_without_surface_root_coordinates() {
+        let presentation = UiCompositionPresentation {
+            definition: UiCompositionDefinition::SharedPresentation {
+                config: serde_json::from_value(serde_json::json!({
+                    "category": "test",
+                    "shared_presentation": {
+                        "schema": 1, "title": "Test", "launcher": "launch",
+                        "dialogs": [{"id": "launch", "title": "Launch", "view": "view:test/input"}],
+                        "capabilities": {"sources": ["ryeos.execute.service.test/read"], "affordances": []}
+                    }
+                }))
+                .unwrap(),
+            },
+            views: BTreeMap::from([(
+                "view:test/input".into(),
+                serde_json::json!({
+                    "sources": {"default": {"ref": "service:test/read", "params": {}}}
+                }),
+            )]),
+        };
+        let compiled = SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &["ryeos.execute.service.test/read".into()],
+                project_root: None,
+                node_policy_generation_digest: "policy:test",
+                identities: EmbeddedUiCompositionIdentity {
+                    request_engine_generation_identity: "engine:test".into(),
+                    root: UiCompositionRootIdentity::SharedPresentation {
+                        identity: identity("config:test/root", 'a'),
+                    },
+                    views: BTreeMap::from([(
+                        "view:test/input".into(),
+                        EmbeddedViewIdentity::Resolved {
+                            identity: identity("view:test/input", 'b'),
+                        },
+                    )]),
+                },
+            },
+            &presentation,
+            |item_ref| {
+                Ok(CompiledUiTarget {
+                    identity: identity(item_ref, 'c'),
+                    required_caps: vec!["ryeos.execute.service.test/read".into()],
+                    source_safe: true,
+                    dispatch_class: CompiledUiDispatchClass::Verified,
+                    result_effect: None,
+                    parameter_schema: BTreeMap::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert!(compiled.binding.surface_route.is_none());
+        assert!(!compiled.binding.sources.contains_key("config:test/root"));
+        assert!(compiled.binding.sources.contains_key("view:test/input"));
+        assert_eq!(
+            compiled.sanitize_presentation(&presentation).unwrap(),
+            presentation
+        );
+    }
+
+    #[test]
+    fn authored_shared_mutations_are_independently_attenuated_by_exact_caps() {
+        // Source-contract fixture only: trusted identities are explicitly
+        // supplied here, not a claim that unsigned edited YAML was admitted.
+        let workspace = ryeos_engine::test_support::workspace_root();
+        let root = workspace.join("bundles/ryeos-ui/.ai");
+        let core_root = workspace.join("bundles/core/.ai");
+        let read = |path: &str| -> Value {
+            serde_yaml::from_str(&std::fs::read_to_string(root.join(path)).unwrap()).unwrap()
+        };
+        for file in [
+            "presentation.yaml",
+            "terminal-presentation.yaml",
+            "atlas-presentation.yaml",
+        ] {
+            let config: ryeos_client_base::presentation::SharedPresentationConfig =
+                serde_json::from_value(read(&format!("config/ryeos/ui/{file}"))).unwrap();
+            let requested = config.shared_presentation.capabilities.affordances.clone();
+            let views: BTreeMap<String, Value> = config
+                .shared_presentation
+                .referenced_views()
+                .into_iter()
+                .map(|reference| {
+                    let value = read(&format!(
+                        "views/{}.yaml",
+                        reference.strip_prefix("view:").unwrap()
+                    ));
+                    (reference.to_string(), value)
+                })
+                .collect();
+            let presentation = UiCompositionPresentation {
+                definition: UiCompositionDefinition::SharedPresentation { config },
+                views,
+            };
+            let compile_actual = |scopes: &[String], missing_catalogue: bool| {
+                SessionCompiledUiBinding::compile(
+                    BindingCompileContext {
+                        contract_revision: "test.v1",
+                        principal_id: "principal:test",
+                        caller_scopes: scopes,
+                        project_root: None,
+                        node_policy_generation_digest: "policy:test",
+                        identities: EmbeddedUiCompositionIdentity {
+                            request_engine_generation_identity: "engine:test".into(),
+                            root: UiCompositionRootIdentity::SharedPresentation {
+                                identity: identity("config:test/shared", 'a'),
+                            },
+                            views: presentation
+                                .views
+                                .keys()
+                                .map(|reference| {
+                                    (
+                                        reference.clone(),
+                                        EmbeddedViewIdentity::Resolved {
+                                            identity: identity(reference, 'b'),
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        },
+                    },
+                    &presentation,
+                    |reference| {
+                        if missing_catalogue && reference == "service:ui/ryeos-ui/items/list" {
+                            bail!("catalogue source unavailable");
+                        }
+                        let relative = format!(
+                            "services/{}.yaml",
+                            reference.strip_prefix("service:").unwrap()
+                        );
+                        let path = [root.join(&relative), core_root.join(&relative)]
+                            .into_iter()
+                            .find(|path| path.is_file())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("authored target missing: {reference}")
+                            })?;
+                        let yaml: Value = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
+                        let session_local = yaml["ui_dispatch"] == "session_local";
+                        Ok(CompiledUiTarget {
+                            identity: identity(reference, 'c'),
+                            required_caps: serde_json::from_value(
+                                yaml.get("required_caps")
+                                    .cloned()
+                                    .unwrap_or(serde_json::json!([])),
+                            )?,
+                            source_safe: yaml["ui_read_only"] == true
+                                && (session_local || yaml["state_access"] == "read_only_existing"),
+                            dispatch_class: if session_local {
+                                CompiledUiDispatchClass::SessionLocal
+                            } else {
+                                CompiledUiDispatchClass::Verified
+                            },
+                            result_effect: yaml
+                                .get("ui_result_effect")
+                                .cloned()
+                                .map(serde_json::from_value)
+                                .transpose()?,
+                            parameter_schema: serde_json::from_value(
+                                yaml.get("schema").cloned().unwrap_or(serde_json::json!({})),
+                            )?,
+                        })
+                    },
+                )
+                .unwrap()
+            };
+            let none = compile_actual(&[], false);
+            let full = compile_actual(&requested, false);
+            let actions = [
+                ("view:ryeos/projects/list", "open-project"),
+                ("view:ryeos/projects/list", "register-project"),
+                ("view:ryeos/view-sets/library", "persist"),
+                ("view:ryeos/view-sets/library", "resume-particular"),
+                ("view:ryeos/view-sets/library", "resume-particular-surface"),
+                ("view:ryeos/surfaces/list", "open"),
+            ];
+            for (view, action) in actions {
+                assert!(
+                    full.binding
+                        .affordances
+                        .get(view)
+                        .and_then(|entries| entries.get(action))
+                        .is_some(),
+                    "{file}: {view}:{action}"
+                );
+                assert!(
+                    none.binding
+                        .affordances
+                        .get(view)
+                        .and_then(|entries| entries.get(action))
+                        .is_none(),
+                    "{file}: {view}:{action}"
+                );
+                assert!(
+                    none.binding
+                        .attenuated
+                        .iter()
+                        .any(|entry| entry.coordinate == format!("affordance:{view}:{action}"))
+                );
+            }
+            assert_eq!(none.binding.sources, full.binding.sources);
+            assert!(!none.binding.sources.is_empty());
+            let reduced: Vec<_> = requested
+                .iter()
+                .filter(|cap| cap.as_str() != "ryeos.execute.service.ui/session/surfaces/open")
+                .cloned()
+                .collect();
+            let reduced = compile_actual(&reduced, false);
+            assert!(
+                !reduced
+                    .binding
+                    .affordances
+                    .get("view:ryeos/surfaces/list")
+                    .is_some_and(|entries| entries.contains_key("open"))
+            );
+            assert!(
+                reduced.binding.affordances["view:ryeos/view-sets/library"]
+                    .contains_key("resume-particular-surface")
+            );
+            assert_eq!(reduced.binding.sources, full.binding.sources);
+            let unavailable = compile_actual(&requested, true);
+            assert!(
+                !unavailable
+                    .binding
+                    .sources
+                    .contains_key("view:ryeos/surfaces/list")
+            );
+            assert!(
+                unavailable
+                    .binding
+                    .sources
+                    .contains_key("view:ryeos/view-sets/library")
+            );
+            assert!(
+                unavailable
+                    .binding
+                    .attenuated
+                    .iter()
+                    .any(
+                        |entry| entry.coordinate == "source:view:ryeos/surfaces/list:default"
+                            && entry.reason
+                                == "target resolution failed: catalogue source unavailable"
+                    )
+            );
+        }
+    }
+
+    #[test]
+    fn composition_capability_lanes_use_canonical_scope_grammar() {
+        for lane in ["sources", "affordances"] {
+            for pattern in ["cap.read", "", "ryeos..execute", "ryeos.execute."] {
+                let value = serde_json::json!({"capabilities": {lane: [pattern]}});
+                assert!(capability_lane(&value, lane).is_err(), "{lane}: {pattern}");
+            }
+            let value =
+                serde_json::json!({"capabilities": {lane: ["ryeos.execute.service.test/read"]}});
+            assert!(capability_lane(&value, lane).is_ok());
+        }
     }
 
     #[test]
@@ -1056,7 +1445,9 @@ mod tests {
 
     #[test]
     fn signed_affordance_lane_compiles_exact_targets_and_derived_posture() {
-        let compiled = compile(surface(serde_json::json!(["cap.write"])));
+        let compiled = compile(surface(serde_json::json!([
+            "ryeos.execute.service.test/write"
+        ])));
         assert!(matches!(
             compiled.binding.affordances["view:test/input"]["run"],
             CompiledUiAffordance::Execution {
@@ -1086,20 +1477,22 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
-                caller_scopes: &["cap.read".into()],
+                caller_scopes: &["ryeos.execute.service.test/read".into()],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
-                identities: EmbeddedSurfaceIdentity {
+                identities: EmbeddedUiCompositionIdentity {
                     request_engine_generation_identity: "engine:test".into(),
-                    surface: identity("surface:test/root", 'a'),
+                    root: UiCompositionRootIdentity::Surface {
+                        identity: identity("surface:test/root", 'a'),
+                    },
                     views: BTreeMap::new(),
                 },
             },
-            &value,
+            &UiCompositionPresentation::from_effective_surface(value).unwrap(),
             |item_ref| {
                 Ok(CompiledUiTarget {
                     identity: identity(item_ref, 'c'),
-                    required_caps: vec!["cap.read".into()],
+                    required_caps: vec!["ryeos.execute.service.test/read".into()],
                     source_safe: true,
                     dispatch_class: CompiledUiDispatchClass::Verified,
                     result_effect: None,
@@ -1108,6 +1501,80 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_optional_scheduler_attenuates_only_its_exact_source() {
+        let presentation = UiCompositionPresentation::from_effective_surface(serde_json::json!({
+            "name":"Optional scheduling",
+            "capabilities":{"sources":["ryeos.execute.service.*"],"affordances":[]},
+            "sources":{
+                "ordinary":{"ref":"service:test/read","params":{"query":"retained"}},
+                "schedules":{"ref":"service:scheduler/list","params":{}}
+            }
+        }))
+        .unwrap();
+        let compiled = SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &["ryeos.execute.service.*".into()],
+                project_root: None,
+                node_policy_generation_digest: "policy:test",
+                identities: EmbeddedUiCompositionIdentity {
+                    request_engine_generation_identity: "engine:test".into(),
+                    root: UiCompositionRootIdentity::Surface {
+                        identity: identity("surface:test/root", 'a'),
+                    },
+                    views: BTreeMap::new(),
+                },
+            },
+            &presentation,
+            |item_ref| {
+                if item_ref == "service:scheduler/list" {
+                    bail!("optional scheduling delivery is absent");
+                }
+                assert_eq!(item_ref, "service:test/read");
+                Ok(CompiledUiTarget {
+                    identity: identity(item_ref, 'b'),
+                    required_caps: vec!["ryeos.execute.service.test/read".into()],
+                    source_safe: true,
+                    dispatch_class: CompiledUiDispatchClass::Verified,
+                    result_effect: None,
+                    parameter_schema: BTreeMap::new(),
+                })
+            },
+        )
+        .unwrap();
+        let sources = &compiled.binding.sources["surface:test/root"];
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources["ordinary"].target.identity.canonical_ref,
+            "service:test/read"
+        );
+        assert_eq!(
+            sources["ordinary"].parameters,
+            serde_json::json!({"query":"retained"})
+        );
+        assert!(sources["ordinary"].target.source_safe);
+        assert!(!sources.contains_key("schedules"));
+        assert_eq!(compiled.binding.attenuated.len(), 1);
+        assert_eq!(
+            compiled.binding.attenuated[0].coordinate,
+            "source:surface:test/root:schedules"
+        );
+        assert_eq!(
+            compiled.binding.attenuated[0].reason,
+            "target resolution failed: optional scheduling delivery is absent"
+        );
+        // Compilation retains the authored request, not a fabricated empty
+        // scheduler result or a callable substitute target.
+        let value = presentation.surface_value().unwrap().unwrap();
+        assert_eq!(
+            value["sources"]["schedules"]["ref"],
+            "service:scheduler/list"
+        );
+        assert!(value.get("schedules").is_none());
     }
 
     #[test]
@@ -1127,7 +1594,7 @@ mod tests {
 
     #[test]
     fn route_semantic_slots_must_match_the_signed_target_schema() {
-        let mut value = surface(serde_json::json!(["cap.write"]));
+        let mut value = surface(serde_json::json!(["ryeos.execute.service.test/write"]));
         value["input"]["route"]["bindings"]["input_parameter"] = serde_json::json!("target");
         let compiled = compile(value);
         assert!(compiled.binding.surface_route.is_none());
@@ -1141,7 +1608,7 @@ mod tests {
 
     #[test]
     fn authored_route_params_cannot_supply_renderer_thread_target() {
-        let mut value = surface(serde_json::json!(["cap.write"]));
+        let mut value = surface(serde_json::json!(["ryeos.execute.service.test/write"]));
         value["input"]["route"]["params"]["target"] =
             serde_json::json!({"thread_id":"attacker-selected"});
         let compiled = compile(value);
@@ -1154,7 +1621,7 @@ mod tests {
 
     #[test]
     fn signed_project_requirements_attenuate_projectless_behavior() {
-        let mut value = surface(serde_json::json!(["cap.write"]));
+        let mut value = surface(serde_json::json!(["ryeos.execute.service.test/write"]));
         value["input"]["route"]["requires_project"] = serde_json::json!(true);
         value["views"]["view:test/input"]["affordances"][0]["requires_project"] =
             serde_json::json!(true);
@@ -1163,12 +1630,17 @@ mod tests {
             BindingCompileContext {
                 contract_revision: "test.v1",
                 principal_id: "principal:test",
-                caller_scopes: &["cap.read".into(), "cap.write".into()],
+                caller_scopes: &[
+                    "ryeos.execute.service.test/read".into(),
+                    "ryeos.execute.service.test/write".into(),
+                ],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
-                identities: EmbeddedSurfaceIdentity {
+                identities: EmbeddedUiCompositionIdentity {
                     request_engine_generation_identity: "engine:test".into(),
-                    surface: identity("surface:test/root", 'a'),
+                    root: UiCompositionRootIdentity::Surface {
+                        identity: identity("surface:test/root", 'a'),
+                    },
                     views: BTreeMap::from([(
                         "view:test/input".into(),
                         EmbeddedViewIdentity::Resolved {
@@ -1177,15 +1649,15 @@ mod tests {
                     )]),
                 },
             },
-            &value,
+            &UiCompositionPresentation::from_effective_surface(value).unwrap(),
             |item_ref| {
                 Ok(CompiledUiTarget {
                     identity: identity(item_ref, 'c'),
                     required_caps: vec![
                         if item_ref.ends_with("/read") {
-                            "cap.read"
+                            "ryeos.execute.service.test/read"
                         } else {
-                            "cap.write"
+                            "ryeos.execute.service.test/write"
                         }
                         .into(),
                     ],

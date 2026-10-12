@@ -372,6 +372,7 @@ pub struct PersistedEventRef {
     pub chain_root_id: String,
     pub chain_seq: i64,
     pub event_hash: String,
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -388,7 +389,7 @@ pub struct NodeIdentitySigner {
 }
 
 impl NodeIdentitySigner {
-    pub fn from_identity(identity: &crate::identity::NodeIdentity) -> Self {
+    pub fn from_identity(identity: &ryeos_node_runtime::identity::NodeIdentity) -> Self {
         Self {
             fingerprint: identity.fingerprint().to_string(),
             signing_key: identity.signing_key().clone(),
@@ -440,6 +441,98 @@ pub struct NewEventRecord {
     pub event_type: String,
     pub storage_class: String,
     pub payload: Value,
+}
+
+/// Authenticated UI-seat facts captured against one exact signed anchor by
+/// the existing seat-transition owner. This is not a grant: StateStore still
+/// requires the running signed seat, active exact lease and unchanged anchor
+/// under the ordered two-chain publication locks.
+pub struct UiTransferPairSeat<'a> {
+    pub anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub owner: &'a str,
+    pub surface: &'a str,
+    pub client_ref: &'a str,
+    pub presentation_id: &'a str,
+    pub producer_incarnation: &'a str,
+    pub revision: u64,
+    pub next_engine_seq: u64,
+    pub max_append_bytes: u64,
+}
+
+/// Signed readback is distinct from a newly published cancellation. Neither
+/// variant releases renderer state without full typed Core replay validation.
+pub enum UiMoveFreezeCancellationAppendResult {
+    AlreadyRecorded(ryeos_ui_presentation_contract::transfer::TransferEvidence),
+    Committed(Vec<PersistedEventRecord>),
+    Conflict,
+}
+
+/// Bounded fixed-predecessor observation of a preparation-pair reply. The
+/// two signed heads are captured separately: unchanged observations are not
+/// a simultaneous absence proof. Every retry or lifecycle decision must
+/// recheck both heads under ordered chain exclusion. An unrelated later
+/// seat event is Ambiguous, never permission to mint a second inbound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiTransferPairReadback {
+    BothObservedUnchanged,
+    DestinationObservedOnly {
+        inbound: ryeos_ui_presentation_contract::transfer::TransferEvidence,
+    },
+    LinkedPairObserved {
+        inbound: ryeos_ui_presentation_contract::transfer::TransferEvidence,
+        prepared: ryeos_ui_presentation_contract::transfer::TransferEvidence,
+    },
+    Ambiguous,
+}
+
+/// Accepted append outcome after its hidden-reservation admission callback.
+/// A definite conflict permits the caller to release only a batch newly
+/// created by this attempt. An uncertain result must retain that batch and
+/// reconcile signed history; neither observation of absence nor a new
+/// allocation is a retry permit.
+#[derive(Debug)]
+pub enum UiTransferAcceptedAppendResult {
+    Committed(ryeos_state::state_db::CommittedWrite<ryeos_state::chain::AppendResult>),
+    Conflict,
+    Uncertain { error: anyhow::Error },
+}
+
+/// The two source decisions admitted from a completed paired history. This is
+/// deliberately not an arbitrary transfer-phase append capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTransferSourceDecision {
+    Commit,
+    Abort,
+}
+
+#[derive(Clone, Copy)]
+enum UiTransferSelectedPhase {
+    Source(UiTransferSourceDecision),
+    Activate,
+}
+
+/// One signed-head observation after an Accepted attempt. `Unchanged` is not
+/// an absence proof because the capture is not held through a retry decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiTransferAcceptedReadback {
+    Observed {
+        acceptance: ryeos_ui_presentation_contract::transfer::TransferEvidence,
+    },
+    Unchanged,
+    Ambiguous,
+}
+
+#[derive(Debug)]
+pub enum ConditionalEventAppendResult {
+    Committed(Vec<PersistedEventRecord>),
+    Conflict,
+}
+
+#[derive(Debug)]
+pub enum RunningConditionalEventAppendResult {
+    Committed(Vec<PersistedEventRecord>),
+    Conflict,
+    NotRunning,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1077,6 +1170,17 @@ pub struct ThreadEdgeRecord {
     pub metadata: Option<Value>,
 }
 
+/// Projection-located structural edge offered for signed execution-tree proof.
+/// No field in this candidate grants visibility or establishes lineage.
+#[derive(Debug, Clone)]
+pub struct ExecutionTreeEdgeCandidate {
+    pub parent_thread_id: String,
+    pub parent_chain_root_id: String,
+    pub child_thread_id: String,
+    pub child_chain_root_id: String,
+    pub relation: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TerminalChainRetirement {
     pub candidate_chains: usize,
@@ -1085,6 +1189,61 @@ pub struct TerminalChainRetirement {
     pub deleted_runtime_rows: usize,
     pub deleted_runtime_files: usize,
     pub pending_retirements_recovered: usize,
+}
+
+/// Attempt-local bounded-page discovery. Partial progress is not absence,
+/// settlement, finalization or Remove admission.
+pub struct TerminalSeatTransferDiscoveryRead {
+    freezes: BTreeSet<String>,
+    store: Arc<StateStore>,
+    anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    progress: Option<ryeos_state::AuthoritativeThreadEventReadProgress>,
+    complete: bool,
+    poisoned: bool,
+    identities: BTreeMap<String, ryeos_ui_presentation_contract::transfer::TransferIdentity>,
+}
+
+impl TerminalSeatTransferDiscoveryRead {
+    pub(crate) fn anchor(&self) -> &ryeos_state::AuthoritativeThreadEventReadAnchor {
+        &self.anchor
+    }
+}
+
+/// Exhaustive local identity scope at one signed terminal root. This stores
+/// positive identities only; it does not authenticate their receipt/phase
+/// lifecycle, counterpart absence, current heads or retirement eligibility.
+pub struct TerminalSeatTransferDiscoveryScope {
+    freezes: BTreeSet<String>,
+    store: Arc<StateStore>,
+    anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    identities: BTreeMap<String, ryeos_ui_presentation_contract::transfer::TransferIdentity>,
+}
+
+impl TerminalSeatTransferDiscoveryScope {
+    pub fn anchor(&self) -> &ryeos_state::AuthoritativeThreadEventReadAnchor {
+        &self.anchor
+    }
+    pub fn identities(
+        &self,
+    ) -> impl Iterator<Item = &ryeos_ui_presentation_contract::transfer::TransferIdentity> {
+        self.identities.values()
+    }
+    pub fn is_for_store(&self, store: &StateStore) -> bool {
+        std::ptr::eq(self.store.as_ref(), store)
+    }
+}
+
+/// Exhaustive local obligations, qualified only by completed same-store
+/// paired reads. This is immutable historical testimony, not permission to
+/// unlink a head: the retirement owner must repeat every exact cut exclusion
+/// and structural/runtime pin check through marker publication.
+pub struct TerminalSeatTransferRetirementCandidate {
+    store: Arc<StateStore>,
+    anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    exclusions: Vec<ryeos_state::AuthoritativeThreadEventReadAnchor>,
+    retired: Vec<ryeos_state::RetiredSeatPositivePrefix>,
+    negative_closures:
+        Vec<ryeos_state::objects::terminal_seat_retirement::TerminalTransferNegativeClosure>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1155,20 +1314,6 @@ pub struct ThreadListEnrichment {
     pub terminal_error_previews: HashMap<String, String>,
 }
 
-/// One graph run's identity lifted from the latest bounded
-/// `graph_step_started` payload for a thread-list page. This preserves the
-/// existing node-keyed list summary while allowing generic run sources to
-/// link a row to the exact definition and graph-run occurrence without N+1
-/// event replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct GraphRunListIdentity {
-    pub definition_ref: String,
-    pub effective_definition_digest: String,
-    pub graph_run_id: String,
-    pub node: String,
-    pub step: u32,
-}
-
 #[derive(Debug, Clone)]
 pub struct AdmittedProgramEvidence {
     pub admitted_launch_capsule_hash: String,
@@ -1199,11 +1344,24 @@ pub struct AdmittedExecutionComparisonEvidence {
 pub struct AuthoritativeThreadSubject {
     pub thread_id: String,
     pub chain_root_id: String,
+    pub kind: String,
     pub item_ref: String,
+    pub executor_ref: String,
+    pub launch_mode: String,
+    pub current_site_id: String,
+    pub origin_site_id: String,
+    pub upstream_thread_id: Option<String>,
+    pub project_root: Option<PathBuf>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
     pub status: ryeos_state::objects::ThreadStatus,
     pub requested_by: Option<String>,
     pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     pub admitted_launch_capsule_hash: Option<String>,
+    pub result_project_snapshot_hash: Option<String>,
+    pub result_workspace_output_capture_hash: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -2467,6 +2625,71 @@ enum EventAppendCommitReadback {
     Ambiguous(&'static str),
 }
 
+enum TransferPairSeatReadback {
+    Absent,
+    Exact {
+        evidence: ryeos_ui_presentation_contract::transfer::TransferEvidence,
+        wrapper: ryeos_ui_presentation_contract::transfer::TransferEventPayload,
+    },
+    Ambiguous,
+}
+
+fn read_transfer_pair_seat_tip(
+    store: &StateStore,
+    original: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    expected: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+    expected_seq: u64,
+    destination: bool,
+) -> Result<TransferPairSeatReadback> {
+    use ryeos_ui_presentation_contract::transfer::{TransferPhase, from_event_value};
+
+    let Some(current) =
+        store.capture_thread_event_read_anchor(original.chain_root_id(), original.thread_id())?
+    else {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    };
+    if current == *original {
+        return Ok(TransferPairSeatReadback::Absent);
+    }
+    let (Some((previous_hash, previous_seq)), Some((current_hash, current_seq))) =
+        (original.tip(), current.tip())
+    else {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    };
+    if previous_seq.checked_add(1) != Some(current_seq) {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    }
+    let page = store.read_thread_event_page(&current, None, 1, 1024 * 1024)?;
+    let Some((hash, event)) = page.events.first() else {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    };
+    if hash != current_hash
+        || event.thread_seq != current_seq
+        || event.prev_thread_event_hash.as_deref() != Some(previous_hash)
+    {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    }
+    let Ok(wrapper) = from_event_value(&event.to_value()) else {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    };
+    if wrapper.seq != expected_seq
+        || wrapper.payload.transfer != *expected
+        || !matches!(
+            (&wrapper.payload.phase, destination),
+            (TransferPhase::InboundCommitment, true) | (TransferPhase::Prepared { .. }, false)
+        )
+    {
+        return Ok(TransferPairSeatReadback::Ambiguous);
+    }
+    Ok(TransferPairSeatReadback::Exact {
+        evidence: ryeos_ui_presentation_contract::transfer::TransferEvidence {
+            event_hash: hash.clone(),
+            chain_seq: event.chain_seq,
+        },
+        wrapper,
+    })
+}
+
 fn same_unpositioned_authored_event(
     actual: &ryeos_state::objects::ThreadEvent,
     expected: &ryeos_state::objects::ThreadEvent,
@@ -2967,6 +3190,32 @@ fn convert_events(
         .collect()
 }
 
+/// Bound the actual native CAS event published by lifecycle settlement. The
+/// browser seat-append envelope is not used on this path. Final sequence and
+/// predecessor fields are filled by the state writer, so charge their maximum
+/// serialized widths before the event reaches that writer.
+fn native_lifecycle_event_fits_bound(
+    event: &NewEventRecord,
+    chain_root_id: &str,
+    thread_id: &str,
+    bound: u64,
+) -> Result<bool> {
+    let mut sized = convert_events(std::slice::from_ref(event), chain_root_id, thread_id)
+        .into_iter()
+        .next()
+        .expect("one lifecycle event");
+    sized.chain_seq = u64::MAX;
+    sized.thread_seq = u64::MAX;
+    sized.prev_chain_event_hash = Some("f".repeat(64));
+    sized.prev_thread_event_hash = Some("f".repeat(64));
+    // `iso8601_now` renders an i32 year. This deliberately exceeds its
+    // longest rendered timestamp; it is a sizing sentinel, not a stored date.
+    sized.ts = "x".repeat(32);
+    let bytes = lillux::canonical_json(&sized.to_value())?.len();
+    Ok(u64::try_from(bytes).is_ok_and(|bytes| bytes <= bound)
+        && bytes <= ryeos_state::objects::thread_event::MAX_THREAD_EVENT_SERIALIZED_BYTES)
+}
+
 fn hook_failed_event(
     completed: &runtime_db::CompletedHookDispatch,
     identity: &ryeos_runtime::callback::HookDispatchIdentity,
@@ -3098,6 +3347,129 @@ fn append_events_locked(
     thread_id: &str,
     events: &[NewEventRecord],
 ) -> Result<Vec<PersistedEventRecord>> {
+    match append_events_locked_inner(
+        g,
+        cas_mutation_guard,
+        chain_root_id,
+        thread_id,
+        events,
+        None,
+    )? {
+        ConditionalEventAppendResult::Committed(records) => Ok(records),
+        ConditionalEventAppendResult::Conflict => {
+            unreachable!("unconditional append cannot conflict")
+        }
+    }
+}
+
+fn append_events_locked_inner(
+    g: &Inner,
+    cas_mutation_guard: Option<&ryeos_state::CasMutationGuard>,
+    chain_root_id: &str,
+    thread_id: &str,
+    events: &[NewEventRecord],
+    expected: Option<&ryeos_state::AuthoritativeThreadEventReadAnchor>,
+) -> Result<ConditionalEventAppendResult> {
+    append_events_locked_inner_with_counterpart(
+        g,
+        cas_mutation_guard,
+        chain_root_id,
+        thread_id,
+        events,
+        expected,
+        None,
+    )
+}
+
+fn append_events_locked_inner_with_counterpart(
+    g: &Inner,
+    cas_mutation_guard: Option<&ryeos_state::CasMutationGuard>,
+    chain_root_id: &str,
+    thread_id: &str,
+    events: &[NewEventRecord],
+    expected: Option<&ryeos_state::AuthoritativeThreadEventReadAnchor>,
+    counterpart: Option<&ryeos_state::AuthoritativeThreadEventReadAnchor>,
+) -> Result<ConditionalEventAppendResult> {
+    append_events_locked_inner_with_counterpart_admission(
+        g,
+        cas_mutation_guard,
+        chain_root_id,
+        thread_id,
+        events,
+        expected,
+        counterpart,
+        TransferAppendAdmission::Generic,
+        |_| Ok(true),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferAppendAdmission {
+    Generic,
+    LifecycleV2,
+    MoveFreezeCancellation,
+}
+
+fn append_events_locked_inner_with_counterpart_admission(
+    g: &Inner,
+    cas_mutation_guard: Option<&ryeos_state::CasMutationGuard>,
+    chain_root_id: &str,
+    thread_id: &str,
+    events: &[NewEventRecord],
+    expected: Option<&ryeos_state::AuthoritativeThreadEventReadAnchor>,
+    counterpart: Option<&ryeos_state::AuthoritativeThreadEventReadAnchor>,
+    transfer_admission: TransferAppendAdmission,
+    admit: impl FnOnce(ryeos_state::state_db::TwoAnchorAdmissionView<'_>) -> Result<bool>,
+) -> Result<ConditionalEventAppendResult> {
+    // Transfer phases and lifecycle settlements require dedicated two-seat
+    // admission. A valid payload contract and a generic append anchor do not
+    // serialize source terminality, destination acceptance, competing phase
+    // decisions, or the lifecycle claim and pin fence.
+    let lifecycle_v2 =
+        ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT;
+    let freeze_cancel =
+        ryeos_ui_presentation_contract::move_freeze_lifecycle::MOVE_FREEZE_CANCELLED_EVENT;
+    if transfer_admission == TransferAppendAdmission::MoveFreezeCancellation
+        && (events.len() != 1
+            || events[0].event_type != freeze_cancel
+            || events[0].storage_class != "indexed"
+            || expected.is_none()
+            || counterpart.is_none())
+    {
+        bail!("freeze cancellation admission requires one indexed event and two exact anchors");
+    }
+    if events.iter().any(|event| {
+        event
+            .event_type
+            .starts_with("contract.ryeos_ui.move_freeze_cancelled")
+            && (event.event_type != freeze_cancel
+                || transfer_admission != TransferAppendAdmission::MoveFreezeCancellation)
+    }) {
+        bail!("freeze cancellation requires dedicated two-seat admission");
+    }
+    if transfer_admission == TransferAppendAdmission::LifecycleV2
+        && (events.len() != 1
+            || events[0].event_type != lifecycle_v2
+            || events[0].storage_class != "indexed"
+            || expected.is_none()
+            || counterpart.is_none())
+    {
+        bail!("dedicated lifecycle admission requires one indexed v2 event and two exact anchors");
+    }
+    if events
+        .iter()
+        .any(|event| event.event_type == ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT)
+    {
+        bail!("transfer phase writer is sealed pending exact two-seat admission");
+    }
+    if events.iter().any(|event| {
+        event.event_type
+            == ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT
+            || (event.event_type == lifecycle_v2
+                && transfer_admission != TransferAppendAdmission::LifecycleV2)
+    }) {
+        bail!("transfer testimony requires dedicated two-seat admission");
+    }
     validate_artifact_event_admission(g, thread_id, events)?;
     validate_facet_event_admission(g, thread_id, events)?;
     let mut records: Vec<Option<PersistedEventRecord>> = vec![None; events.len()];
@@ -3132,17 +3504,52 @@ fn append_events_locked(
                     "authoritative append predecessor missing for thread {thread_id} in chain {chain_root_id}"
                 )
             })?;
-        let committed = g.state_db.append_events_admitted(
-            chain_root_id,
-            thread_id,
-            durable_thread_events.clone(),
-            vec![],
-            g.signer.as_ref(),
-            &g.runtime_db,
-            cas_mutation_guard,
-        );
+        let committed = match (expected, counterpart) {
+            (Some(expected), Some(counterpart)) => g
+                .state_db
+                .append_running_events_admitted_if_two_anchors_with_admission(
+                    chain_root_id,
+                    thread_id,
+                    durable_thread_events.clone(),
+                    g.signer.as_ref(),
+                    &g.runtime_db,
+                    expected,
+                    counterpart,
+                    "seat_session",
+                    cas_mutation_guard,
+                    admit,
+                ),
+            (Some(expected), None) => g.state_db.append_events_admitted_if_anchor(
+                chain_root_id,
+                thread_id,
+                durable_thread_events.clone(),
+                vec![],
+                g.signer.as_ref(),
+                &g.runtime_db,
+                expected,
+                cas_mutation_guard,
+            ),
+            (None, None) => g
+                .state_db
+                .append_events_admitted(
+                    chain_root_id,
+                    thread_id,
+                    durable_thread_events.clone(),
+                    vec![],
+                    g.signer.as_ref(),
+                    &g.runtime_db,
+                    cas_mutation_guard,
+                )
+                .map(ryeos_state::ConditionalThreadEventAppendResult::Committed),
+            (None, Some(_)) => bail!("counterpart-fenced append requires its owning anchor"),
+        };
         let persisted = match committed {
-            Ok(committed) => persisted_from_append(&committed_value(committed), &durable_events)?,
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Committed(committed)) => {
+                persisted_from_append(&committed_value(committed), &durable_events)?
+            }
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Conflict) => {
+                return Ok(ConditionalEventAppendResult::Conflict);
+            }
             Err(error) => match read_exact_committed_event_append(
                 g,
                 chain_root_id,
@@ -3180,7 +3587,8 @@ fn append_events_locked(
     records
         .into_iter()
         .map(|record| record.ok_or_else(|| anyhow!("append event record missing")))
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .map(ConditionalEventAppendResult::Committed)
 }
 
 fn has_indexed_collection_events(events: &[NewEventRecord]) -> bool {
@@ -3411,6 +3819,26 @@ fn persisted_event_from_authoritative(
         prev_thread_event_hash: event.prev_thread_event_hash,
         payload: event.payload,
     })
+}
+
+fn execution_event_candidate_matches(
+    candidate: &PersistedEventRecord,
+    signed: &PersistedEventRecord,
+) -> bool {
+    // `event_id` is a rebuildable SQLite row coordinate, not part of the
+    // signed event. All facts and braid coordinates consumed by the UI must
+    // agree with the authenticated object.
+    candidate.event_hash == signed.event_hash
+        && candidate.chain_root_id == signed.chain_root_id
+        && candidate.chain_seq == signed.chain_seq
+        && candidate.thread_id == signed.thread_id
+        && candidate.thread_seq == signed.thread_seq
+        && candidate.event_type == signed.event_type
+        && candidate.storage_class == signed.storage_class
+        && candidate.ts == signed.ts
+        && candidate.prev_chain_event_hash == signed.prev_chain_event_hash
+        && candidate.prev_thread_event_hash == signed.prev_thread_event_hash
+        && candidate.payload == signed.payload
 }
 
 fn validate_prefixed_digest(label: &str, value: &str) -> Result<()> {
@@ -8696,6 +9124,14 @@ impl StateStore {
         let (target_launch_metadata, accounting_transfer) =
             validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, true)?;
         admit_accounting(accounting_transfer.as_ref())?;
+        let _admission =
+            Self::authorize_runtime_pin_for_chain(&g, &transition.evidence.chain_root_id)?;
+        Self::verify_runtime_pin_thread_membership(
+            &g,
+            &_admission,
+            &transition.evidence.chain_root_id,
+            &transition.evidence.successor_placement_thread_id,
+        )?;
         g.runtime_db.install_imported_thread_runtime(
             &transition.evidence.successor_placement_thread_id,
             &transition.evidence.chain_root_id,
@@ -8720,6 +9156,14 @@ impl StateStore {
         let (target_launch_metadata, accounting_transfer) =
             validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, true)?;
         admit_accounting(accounting_transfer.as_ref())?;
+        let _admission =
+            Self::authorize_runtime_pin_for_chain(&g, &transition.evidence.chain_root_id)?;
+        Self::verify_runtime_pin_thread_membership(
+            &g,
+            &_admission,
+            &transition.evidence.chain_root_id,
+            &transition.evidence.successor_placement_thread_id,
+        )?;
         g.runtime_db.install_imported_thread_runtime(
             &transition.evidence.successor_placement_thread_id,
             &transition.evidence.chain_root_id,
@@ -8854,7 +9298,232 @@ impl StateStore {
             .state_db
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("runtime-pin thread {thread_id} does not exist"))?;
-        g.state_db.authorize_runtime_pin(&thread.chain_root_id)
+        let admission = Self::authorize_runtime_pin_for_chain(g, &thread.chain_root_id)?;
+        Self::verify_runtime_pin_thread_membership(
+            g,
+            &admission,
+            &thread.chain_root_id,
+            thread_id,
+        )?;
+        Ok(admission)
+    }
+
+    /// Admit only a short, synchronous UI token/attachment publication. The
+    /// exact signed seat anchor and reaping marker are checked while holding
+    /// the same root lock through the callback. Callbacks must not call back
+    /// into StateStore, state authority or CAS.
+    pub fn with_exact_seat_action_if_anchor<T>(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        expected_owner: &str,
+        expected_item_ref: &str,
+        expected_executor_ref: &str,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_exact_seat_action_if_anchors(
+            chain_root_id,
+            thread_id,
+            expected,
+            std::slice::from_ref(expected),
+            expected_owner,
+            expected_item_ref,
+            expected_executor_ref,
+            action,
+        )
+    }
+
+    /// Same short token/attachment owner, conditioned on every completed
+    /// paired-cut head. Caller retains session authority separately.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_exact_seat_action_if_anchors<T>(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        expected_owner: &str,
+        expected_item_ref: &str,
+        expected_executor_ref: &str,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_exact_seat_action_if_mixed_cut(
+            chain_root_id,
+            thread_id,
+            expected,
+            anchors,
+            &[],
+            expected_owner,
+            expected_item_ref,
+            expected_executor_ref,
+            action,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_exact_seat_action_if_mixed_cut<T>(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredSeatPositivePrefix],
+        expected_owner: &str,
+        expected_item_ref: &str,
+        expected_executor_ref: &str,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        if chain_root_id != thread_id {
+            bail!("UI action requires an exact seat root");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.state_db
+            .with_running_seat_action_if_mixed_cut(
+                chain_root_id,
+                thread_id,
+                expected,
+                anchors,
+                retired,
+                expected_owner,
+                expected_item_ref,
+                expected_executor_ref,
+                permit.cas_guard(),
+                || {
+                    if g.runtime_db.seat_lease_is_reaping(chain_root_id)? {
+                        return Ok(None);
+                    }
+                    action().map(Some)
+                },
+            )
+            .map(Option::flatten)
+    }
+
+    /// Finalize an in-memory publication only if all fixed signed thread heads
+    /// still match. This is read-only with respect to retained state and CAS.
+    /// A separately authorized session owner may publish its prevalidated
+    /// in-memory projection using an owner lock acquired BEFORE this call.
+    /// The callback must not acquire locks, reenter StateStore/CAS, perform I/O
+    /// or write durable state. This exclusion grants no session authority.
+    pub fn with_thread_event_read_anchors<T>(
+        &self,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        let g = self.lock()?;
+        g.state_db.with_thread_event_read_anchors(anchors, action)
+    }
+
+    /// Read-only publication exclusion for a completed mixed historical cut.
+    /// The target is an explicit live root; retired dependencies must match
+    /// their permanent markers and absent heads under the same ordered locks.
+    /// Session membership and disclosure authority belong to the caller.
+    pub fn with_thread_event_read_mixed_cut<T>(
+        &self,
+        target_root: &str,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        if target_root.is_empty()
+            || !current_anchors.iter().any(|anchor| {
+                anchor.chain_root_id() == target_root && anchor.thread_id() == target_root
+            })
+        {
+            bail!("mixed read publication omits exact live target root");
+        }
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db.with_live_and_retired_seat_exclusions(
+            &guard,
+            target_root,
+            current_anchors,
+            retired_prefixes,
+            |_| action(),
+        )
+    }
+
+    /// Read-only exclusion when every historical dependency is permanently
+    /// retired. No live target or mutation-capable chain lock is exposed.
+    /// Acquire session authority before entering this owner. The callback may
+    /// only publish its already-validated in-memory candidate: no StateStore
+    /// or CAS reentry, further locks, I/O, or durable writes.
+    pub fn with_retired_seat_read_prefixes<T>(
+        &self,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db.with_retired_seat_read_prefixes(
+            &guard,
+            current_anchors,
+            retired_prefixes,
+            action,
+        )
+    }
+
+    fn verify_runtime_pin_thread_membership(
+        g: &Inner,
+        admission: &ryeos_state::AuthoritativeRuntimePinAdmission,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        let signed = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_runtime_pin_admission(
+                admission,
+                chain_root_id,
+                thread_id,
+            )?
+            .ok_or_else(|| {
+                anyhow!(
+                    "runtime-pin thread {thread_id} is absent from signed chain {chain_root_id}",
+                )
+            })?;
+        if signed.thread_id != thread_id || signed.chain_root_id != chain_root_id {
+            bail!("runtime-pin thread {thread_id} contradicts its signed chain membership");
+        }
+        Ok(())
+    }
+
+    /// The chain admission lock is held across this exact-seat lifecycle check
+    /// and by the caller until its runtime pin is durable. Reaping is thus a
+    /// cross-process no-rebirth fence, not just a lease-touch prohibition.
+    fn authorize_runtime_pin_for_chain(
+        g: &Inner,
+        chain_root_id: &str,
+    ) -> Result<ryeos_state::AuthoritativeRuntimePinAdmission> {
+        let admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+        Self::reject_reaping_seat_root(g, &admission, chain_root_id)?;
+        Ok(admission)
+    }
+
+    fn reject_reaping_seat_root(
+        g: &Inner,
+        admission: &ryeos_state::AuthoritativeRuntimePinAdmission,
+        chain_root_id: &str,
+    ) -> Result<()> {
+        let root = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_runtime_pin_admission(
+                admission,
+                chain_root_id,
+                chain_root_id,
+            )?
+            .ok_or_else(|| anyhow!("signed chain {chain_root_id} has no root snapshot"))?;
+        if root.kind_name != "seat_session" || root.chain_root_id != chain_root_id {
+            return Ok(());
+        }
+        if g.runtime_db.seat_lease_is_reaping(chain_root_id)? {
+            bail!("seat root {chain_root_id} is being reaped and cannot accept runtime pins");
+        }
+        if root.status.is_terminal() {
+            bail!("terminal seat root {chain_root_id} cannot accept runtime pins");
+        }
+        Ok(())
     }
 
     #[tracing::instrument(
@@ -9017,7 +9686,7 @@ impl StateStore {
             &thread.thread_id,
         );
         {
-            let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
+            let _admission = Self::authorize_runtime_pin_for_chain(&g, &thread.chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
         }
@@ -9516,7 +10185,7 @@ impl StateStore {
         )?);
 
         {
-            let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
+            let _admission = Self::authorize_runtime_pin_for_chain(&g, &thread.chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
         }
@@ -10185,6 +10854,19 @@ impl StateStore {
         if !terminal_status.is_terminal() {
             bail!("finalize_thread requires a terminal status");
         }
+        let mut updated_snapshot = authoritative_snapshot_for_transition(
+            g,
+            &thread_row.chain_root_id,
+            &thread_row.thread_id,
+        )?;
+        // Every finalizer reaches this shared seam. A seat cannot become
+        // terminal through an ordinary execution-result path: the lifecycle
+        // owner must first settle both transfer sides and consume an exact
+        // signed-head clearance here. Until that admission is connected,
+        // retaining the Running seat is the only sound outcome.
+        if updated_snapshot.kind_name == "seat_session" {
+            bail!("seat finalization requires lifecycle transfer clearance");
+        }
         self.validate_external_direct_finalization_locked(
             g,
             thread_id,
@@ -10252,11 +10934,6 @@ impl StateStore {
             .map(|a| serde_json::to_value(a).unwrap())
             .collect();
 
-        let mut updated_snapshot = authoritative_snapshot_for_transition(
-            g,
-            &thread_row.chain_root_id,
-            &thread_row.thread_id,
-        )?;
         let usage_started_at = updated_snapshot
             .started_at
             .clone()
@@ -10458,6 +11135,11 @@ impl StateStore {
         if successor_with_upstream.upstream_thread_id.is_none() {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
+        if authoritative_snapshot_for_transition(&g, chain_root_id, source_thread_id)?.kind_name
+            == "seat_session"
+        {
+            bail!("seat continuation requires lifecycle transfer clearance");
+        }
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
             permit.cas_guard(),
@@ -10495,7 +11177,7 @@ impl StateStore {
             ..RuntimeInfo::default()
         };
         {
-            let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+            let _admission = Self::authorize_runtime_pin_for_chain(&g, chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
             if let Some(launch_metadata) = launch_metadata
@@ -11507,6 +12189,11 @@ impl StateStore {
             launch_metadata: Some(successor_meta.clone()),
             ..RuntimeInfo::default()
         };
+        if authoritative_snapshot_for_transition(&g, chain_root_id, source_thread_id)?.kind_name
+            == "seat_session"
+        {
+            bail!("seat continuation requires lifecycle transfer clearance");
+        }
         let (successor_snapshot, source_snapshot_before) =
             if let RunningContinuationKind::RemoteAdoption { authority } = &kind {
                 let mut snapshot = build_continuation_snapshot(
@@ -11537,7 +12224,6 @@ impl StateStore {
                     },
                 )?
             };
-
         // Same-node successors become locally runnable, so their runtime seed
         // is written before the authoritative edge. A remote successor is
         // deliberately absent from this node's runtime database; the target
@@ -11566,7 +12252,7 @@ impl StateStore {
                     "prepared successor execution policy differs from its source launch metadata"
                 );
             }
-            let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+            let _admission = Self::authorize_runtime_pin_for_chain(&g, chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
             let metadata_result = g
@@ -11949,6 +12635,11 @@ impl StateStore {
             Some(resume) => build_continuation_snapshot(&successor_with_upstream, resume)?,
             None => build_snapshot(&successor_with_upstream),
         };
+        if authoritative_snapshot_for_transition(&g, chain_root_id, source_thread_id)?.kind_name
+            == "seat_session"
+        {
+            bail!("seat continuation requires lifecycle transfer clearance");
+        }
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
             permit.cas_guard(),
@@ -11986,7 +12677,7 @@ impl StateStore {
         // leaves at most an auxiliary runtime row, which is removed below; the
         // successor snapshot and source edge are indivisible.
         {
-            let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+            let _admission = Self::authorize_runtime_pin_for_chain(&g, chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
 
@@ -12546,11 +13237,25 @@ impl StateStore {
                 Ok(Some(AuthoritativeThreadSubject {
                     thread_id: snapshot.thread_id,
                     chain_root_id: snapshot.chain_root_id,
+                    kind: snapshot.kind_name,
                     item_ref: snapshot.item_ref,
+                    executor_ref: snapshot.executor_ref,
+                    launch_mode: snapshot.launch_mode,
+                    current_site_id: snapshot.current_site_id,
+                    origin_site_id: snapshot.origin_site_id,
+                    upstream_thread_id: snapshot.upstream_thread_id,
+                    project_root: snapshot.project_root,
+                    created_at: snapshot.created_at,
+                    updated_at: snapshot.updated_at,
+                    started_at: snapshot.started_at,
+                    finished_at: snapshot.finished_at,
                     status: snapshot.status,
                     requested_by: snapshot.requested_by,
                     project_authority: snapshot.project_authority,
                     admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash,
+                    result_project_snapshot_hash: snapshot.result_project_snapshot_hash,
+                    result_workspace_output_capture_hash: snapshot
+                        .result_workspace_output_capture_hash,
                 }))
             })
             .collect()
@@ -12720,7 +13425,7 @@ impl StateStore {
         {
             bail!("seat thread {thread_id} is not a matching running owned seat");
         }
-        let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         if !g
             .runtime_db
             .touch_seat_lease(thread_id, owner, surface, client_ref)?
@@ -12728,6 +13433,65 @@ impl StateStore {
             bail!("seat thread {thread_id} is being reaped");
         }
         Ok(())
+    }
+
+    /// Renew a current UI producer lease only while its completed paired cut
+    /// still has every signed dependency head. The callback uses the already
+    /// held runtime DB owner; it must not reenter StateStore or acquire a root.
+    #[allow(clippy::too_many_arguments)]
+    pub fn touch_seat_lease_if_anchors(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<bool> {
+        self.touch_seat_lease_if_mixed_cut(
+            chain_root_id,
+            thread_id,
+            expected,
+            anchors,
+            &[],
+            owner,
+            surface,
+            client_ref,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn touch_seat_lease_if_mixed_cut(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredSeatPositivePrefix],
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.state_db
+            .with_running_seat_action_if_mixed_cut(
+                chain_root_id,
+                thread_id,
+                expected,
+                anchors,
+                retired,
+                owner,
+                surface,
+                client_ref,
+                _permit.cas_guard(),
+                || {
+                    g.runtime_db
+                        .touch_seat_lease(thread_id, owner, surface, client_ref)
+                },
+            )
+            .map(|outcome| outcome.unwrap_or(false))
     }
 
     pub fn touch_existing_seat_lease(&self, thread_id: &str) -> Result<bool> {
@@ -12739,7 +13503,48 @@ impl StateStore {
 
     pub fn remove_seat_lease(&self, thread_id: &str) -> Result<()> {
         let g = self.lock()?;
+        // Serialize with a cross-process claim before inspecting its marker;
+        // retain the same lock through deletion so the marker cannot appear
+        // between the read and DELETE.
+        let _admission = g.state_db.authorize_runtime_pin(thread_id)?;
+        if g.runtime_db.seat_lease_is_reaping(thread_id)?
+            && !Self::signed_seat_root_is_terminal_under_admission(&g, &_admission, thread_id)?
+        {
+            bail!("claimed seat lease {thread_id} cannot be removed before signed terminality");
+        }
         g.runtime_db.remove_seat_lease(thread_id)
+    }
+
+    /// Reaping maintenance may release its durable fence only after the
+    /// exact root is terminal in signed authority. Projection absence or a
+    /// stale projected status is never sufficient evidence.
+    pub fn remove_terminal_seat_lease_if_proved(&self, thread_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        let _admission = g.state_db.authorize_runtime_pin(thread_id)?;
+        if !Self::signed_seat_root_is_terminal_under_admission(&g, &_admission, thread_id)? {
+            return Ok(false);
+        }
+        g.runtime_db.remove_seat_lease(thread_id)?;
+        Ok(true)
+    }
+
+    fn signed_seat_root_is_terminal_under_admission(
+        g: &Inner,
+        admission: &ryeos_state::AuthoritativeRuntimePinAdmission,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let Some(snapshot) = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_runtime_pin_admission(
+                admission, thread_id, thread_id,
+            )?
+        else {
+            return Ok(false);
+        };
+        Ok(snapshot.thread_id == thread_id
+            && snapshot.chain_root_id == thread_id
+            && snapshot.kind_name == "seat_session"
+            && snapshot.status.is_terminal())
     }
 
     pub fn seat_leases_for_owner_client(
@@ -12756,11 +13561,172 @@ impl StateStore {
         g.runtime_db.expired_seat_leases(cutoff_ms)
     }
 
+    pub fn expired_seat_leases_slice(
+        &self,
+        cutoff_ms: i64,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+        limit: usize,
+    ) -> Result<runtime_db::SeatLeaseMaintenancePage> {
+        let g = self.lock()?;
+        g.runtime_db
+            .expired_seat_leases_slice(cutoff_ms, after_id, cycle_max_id, limit)
+    }
+
+    pub fn max_seat_lease_id(&self) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db.max_seat_lease_id()
+    }
+
+    pub(crate) fn claimed_seat_leases_slice(
+        &self,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .claimed_seat_leases_slice(after_id, cycle_max_id, limit)
+    }
+
+    /// Scheduling hint only. Settlement still revalidates the signed seat and
+    /// exact durable claim under runtime-pin admission.
+    pub(crate) fn has_claimed_seat_lease(&self, seat_root_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.seat_lease_is_reaping(seat_root_id)
+    }
+
     pub fn claim_expired_seat_lease(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        // Maintenance must be able to reclaim an already-marked lease after a
+        // crash. The lease coordinate is the exact seat root; signed authority
+        // proves that identity under the raw chain lock without consulting a
+        // possibly stale or missing projection.
+        let _admission = g.state_db.authorize_runtime_pin(thread_id)?;
+        let signed = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_runtime_pin_admission(
+                &_admission,
+                thread_id,
+                thread_id,
+            )?
+            .ok_or_else(|| anyhow!("seat lease {thread_id} has no signed root snapshot"))?;
+        if signed.thread_id != thread_id
+            || signed.chain_root_id != thread_id
+            || signed.kind_name != "seat_session"
+        {
+            bail!("seat lease {thread_id} is not an exact signed seat root");
+        }
         g.runtime_db.claim_expired_seat_lease(thread_id, cutoff_ms)
+    }
+
+    /// Promptly hand a durably Closed seat to the existing bounded lifecycle
+    /// finalizer. Only the exact signed Closed tip may mark its matching lease;
+    /// a later suffix defers to ordinary expiry instead of replaying old proof.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_closed_seat_lease_if_tip(
+        &self,
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredSeatPositivePrefix],
+        closed: &ryeos_ui_presentation_contract::seat_control::UiSeatProducer,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<bool> {
+        use ryeos_ui_presentation_contract::seat_control::{
+            SEAT_PRODUCER_EVENT, UiSeatControlRequest, UiSeatProducerState,
+        };
+        let root = expected.chain_root_id();
+        if root != expected.thread_id()
+            || !anchors.iter().any(|anchor| anchor == expected)
+            || closed.state != UiSeatProducerState::Closed
+            || !matches!(&closed.request, UiSeatControlRequest::Close { .. })
+        {
+            bail!("Closed lease claim requires an exact live root cut and control");
+        }
+        closed.validate().map_err(anyhow::Error::msg)?;
+        closed
+            .validate_subject(root, root)
+            .map_err(anyhow::Error::msg)?;
+        let Some((tip_hash, tip_seq)) = expected.tip() else {
+            return Ok(false);
+        };
+        let Some(tip) = self.retained_thread_event_by_hash(tip_hash)? else {
+            return Ok(false);
+        };
+        if tip.chain_root_id != root
+            || tip.thread_id != root
+            || tip.thread_seq != tip_seq
+            || tip.event_type != SEAT_PRODUCER_EVENT
+            || serde_json::to_value(closed)? != tip.payload
+        {
+            return Ok(false);
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.state_db
+            .with_live_and_retired_seat_exclusions(
+                permit.cas_guard(),
+                root,
+                anchors,
+                retired,
+                |root_lock| {
+                    let snapshot = g
+                        .state_db
+                        .read_authoritative_thread_snapshot_under_chain_lock(
+                            root, root, root_lock,
+                        )?;
+                    let Some(snapshot) = snapshot else {
+                        return Ok(false);
+                    };
+                    if snapshot.kind_name != "seat_session"
+                        || snapshot.status != ThreadStatus::Running
+                        || snapshot.requested_by.as_deref() != Some(owner)
+                        || snapshot.item_ref != surface
+                        || snapshot.executor_ref != client_ref
+                    {
+                        return Ok(false);
+                    }
+                    g.runtime_db
+                        .claim_closed_seat_lease(root, owner, surface, client_ref)
+                },
+            )
+            .map(|result| result.unwrap_or(false))
+    }
+
+    /// Read-only lifecycle discovery fence. The claimed lease and exact signed
+    /// running seat root are inspected under the same runtime-pin admission;
+    /// this is evidence for a fixed-history read, not settlement admission.
+    pub(crate) fn claimed_running_seat_root_snapshot(
+        &self,
+        seat_root_id: &str,
+    ) -> Result<Option<runtime_db::ClaimedSeatLeaseSnapshot>> {
+        let g = self.lock()?;
+        let admission = g.state_db.authorize_runtime_pin(seat_root_id)?;
+        let Some(root) = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_runtime_pin_admission(
+                &admission,
+                seat_root_id,
+                seat_root_id,
+            )?
+        else {
+            return Ok(None);
+        };
+        let Some(claim) = g.runtime_db.claimed_seat_lease_snapshot(seat_root_id)? else {
+            return Ok(None);
+        };
+        Ok((root.thread_id == seat_root_id
+            && root.chain_root_id == seat_root_id
+            && root.kind_name == "seat_session"
+            && root.status == ThreadStatus::Running
+            && root.requested_by.as_deref() == Some(claim.owner.as_str())
+            && root.item_ref == claim.surface
+            && root.executor_ref == claim.client_ref
+            && claim.seat_thread_id == seat_root_id)
+            .then_some(claim))
     }
 
     fn inspect_terminal_chain_pins<F>(
@@ -12771,20 +13737,512 @@ impl StateStore {
     where
         F: Fn(&[String]) -> Result<u64>,
     {
+        Self::inspect_signed_chain_pins(
+            g,
+            &chain.chain_root_id,
+            &chain.thread_ids,
+            scheduler_pin_count,
+            true,
+        )
+    }
+
+    /// Until Gate R has a durable terminal clearance commitment, a signed
+    /// seat root is not eligible for a new Remove. The lease row and projected
+    /// kind are insufficient: either may be absent for historical terminal
+    /// seats while their transfer obligations remain unresolved.
+    fn terminal_chain_is_signed_seat_under_lock(
+        g: &Inner,
+        chain_root_id: &str,
+        chain_lock: &ChainLock,
+    ) -> Result<bool> {
+        let root = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_chain_lock(
+                chain_root_id,
+                chain_root_id,
+                chain_lock,
+            )?
+            .ok_or_else(|| anyhow!("terminal chain {chain_root_id} has no signed root"))?;
+        if root.thread_id != chain_root_id || root.chain_root_id != chain_root_id {
+            bail!("terminal chain {chain_root_id} has contradictory signed root identity");
+        }
+        Ok(root.kind_name == "seat_session")
+    }
+
+    /// Begin sessionless exhaustive *local* transfer identity discovery at an
+    /// atomically qualified terminal root. No lease or browser claim is made.
+    pub fn begin_terminal_seat_transfer_discovery(
+        self: &Arc<Self>,
+        seat_root_id: &str,
+    ) -> Result<Option<TerminalSeatTransferDiscoveryRead>> {
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let Some(anchor) =
+            authority.capture_terminal_seat_event_read_anchor(seat_root_id, &guard)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(TerminalSeatTransferDiscoveryRead {
+            freezes: BTreeSet::new(),
+            store: self.clone(),
+            anchor,
+            progress: None,
+            complete: false,
+            poisoned: false,
+            identities: BTreeMap::new(),
+        }))
+    }
+
+    /// Begin exhaustive local discovery for an already claimed Running seat.
+    /// The claim and supplied signed cut are scheduling inputs only: finalization
+    /// must recheck both under the complete paired exclusions before appending.
+    pub(crate) fn begin_claimed_seat_transfer_discovery(
+        self: &Arc<Self>,
+        seat_root_id: &str,
+        anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<Option<TerminalSeatTransferDiscoveryRead>> {
+        if anchor.chain_root_id() != seat_root_id || anchor.thread_id() != seat_root_id {
+            bail!("claimed discovery requires an exact supplied root-seat cut");
+        }
+        if self
+            .claimed_running_seat_root_snapshot(seat_root_id)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(TerminalSeatTransferDiscoveryRead {
+            freezes: BTreeSet::new(),
+            store: self.clone(),
+            anchor,
+            progress: None,
+            complete: false,
+            poisoned: false,
+            identities: BTreeMap::new(),
+        }))
+    }
+
+    /// One caller-budgeted signed page. Resident identity memory is O(local
+    /// operations), not claimed bounded over seat lifetime. Error poisons the
+    /// whole attempt; duplicates can never replace a full immutable identity.
+    pub fn read_terminal_seat_transfer_discovery_page(
+        &self,
+        read: &mut TerminalSeatTransferDiscoveryRead,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<bool> {
+        if !std::ptr::eq(self, read.store.as_ref()) || read.poisoned {
+            bail!("terminal seat discovery has another store or poisoned read");
+        }
+        if read.complete {
+            return Ok(true);
+        }
+        let result = (|| -> Result<bool> {
+            let page = crate::thread_lifecycle::presentation_transfer::read_signed_seat_transfer_identity_page(
+                self, read.anchor.chain_root_id(), &read.anchor, read.progress.as_ref(), max_events, max_bytes,
+            )?;
+            read.freezes.extend(
+                page.freeze_preparations
+                    .iter()
+                    .map(|identity| identity.operation_id.clone()),
+            );
+            for identity in page.identities {
+                if let Some(previous) = read.identities.get(&identity.operation_id) {
+                    if previous != &identity {
+                        bail!("terminal seat discovery has conflicting operation identities");
+                    }
+                } else {
+                    read.identities
+                        .insert(identity.operation_id.clone(), identity);
+                }
+            }
+            read.complete = page.progress.is_none();
+            read.progress = page.progress;
+            Ok(read.complete)
+        })();
+        if result.is_err() {
+            read.poisoned = true;
+        }
+        result
+    }
+
+    pub fn finish_terminal_seat_transfer_discovery(
+        &self,
+        read: TerminalSeatTransferDiscoveryRead,
+    ) -> Result<TerminalSeatTransferDiscoveryScope> {
+        if !std::ptr::eq(self, read.store.as_ref()) || read.poisoned || !read.complete {
+            bail!("terminal seat discovery is incomplete, poisoned or has another store");
+        }
+        Ok(TerminalSeatTransferDiscoveryScope {
+            freezes: read.freezes,
+            store: read.store,
+            anchor: read.anchor,
+            identities: read.identities,
+        })
+    }
+
+    /// Positive read-only join after the exact terminal cut crossed Remove.
+    /// Missing markers are not absence and a different retired head refuses.
+    /// This standalone observation grants no counterpart release or retirement;
+    /// an eventual eligibility owner must repeat it under all sorted cut locks.
+    /// Qualify every discovered local operation from complete paired testimony.
+    /// Missing coverage is a refusal, never inferred settlement. In particular
+    /// an active destination alone does not clear the source's observation
+    /// obligation. No mutable head or pin assertion is made here.
+    pub fn qualify_terminal_seat_transfer_retirement(
+        &self,
+        scope: TerminalSeatTransferDiscoveryScope,
+        pairs: &[crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof],
+        cancellations: &[crate::thread_lifecycle::presentation_transfer::UiMoveFreezeCancellationProof],
+    ) -> Result<TerminalSeatTransferRetirementCandidate> {
+        if !scope.is_for_store(self) {
+            bail!("terminal retirement discovery belongs to another store");
+        }
+        let mut covered = BTreeSet::new();
+        let mut cuts = BTreeMap::new();
+        cuts.insert(
+            scope.anchor.chain_root_id().to_owned(),
+            scope.anchor.clone(),
+        );
+        let mut include =
+            |transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+             source: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+             destination: &ryeos_state::AuthoritativeThreadEventReadAnchor|
+             -> Result<()> {
+                if scope.identities.get(&transfer.operation_id) != Some(transfer) {
+                    bail!("terminal retirement paired coverage differs from exhaustive discovery");
+                }
+                let local = if transfer.source.chain_root_id == scope.anchor.chain_root_id() {
+                    source
+                } else if transfer.destination.chain_root_id == scope.anchor.chain_root_id() {
+                    destination
+                } else {
+                    bail!("terminal retirement operation does not touch its local root");
+                };
+                if local != &scope.anchor || !covered.insert(transfer.operation_id.clone()) {
+                    bail!("terminal retirement has duplicate or mixed local cuts");
+                }
+                for cut in [source, destination] {
+                    if cut.thread_id() != cut.chain_root_id() {
+                        bail!("terminal retirement paired cut is not an exact root seat");
+                    }
+                    if let Some(prior) = cuts.insert(cut.chain_root_id().to_owned(), cut.clone()) {
+                        if prior != *cut {
+                            bail!("terminal retirement counterpart cuts conflict");
+                        }
+                    }
+                }
+                Ok(())
+            };
+        for pair in pairs {
+            if !pair.is_for_store(self) {
+                bail!("terminal retirement paired proof belongs to another store");
+            }
+            let lifecycle = pair.lifecycle();
+            if scope.freezes.contains(&lifecycle.transfer().operation_id)
+                && !lifecycle.prepared().is_some_and(|prepared| {
+                    matches!(
+                        &prepared.record.phase,
+                        ryeos_ui_presentation_contract::transfer::TransferPhase::Prepared {
+                            freeze: Some(_),
+                            ..
+                        }
+                    )
+                })
+            {
+                bail!(
+                    "terminal retirement ordinary freeze lacks matching authenticated transfer preparation"
+                );
+            }
+            // Conservative closed-lifecycle qualification. Predecision aborts
+            // without a destination release remain vetoed until their complete
+            // negative reservation clearance is explicitly owned here.
+            if lifecycle.settlement_observed().is_none()
+                && !(lifecycle.aborted().is_some() && lifecycle.released().is_some())
+            {
+                bail!("terminal retirement transfer still has an unsettled obligation");
+            }
+            include(
+                lifecycle.transfer(),
+                pair.source_anchor(),
+                pair.destination_anchor(),
+            )?;
+        }
+        for cancellation in cancellations {
+            if !cancellation.belongs_to(self) || cancellation.retained_cancellation().is_none() {
+                bail!("terminal retirement freeze lacks completed retained cancellation");
+            }
+            if cancellation.destination_inbound().is_some() {
+                bail!(
+                    "terminal cancellation with an inbound requires bounded negative-closure clearance"
+                );
+            }
+            include(
+                cancellation.transfer(),
+                cancellation.source_anchor(),
+                cancellation.destination_anchor(),
+            )?;
+        }
+        if covered.len() != scope.identities.len() {
+            bail!("terminal retirement omits discovered transfer obligations");
+        }
+        Ok(TerminalSeatTransferRetirementCandidate {
+            retired: Vec::new(),
+            negative_closures: Vec::new(),
+            store: scope.store,
+            anchor: scope.anchor,
+            exclusions: cuts.into_values().collect(),
+        })
+    }
+
+    pub(crate) fn qualify_terminal_transfer_clearance(
+        &self,
+        scope: TerminalSeatTransferDiscoveryScope,
+        clearance: crate::thread_lifecycle::presentation_transfer::TerminalTransferClearance,
+    ) -> Result<TerminalSeatTransferRetirementCandidate> {
+        if !scope.is_for_store(self)
+            || !clearance.belongs_to(self)
+            || scope.anchor() != clearance.local_anchor()
+            || &scope.identities != clearance.identities()
+        {
+            bail!("terminal clearance differs from exhaustive same-store local scope");
+        }
+        Ok(TerminalSeatTransferRetirementCandidate {
+            store: scope.store,
+            anchor: scope.anchor,
+            exclusions: clearance.anchors().to_vec(),
+            retired: clearance.retired().to_vec(),
+            negative_closures: clearance.negative_closures().to_vec(),
+        })
+    }
+
+    /// Bounded, positive-only scheduling metadata for the existing lifecycle
+    /// cursor owner. Every destructive decision still needs complete discovery,
+    /// paired clearance, exact exclusions and final pin inspection.
+    pub fn due_signed_seat_retirement_slice(
+        &self,
+        now: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .state_db
+            .due_signed_seat_retirement_slice(now, after, limit)
+    }
+
+    /// Existing terminal Remove, qualified by exhaustive paired testimony.
+    /// All counterpart cuts remain excluded through the final pin inspection,
+    /// retired-marker publication and head unlink. This does not relax the
+    /// ordinary due-candidate sweep's blanket signed-seat veto.
+    pub fn retire_qualified_terminal_seat<F>(
+        &self,
+        candidate: &TerminalSeatTransferRetirementCandidate,
+        now: &str,
+        dry_run: bool,
+        scheduler_pin_count: F,
+    ) -> Result<Option<TerminalChainRetirement>>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        if !std::ptr::eq(candidate.store.as_ref(), self) {
+            bail!("terminal retirement candidate belongs to another store");
+        }
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let _permit = if dry_run {
+            self.acquire_gc_inspection_permit()?
+        } else {
+            self.acquire_write_permit()?
+        };
+        let g = self.lock()?;
+        g.state_db.with_terminal_retirement_exclusions(
+            &guard,
+            candidate.anchor.chain_root_id(),
+            &candidate.exclusions,
+            &candidate.retired,
+            |target_lock| {
+                let mut result = TerminalChainRetirement::default();
+                let Some(chain) = g.state_db.authoritative_terminal_chain_under_lock(
+                    candidate.anchor.chain_root_id(),
+                    target_lock,
+                )?
+                else {
+                    return Ok(result);
+                };
+                if !chain.is_due_at(now)? {
+                    return Ok(result);
+                }
+                if !Self::terminal_chain_is_signed_seat_under_lock(
+                    &g,
+                    candidate.anchor.chain_root_id(),
+                    target_lock,
+                )? {
+                    bail!("qualified terminal seat lost its signed seat identity");
+                }
+                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &scheduler_pin_count)?;
+                if !pins.is_empty() {
+                    return Ok(result);
+                }
+                let runtime_paths = inspect_thread_runtime_files(
+                    self.thread_runtime_authority()?,
+                    &chain.thread_ids,
+                )?;
+                result.retired_chains = 1;
+                if !dry_run {
+                    let mut counterpart_roots = candidate
+                        .exclusions
+                        .iter()
+                        .map(|anchor| anchor.chain_root_id().to_owned())
+                        .filter(|root| root != candidate.anchor.chain_root_id())
+                        .collect::<Vec<_>>();
+                    counterpart_roots.extend(
+                        candidate
+                            .retired
+                            .iter()
+                            .map(|prefix| prefix.chain_root_id().to_owned()),
+                    );
+                    counterpart_roots.sort();
+                    counterpart_roots.dedup();
+                    if !g
+                        .state_db
+                        .remove_qualified_terminal_seat_head_ref_with_negative_closures(
+                            &guard,
+                            &candidate.anchor,
+                            &counterpart_roots,
+                            &candidate.negative_closures,
+                            target_lock,
+                        )?
+                    {
+                        bail!("qualified terminal seat changed before Remove");
+                    }
+                    self.finish_terminal_chain_removal(
+                        &g,
+                        &chain,
+                        target_lock,
+                        &runtime_paths,
+                        true,
+                        &mut result,
+                    )?;
+                }
+                Ok(result)
+            },
+        )
+    }
+
+    pub fn terminal_transfer_scope_matches_retired_marker(
+        &self,
+        scope: &TerminalSeatTransferDiscoveryScope,
+    ) -> Result<bool> {
+        if !scope.is_for_store(self) {
+            bail!("terminal discovery scope has another store");
+        }
+        let _permit = self.acquire_gc_inspection_permit()?;
+        let g = self.lock()?;
+        let lock = g
+            .state_db
+            .acquire_existing_chain_lock(scope.anchor.chain_root_id())?;
+        g.state_db
+            .retired_seat_read_anchor_absent_head_under_lock(&scope.anchor, &lock)
+    }
+
+    /// Finalize only an exhaustive claimed-seat scope whose entire dependency
+    /// closure is authenticated. Ordinary finalizers remain unable to settle
+    /// a signed seat. The caller holds the scheduler mutation exclusion.
+    pub(crate) fn finalize_claimed_seat_with_clearance<F>(
+        &self,
+        scope: &TerminalSeatTransferDiscoveryScope,
+        clearance: &crate::thread_lifecycle::presentation_transfer::TerminalTransferClearance,
+        claim: &runtime_db::ClaimedSeatLeaseSnapshot,
+        scheduler_pin_count: F,
+    ) -> Result<Option<Vec<PersistedEventRecord>>>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        if !scope.is_for_store(self)
+            || !clearance.belongs_to(self)
+            || clearance.local_anchor() != &scope.anchor
+            || clearance.identities() != &scope.identities
+            || claim.seat_thread_id != scope.anchor.thread_id()
+        {
+            bail!("claimed finalization lacks exhaustive exact-cut clearance");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.state_db.with_terminal_retirement_exclusions(
+            permit.cas_guard(), scope.anchor.chain_root_id(), clearance.anchors(),
+            clearance.retired(), |target_lock| {
+                if g.runtime_db.claimed_seat_lease_snapshot(&claim.seat_thread_id)?
+                    != Some(claim.clone()) { return Ok(None); }
+                let Some(mut root) = g.state_db.read_authoritative_thread_snapshot_under_chain_lock(
+                    scope.anchor.chain_root_id(), scope.anchor.thread_id(), target_lock,
+                )? else { return Ok(None); };
+                if root.kind_name != "seat_session" || root.status != ThreadStatus::Running
+                    || root.requested_by.as_deref() != Some(claim.owner.as_str())
+                    || root.item_ref != claim.surface || root.executor_ref != claim.client_ref
+                    || !self.process_attachment_admission_open.load(Ordering::Acquire)
+                { return Ok(None); }
+                let members = g.state_db.authoritative_chain_thread_ids_under_lock(
+                    scope.anchor.chain_root_id(), target_lock,
+                )?.ok_or_else(|| anyhow!("claimed seat signed inventory disappeared"))?;
+                let mut pins = Self::inspect_signed_chain_pins(
+                    &g, scope.anchor.chain_root_id(), &members, &scheduler_pin_count, false,
+                )?;
+                if pins.seat_leases != 1 { return Ok(None); }
+                pins.seat_leases = 0;
+                if !pins.is_empty() { return Ok(None); }
+                let now = lillux::time::iso8601_now();
+                let runtime = g.runtime_db.get_runtime_info(&claim.seat_thread_id)?
+                    .ok_or_else(|| anyhow!("claimed seat runtime disappeared"))?;
+                root.status = match runtime.stop_intent {
+                    Some(StopIntent::Cancel) => ThreadStatus::Cancelled,
+                    Some(StopIntent::Kill) => ThreadStatus::Killed,
+                    None => ThreadStatus::Completed,
+                };
+                root.updated_at = now.clone();
+                root.finished_at = Some(now);
+                root.outcome_code = Some("seat_lease_expired".into());
+                let events = vec![NewEventRecord {
+                    event_type: terminal_event_type(root.status.as_str())?.into(), storage_class: "indexed".into(),
+                    payload: json!({"status":root.status.as_str(), "outcome_code":"seat_lease_expired"}),
+                }];
+                let mut native = convert_events(&events, scope.anchor.chain_root_id(), scope.anchor.thread_id());
+                let result = g.state_db.append_qualified_seat_terminal_under_lock(
+                    &scope.anchor, native.remove(0), SnapshotUpdate {
+                        thread_id: scope.anchor.thread_id().to_owned(), new_snapshot: root,
+                    }, g.signer.as_ref(), &g.runtime_db, permit.cas_guard(), target_lock,
+                )?;
+                match result {
+                    ryeos_state::ConditionalThreadEventAppendResult::Conflict => Ok(None),
+                    ryeos_state::ConditionalThreadEventAppendResult::Committed(result) => {
+                        g.runtime_db.remove_seat_lease(&claim.seat_thread_id)?;
+                        Ok(Some(persisted_from_append(&committed_value(result), &events)?))
+                    }
+                }
+            },
+        ).map(|result| result.flatten())
+    }
+
+    /// Shared structural inventory for signed terminal retirement and an
+    /// exact nonterminal seat settlement. Membership must come from the signed
+    /// chain while its caller-retained lock is held.
+    fn inspect_signed_chain_pins<F>(
+        g: &Inner,
+        chain_root_id: &str,
+        thread_ids: &[String],
+        scheduler_pin_count: &F,
+        allow_projected_terminal_external_child: bool,
+    ) -> Result<runtime_db::ChainRecoveryPins>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
         let mut pins = g
             .runtime_db
-            .inspect_chain_recovery_pins(&chain.chain_root_id, &chain.thread_ids)?;
-        pins.candidate_evidence = g
-            .runtime_db
-            .candidate_evidence_pin_count(&chain.chain_root_id)?;
-        let members = chain
-            .thread_ids
+            .inspect_chain_recovery_pins(chain_root_id, thread_ids)?;
+        pins.candidate_evidence = g.runtime_db.candidate_evidence_pin_count(chain_root_id)?;
+        let members = thread_ids
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        for (parent_thread_id, child_thread_id) in
-            g.runtime_db.chain_child_links(&chain.thread_ids)?
-        {
+        for (parent_thread_id, child_thread_id) in g.runtime_db.chain_child_links(thread_ids)? {
             let parent_is_member = members.contains(parent_thread_id.as_str());
             let child_is_member = members.contains(child_thread_id.as_str());
             if parent_is_member && child_is_member {
@@ -12795,13 +14253,14 @@ impl StateStore {
             } else {
                 &parent_thread_id
             };
-            // A missing counterpart while its operational edge remains is an
-            // inconsistent read, not proof of safety. Fail closed by retaining
-            // the chain. A terminal counterpart no longer needs cancellation
-            // cascade state and therefore does not pin this history.
-            if g.state_db
-                .get_thread(counterpart)?
-                .is_none_or(|thread| !is_terminal_status(&thread.status))
+            // Terminal retirement retains its established projected-terminal
+            // treatment of external counterparts. Gate R never treats a
+            // projected counterpart as signed proof: any external edge pins
+            // settlement until a separately locked authority can prove it.
+            if !allow_projected_terminal_external_child
+                || g.state_db
+                    .get_thread(counterpart)?
+                    .is_none_or(|thread| !is_terminal_status(&thread.status))
             {
                 pins.child_links = pins
                     .child_links
@@ -12809,8 +14268,65 @@ impl StateStore {
                     .ok_or_else(|| anyhow!("child-link recovery pin count overflow"))?;
             }
         }
-        pins.scheduler_fires = scheduler_pin_count(&chain.thread_ids)?;
+        pins.scheduler_fires = scheduler_pin_count(thread_ids)?;
         Ok(pins)
+    }
+
+    /// Read-only Gate R owner inspection. The caller retains this exact chain
+    /// lock (and any counterpart lock) through its eventual publication; this
+    /// method neither grants settlement nor mutates any owner row.
+    #[cfg(test)]
+    fn inspect_reaping_seat_settlement_owners_under_lock<F>(
+        g: &Inner,
+        seat_root_id: &str,
+        chain_lock: &ChainLock,
+        scheduler_pin_count: &F,
+    ) -> Result<Option<runtime_db::ClaimedSeatLeaseSnapshot>>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        let Some(root) = g
+            .state_db
+            .read_authoritative_thread_snapshot_under_chain_lock(
+                seat_root_id,
+                seat_root_id,
+                chain_lock,
+            )?
+        else {
+            return Ok(None);
+        };
+        let Some(claim) = g.runtime_db.claimed_seat_lease_snapshot(seat_root_id)? else {
+            return Ok(None);
+        };
+        if root.thread_id != seat_root_id
+            || root.chain_root_id != seat_root_id
+            || root.kind_name != "seat_session"
+            || root.status != ThreadStatus::Running
+            || root.requested_by.as_deref() != Some(claim.owner.as_str())
+            || root.item_ref != claim.surface
+            || root.executor_ref != claim.client_ref
+            || claim.seat_thread_id != seat_root_id
+        {
+            return Ok(None);
+        }
+        let Some(thread_ids) = g
+            .state_db
+            .authoritative_chain_thread_ids_under_lock(seat_root_id, chain_lock)?
+        else {
+            return Ok(None);
+        };
+        let mut pins = Self::inspect_signed_chain_pins(
+            g,
+            seat_root_id,
+            &thread_ids,
+            scheduler_pin_count,
+            false,
+        )?;
+        if pins.seat_leases != 1 {
+            return Ok(None);
+        }
+        pins.seat_leases = 0;
+        Ok(pins.is_empty().then_some(claim))
     }
 
     fn finish_terminal_chain_removal(
@@ -12885,6 +14401,13 @@ impl StateStore {
             if !still_pending {
                 continue;
             }
+            let marked_retired_seat = g
+                .state_db
+                .retired_seat_marker_for_pending_remove_under_lock(
+                    &chain_root_id,
+                    &observed.transition_id,
+                    &chain_lock,
+                )?;
 
             match g.state_db.pending_chain_removal_head_state(
                 &chain_root_id,
@@ -12954,6 +14477,9 @@ impl StateStore {
                 .state_db
                 .authoritative_terminal_chain_under_lock(&chain_root_id, &chain_lock)?
             else {
+                if marked_retired_seat {
+                    bail!("marked retired seat lost its visible terminal chain");
+                }
                 result.pending_retirements_recovered += 1;
                 if !dry_run {
                     g.state_db
@@ -12961,6 +14487,39 @@ impl StateStore {
                 }
                 continue;
             };
+            if marked_retired_seat {
+                // Marker publication is the irreversible cutover. An
+                // interrupted unlink resumes unconditionally; later pins or
+                // clock/policy changes cannot cancel this pending Remove.
+                let runtime_paths = inspect_thread_runtime_files(
+                    self.thread_runtime_authority()?,
+                    &chain.thread_ids,
+                )?;
+                result.pending_retirements_recovered += 1;
+                result.retired_chains += 1;
+                if !dry_run {
+                    self.finish_terminal_chain_removal(
+                        &g,
+                        &chain,
+                        &chain_lock,
+                        &runtime_paths,
+                        false,
+                        &mut result,
+                    )?;
+                }
+                continue;
+            }
+            if Self::terminal_chain_is_signed_seat_under_lock(&g, &chain_root_id, &chain_lock)? {
+                // This visible, unmarked Remove has not crossed the durable
+                // boundary. Cancel it; historical terminal seats lack Gate R
+                // clearance even when their lease row is already absent.
+                result.pending_retirements_recovered += 1;
+                if !dry_run {
+                    g.state_db
+                        .cancel_pending_chain_removal(&chain_root_id, &chain_lock)?;
+                }
+                continue;
+            }
             let due = chain.is_due_at(now)?;
             let pins = Self::inspect_terminal_chain_pins(&g, &chain, scheduler_pin_count)?;
             if !due || !pins.is_empty() {
@@ -13086,6 +14645,13 @@ impl StateStore {
                 {
                     continue;
                 }
+                if Self::terminal_chain_is_signed_seat_under_lock(
+                    &g,
+                    &candidate.chain_root_id,
+                    &chain_lock,
+                )? {
+                    continue;
+                }
                 let pins = Self::inspect_terminal_chain_pins(&g, &chain, &scheduler_pin_count)?;
                 if !pins.is_empty() {
                     continue;
@@ -13154,6 +14720,43 @@ impl StateStore {
             bail!(
                 "thread {thread_id} result response is {response_bytes} bytes; maximum is {MAX_THREAD_RESULT_RESPONSE_BYTES}"
             );
+        }
+        Ok(Some(record))
+    }
+
+    /// Execution-Field result facts come from the signed thread snapshot, not
+    /// the rebuildable `thread_results` projection. The caller has already
+    /// authorized this exact thread/root as part of its bounded tree.
+    pub fn get_thread_result_authoritative(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected_status: &str,
+    ) -> Result<Option<ThreadResultRecord>> {
+        let snapshot = {
+            let g = self.lock()?;
+            g.state_db
+                .read_authoritative_thread_snapshot(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("execution thread is missing its signed snapshot"))?
+        };
+        if snapshot.chain_root_id != chain_root_id || snapshot.thread_id != thread_id {
+            bail!("execution result snapshot contradicts the requested thread");
+        }
+        if snapshot.status.as_str() != expected_status {
+            bail!("execution result snapshot changed after the authorized tree read");
+        }
+        if snapshot.result.is_none() && snapshot.error.is_none() && snapshot.outcome_code.is_none()
+        {
+            return Ok(None);
+        }
+        let record = ThreadResultRecord {
+            outcome_code: snapshot.outcome_code,
+            result: snapshot.result,
+            error: snapshot.error,
+            metadata: None,
+        };
+        if serde_json::to_vec(&record)?.len() > MAX_THREAD_RESULT_RESPONSE_BYTES {
+            bail!("thread {thread_id} signed result exceeds its response byte maximum");
         }
         Ok(Some(record))
     }
@@ -13248,6 +14851,8 @@ impl StateStore {
                 MAX_THREAD_ARTIFACT_METADATA_TOTAL_BYTES,
             )?
         };
+        let signed_artifact_sequences =
+            self.authenticate_artifact_projection_rows(thread_id, &artifact_rows)?;
         let mut records = Vec::with_capacity(artifact_rows.len());
         let mut response_bytes = b"[]".len();
         for (idx, row) in artifact_rows.into_iter().enumerate() {
@@ -13264,7 +14869,12 @@ impl StateStore {
                 None => None,
             };
             let record = ThreadArtifactRecord {
-                artifact_id: idx as i64 + 1,
+                // A list ordinal changes when a rebuildable projection is
+                // reordered. The signed chain sequence is stable for this
+                // exact artifact event and is unique within its chain.
+                artifact_id: *signed_artifact_sequences
+                    .get(&row.source_event_hash)
+                    .ok_or_else(|| anyhow!("authenticated artifact has no signed identity"))?,
                 artifact_type: row.kind,
                 uri: String::new(),
                 content_hash: None,
@@ -13283,6 +14893,80 @@ impl StateStore {
             records.push(record);
         }
         Ok(records)
+    }
+
+    /// A bounded artifact projection is only a locator. Prove each returned
+    /// source event against one fixed signed thread endpoint before exposing
+    /// its type, metadata or synthetic list coordinate. This is positive
+    /// membership proof, not a claim that the projection lists every event.
+    fn authenticate_artifact_projection_rows(
+        &self,
+        thread_id: &str,
+        rows: &[queries::ArtifactRow],
+    ) -> Result<BTreeMap<String, i64>> {
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+        let Some(first) = rows.first() else {
+            return Ok(BTreeMap::new());
+        };
+        let chain_root_id = first.chain_root_id.as_str();
+        let mut pending = BTreeMap::<&str, &queries::ArtifactRow>::new();
+        for row in rows {
+            if row.thread_id != thread_id
+                || row.chain_root_id != chain_root_id
+                || !lillux::valid_hash(&row.source_event_hash)
+                || row
+                    .source_event_hash
+                    .bytes()
+                    .any(|byte| byte.is_ascii_uppercase())
+                || pending.insert(&row.source_event_hash, row).is_some()
+            {
+                bail!("thread artifact projection has contradictory signed coordinates");
+            }
+        }
+        let anchor = self
+            .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+            .ok_or_else(|| anyhow!("thread artifact projection has no signed thread anchor"))?;
+        let mut progress = None;
+        let mut signed_sequences = BTreeMap::new();
+        loop {
+            let page =
+                self.read_thread_event_page(&anchor, progress.as_ref(), PAGE_EVENTS, PAGE_BYTES)?;
+            if page.events.is_empty() && page.progress.is_some() {
+                bail!("signed artifact history made no progress");
+            }
+            for (hash, event) in page.events {
+                let Some(row) = pending.remove(hash.as_str()) else {
+                    continue;
+                };
+                let metadata = row
+                    .metadata
+                    .as_ref()
+                    .map(|bytes| serde_json::from_slice::<Value>(bytes))
+                    .transpose()
+                    .context("decode projected artifact metadata for signed comparison")?;
+                if event.chain_root_id != chain_root_id
+                    || event.thread_id != thread_id
+                    || event.event_type != ryeos_state::event_types::ARTIFACT_PUBLISHED
+                    || event.ts != row.created_at
+                    || event.payload.get("artifact_type").and_then(Value::as_str)
+                        != Some(row.kind.as_str())
+                    || event.payload.get("metadata").cloned() != metadata
+                {
+                    bail!("thread artifact projection contradicts signed source event");
+                }
+                let chain_seq = i64::try_from(event.chain_seq)
+                    .context("signed artifact chain sequence exceeds display coordinate")?;
+                signed_sequences.insert(hash, chain_seq);
+            }
+            if pending.is_empty() {
+                return Ok(signed_sequences);
+            }
+            progress = page.progress;
+            if progress.is_none() {
+                bail!("thread artifact projection source event is absent from signed history");
+            }
+        }
     }
 
     #[tracing::instrument(
@@ -13913,6 +15597,51 @@ impl StateStore {
         Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
+    /// Bounded projection candidates for a signed-first listing. Unlike the
+    /// general dashboard list this does not enrich rows with projected
+    /// continuation facts; the caller must check every candidate against its
+    /// signed subject before displaying it or advancing to a new page.
+    pub fn list_threads_candidate_page(
+        &self,
+        limit: usize,
+        filter: &queries::ThreadListFilter,
+        sort: queries::ThreadSort,
+        after: Option<&queries::ThreadListCursor>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let rows = {
+            let g = self.lock()?;
+            queries::list_threads_candidate_page(
+                g.state_db.projection(),
+                limit,
+                filter,
+                sort,
+                after,
+            )?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|row| ThreadListItem {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id: None,
+                requested_by: row.requested_by,
+                project_root: row.project_root,
+                project_authority: Some(row.project_authority),
+                lifecycle_authority: None,
+                admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+            .collect())
+    }
+
     /// Bounded execution closure containing continuation and cross-chain spawn
     /// edges. The query resolves an arbitrary selected thread to its oldest
     /// reachable ancestor, so opening the tree from a child still shows its
@@ -14066,69 +15795,6 @@ impl StateStore {
             follow_waiters,
             terminal_error_previews,
         )
-    }
-
-    /// Load graph-run identity for a bounded thread page in one projection
-    /// query. Missing or malformed payloads produce no identity rather than a
-    /// guessed link to mutable definition content.
-    pub fn graph_run_list_identities(
-        &self,
-        thread_ids: &[String],
-    ) -> Result<HashMap<String, GraphRunListIdentity>> {
-        let payloads = {
-            let g = self.lock()?;
-            queries::current_graph_node_payloads(
-                g.state_db.projection(),
-                thread_ids,
-                MAX_THREAD_LIST_ENRICHMENT_THREADS,
-                MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
-                MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
-            )?
-        };
-        let mut identities = HashMap::new();
-        for (thread_id, payload) in payloads {
-            let payload: Value = match serde_json::from_slice(&payload) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    tracing::warn!(
-                        %thread_id,
-                        %error,
-                        "ignoring malformed graph identity payload in field run enrichment"
-                    );
-                    continue;
-                }
-            };
-            let Some(definition_ref) = payload.get("definition_ref").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(effective_definition_digest) = payload
-                .get("effective_definition_digest")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            let Some(graph_run_id) = payload.get("graph_run_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(node) = payload.get("node").and_then(Value::as_str) else {
-                continue;
-            };
-            let step = payload.get("step").and_then(Value::as_u64).unwrap_or(0);
-            let Ok(step) = u32::try_from(step) else {
-                continue;
-            };
-            identities.insert(
-                thread_id,
-                GraphRunListIdentity {
-                    definition_ref: definition_ref.to_string(),
-                    effective_definition_digest: effective_definition_digest.to_string(),
-                    graph_run_id: graph_run_id.to_string(),
-                    node: node.to_string(),
-                    step,
-                },
-            );
-        }
-        Ok(identities)
     }
 
     pub fn thread_list_enrichment_with_waiters(
@@ -18340,7 +20006,7 @@ impl StateStore {
             .state_db
             .get_thread(caller_thread_id)?
             .ok_or_else(|| anyhow!("runtime action caller {caller_thread_id} does not exist"))?;
-        let _admission = g.state_db.authorize_runtime_pin(&caller.chain_root_id)?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, caller_thread_id)?;
         g.runtime_db.reserve_runtime_action_intent(
             operation_id,
             &caller.chain_root_id,
@@ -18373,7 +20039,7 @@ impl StateStore {
             .state_db
             .get_thread(caller_thread_id)?
             .ok_or_else(|| anyhow!("runtime action caller {caller_thread_id} does not exist"))?;
-        let _admission = g.state_db.authorize_runtime_pin(&caller.chain_root_id)?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, caller_thread_id)?;
         let workspace = g
             .runtime_db
             .workspace(workspace_operation.workspace_id)?
@@ -18821,9 +20487,7 @@ impl StateStore {
         validate_follow_reservation_shape(seed)?;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let _admission = g
-            .state_db
-            .authorize_runtime_pin(&seed.parent_chain_root_id)?;
+        let _admission = Self::authorize_runtime_pin_for_chain(&g, &seed.parent_chain_root_id)?;
         g.runtime_db.reserve_follow(seed)
     }
 
@@ -18860,11 +20524,16 @@ impl StateStore {
             .runtime_db
             .get_follow_waiter_by_key(follow_key)?
             .ok_or_else(|| anyhow!("follow waiter {follow_key} does not exist"))?;
-        let _admission = match g.state_db.authorize_runtime_pin(child_chain_root_id) {
+        let _admission = match Self::authorize_runtime_pin_for_chain(&g, child_chain_root_id) {
             Ok(admission) => admission,
-            Err(_) => g
-                .state_db
-                .authorize_future_runtime_pin(&waiter.parent_chain_root_id, child_chain_root_id)?,
+            Err(_) => {
+                let admission = g.state_db.authorize_future_runtime_pin(
+                    &waiter.parent_chain_root_id,
+                    child_chain_root_id,
+                )?;
+                Self::reject_reaping_seat_root(&g, &admission, &waiter.parent_chain_root_id)?;
+                admission
+            }
         };
         g.runtime_db.set_follow_child(
             follow_key,
@@ -19479,6 +21148,1271 @@ impl StateStore {
         )
     }
 
+    /// Append a durable batch only if the exact signed-head-derived anchor is
+    /// still current. A conflict is an expected result and performs no append.
+    pub fn append_events_if_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<ConditionalEventAppendResult> {
+        if events.is_empty()
+            || events
+                .iter()
+                .any(|event| event.storage_class == "ephemeral")
+        {
+            bail!("conditional event append requires a nonempty durable batch");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if has_indexed_collection_events(events) && !self.projection_health.is_current() {
+            bail!("collection event admission requires a current thread projection");
+        }
+        append_events_locked_inner(
+            &g,
+            Some(permit.cas_guard()),
+            chain_root_id,
+            thread_id,
+            events,
+            Some(expected),
+        )
+    }
+
+    /// Reserved ingress for browser-authored transfer phases. The state layer
+    /// has an ordered two-anchor append primitive, but a caller-supplied record
+    /// and anchors are not proof of current source export, destination binding
+    /// admission, producer ownership, or phase causality. Keep this sealed
+    /// until those exact checks can be repeated under both chain locks.
+    #[allow(dead_code)]
+    pub(crate) fn append_ui_transfer_phase_if_two_anchors(
+        &self,
+        record: &ryeos_ui_presentation_contract::transfer::TransferRecord,
+        target: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        counterpart: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<RunningConditionalEventAppendResult> {
+        record.validate_shape().map_err(anyhow::Error::msg)?;
+        let owner = record.event_owner();
+        let other = if owner == &record.transfer.source {
+            &record.transfer.destination
+        } else {
+            &record.transfer.source
+        };
+        if target.chain_root_id() != owner.chain_root_id
+            || target.thread_id() != owner.thread_id
+            || counterpart.chain_root_id() != other.chain_root_id
+            || counterpart.thread_id() != other.thread_id
+        {
+            bail!("transfer phase anchors do not name its exact two seats");
+        }
+        bail!("transfer phase writer is sealed pending exact two-seat domain admission")
+    }
+
+    /// Source-owned negative commitment publication. This does not prove the
+    /// nested renderer export or release local state. The original typed Core
+    /// preparation remains mandatory at any release consumer.
+    pub fn append_ui_move_freeze_cancellation<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiMoveFreezeCancellationProof,
+        source: &UiTransferPairSeat<'_>,
+        admit_source_session: F,
+    ) -> Result<UiMoveFreezeCancellationAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        use ryeos_ui_presentation_contract::move_freeze_lifecycle::{
+            MOVE_FREEZE_CANCELLED_EVENT, MoveFreezeCancellation, MoveFreezeCancellationWriter,
+        };
+        let transfer = proof.transfer();
+        if !proof.belongs_to(self)
+            || proof.source_anchor() != source.anchor
+            || source.presentation_id != transfer.source.presentation_id
+            || source.anchor.chain_root_id() != transfer.source.chain_root_id
+            || source.anchor.thread_id() != transfer.source.thread_id
+            || transfer.source.chain_root_id != transfer.source.thread_id
+        {
+            bail!(
+                "freeze cancellation requires completed same-store exact source and counterpart cuts"
+            );
+        }
+        if let Some((evidence, _)) = proof.retained_cancellation() {
+            return Ok(UiMoveFreezeCancellationAppendResult::AlreadyRecorded(
+                evidence.clone(),
+            ));
+        }
+        let (_, control) = proof.latest_control();
+        if control.state
+            != ryeos_ui_presentation_contract::seat_control::UiSeatProducerState::Active
+            || control.producer_incarnation != source.producer_incarnation
+            || proof.next_engine_seq() != source.next_engine_seq
+        {
+            bail!("freeze cancellation current producer differs from authenticated source cut");
+        }
+        let bound = proof.original_append_bound().min(source.max_append_bytes);
+        let record = MoveFreezeCancellation::new(
+            transfer.clone(),
+            proof.freeze().clone(),
+            MoveFreezeCancellationWriter::CurrentProducer {
+                producer_incarnation: source.producer_incarnation.into(),
+                next_engine_seq: source.next_engine_seq,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        record.validate_bounds(bound).map_err(anyhow::Error::msg)?;
+        let event = NewEventRecord {
+            event_type: MOVE_FREEZE_CANCELLED_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(record)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &event,
+            &transfer.source.chain_root_id,
+            &transfer.source.thread_id,
+            bound,
+        )? {
+            bail!("freeze cancellation exceeds authenticated source append bound");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let result = append_events_locked_inner_with_counterpart_admission(
+            &g,
+            Some(permit.cas_guard()),
+            &transfer.source.chain_root_id,
+            &transfer.source.thread_id,
+            &[event],
+            Some(proof.source_anchor()),
+            Some(proof.destination_anchor()),
+            TransferAppendAdmission::MoveFreezeCancellation,
+            |view| {
+                let Some(lease) = g
+                    .runtime_db
+                    .active_seat_lease_snapshot(&transfer.source.thread_id)?
+                else {
+                    return Ok(false);
+                };
+                let runtime = g.runtime_db.get_runtime_info(&transfer.source.thread_id)?;
+                if !self
+                    .process_attachment_admission_open
+                    .load(Ordering::Acquire)
+                    || lease.owner != source.owner
+                    || lease.surface != source.surface
+                    || lease.client_ref != source.client_ref
+                    || view.target.thread_id != transfer.source.thread_id
+                    || view.target.chain_root_id != transfer.source.chain_root_id
+                    || view.target.kind_name != "seat_session"
+                    || view.target.status != ThreadStatus::Running
+                    || view.target.requested_by.as_deref() != Some(source.owner)
+                    || view.target.item_ref != source.surface
+                    || view.target.executor_ref != source.client_ref
+                    || view.counterpart.thread_id != transfer.destination.thread_id
+                    || view.counterpart.chain_root_id != transfer.destination.chain_root_id
+                    || view.counterpart.kind_name != "seat_session"
+                    || !runtime.is_some_and(|runtime| runtime.stop_intent.is_none())
+                {
+                    return Ok(false);
+                }
+                admit_source_session()
+            },
+        )?;
+        Ok(match result {
+            ConditionalEventAppendResult::Committed(records) => {
+                UiMoveFreezeCancellationAppendResult::Committed(records)
+            }
+            ConditionalEventAppendResult::Conflict => {
+                UiMoveFreezeCancellationAppendResult::Conflict
+            }
+        })
+    }
+
+    /// Expiry cancellation uses the existing claimed-seat lease and source
+    /// runtime/scheduler pin exclusion under the same ordered pair publication.
+    pub(crate) fn append_reaping_ui_move_freeze_cancellation<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiMoveFreezeCancellationProof,
+        current_bound: crate::thread_lifecycle::AdmittedUiSeatAppendBound,
+        scheduler_pin_count: F,
+    ) -> Result<UiMoveFreezeCancellationAppendResult>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        use ryeos_ui_presentation_contract::move_freeze_lifecycle::{
+            MOVE_FREEZE_CANCELLED_EVENT, MoveFreezeCancellation, MoveFreezeCancellationWriter,
+        };
+        use ryeos_ui_presentation_contract::transfer_lifecycle_v2::TransferLifecycleFenceV2;
+        if !proof.belongs_to(self) {
+            bail!("freeze cancellation proof belongs to another state owner");
+        }
+        if let Some((evidence, _)) = proof.retained_cancellation() {
+            return Ok(UiMoveFreezeCancellationAppendResult::AlreadyRecorded(
+                evidence.clone(),
+            ));
+        }
+        let transfer = proof.transfer();
+        if transfer.source.chain_root_id != transfer.source.thread_id {
+            bail!("freeze cancellation source is not an exact seat root");
+        }
+        let bound = proof.original_append_bound().min(current_bound.get());
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(claim) = g
+            .runtime_db
+            .claimed_seat_lease_snapshot(&transfer.source.thread_id)?
+        else {
+            return Ok(UiMoveFreezeCancellationAppendResult::Conflict);
+        };
+        let (evidence, control) = proof.latest_control();
+        let fence = if control.state
+            == ryeos_ui_presentation_contract::seat_control::UiSeatProducerState::Closed
+        {
+            TransferLifecycleFenceV2::ClosedControl {
+                latest_control: evidence.clone(),
+                reaping_at_ms: claim.reaping_at_ms,
+            }
+        } else {
+            TransferLifecycleFenceV2::LeaseReaping {
+                latest_control: evidence.clone(),
+                reaping_at_ms: claim.reaping_at_ms,
+            }
+        };
+        ryeos_ui_presentation_contract::transfer_lifecycle_v2::verify_control_fence(
+            &transfer.source,
+            &fence,
+            evidence,
+            control,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let record = MoveFreezeCancellation::new(
+            transfer.clone(),
+            proof.freeze().clone(),
+            MoveFreezeCancellationWriter::NodeLifecycle { fence },
+        )
+        .map_err(anyhow::Error::msg)?;
+        record.validate_bounds(bound).map_err(anyhow::Error::msg)?;
+        let event = NewEventRecord {
+            event_type: MOVE_FREEZE_CANCELLED_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(record)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &event,
+            &transfer.source.chain_root_id,
+            &transfer.source.thread_id,
+            bound,
+        )? {
+            bail!("expiry freeze cancellation exceeds authenticated source append bound");
+        }
+        let result = append_events_locked_inner_with_counterpart_admission(
+            &g,
+            Some(permit.cas_guard()),
+            &transfer.source.chain_root_id,
+            &transfer.source.thread_id,
+            &[event],
+            Some(proof.source_anchor()),
+            Some(proof.destination_anchor()),
+            TransferAppendAdmission::MoveFreezeCancellation,
+            |view| {
+                if g.runtime_db
+                    .claimed_seat_lease_snapshot(&transfer.source.thread_id)?
+                    != Some(claim.clone())
+                    || view.target.thread_id != transfer.source.thread_id
+                    || view.target.chain_root_id != transfer.source.chain_root_id
+                    || view.target.kind_name != "seat_session"
+                    || view.target.status != ThreadStatus::Running
+                    || view.target.requested_by.as_deref() != Some(claim.owner.as_str())
+                    || view.target.item_ref != claim.surface
+                    || view.target.executor_ref != claim.client_ref
+                    || view.counterpart.thread_id != transfer.destination.thread_id
+                    || view.counterpart.chain_root_id != transfer.destination.chain_root_id
+                    || view.counterpart.kind_name != "seat_session"
+                {
+                    return Ok(false);
+                }
+                let mut pins = Self::inspect_signed_chain_pins(
+                    &g,
+                    &transfer.source.chain_root_id,
+                    view.target_thread_ids,
+                    &scheduler_pin_count,
+                    false,
+                )?;
+                if pins.seat_leases != 1 {
+                    return Ok(false);
+                }
+                pins.seat_leases = 0;
+                Ok(pins.is_empty())
+            },
+        )?;
+        Ok(match result {
+            ConditionalEventAppendResult::Committed(records) => {
+                UiMoveFreezeCancellationAppendResult::Committed(records)
+            }
+            ConditionalEventAppendResult::Conflict => {
+                UiMoveFreezeCancellationAppendResult::Conflict
+            }
+        })
+    }
+
+    /// Destination-first, exact InboundCommitment + Prepared publication.
+    /// The UI-seat owner must supply both authenticated fixed frontiers, the
+    /// validated source export and a bounded session-generation recheck. The
+    /// pair result is deliberately not flattened into a boolean: either
+    /// uncertain variant requires signed-head reconciliation before retry.
+    pub fn append_ui_transfer_preparation_pair<F>(
+        &self,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        export: &Value,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+        source_proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedSeatProof,
+        destination_proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedSeatProof,
+        admit_session: F,
+    ) -> Result<ryeos_state::state_db::ConditionalThreadEventPairAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_preparation_pair_if_mixed_cut(
+            transfer,
+            export,
+            destination,
+            source,
+            source_proof,
+            destination_proof,
+            &[destination.anchor.clone(), source.anchor.clone()],
+            &[],
+            admit_session,
+        )
+    }
+
+    pub fn append_ui_transfer_preparation_pair_if_mixed_cut<F>(
+        &self,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        export: &Value,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+        source_proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedSeatProof,
+        destination_proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedSeatProof,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        admit_session: F,
+    ) -> Result<ryeos_state::state_db::ConditionalThreadEventPairAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        source_proof.validate_preparation_source(self, source.anchor, transfer)?;
+        destination_proof.validate_preparation_destination(self, destination.anchor, transfer)?;
+        use ryeos_ui_presentation_contract::transfer::{
+            TRANSFER_EVENT, TRANSFER_SCHEMA, TransferEventPayload, TransferEvidence, TransferPhase,
+            TransferRecord,
+        };
+
+        if destination.anchor.chain_root_id() != transfer.destination.chain_root_id
+            || destination.anchor.thread_id() != transfer.destination.thread_id
+            || source.anchor.chain_root_id() != transfer.source.chain_root_id
+            || source.anchor.thread_id() != transfer.source.thread_id
+            || transfer.destination.chain_root_id != transfer.destination.thread_id
+            || transfer.source.chain_root_id != transfer.source.thread_id
+        {
+            bail!("transfer preparation requires two exact signed seat roots");
+        }
+        let inbound = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase: TransferPhase::InboundCommitment,
+        };
+        let inbound_wrapper = TransferEventPayload {
+            seq: destination.next_engine_seq,
+            operation_id: transfer.operation_id.clone(),
+            payload: inbound,
+        };
+        inbound_wrapper
+            .payload
+            .validate_bounds(destination.max_append_bytes)
+            .map_err(anyhow::Error::msg)?;
+        inbound_wrapper
+            .validate_current_witness(
+                destination.next_engine_seq,
+                destination.revision,
+                destination.presentation_id,
+                destination.producer_incarnation,
+            )
+            .map_err(anyhow::Error::msg)?;
+        let destination_event = NewEventRecord {
+            event_type: TRANSFER_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(inbound_wrapper)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &destination_event,
+            &transfer.destination.chain_root_id,
+            &transfer.destination.thread_id,
+            destination.max_append_bytes,
+        )? {
+            bail!("destination inbound commitment exceeds admitted seat append bound");
+        }
+        // The export must already be a closed source snapshot under the UI
+        // owner's verified replay. Recheck its typed digest and native bound
+        // before either chain can publish.
+        let export_digest =
+            ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(export)
+                .map_err(anyhow::Error::msg)?;
+        if export_digest != transfer.export_digest {
+            bail!("transfer source export differs from exact commitment");
+        }
+        let freeze = match export.get("mode").and_then(Value::as_str) {
+            Some("copy") => None,
+            Some("move") => {
+                Some(source_proof.preparation_freeze_links(self, source.anchor, transfer)?)
+            }
+            _ => bail!("transfer preparation has no current export mode"),
+        };
+        // Eliminate deterministic source shape/size failures before the
+        // destination becomes visible. The real source event replaces only
+        // this worst-case evidence coordinate after the signed inbound write.
+        let source_preflight = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase: TransferPhase::Prepared {
+                freeze: freeze.clone(),
+                inbound: TransferEvidence {
+                    event_hash: "f".repeat(64),
+                    chain_seq: u64::MAX,
+                },
+                export: export.clone(),
+            },
+        };
+        source_preflight
+            .validate_bounds(source.max_append_bytes)
+            .map_err(anyhow::Error::msg)?;
+        let source_preflight = TransferEventPayload {
+            seq: source.next_engine_seq,
+            operation_id: transfer.operation_id.clone(),
+            payload: source_preflight,
+        };
+        source_preflight
+            .validate_current_witness(
+                source.next_engine_seq,
+                source.revision,
+                source.presentation_id,
+                source.producer_incarnation,
+            )
+            .map_err(anyhow::Error::msg)?;
+        let source_preflight_event = NewEventRecord {
+            event_type: TRANSFER_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(source_preflight)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &source_preflight_event,
+            &transfer.source.chain_root_id,
+            &transfer.source.thread_id,
+            source.max_append_bytes,
+        )? {
+            bail!("source preparation exceeds admitted seat append bound");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let live = |seat: &UiTransferPairSeat<'_>,
+                    expected: &ryeos_ui_presentation_contract::transfer::TransferSeat,
+                    snapshot: &ThreadSnapshot|
+         -> Result<bool> {
+            let Some(lease) = g
+                .runtime_db
+                .active_seat_lease_snapshot(&expected.thread_id)?
+            else {
+                return Ok(false);
+            };
+            let runtime = g.runtime_db.get_runtime_info(&expected.thread_id)?;
+            Ok(lease.seat_thread_id == expected.thread_id
+                && lease.owner == seat.owner
+                && lease.surface == seat.surface
+                && lease.client_ref == seat.client_ref
+                && snapshot.thread_id == expected.thread_id
+                && snapshot.chain_root_id == expected.chain_root_id
+                && snapshot.kind_name == "seat_session"
+                && snapshot.status == ThreadStatus::Running
+                && snapshot.requested_by.as_deref() == Some(seat.owner)
+                && snapshot.item_ref == seat.surface
+                && snapshot.executor_ref == seat.client_ref
+                && runtime.is_some_and(|runtime| runtime.stop_intent.is_none()))
+        };
+        g.state_db.append_running_event_pair_admitted_if_mixed_cut(
+            destination.anchor,
+            source.anchor,
+            current_anchors,
+            retired_prefixes,
+            convert_events(
+                std::slice::from_ref(&destination_event),
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            ),
+            g.signer.as_ref(),
+            &g.runtime_db,
+            "seat_session",
+            "seat_session",
+            permit.cas_guard(),
+            |view| {
+                if !self
+                    .process_attachment_admission_open
+                    .load(Ordering::Acquire)
+                    || !live(destination, &transfer.destination, view.target)?
+                    || !live(source, &transfer.source, view.counterpart)?
+                {
+                    return Ok(false);
+                }
+                admit_session()
+            },
+            |committed, destination_after| {
+                if committed.value.event_count != 1 || committed.value.events.len() != 1 {
+                    bail!("transfer inbound pair published another event count");
+                }
+                let (event_hash, _) = destination_after
+                    .tip()
+                    .ok_or_else(|| anyhow!("committed destination inbound has no signed tip"))?;
+                let prepared = TransferRecord {
+                    schema: TRANSFER_SCHEMA,
+                    transfer: transfer.clone(),
+                    phase: TransferPhase::Prepared {
+                        freeze: freeze.clone(),
+                        inbound: TransferEvidence {
+                            event_hash: event_hash.to_owned(),
+                            chain_seq: committed.value.events[0].chain_seq,
+                        },
+                        export: export.clone(),
+                    },
+                };
+                prepared
+                    .validate_bounds(source.max_append_bytes)
+                    .map_err(anyhow::Error::msg)?;
+                let wrapper = TransferEventPayload {
+                    seq: source.next_engine_seq,
+                    operation_id: transfer.operation_id.clone(),
+                    payload: prepared,
+                };
+                wrapper
+                    .validate_current_witness(
+                        source.next_engine_seq,
+                        source.revision,
+                        source.presentation_id,
+                        source.producer_incarnation,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                let event = NewEventRecord {
+                    event_type: TRANSFER_EVENT.into(),
+                    storage_class: "indexed".into(),
+                    payload: serde_json::to_value(wrapper)?,
+                };
+                if !native_lifecycle_event_fits_bound(
+                    &event,
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    source.max_append_bytes,
+                )? {
+                    bail!("source preparation exceeds admitted seat append bound");
+                }
+                Ok(convert_events(
+                    &[event],
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                ))
+            },
+        )
+    }
+
+    /// Observe an uncertain preparation-pair attempt from two signed heads
+    /// relative to its exact attempted predecessors. This reads at most one
+    /// authenticated tip per seat, without simultaneous two-head exclusion.
+    /// Unchanged observations alone cannot authorize retry or cancellation.
+    pub fn read_ui_transfer_preparation_pair(
+        &self,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        export: &Value,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+    ) -> Result<UiTransferPairReadback> {
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+
+        if destination.anchor.chain_root_id() != transfer.destination.chain_root_id
+            || destination.anchor.thread_id() != transfer.destination.thread_id
+            || source.anchor.chain_root_id() != transfer.source.chain_root_id
+            || source.anchor.thread_id() != transfer.source.thread_id
+        {
+            bail!("transfer pair readback names another seat");
+        }
+        let inbound = read_transfer_pair_seat_tip(
+            self,
+            destination.anchor,
+            transfer,
+            destination.next_engine_seq,
+            true,
+        )?;
+        let prepared = read_transfer_pair_seat_tip(
+            self,
+            source.anchor,
+            transfer,
+            source.next_engine_seq,
+            false,
+        )?;
+        Ok(match (inbound, prepared) {
+            (TransferPairSeatReadback::Absent, TransferPairSeatReadback::Absent) => {
+                UiTransferPairReadback::BothObservedUnchanged
+            }
+            (
+                TransferPairSeatReadback::Exact { evidence, .. },
+                TransferPairSeatReadback::Absent,
+            ) => UiTransferPairReadback::DestinationObservedOnly { inbound: evidence },
+            (
+                TransferPairSeatReadback::Exact {
+                    evidence: inbound, ..
+                },
+                TransferPairSeatReadback::Exact {
+                    evidence: prepared,
+                    wrapper,
+                },
+            ) if matches!(
+                &wrapper.payload.phase,
+                TransferPhase::Prepared { inbound: link, freeze, export: actual }
+                    if *link == inbound && freeze.is_none() && actual == export
+            ) =>
+            {
+                UiTransferPairReadback::LinkedPairObserved { inbound, prepared }
+            }
+            _ => UiTransferPairReadback::Ambiguous,
+        })
+    }
+
+    /// Publish one destination Accepted event after a complete two-seat phase
+    /// proof at these exact signed anchors. Unrelated intervening events are
+    /// permitted; the ordered append still rejects any change after proof.
+    /// The UI-seat owner independently rechecks the affected source inventory,
+    /// destination placement, current producer and hidden reservation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_ui_transfer_accepted_if_two_anchors<F>(
+        &self,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        preparation: &ryeos_ui_presentation_contract::transfer::TransferEvidence,
+        inbound_event: &ryeos_state::objects::thread_event::ThreadEvent,
+        prepared_event: &ryeos_state::objects::thread_event::ThreadEvent,
+        reservation: &Value,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+        admit_reservation: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_accepted_if_mixed_cut(
+            transfer,
+            proof,
+            preparation,
+            inbound_event,
+            prepared_event,
+            reservation,
+            destination,
+            source,
+            &[destination.anchor.clone(), source.anchor.clone()],
+            &[],
+            admit_reservation,
+        )
+    }
+
+    pub fn append_ui_transfer_accepted_if_mixed_cut<F>(
+        &self,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        preparation: &ryeos_ui_presentation_contract::transfer::TransferEvidence,
+        inbound_event: &ryeos_state::objects::thread_event::ThreadEvent,
+        prepared_event: &ryeos_state::objects::thread_event::ThreadEvent,
+        reservation: &Value,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        admit_reservation: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        use ryeos_ui_presentation_contract::transfer::{
+            TRANSFER_EVENT, TRANSFER_SCHEMA, TransferEventPayload, TransferPhase, TransferRecord,
+            from_event_value,
+        };
+        use ryeos_ui_presentation_contract::transfer_state::{
+            TransferDestinationState, TransferSourceState,
+        };
+
+        if !proof.belongs_to(self)
+            || proof.source_anchor() != source.anchor
+            || proof.destination_anchor() != destination.anchor
+            || proof.lifecycle().transfer() != transfer
+            || proof.lifecycle().source_state() != TransferSourceState::Frozen
+            || proof.lifecycle().destination_state() != TransferDestinationState::Unreserved
+            || proof
+                .lifecycle()
+                .prepared()
+                .is_none_or(|retained| retained.evidence != preparation)
+        {
+            bail!("acceptance requires complete current two-seat phase proof");
+        }
+
+        let inbound = from_event_value(&inbound_event.to_value()).map_err(anyhow::Error::msg)?;
+        let prepared = from_event_value(&prepared_event.to_value()).map_err(anyhow::Error::msg)?;
+        let TransferPhase::Prepared {
+            inbound: inbound_link,
+            ..
+        } = &prepared.payload.phase
+        else {
+            bail!("acceptance requires exact source Prepared testimony");
+        };
+
+        if destination.anchor.chain_root_id() != transfer.destination.chain_root_id
+            || destination.anchor.thread_id() != transfer.destination.thread_id
+            || source.anchor.chain_root_id() != transfer.source.chain_root_id
+            || source.anchor.thread_id() != transfer.source.thread_id
+            || transfer.destination.chain_root_id != transfer.destination.thread_id
+            || transfer.source.chain_root_id != transfer.source.thread_id
+            || destination.presentation_id != transfer.destination.presentation_id
+            || source.presentation_id != transfer.source.presentation_id
+            || source.revision < transfer.source.revision
+            || inbound.payload.transfer != *transfer
+            || inbound.operation_id != transfer.operation_id
+            || !matches!(inbound.payload.phase, TransferPhase::InboundCommitment)
+            || inbound_link.chain_seq != inbound_event.chain_seq
+            || ryeos_state::objects::thread_event::hash_event(inbound_event)?
+                != inbound_link.event_hash
+            || proof.lifecycle().inbound().evidence != inbound_link
+            || prepared_event.chain_seq != preparation.chain_seq
+            || ryeos_state::objects::thread_event::hash_event(prepared_event)?
+                != preparation.event_hash
+            || prepared_event.chain_root_id != transfer.source.chain_root_id
+            || prepared_event.thread_id != transfer.source.thread_id
+            || prepared.payload.transfer != *transfer
+            || prepared.operation_id != transfer.operation_id
+        {
+            bail!("acceptance differs from authenticated retained phase evidence");
+        }
+        prepared
+            .payload
+            .validate_shape()
+            .map_err(anyhow::Error::msg)?;
+        let import_digest =
+            ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(reservation)
+                .map_err(anyhow::Error::msg)?;
+        let accepted = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase: TransferPhase::Accepted {
+                preparation: preparation.clone(),
+                reservation: reservation.clone(),
+                import_digest,
+            },
+        };
+        accepted
+            .validate_bounds(destination.max_append_bytes)
+            .map_err(anyhow::Error::msg)?;
+        let wrapper = TransferEventPayload {
+            seq: destination.next_engine_seq,
+            operation_id: transfer.operation_id.clone(),
+            payload: accepted,
+        };
+        wrapper
+            .validate_current_witness(
+                destination.next_engine_seq,
+                destination.revision,
+                destination.presentation_id,
+                destination.producer_incarnation,
+            )
+            .map_err(anyhow::Error::msg)?;
+        let event = NewEventRecord {
+            event_type: TRANSFER_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(wrapper)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &event,
+            &transfer.destination.chain_root_id,
+            &transfer.destination.thread_id,
+            destination.max_append_bytes,
+        )? {
+            bail!("destination acceptance exceeds admitted seat append bound");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let reservation_admission_entered = std::cell::Cell::new(false);
+        let outcome = g
+            .state_db
+            .append_running_events_admitted_if_mixed_cut_with_admission(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+                convert_events(
+                    &[event],
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id,
+                ),
+                g.signer.as_ref(),
+                &g.runtime_db,
+                destination.anchor,
+                source.anchor,
+                current_anchors,
+                retired_prefixes,
+                "seat_session",
+                permit.cas_guard(),
+                |view| {
+                    let live =
+                        |seat: &UiTransferPairSeat<'_>,
+                         expected: &ryeos_ui_presentation_contract::transfer::TransferSeat,
+                         snapshot: &ThreadSnapshot|
+                         -> Result<bool> {
+                            let Some(lease) = g
+                                .runtime_db
+                                .active_seat_lease_snapshot(&expected.thread_id)?
+                            else {
+                                return Ok(false);
+                            };
+                            let runtime = g.runtime_db.get_runtime_info(&expected.thread_id)?;
+                            Ok(lease.seat_thread_id == expected.thread_id
+                                && lease.owner == seat.owner
+                                && lease.surface == seat.surface
+                                && lease.client_ref == seat.client_ref
+                                && snapshot.thread_id == expected.thread_id
+                                && snapshot.chain_root_id == expected.chain_root_id
+                                && snapshot.kind_name == "seat_session"
+                                && snapshot.status == ThreadStatus::Running
+                                && snapshot.requested_by.as_deref() == Some(seat.owner)
+                                && snapshot.item_ref == seat.surface
+                                && snapshot.executor_ref == seat.client_ref
+                                && runtime.is_some_and(|runtime| runtime.stop_intent.is_none()))
+                        };
+                    if !self
+                        .process_attachment_admission_open
+                        .load(Ordering::Acquire)
+                        || !live(destination, &transfer.destination, view.target)?
+                        || !live(source, &transfer.source, view.counterpart)?
+                    {
+                        return Ok(false);
+                    }
+                    reservation_admission_entered.set(true);
+                    admit_reservation()
+                },
+            );
+        Ok(match outcome {
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Committed(committed)) => {
+                UiTransferAcceptedAppendResult::Committed(committed)
+            }
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Conflict) => {
+                UiTransferAcceptedAppendResult::Conflict
+            }
+            Err(error) if reservation_admission_entered.get() => {
+                UiTransferAcceptedAppendResult::Uncertain { error }
+            }
+            Err(error) => return Err(error),
+        })
+    }
+
+    /// Publish only the source decision justified by this completed paired
+    /// history. The seat owner must check the affected inventory and frozen
+    /// obligation in `admit_decision` while both signed heads are excluded.
+    pub fn append_ui_transfer_source_decision_if_two_anchors<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        decision: UiTransferSourceDecision,
+        source: &UiTransferPairSeat<'_>,
+        destination: &UiTransferPairSeat<'_>,
+        admit_decision: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_selected_phase_if_two_anchors(
+            proof,
+            UiTransferSelectedPhase::Source(decision),
+            source,
+            destination,
+            admit_decision,
+        )
+    }
+
+    pub fn append_ui_transfer_source_decision_if_mixed_cut<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        decision: UiTransferSourceDecision,
+        source: &UiTransferPairSeat<'_>,
+        destination: &UiTransferPairSeat<'_>,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        admit_decision: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_selected_phase_if_mixed_cut(
+            proof,
+            UiTransferSelectedPhase::Source(decision),
+            source,
+            destination,
+            current_anchors,
+            retired_prefixes,
+            admit_decision,
+        )
+    }
+
+    /// Publish only destination Activated after an exact retained source
+    /// commit. The callback checks the current reservation and installation;
+    /// retained phase evidence alone never revives a session or attachment.
+    pub fn append_ui_transfer_activated_if_two_anchors<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+        admit_activation: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_selected_phase_if_two_anchors(
+            proof,
+            UiTransferSelectedPhase::Activate,
+            destination,
+            source,
+            admit_activation,
+        )
+    }
+
+    pub fn append_ui_transfer_activated_if_mixed_cut<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        destination: &UiTransferPairSeat<'_>,
+        source: &UiTransferPairSeat<'_>,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        admit_activation: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_selected_phase_if_mixed_cut(
+            proof,
+            UiTransferSelectedPhase::Activate,
+            destination,
+            source,
+            current_anchors,
+            retired_prefixes,
+            admit_activation,
+        )
+    }
+
+    fn append_ui_transfer_selected_phase_if_two_anchors<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        selected: UiTransferSelectedPhase,
+        target: &UiTransferPairSeat<'_>,
+        counterpart: &UiTransferPairSeat<'_>,
+        admit_phase: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        self.append_ui_transfer_selected_phase_if_mixed_cut(
+            proof,
+            selected,
+            target,
+            counterpart,
+            &[target.anchor.clone(), counterpart.anchor.clone()],
+            &[],
+            admit_phase,
+        )
+    }
+
+    fn append_ui_transfer_selected_phase_if_mixed_cut<F>(
+        &self,
+        proof: &crate::thread_lifecycle::presentation_transfer::UiTransferFixedHistoryProof,
+        selected: UiTransferSelectedPhase,
+        target: &UiTransferPairSeat<'_>,
+        counterpart: &UiTransferPairSeat<'_>,
+        current_anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[ryeos_state::RetiredSeatPositivePrefix],
+        admit_phase: F,
+    ) -> Result<UiTransferAcceptedAppendResult>
+    where
+        F: FnOnce() -> Result<bool>,
+    {
+        use ryeos_ui_presentation_contract::transfer::{
+            TRANSFER_EVENT, TRANSFER_SCHEMA, TransferEventPayload, TransferPhase, TransferRecord,
+        };
+        use ryeos_ui_presentation_contract::transfer_state::{
+            TransferDestinationState, TransferSourceState,
+        };
+
+        let lifecycle = proof.lifecycle();
+        let transfer = lifecycle.transfer();
+        let (expected_target, expected_counterpart, phase) = match selected {
+            UiTransferSelectedPhase::Source(UiTransferSourceDecision::Commit) => {
+                if lifecycle.source_state() != TransferSourceState::Frozen
+                    || lifecycle.destination_state() != TransferDestinationState::Reserved
+                {
+                    bail!("source commit requires retained accepted reservation");
+                }
+                let preparation = lifecycle
+                    .prepared()
+                    .ok_or_else(|| anyhow!("missing preparation"))?;
+                let acceptance = lifecycle
+                    .accepted()
+                    .ok_or_else(|| anyhow!("missing acceptance"))?;
+                let TransferPhase::Accepted { import_digest, .. } = &acceptance.record.phase else {
+                    bail!("retained acceptance has wrong phase");
+                };
+                (
+                    &transfer.source,
+                    &transfer.destination,
+                    TransferPhase::Committed {
+                        preparation: (*preparation.evidence).clone(),
+                        acceptance: (*acceptance.evidence).clone(),
+                        import_digest: import_digest.clone(),
+                    },
+                )
+            }
+            UiTransferSelectedPhase::Source(UiTransferSourceDecision::Abort) => {
+                if lifecycle.source_state() != TransferSourceState::Frozen
+                    || !matches!(
+                        lifecycle.destination_state(),
+                        TransferDestinationState::Unreserved | TransferDestinationState::Reserved
+                    )
+                {
+                    bail!("source abort requires an undecided retained preparation");
+                }
+                let preparation = lifecycle
+                    .prepared()
+                    .ok_or_else(|| anyhow!("missing preparation"))?;
+                (
+                    &transfer.source,
+                    &transfer.destination,
+                    TransferPhase::Aborted {
+                        preparation: (*preparation.evidence).clone(),
+                    },
+                )
+            }
+            UiTransferSelectedPhase::Activate => {
+                if lifecycle.source_state() != TransferSourceState::Committed
+                    || lifecycle.destination_state() != TransferDestinationState::Reserved
+                {
+                    bail!("activation requires retained commit and reservation");
+                }
+                let commit = lifecycle
+                    .committed()
+                    .ok_or_else(|| anyhow!("missing commit"))?;
+                let TransferPhase::Committed { import_digest, .. } = &commit.record.phase else {
+                    bail!("retained commit has wrong phase");
+                };
+                (
+                    &transfer.destination,
+                    &transfer.source,
+                    TransferPhase::Activated {
+                        commit: (*commit.evidence).clone(),
+                        import_digest: import_digest.clone(),
+                    },
+                )
+            }
+        };
+        let (target_anchor, counterpart_anchor) = match selected {
+            UiTransferSelectedPhase::Source(_) => {
+                (proof.source_anchor(), proof.destination_anchor())
+            }
+            UiTransferSelectedPhase::Activate => {
+                (proof.destination_anchor(), proof.source_anchor())
+            }
+        };
+        if !proof.belongs_to(self)
+            || target.anchor != target_anchor
+            || counterpart.anchor != counterpart_anchor
+            || target.anchor.chain_root_id() != expected_target.chain_root_id
+            || target.anchor.thread_id() != expected_target.thread_id
+            || counterpart.anchor.chain_root_id() != expected_counterpart.chain_root_id
+            || counterpart.anchor.thread_id() != expected_counterpart.thread_id
+            || target.presentation_id != expected_target.presentation_id
+            || counterpart.presentation_id != expected_counterpart.presentation_id
+            || target.revision < expected_target.revision
+            || counterpart.revision < expected_counterpart.revision
+        {
+            bail!("selected phase differs from completed paired seat proof");
+        }
+        let record = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase,
+        };
+        record
+            .validate_bounds(target.max_append_bytes)
+            .map_err(anyhow::Error::msg)?;
+        let wrapper = TransferEventPayload {
+            seq: target.next_engine_seq,
+            operation_id: transfer.operation_id.clone(),
+            payload: record,
+        };
+        wrapper
+            .validate_current_witness(
+                target.next_engine_seq,
+                target.revision,
+                target.presentation_id,
+                target.producer_incarnation,
+            )
+            .map_err(anyhow::Error::msg)?;
+        let event = NewEventRecord {
+            event_type: TRANSFER_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(wrapper)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &event,
+            &expected_target.chain_root_id,
+            &expected_target.thread_id,
+            target.max_append_bytes,
+        )? {
+            bail!("selected transfer phase exceeds admitted seat append bound");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let admission_entered = std::cell::Cell::new(false);
+        let outcome = g
+            .state_db
+            .append_running_events_admitted_if_mixed_cut_with_admission(
+                &expected_target.chain_root_id,
+                &expected_target.thread_id,
+                convert_events(
+                    &[event],
+                    &expected_target.chain_root_id,
+                    &expected_target.thread_id,
+                ),
+                g.signer.as_ref(),
+                &g.runtime_db,
+                target.anchor,
+                counterpart.anchor,
+                current_anchors,
+                retired_prefixes,
+                "seat_session",
+                permit.cas_guard(),
+                |view| {
+                    let live =
+                        |seat: &UiTransferPairSeat<'_>,
+                         expected: &ryeos_ui_presentation_contract::transfer::TransferSeat,
+                         snapshot: &ThreadSnapshot|
+                         -> Result<bool> {
+                            let Some(lease) = g
+                                .runtime_db
+                                .active_seat_lease_snapshot(&expected.thread_id)?
+                            else {
+                                return Ok(false);
+                            };
+                            let runtime = g.runtime_db.get_runtime_info(&expected.thread_id)?;
+                            Ok(lease.seat_thread_id == expected.thread_id
+                                && lease.owner == seat.owner
+                                && lease.surface == seat.surface
+                                && lease.client_ref == seat.client_ref
+                                && snapshot.thread_id == expected.thread_id
+                                && snapshot.chain_root_id == expected.chain_root_id
+                                && snapshot.kind_name == "seat_session"
+                                && snapshot.status == ThreadStatus::Running
+                                && snapshot.requested_by.as_deref() == Some(seat.owner)
+                                && snapshot.item_ref == seat.surface
+                                && snapshot.executor_ref == seat.client_ref
+                                && runtime.is_some_and(|runtime| runtime.stop_intent.is_none()))
+                        };
+                    if !self
+                        .process_attachment_admission_open
+                        .load(Ordering::Acquire)
+                        || !live(target, expected_target, view.target)?
+                        || !live(counterpart, expected_counterpart, view.counterpart)?
+                    {
+                        return Ok(false);
+                    }
+                    admission_entered.set(true);
+                    admit_phase()
+                },
+            );
+        Ok(match outcome {
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Committed(committed)) => {
+                UiTransferAcceptedAppendResult::Committed(committed)
+            }
+            Ok(ryeos_state::ConditionalThreadEventAppendResult::Conflict) => {
+                UiTransferAcceptedAppendResult::Conflict
+            }
+            Err(error) if admission_entered.get() => {
+                UiTransferAcceptedAppendResult::Uncertain { error }
+            }
+            Err(error) => return Err(error),
+        })
+    }
+
+    /// Positive fixed-predecessor observation of one Accepted successor.
+    /// An unchanged or ambiguous result never permits a second reservation or
+    /// append without new ordered two-head admission.
+    pub fn read_ui_transfer_accepted_successor(
+        &self,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        preparation: &ryeos_ui_presentation_contract::transfer::TransferEvidence,
+        import_digest: &str,
+        destination: &UiTransferPairSeat<'_>,
+    ) -> Result<UiTransferAcceptedReadback> {
+        use ryeos_ui_presentation_contract::transfer::{TransferPhase, from_event_value};
+
+        if destination.anchor.chain_root_id() != transfer.destination.chain_root_id
+            || destination.anchor.thread_id() != transfer.destination.thread_id
+        {
+            bail!("acceptance readback names another exact destination seat");
+        }
+        let Some(current) = self.capture_thread_event_read_anchor(
+            destination.anchor.chain_root_id(),
+            destination.anchor.thread_id(),
+        )?
+        else {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        };
+        if current == *destination.anchor {
+            return Ok(UiTransferAcceptedReadback::Unchanged);
+        }
+        let (Some((previous_hash, previous_seq)), Some((current_hash, current_seq))) =
+            (destination.anchor.tip(), current.tip())
+        else {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        };
+        if previous_seq.checked_add(1) != Some(current_seq) {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        }
+        let page = self.read_thread_event_page(&current, None, 1, destination.max_append_bytes)?;
+        let Some((hash, event)) = page.events.first() else {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        };
+        if hash != current_hash
+            || event.thread_seq != current_seq
+            || event.prev_thread_event_hash.as_deref() != Some(previous_hash)
+        {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        }
+        let Ok(wrapper) = from_event_value(&event.to_value()) else {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        };
+        if wrapper.seq != destination.next_engine_seq
+            || wrapper.operation_id != transfer.operation_id
+            || wrapper.payload.transfer != *transfer
+        {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        }
+        if !matches!(
+            &wrapper.payload.phase,
+            TransferPhase::Accepted {
+                preparation: linked,
+                import_digest: admitted,
+                ..
+            } if linked == preparation && admitted == import_digest
+        ) {
+            return Ok(UiTransferAcceptedReadback::Ambiguous);
+        }
+        Ok(UiTransferAcceptedReadback::Observed {
+            acceptance: ryeos_ui_presentation_contract::transfer::TransferEvidence {
+                event_hash: hash.clone(),
+                chain_seq: event.chain_seq,
+            },
+        })
+    }
+
     #[tracing::instrument(
         name = "state:append_events_if_thread_running",
         skip(self, events),
@@ -19495,6 +22429,395 @@ impl StateStore {
         events: &[NewEventRecord],
     ) -> Result<Option<Vec<PersistedEventRecord>>> {
         self.append_events_if_thread_running_inner(chain_root_id, thread_id, events, None)
+    }
+
+    pub fn append_events_if_thread_running_and_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<RunningConditionalEventAppendResult> {
+        self.append_events_if_thread_running_with_conditions(
+            chain_root_id,
+            thread_id,
+            events,
+            None,
+            Some(expected),
+        )
+    }
+
+    /// Browser producer writes use one exact-root chain lock for signed
+    /// running/anchor admission, lease renewal, and durable publication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_seat_events_and_renew_if_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    ) -> Result<RunningConditionalEventAppendResult> {
+        self.append_seat_events_and_renew_if_anchors(
+            chain_root_id,
+            thread_id,
+            owner,
+            surface,
+            client_ref,
+            events,
+            expected,
+            std::slice::from_ref(expected),
+        )
+    }
+
+    /// Ordinary producer append conditioned on a completed paired history cut.
+    /// Callers authenticate the cut and membership; this owner atomically
+    /// excludes every supplied signed head during the root append.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_seat_events_and_renew_if_anchors(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+    ) -> Result<RunningConditionalEventAppendResult> {
+        self.append_seat_events_and_renew_if_mixed_cut(
+            chain_root_id,
+            thread_id,
+            owner,
+            surface,
+            client_ref,
+            events,
+            expected,
+            anchors,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_seat_events_and_renew_if_mixed_cut(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: &[NewEventRecord],
+        expected: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+        retired: &[ryeos_state::RetiredSeatPositivePrefix],
+    ) -> Result<RunningConditionalEventAppendResult> {
+        if events.iter().any(|event| {
+            event.event_type == ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT
+                || event.event_type.starts_with("contract.ryeos_ui.move_freeze_cancelled")
+                || event.event_type
+                    == ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT
+                || event.event_type
+                    == ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT
+        }) {
+            bail!("transfer testimony requires dedicated two-seat admission");
+        }
+        if chain_root_id != thread_id
+            || events.is_empty()
+            || events
+                .iter()
+                .any(|event| event.storage_class == "ephemeral")
+        {
+            bail!("seat producer append requires exact root and durable events");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(thread) = g.state_db.get_thread(thread_id)? else {
+            return Ok(RunningConditionalEventAppendResult::NotRunning);
+        };
+        if thread.chain_root_id != chain_root_id
+            || thread.kind != "seat_session"
+            || thread.status != ThreadStatus::Running.as_str()
+            || thread.requested_by.as_deref() != Some(owner)
+            || thread.item_ref != surface
+            || thread.executor_ref != client_ref
+        {
+            return Ok(RunningConditionalEventAppendResult::NotRunning);
+        }
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow!("runtime row missing while appending seat events: {thread_id}")
+        })?;
+        if runtime.stop_intent.is_some()
+            || !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            return Ok(RunningConditionalEventAppendResult::NotRunning);
+        }
+        let converted = convert_events(events, chain_root_id, thread_id);
+        for event in &converted {
+            event.validate()?;
+        }
+        let predecessor = g
+            .state_db
+            .read_authoritative_thread_append_anchor(chain_root_id, thread_id)?
+            .ok_or_else(|| anyhow!("seat append has no signed predecessor"))?;
+        let committed = g
+            .state_db
+            .append_running_seat_events_and_renew_if_mixed_cut(
+                chain_root_id,
+                thread_id,
+                owner,
+                surface,
+                client_ref,
+                converted.clone(),
+                g.signer.as_ref(),
+                &g.runtime_db,
+                expected,
+                anchors,
+                retired,
+                permit.cas_guard(),
+                || {
+                    g.runtime_db
+                        .touch_seat_lease(thread_id, owner, surface, client_ref)
+                },
+            );
+        let persisted = match committed {
+            Ok(ryeos_state::state_db::SeatConditionalAppendResult::Committed(committed)) =>
+                persisted_from_append(&committed_value(committed), events)?,
+            Ok(ryeos_state::state_db::SeatConditionalAppendResult::Conflict) =>
+                return Ok(RunningConditionalEventAppendResult::Conflict),
+            Ok(ryeos_state::state_db::SeatConditionalAppendResult::Fenced) =>
+                return Ok(RunningConditionalEventAppendResult::NotRunning),
+            Err(error) => match read_exact_committed_event_append(
+                &g, chain_root_id, thread_id, &predecessor, &converted,
+            ) {
+                Ok(EventAppendCommitReadback::Exact(stored)) =>
+                    persisted_from_stored_events(&stored, events)?,
+                Ok(EventAppendCommitReadback::ProvenAbsent) => return Err(error),
+                Ok(EventAppendCommitReadback::Ambiguous(reason)) =>
+                    return Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
+                        "seat append failed with ambiguous readback ({reason}); write error: {error:#}"
+                    ))),
+                Err(readback_error) =>
+                    return Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
+                        "seat append failed and readback was unavailable; write error: {error:#}; readback error: {readback_error:#}"
+                    ))),
+            },
+        };
+        Ok(RunningConditionalEventAppendResult::Committed(persisted))
+    }
+
+    /// Legacy v1 writer remains sealed: historical Closed-only testimony has
+    /// no durable expiry marker. The separate known-transfer path emits v2
+    /// only after proving the exact claim and runtime-owner fence.
+    #[cfg(test)]
+    fn append_closed_ui_transfer_settlement(
+        &self,
+        candidate: &crate::thread_lifecycle::presentation_transfer::ClosedTransferSettlementCandidate,
+    ) -> Result<RunningConditionalEventAppendResult> {
+        if !candidate.belongs_to(self) {
+            bail!("transfer settlement candidate belongs to another state owner");
+        }
+        candidate
+            .payload()
+            .validate_shape()
+            .map_err(anyhow::Error::msg)?;
+        bail!(
+            "Gate R lifecycle settlement writer is sealed: control causality/frontier, lifecycle expiry fence and runtime-owner exclusion through publication remain unproved"
+        )
+    }
+
+    /// Known-transfer lifecycle settlement. The caller's complete fixed-history
+    /// candidate is data, never an admission token. The first claim marker is
+    /// prepared under the store lock and compared in full under both chain
+    /// locks immediately before the existing conditional append publishes.
+    pub(crate) fn append_reaping_ui_transfer_settlement_v2<F>(
+        &self,
+        candidate: &crate::thread_lifecycle::presentation_transfer::SettlementPreparation,
+        current_append_bound: crate::thread_lifecycle::AdmittedUiSeatAppendBound,
+        scheduler_pin_count: F,
+    ) -> Result<RunningConditionalEventAppendResult>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        use crate::thread_lifecycle::presentation_transfer::SettlementPreparation;
+        use ryeos_ui_presentation_contract::transfer_lifecycle_v2::{
+            TRANSFER_LIFECYCLE_V2_EVENT, TransferLifecycleEventPayloadV2, TransferLifecycleFenceV2,
+        };
+
+        let (belongs, record, evidence, closed, owner_anchor, counterpart_anchor, original_bound) =
+            match candidate {
+                SettlementPreparation::Candidate(candidate) => (
+                    candidate.belongs_to(self),
+                    &candidate.payload().payload,
+                    &candidate.payload().producer_fence,
+                    true,
+                    candidate.owner_anchor(),
+                    candidate.counterpart_anchor(),
+                    candidate.original_append_bound(),
+                ),
+                SettlementPreparation::ReapingCandidate(candidate) => (
+                    candidate.belongs_to(self),
+                    candidate.record(),
+                    candidate.latest_control(),
+                    candidate.closed_control(),
+                    candidate.owner_anchor(),
+                    candidate.counterpart_anchor(),
+                    candidate.original_append_bound(),
+                ),
+                SettlementPreparation::FreezeCancellation(_)
+                | SettlementPreparation::Deferred(_) => {
+                    bail!("deferred transfer has no lifecycle settlement candidate")
+                }
+            };
+        if !belongs {
+            bail!("transfer settlement candidate belongs to another state owner");
+        }
+        // Abort is a claimed-seat decision, not live Commit authority. The
+        // candidate came from complete fixed histories, and the ordered
+        // two-head append below serializes it against late Accepted. A stale
+        // candidate conflicts rather than inferring absence or dropping the
+        // destination's Release obligation after an earlier Accepted.
+        if matches!(
+            &record.phase,
+            ryeos_ui_presentation_contract::transfer::TransferPhase::Aborted { .. }
+        ) && (owner_anchor.chain_root_id() != record.transfer.source.chain_root_id
+            || owner_anchor.thread_id() != record.transfer.source.thread_id)
+        {
+            bail!("source Abort candidate does not own its exact source seat");
+        }
+        let orphan_cancellation = matches!(
+            &record.phase,
+            ryeos_ui_presentation_contract::transfer::TransferPhase::OrphanCancelled { .. }
+        );
+        let owner = record.event_owner();
+        let counterpart = if owner == &record.transfer.source {
+            &record.transfer.destination
+        } else {
+            &record.transfer.source
+        };
+        if owner.chain_root_id != owner.thread_id {
+            bail!("transfer settlement owner is not an exact seat root");
+        }
+        let append_bound = original_bound.min(current_append_bound.get());
+        if append_bound == 0 {
+            bail!("Gate R lifecycle settlement append bound is zero");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(prepared_claim) = g.runtime_db.claimed_seat_lease_snapshot(&owner.thread_id)?
+        else {
+            return Ok(RunningConditionalEventAppendResult::Conflict);
+        };
+        let source_claim = if orphan_cancellation {
+            if owner != &record.transfer.destination {
+                bail!("orphan cancellation must be destination-owned");
+            }
+            let Some(claim) = g
+                .runtime_db
+                .claimed_seat_lease_snapshot(&counterpart.thread_id)?
+            else {
+                return Ok(RunningConditionalEventAppendResult::Conflict);
+            };
+            Some(claim)
+        } else {
+            None
+        };
+        let fence = if closed {
+            TransferLifecycleFenceV2::ClosedControl {
+                latest_control: evidence.clone(),
+                reaping_at_ms: prepared_claim.reaping_at_ms,
+            }
+        } else {
+            TransferLifecycleFenceV2::LeaseReaping {
+                latest_control: evidence.clone(),
+                reaping_at_ms: prepared_claim.reaping_at_ms,
+            }
+        };
+        let payload = TransferLifecycleEventPayloadV2::new(record.clone(), fence)
+            .map_err(anyhow::Error::msg)?;
+        payload
+            .validate_bounds(append_bound)
+            .map_err(anyhow::Error::msg)?;
+        let event = NewEventRecord {
+            event_type: TRANSFER_LIFECYCLE_V2_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(payload)?,
+        };
+        if !native_lifecycle_event_fits_bound(
+            &event,
+            &owner.chain_root_id,
+            &owner.thread_id,
+            append_bound,
+        )? {
+            bail!(
+                "v2 lifecycle settlement event exceeds original/current seat append bound or native event ceiling"
+            );
+        }
+        let committed = append_events_locked_inner_with_counterpart_admission(
+            &g,
+            Some(permit.cas_guard()),
+            &owner.chain_root_id,
+            &owner.thread_id,
+            &[event],
+            Some(owner_anchor),
+            Some(counterpart_anchor),
+            TransferAppendAdmission::LifecycleV2,
+            |view| {
+                let Some(current_claim) =
+                    g.runtime_db.claimed_seat_lease_snapshot(&owner.thread_id)?
+                else {
+                    return Ok(false);
+                };
+                if current_claim != prepared_claim
+                    || view.target.thread_id != owner.thread_id
+                    || view.target.chain_root_id != owner.chain_root_id
+                    || view.target.kind_name != "seat_session"
+                    || view.target.status != ThreadStatus::Running
+                    || view.target.requested_by.as_deref() != Some(current_claim.owner.as_str())
+                    || view.target.item_ref != current_claim.surface
+                    || view.target.executor_ref != current_claim.client_ref
+                    || view.counterpart.thread_id != counterpart.thread_id
+                    || view.counterpart.chain_root_id != counterpart.chain_root_id
+                    || view.counterpart.kind_name != "seat_session"
+                {
+                    return Ok(false);
+                }
+                if let Some(source_claim) = &source_claim {
+                    if g.runtime_db
+                        .claimed_seat_lease_snapshot(&counterpart.thread_id)?
+                        != Some(source_claim.clone())
+                        || view.counterpart.status != ThreadStatus::Running
+                        || view.counterpart.requested_by.as_deref()
+                            != Some(source_claim.owner.as_str())
+                        || view.counterpart.item_ref != source_claim.surface
+                        || view.counterpart.executor_ref != source_claim.client_ref
+                    {
+                        return Ok(false);
+                    }
+                }
+                let mut pins = Self::inspect_signed_chain_pins(
+                    &g,
+                    &owner.chain_root_id,
+                    view.target_thread_ids,
+                    &scheduler_pin_count,
+                    false,
+                )?;
+                if pins.seat_leases != 1 {
+                    return Ok(false);
+                }
+                pins.seat_leases = 0;
+                Ok(pins.is_empty())
+            },
+        )?;
+        Ok(match committed {
+            ConditionalEventAppendResult::Committed(records) => {
+                RunningConditionalEventAppendResult::Committed(records)
+            }
+            ConditionalEventAppendResult::Conflict => RunningConditionalEventAppendResult::Conflict,
+        })
     }
 
     /// Process-observer admission must fence the exact launch owner under the
@@ -19522,6 +22845,37 @@ impl StateStore {
         events: &[NewEventRecord],
         launch_owner: Option<&str>,
     ) -> Result<Option<Vec<PersistedEventRecord>>> {
+        match self.append_events_if_thread_running_with_conditions(
+            chain_root_id,
+            thread_id,
+            events,
+            launch_owner,
+            None,
+        )? {
+            RunningConditionalEventAppendResult::Committed(records) => Ok(Some(records)),
+            RunningConditionalEventAppendResult::NotRunning => Ok(None),
+            RunningConditionalEventAppendResult::Conflict => {
+                unreachable!("running append without an anchor cannot conflict")
+            }
+        }
+    }
+
+    fn append_events_if_thread_running_with_conditions(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+        launch_owner: Option<&str>,
+        expected: Option<&ryeos_state::AuthoritativeThreadEventReadAnchor>,
+    ) -> Result<RunningConditionalEventAppendResult> {
+        if expected.is_some()
+            && (events.is_empty()
+                || events
+                    .iter()
+                    .any(|event| event.storage_class == "ephemeral"))
+        {
+            bail!("conditional event append requires a nonempty durable batch");
+        }
         let has_cas_events = events
             .iter()
             .any(|event| event.storage_class != "ephemeral");
@@ -19535,15 +22889,15 @@ impl StateStore {
             bail!("collection event admission requires a current thread projection");
         }
         let Some(thread) = g.state_db.get_thread(thread_id)? else {
-            return Ok(None);
+            return Ok(RunningConditionalEventAppendResult::NotRunning);
         };
         if thread.status != ThreadStatus::Running.as_str() {
-            return Ok(None);
+            return Ok(RunningConditionalEventAppendResult::NotRunning);
         }
         if let Some(expected) = launch_owner {
             let claim = g.runtime_db.get_launch_claim(thread_id)?;
             if !claim.is_some_and(|claim| claim.claimed_by == expected) {
-                return Ok(None);
+                return Ok(RunningConditionalEventAppendResult::NotRunning);
             }
         }
         let runtime = g
@@ -19555,17 +22909,24 @@ impl StateStore {
                 .process_attachment_admission_open
                 .load(Ordering::Acquire)
         {
-            return Ok(None);
+            return Ok(RunningConditionalEventAppendResult::NotRunning);
         }
 
-        append_events_locked(
+        match append_events_locked_inner(
             &g,
             permit.as_ref().map(StateMutationPermit::cas_guard),
             chain_root_id,
             thread_id,
             events,
-        )
-        .map(Some)
+            expected,
+        )? {
+            ConditionalEventAppendResult::Committed(records) => {
+                Ok(RunningConditionalEventAppendResult::Committed(records))
+            }
+            ConditionalEventAppendResult::Conflict => {
+                Ok(RunningConditionalEventAppendResult::Conflict)
+            }
+        }
     }
 
     /// Append the exact daemon-authored launch-attempt audit immediately before
@@ -19759,6 +23120,59 @@ impl StateStore {
         })
     }
 
+    /// Locate a recent bounded thread page for an execution Field. The rows
+    /// remain projection candidates until the caller authenticates them from
+    /// the fixed signed thread history.
+    pub fn recent_thread_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        through_seq: Option<i64>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<PersistedEventPage> {
+        let g = self.lock()?;
+        let page = queries::recent_thread_events_bounded(
+            g.state_db.projection(),
+            chain_root_id,
+            thread_id,
+            through_seq,
+            limit,
+            max_serialized_bytes,
+        )?;
+        drop(g);
+        let events = page
+            .rows
+            .into_iter()
+            .map(|row| {
+                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
+                    format!(
+                        "malformed JSON payload for event {} (chain_seq {})",
+                        row.event_id, row.chain_seq
+                    )
+                })?;
+                Ok(PersistedEventRecord {
+                    event_id: row.event_id,
+                    event_hash: Some(row.event_hash),
+                    chain_root_id: row.chain_root_id,
+                    chain_seq: row.chain_seq,
+                    thread_id: row.thread_id,
+                    thread_seq: row.thread_seq,
+                    event_type: row.event_type,
+                    storage_class: row.durability,
+                    ts: row.ts,
+                    prev_chain_event_hash: row.prev_chain_event_hash,
+                    prev_thread_event_hash: row.prev_thread_event_hash,
+                    payload,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PersistedEventPage {
+            events,
+            has_more: page.has_more,
+        })
+    }
+
     pub fn chain_event_navigation(
         &self,
         chain_root_id: &str,
@@ -19769,6 +23183,7 @@ impl StateStore {
                 chain_root_id: row.chain_root_id,
                 chain_seq: row.chain_seq,
                 event_hash: row.event_hash,
+                thread_id: row.thread_id,
             }
         }
 
@@ -19896,6 +23311,489 @@ impl StateStore {
         .into_iter()
         .map(persisted_event_from_projection_row)
         .collect()
+    }
+
+    /// Load one immutable thread event by its exact CAS hash without trusting
+    /// the rebuildable projection. The shared authority guard prevents a
+    /// concurrent retention sweep from invalidating the read while its typed
+    /// envelope and canonical content hash are verified.
+    pub fn retained_thread_event_by_hash(
+        &self,
+        event_hash: &str,
+    ) -> Result<Option<ryeos_state::objects::thread_event::ThreadEvent>> {
+        if !lillux::valid_hash(event_hash)
+            || event_hash.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            bail!("retained thread event hash is not canonical");
+        }
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority.cas_store()?.get_object_bounded(
+            event_hash,
+            ryeos_state::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+        )?;
+        authority.ensure_guard(&guard)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let event: ryeos_state::objects::thread_event::ThreadEvent =
+            serde_json::from_value(value).context("decode retained thread event")?;
+        event.validate().context("validate retained thread event")?;
+        let actual = ryeos_state::objects::thread_event::hash_event(&event)
+            .context("hash retained thread event")?;
+        if actual != event_hash {
+            bail!("retained thread event content hash changed");
+        }
+        Ok(Some(event))
+    }
+
+    /// Capture one opaque, signed-head-derived endpoint for bounded history
+    /// reads. The chain lock and CAS guard are held only during this capture.
+    pub fn capture_thread_event_read_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<ryeos_state::AuthoritativeThreadEventReadAnchor>> {
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority
+            .capture_thread_event_read_anchor(chain_root_id, thread_id, &guard)
+            .context("capture authoritative thread event read anchor")
+    }
+
+    /// Read one newest-first bounded slice from a fixed authenticated endpoint.
+    /// `progress: None` starts at the anchor tip; a returned `Some` token means
+    /// the authenticated interval is incomplete, never that an event is absent.
+    pub fn read_thread_event_page(
+        &self,
+        anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        progress: Option<&ryeos_state::AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<ryeos_state::AuthoritativeThreadEventReadPage> {
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority
+            .read_thread_event_page(anchor, progress, max_events, max_bytes, &guard)
+            .context("read bounded authoritative thread event page")
+    }
+
+    /// Authenticate one bounded projection-located execution page against
+    /// fixed signed thread histories. Projection fields are only search
+    /// coordinates: every returned record is rebuilt from CAS, and a
+    /// contradictory projected field refuses the whole page. The per-thread
+    /// history walk advances in small pages without a guessed seat/history
+    /// lifetime ceiling or a lock held across the complete walk.
+    pub fn authenticate_execution_event_candidates(
+        &self,
+        chain_root_id: &str,
+        candidates: &[PersistedEventRecord],
+    ) -> Result<Vec<PersistedEventRecord>> {
+        const MAX_CANDIDATES: usize = 2_000;
+        const MAX_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+
+        if candidates.len() > MAX_CANDIDATES {
+            bail!("execution event candidate page exceeds its item bound");
+        }
+        let mut encoded_bytes = 0usize;
+        let mut by_thread = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            encoded_bytes = encoded_bytes
+                .checked_add(serde_json::to_vec(candidate)?.len())
+                .ok_or_else(|| anyhow!("execution event candidate byte count overflow"))?;
+            if encoded_bytes > MAX_CANDIDATE_BYTES {
+                bail!("execution event candidate page exceeds its byte bound");
+            }
+            let Some(hash) = candidate.event_hash.as_deref() else {
+                bail!("execution event candidate has no CAS hash");
+            };
+            if candidate.chain_root_id != chain_root_id
+                || candidate.thread_id.is_empty()
+                || candidate.chain_seq < 1
+                || candidate.thread_seq < 1
+                || !lillux::valid_hash(hash)
+                || hash.bytes().any(|byte| byte.is_ascii_uppercase())
+                || by_thread
+                    .entry(&candidate.thread_id)
+                    .or_default()
+                    .insert(hash, index)
+                    .is_some()
+            {
+                bail!("execution event candidate has contradictory coordinates");
+            }
+        }
+        let mut authenticated = vec![None; candidates.len()];
+        for (thread_id, pending) in &mut by_thread {
+            let anchor = self
+                .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("execution event candidate thread is absent"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (hash, event) in page.events {
+                    if let Some(index) = pending.remove(hash.as_str()) {
+                        let signed = persisted_event_from_authoritative(hash, event)?;
+                        if !execution_event_candidate_matches(&candidates[index], &signed) {
+                            bail!("execution event projection contradicts signed content");
+                        }
+                        authenticated[index] = Some(signed);
+                    }
+                }
+                progress = page.progress;
+                if progress.is_none() || pending.is_empty() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution event candidate is absent from signed thread history");
+            }
+        }
+        authenticated
+            .into_iter()
+            .map(|record| record.ok_or_else(|| anyhow!("execution event proof is incomplete")))
+            .collect()
+    }
+
+    /// Authenticate the small current/previous/next/live-head navigation set
+    /// against each exact thread's fixed signed endpoint. The projected refs
+    /// are locators only; returned refs are rebuilt from CAS events.
+    pub fn authenticate_execution_event_refs(
+        &self,
+        chain_root_id: &str,
+        candidates: &[PersistedEventRef],
+    ) -> Result<Vec<PersistedEventRef>> {
+        const MAX_REFS: usize = 4;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+        if candidates.len() > MAX_REFS {
+            bail!("execution event navigation exceeds its reference bound");
+        }
+        let mut by_thread = BTreeMap::<&str, BTreeMap<&str, Vec<usize>>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            if candidate.chain_root_id != chain_root_id
+                || candidate.chain_seq < 1
+                || candidate.thread_id.is_empty()
+                || !lillux::valid_hash(&candidate.event_hash)
+                || candidate
+                    .event_hash
+                    .bytes()
+                    .any(|byte| byte.is_ascii_uppercase())
+            {
+                bail!("execution event navigation has contradictory coordinates");
+            }
+            let positions = by_thread
+                .entry(&candidate.thread_id)
+                .or_default()
+                .entry(&candidate.event_hash)
+                .or_default();
+            if positions
+                .first()
+                .is_some_and(|first| &candidates[*first] != candidate)
+            {
+                bail!("execution event navigation repeats a hash with different coordinates");
+            }
+            positions.push(index);
+        }
+        let mut authenticated = vec![None; candidates.len()];
+        for (thread_id, pending) in &mut by_thread {
+            let anchor = self
+                .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("execution event navigation thread is absent"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (hash, event) in page.events {
+                    if let Some(positions) = pending.remove(hash.as_str()) {
+                        let candidate = &candidates[positions[0]];
+                        let chain_seq = i64::try_from(event.chain_seq)
+                            .context("signed navigation chain sequence exceeds storage range")?;
+                        if event.chain_root_id != candidate.chain_root_id
+                            || event.thread_id != candidate.thread_id
+                            || chain_seq != candidate.chain_seq
+                        {
+                            bail!("execution event navigation contradicts signed content");
+                        }
+                        let signed = PersistedEventRef {
+                            chain_root_id: event.chain_root_id,
+                            chain_seq,
+                            event_hash: hash,
+                            thread_id: event.thread_id,
+                        };
+                        for index in positions {
+                            authenticated[index] = Some(signed.clone());
+                        }
+                    }
+                }
+                progress = page.progress;
+                if progress.is_none() || pending.is_empty() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution event navigation is absent from signed thread history");
+            }
+        }
+        authenticated
+            .into_iter()
+            .map(|record| {
+                record.ok_or_else(|| anyhow!("execution event navigation proof is incomplete"))
+            })
+            .collect()
+    }
+
+    /// Prove every projection-located execution-tree edge from signed child
+    /// identity and a signed parent event. A child snapshot's upstream link
+    /// alone does not prove the source decision; a projected edge/reason alone
+    /// is never authority. Walk parent histories through bounded CAS pages and
+    /// release each page guard before continuing. No total-history ceiling is
+    /// inferred from the UI node limit.
+    pub fn verify_execution_tree_edges(&self, edges: &[ExecutionTreeEdgeCandidate]) -> Result<()> {
+        const MAX_EDGES: usize = 1_000;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+        if edges.len() > MAX_EDGES {
+            bail!("execution tree edge proof exceeds its node bound");
+        }
+        let mut by_parent =
+            BTreeMap::<(&str, &str), BTreeMap<&str, Vec<&ExecutionTreeEdgeCandidate>>>::new();
+        for edge in edges {
+            if edge.parent_thread_id.is_empty()
+                || edge.child_thread_id.is_empty()
+                || edge.parent_thread_id == edge.child_thread_id
+                || edge.parent_chain_root_id.is_empty()
+                || edge.child_chain_root_id.is_empty()
+                || !matches!(edge.relation.as_str(), "continued" | "spawned" | "follow")
+            {
+                bail!("execution tree edge candidate is malformed");
+            }
+            let (parent, child) = {
+                let g = self.lock()?;
+                let parent = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(
+                        &edge.parent_chain_root_id,
+                        &edge.parent_thread_id,
+                    )?
+                    .ok_or_else(|| anyhow!("execution tree parent is absent from signed state"))?;
+                let child = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(
+                        &edge.child_chain_root_id,
+                        &edge.child_thread_id,
+                    )?
+                    .ok_or_else(|| anyhow!("execution tree child is absent from signed state"))?;
+                (parent, child)
+            };
+            if parent.thread_id != edge.parent_thread_id
+                || parent.chain_root_id != edge.parent_chain_root_id
+                || child.thread_id != edge.child_thread_id
+                || child.chain_root_id != edge.child_chain_root_id
+            {
+                bail!("execution tree edge identity contradicts signed snapshots");
+            }
+            let continued = child.upstream_thread_id.as_deref()
+                == Some(edge.parent_thread_id.as_str())
+                && edge.parent_chain_root_id == edge.child_chain_root_id;
+            if (edge.relation == "continued") != continued {
+                bail!("execution tree edge relation contradicts signed child lineage");
+            }
+            let matching = by_parent
+                .entry((
+                    edge.parent_chain_root_id.as_str(),
+                    edge.parent_thread_id.as_str(),
+                ))
+                .or_default()
+                .entry(edge.child_thread_id.as_str())
+                .or_default();
+            if matching.first().is_some_and(|first| {
+                first.relation != edge.relation
+                    || first.child_chain_root_id != edge.child_chain_root_id
+            }) {
+                bail!("execution tree repeats an edge with contradictory identity");
+            }
+            matching.push(edge);
+        }
+        // One authenticated traversal serves every candidate child of this
+        // parent. A wide fan-out must not rescan the parent's whole history
+        // once per child or retain unbounded event pages in memory.
+        for ((parent_chain_root_id, parent_thread_id), mut pending) in by_parent {
+            let anchor = self
+                .capture_thread_event_read_anchor(parent_chain_root_id, parent_thread_id)?
+                .ok_or_else(|| anyhow!("execution tree parent has no signed event anchor"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (_, event) in page.events {
+                    let key = match event.event_type.as_str() {
+                        ryeos_state::event_types::THREAD_CONTINUED => "successor_thread_id",
+                        ryeos_state::event_types::CHILD_THREAD_SPAWNED => "child_thread_id",
+                        _ => continue,
+                    };
+                    let Some(child_id) = event.payload.get(key).and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(matching) = pending.get(child_id) else {
+                        continue;
+                    };
+                    let signed_relation =
+                        if event.event_type == ryeos_state::event_types::THREAD_CONTINUED {
+                            "continued"
+                        } else if event.payload.get("spawn_reason").and_then(Value::as_str)
+                            == Some("follow")
+                        {
+                            "follow"
+                        } else {
+                            "spawned"
+                        };
+                    if matching.iter().any(|edge| edge.relation != signed_relation) {
+                        bail!("execution tree relation contradicts signed parent event");
+                    }
+                    pending.remove(child_id);
+                }
+                progress = page.progress;
+                if pending.is_empty() || progress.is_none() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution tree edge has no signed parent decision");
+            }
+        }
+        Ok(())
+    }
+
+    /// Prove that one exact immutable event is a member of the currently
+    /// trusted authoritative history for the named thread. The complete
+    /// bounded walk must succeed; a callback hit from a truncated or invalid
+    /// history is never returned as evidence.
+    pub fn authoritative_thread_event_by_hash(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        event_hash: &str,
+        chain_seq: u64,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<Option<ryeos_state::objects::thread_event::ThreadEvent>> {
+        Ok(self
+            .authoritative_thread_events_by_coordinates(
+                chain_root_id,
+                thread_id,
+                &[(event_hash.to_owned(), chain_seq)],
+                max_events,
+                max_bytes,
+            )?
+            .and_then(|mut events| events.pop().map(|(_, event)| event)))
+    }
+
+    /// Authenticate a bounded set of coordinates under one retained-history
+    /// proof. Projection rows can locate candidates but cannot supply evidence.
+    /// Return in caller order only after the entire trusted walk succeeds.
+    pub fn authoritative_thread_events_by_coordinates(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        coordinates: &[(String, u64)],
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<(String, ryeos_state::objects::thread_event::ThreadEvent)>>> {
+        let requested = coordinates
+            .iter()
+            .map(|(hash, seq)| (hash.as_str(), *seq))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if coordinates.is_empty()
+            || coordinates.len() as u64 > max_events
+            || requested.len() != coordinates.len()
+            || coordinates.iter().any(|(hash, _)| {
+                !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase())
+            })
+            || max_events == 0
+            || max_bytes == 0
+        {
+            bail!("authoritative thread event proof coordinate is invalid");
+        }
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let mut matched = std::collections::BTreeMap::new();
+        let Some((observed_head, _snapshot)) = authority.visit_thread_snapshot_events(
+            chain_root_id,
+            thread_id,
+            max_events,
+            max_bytes,
+            &guard,
+            |hash, event| {
+                if requested.contains_key(hash.as_str()) {
+                    matched.insert(hash, event);
+                }
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        authority.ensure_guard(&guard)?;
+        // Re-read through the same trust-validating owner rather than a
+        // rebuildable projection. This second complete bounded walk closes the
+        // gap between the membership walk and a concurrent head replacement.
+        let current_head = authority
+            .visit_thread_snapshot_events(
+                chain_root_id,
+                thread_id,
+                max_events,
+                max_bytes,
+                &guard,
+                |_, _| {},
+            )?
+            .map(|(head, _)| head);
+        authority.ensure_guard(&guard)?;
+        if current_head.as_deref() != Some(observed_head.as_str()) {
+            bail!("authoritative thread head changed during event membership proof");
+        }
+        let mut events = Vec::with_capacity(coordinates.len());
+        for (hash, chain_seq) in coordinates {
+            let Some(event) = matched.remove(hash) else {
+                return Ok(None);
+            };
+            if event.chain_root_id != chain_root_id
+                || event.thread_id != thread_id
+                || event.chain_seq != *chain_seq
+                || ryeos_state::objects::thread_event::hash_event(&event)? != *hash
+            {
+                bail!("authoritative thread event membership differs from requested coordinate");
+            }
+            events.push((hash.clone(), event));
+        }
+        Ok(Some(events))
+    }
+
+    /// At most two exact-type rows, for an owner's singleton journal invariant.
+    pub fn thread_events_by_type(
+        &self,
+        thread_id: &str,
+        event_type: &str,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let guard = self.lock()?;
+        queries::thread_events_by_type(guard.state_db.projection(), thread_id, event_type)?
+            .into_iter()
+            .map(persisted_event_from_projection_row)
+            .collect()
     }
 
     pub fn append_bundle_event(
@@ -20097,7 +23995,7 @@ impl StateStore {
     ) -> Result<Vec<String>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let _admission = g.state_db.authorize_runtime_pin(child_chain_root_id)?;
+        let _admission = Self::authorize_runtime_pin_for_chain(&g, child_chain_root_id)?;
         g.runtime_db
             .launch_window_insert(child_chain_root_id, window_key, width, now_ms)?;
         g.runtime_db
@@ -20115,7 +24013,7 @@ impl StateStore {
     ) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let _admission = g.state_db.authorize_runtime_pin(child_chain_root_id)?;
+        let _admission = Self::authorize_runtime_pin_for_chain(&g, child_chain_root_id)?;
         g.runtime_db
             .launch_window_insert(child_chain_root_id, window_key, width, now_ms)
     }
@@ -20301,7 +24199,7 @@ impl StateStore {
         chain_roots.dedup();
         let mut _admissions = Vec::with_capacity(chain_roots.len());
         for chain_root_id in chain_roots {
-            _admissions.push(g.state_db.authorize_runtime_pin(&chain_root_id)?);
+            _admissions.push(Self::authorize_runtime_pin_for_chain(&g, &chain_root_id)?);
         }
         let inherited_stop = g
             .runtime_db
@@ -20442,6 +24340,29 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn lifecycle_event_bound_charges_native_thread_event_and_its_ceiling() {
+        let small = NewEventRecord {
+            event_type: "ui_seat.transfer_lifecycle.v2".into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::json!({"value":"quoted \\\" evidence"}),
+        };
+        assert!(native_lifecycle_event_fits_bound(&small, "T-seat", "T-seat", 4096).unwrap());
+        assert!(!native_lifecycle_event_fits_bound(&small, "T-seat", "T-seat", 1).unwrap());
+
+        let oversized = NewEventRecord {
+            payload: serde_json::json!({
+                "value":"x".repeat(
+                    ryeos_state::objects::thread_event::MAX_THREAD_EVENT_SERIALIZED_BYTES
+                )
+            }),
+            ..small
+        };
+        assert!(
+            !native_lifecycle_event_fits_bound(&oversized, "T-seat", "T-seat", u64::MAX,).unwrap()
+        );
+    }
+
+    #[test]
     fn abandoned_runtime_snapshot_stage_is_removed_under_pinned_state_authority() {
         let temporary = tempdir().unwrap();
         let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
@@ -20549,8 +24470,9 @@ mod tests {
         let temporary = tempdir().unwrap();
         let app_root = temporary.path().to_path_buf();
         let runtime_state_dir = app_root.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -20788,8 +24710,9 @@ mod tests {
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -20805,6 +24728,113 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn artifact_projection_reorder_keeps_signed_ids_and_metadata_tamper_fails() {
+        let store = test_store();
+        let thread_id = "T-artifact-signed-field";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        store.mark_thread_running(thread_id, None).unwrap();
+        let mut signed_sequences = BTreeMap::new();
+        for artifact_type in ["first", "second"] {
+            let (record, event) = store
+                .publish_artifact(
+                    thread_id,
+                    &NewArtifactRecord {
+                        artifact_type: artifact_type.into(),
+                        uri: String::new(),
+                        content_hash: None,
+                        metadata: Some(json!({"kind": artifact_type})),
+                    },
+                )
+                .unwrap();
+            assert_eq!(record.artifact_id, event.chain_seq);
+            signed_sequences.insert(artifact_type.to_string(), event.chain_seq);
+        }
+        let ids = |store: &StateStore| {
+            store
+                .list_thread_artifacts(thread_id)
+                .unwrap()
+                .into_iter()
+                .map(|record| (record.artifact_type, record.artifact_id))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(ids(&store), signed_sequences);
+        {
+            let g = store.lock().unwrap();
+            g.state_db
+                .projection()
+                .connection()
+                .execute(
+                    "UPDATE thread_artifacts SET artifact_id = -artifact_id WHERE thread_id = ?1",
+                    [thread_id],
+                )
+                .unwrap();
+        }
+        assert_eq!(ids(&store), signed_sequences);
+        {
+            let g = store.lock().unwrap();
+            g.state_db
+                .projection()
+                .connection()
+                .execute(
+                    "UPDATE thread_artifacts SET metadata = ?1 WHERE thread_id = ?2 AND kind = 'first'",
+                    rusqlite::params![serde_json::to_vec(&json!({"kind":"forged"})).unwrap(), thread_id],
+                )
+                .unwrap();
+        }
+        assert!(store.list_thread_artifacts(thread_id).is_err());
+    }
+
+    #[test]
+    fn execution_result_read_ignores_tampered_result_projection() {
+        let store = test_store();
+        let thread_id = "T-signed-result-field";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        store.mark_thread_running(thread_id, None).unwrap();
+        store
+            .finalize_thread(
+                thread_id,
+                &FinalizeThreadRecord {
+                    status: "completed".into(),
+                    outcome_code: Some("success".into()),
+                    result_json: Some(json!({"answer": 42})),
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .unwrap();
+        {
+            let g = store.lock().unwrap();
+            g.state_db
+                .projection()
+                .connection()
+                .execute(
+                    "UPDATE thread_results SET result = ?1, outcome_code = 'forged' WHERE thread_id = ?2",
+                    rusqlite::params![serde_json::to_vec(&json!({"answer": "forged"})).unwrap(), thread_id],
+                )
+                .unwrap();
+        }
+        let signed = store
+            .get_thread_result_authoritative(thread_id, thread_id, "completed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(signed.outcome_code.as_deref(), Some("success"));
+        assert_eq!(signed.result, Some(json!({"answer": 42})));
+        assert!(
+            store
+                .get_thread_result_authoritative(thread_id, thread_id, "running")
+                .is_err()
+        );
     }
 
     // Signed persistence fixture only: no RootAdmission, compiler token, or
@@ -20936,7 +24966,7 @@ mod tests {
         let provisional = metadata.admitted_launch_capsule().unwrap().unwrap();
         let authority = provisional.launch_authority();
         let cas_root = store.cas_root().unwrap();
-        let identity = crate::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &cas_root.ancestors().nth(3).unwrap().join("node-key.pem"),
         )
         .unwrap();
@@ -22706,8 +26736,9 @@ mod tests {
     fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         let tmp = tempdir().expect("tempdir");
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+                .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -23478,8 +27509,9 @@ mod tests {
     fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -23542,8 +27574,9 @@ mod tests {
     fn recreated_credential_profile_persists_its_advanced_generation() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -23616,8 +27649,9 @@ mod tests {
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -23830,8 +27864,9 @@ mod tests {
     fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
         let tmp = tempdir().unwrap();
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -23953,6 +27988,54 @@ mod tests {
             .collect::<Vec<_>>();
         sequences.sort_unstable();
         assert_eq!(sequences, (1..=WRITERS as u64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn project_admission_reader_excludes_other_principals_signed_details() {
+        let store = test_store();
+        let project = std::path::Path::new("/admission-reader-project");
+        crate::admission_events::append_admission_refused(
+            &store,
+            crate::admission_events::AdmissionRefused {
+                project_path: project,
+                canonical_ref: "graph:private/solve",
+                stage: crate::admission_events::AdmissionStage::Authority,
+                reason_code: "private_refusal",
+                detail: "other principal confidential detail",
+                acting_principal: "other-principal",
+            },
+        )
+        .unwrap();
+        crate::admission_events::append_admission_recorded(
+            &store,
+            crate::admission_events::AdmissionRecorded {
+                project_path: project,
+                canonical_ref: "graph:owner/solve",
+                thread_id: "owner-thread",
+                chain_root_id: "owner-root",
+                root_raw_content_digest: "owner-raw",
+                effective_definition_digest: "owner-definition",
+                admitted_launch_capsule_hash: "owner-capsule",
+                acting_principal: "owner-principal",
+            },
+        )
+        .unwrap();
+        let observed = crate::admission_events::read_admission_events_for_principal(
+            &store,
+            project,
+            "owner-principal",
+            50,
+        )
+        .unwrap();
+        assert_eq!(observed.records.len(), 1);
+        assert!(!observed.incomplete);
+        assert_eq!(
+            observed.records[0].event.payload["thread_id"],
+            "owner-thread"
+        );
+        let encoded = serde_json::to_string(&observed.records).unwrap();
+        assert!(!encoded.contains("other principal confidential detail"));
+        assert!(!encoded.contains("private_refusal"));
     }
 
     fn positioned_test_event(
@@ -25111,6 +29194,5144 @@ mod tests {
             usage_subject_asserted_by: None,
             captured_history_policy,
         }
+    }
+
+    #[test]
+    fn claimed_exact_seat_root_rejects_runtime_pins_without_fencing_direct_roots() {
+        let store = test_store();
+        let mut seat = thread_record("T-seat-fence", "T-seat-fence");
+        seat.kind = "seat_session".into();
+        store.create_thread_for_test(&seat).unwrap();
+        store.mark_thread_running(&seat.thread_id, None).unwrap();
+        let direct = thread_record("T-direct-fence", "T-direct-fence");
+        store.create_thread_for_test(&direct).unwrap();
+        {
+            let g = store.lock().unwrap();
+            g.runtime_db
+                .touch_seat_lease(&seat.thread_id, "fp:test", "surface", "client")
+                .unwrap();
+            assert!(StateStore::authorize_runtime_pin_for_chain(&g, &seat.chain_root_id).is_ok());
+        }
+        store.remove_seat_lease(&seat.thread_id).unwrap();
+        {
+            let g = store.lock().unwrap();
+            assert!(
+                g.runtime_db
+                    .touch_seat_lease(&seat.thread_id, "fp:test", "surface", "client",)
+                    .unwrap()
+            );
+        }
+        let anchor = store
+            .capture_thread_event_read_anchor(&seat.thread_id, &seat.thread_id)
+            .unwrap()
+            .unwrap();
+        let event = NewEventRecord {
+            event_type: "contract.test.seat.producer.v1".into(),
+            storage_class: "indexed".into(),
+            payload: json!({"test": true}),
+        };
+        assert!(matches!(
+            store
+                .append_seat_events_and_renew_if_anchor(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    std::slice::from_ref(&event),
+                    &anchor,
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::Committed(_)
+        ));
+        let current_anchor = store
+            .capture_thread_event_read_anchor(&seat.thread_id, &seat.thread_id)
+            .unwrap()
+            .unwrap();
+        let mut admitted_actions = 0;
+        assert!(
+            store
+                .with_exact_seat_action_if_anchor(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    &anchor,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    || {
+                        admitted_actions += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(admitted_actions, 0);
+        assert!(
+            store
+                .with_exact_seat_action_if_anchor(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    &current_anchor,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    || {
+                        admitted_actions += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(admitted_actions, 1);
+        assert!(
+            store
+                .with_exact_seat_action_if_anchor(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    &current_anchor,
+                    "fp:wrong",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    || {
+                        admitted_actions += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(admitted_actions, 1);
+        assert!(
+            store
+                .with_exact_seat_action_if_anchor(
+                    &direct.thread_id,
+                    &direct.thread_id,
+                    &current_anchor,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    || {
+                        admitted_actions += 1;
+                        Ok(())
+                    },
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .claim_expired_seat_lease(&seat.thread_id, i64::MAX)
+                .unwrap()
+        );
+        assert!(
+            store
+                .with_exact_seat_action_if_anchor(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    &current_anchor,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    || {
+                        admitted_actions += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(admitted_actions, 1);
+        assert!(
+            store
+                .claim_expired_seat_lease(&seat.thread_id, i64::MAX)
+                .unwrap()
+        );
+        assert!(matches!(
+            store
+                .append_seat_events_and_renew_if_anchor(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                    &[event],
+                    &current_anchor,
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::NotRunning
+        ));
+        assert!(
+            !store
+                .remove_terminal_seat_lease_if_proved(&seat.thread_id)
+                .unwrap()
+        );
+        assert!(store.remove_seat_lease(&seat.thread_id).is_err());
+        let g = store.lock().unwrap();
+        assert!(
+            StateStore::authorize_runtime_pin_for_chain(&g, &seat.chain_root_id)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("being reaped")
+        );
+        assert!(StateStore::authorize_runtime_pin_for_chain(&g, &direct.chain_root_id).is_ok());
+        drop(g);
+        let refused = store
+            .finalize_thread(
+                &seat.thread_id,
+                &FinalizeThreadRecord {
+                    status: "completed".into(),
+                    outcome_code: None,
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .expect_err("claimed seat needs lifecycle transfer clearance");
+        assert!(refused.to_string().contains("lifecycle transfer clearance"));
+        assert!(
+            !store
+                .remove_terminal_seat_lease_if_proved(&seat.thread_id)
+                .unwrap()
+        );
+        let g = store.lock().unwrap();
+        assert!(
+            StateStore::authorize_runtime_pin_for_chain(&g, &seat.chain_root_id)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("being reaped")
+        );
+    }
+
+    #[test]
+    fn ordinary_terminal_finalizer_cannot_bypass_seat_transfer_clearance() {
+        let store = test_store();
+        let mut seat = thread_record("T-seat-terminal-veto", "T-seat-terminal-veto");
+        seat.kind = "seat_session".into();
+        store.create_thread_for_test(&seat).unwrap();
+        store.mark_thread_running(&seat.thread_id, None).unwrap();
+        let update = FinalizeThreadRecord {
+            status: ThreadStatus::Failed.as_str().to_string(),
+            outcome_code: Some("expired".to_string()),
+            result_json: None,
+            error_json: Some(json!({"reason": "expired"})),
+            artifacts: Vec::new(),
+            final_cost: None,
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
+        };
+        let error = store
+            .finalize_if_nonterminal(&seat.thread_id, &update)
+            .expect_err("ordinary finalization must not erase a seat transfer obligation");
+        assert!(error.to_string().contains("lifecycle transfer clearance"));
+        assert_eq!(
+            store.get_thread(&seat.thread_id).unwrap().unwrap().status,
+            ThreadStatus::Running.as_str()
+        );
+    }
+
+    #[test]
+    fn retirement_seat_veto_uses_signed_root_without_seat_lease() {
+        let store = test_store();
+        let mut seat = thread_record("T-seat-retirement-veto", "T-seat-retirement-veto");
+        seat.kind = "seat_session".into();
+        store.create_thread_for_test(&seat).unwrap();
+        let direct = thread_record("T-direct-retirement-control", "T-direct-retirement-control");
+        store.create_thread_for_test(&direct).unwrap();
+        // Neither root has a seat lease. The same signed-kind check gates
+        // normal retirement and reversible expected-head Remove recovery.
+        let g = store.lock().unwrap();
+        let seat_lock = g
+            .state_db
+            .acquire_existing_chain_lock(&seat.chain_root_id)
+            .unwrap();
+        assert!(
+            StateStore::terminal_chain_is_signed_seat_under_lock(
+                &g,
+                &seat.chain_root_id,
+                &seat_lock,
+            )
+            .unwrap()
+        );
+        drop(seat_lock);
+        let direct_lock = g
+            .state_db
+            .acquire_existing_chain_lock(&direct.chain_root_id)
+            .unwrap();
+        assert!(
+            !StateStore::terminal_chain_is_signed_seat_under_lock(
+                &g,
+                &direct.chain_root_id,
+                &direct_lock,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn terminal_transfer_discovery_requires_genesis_and_preserves_retirement_veto() {
+        let store = Arc::new(test_store());
+        let root_id = "T-terminal-discovery";
+        {
+            let permit = store.acquire_write_permit().unwrap();
+            let g = store.lock().unwrap();
+            let snapshot = ryeos_state::objects::ThreadSnapshotBuilder::new(
+                root_id,
+                root_id,
+                "seat_session",
+                "directive:test",
+                "test-executor",
+            )
+            .status(ThreadStatus::Completed)
+            .captured_history_policy(thread_record(root_id, root_id).captured_history_policy)
+            .build();
+            let events = (0..3)
+                .map(|index| {
+                    ryeos_state::objects::thread_event::NewEvent::new(
+                        root_id,
+                        root_id,
+                        "ordinary-retained-notice",
+                    )
+                    .payload(json!({"index":index}))
+                    .build()
+                })
+                .collect();
+            let _publication = g
+                .state_db
+                .create_chain_with_events_admitted(
+                    root_id,
+                    snapshot,
+                    events,
+                    g.signer.as_ref(),
+                    &g.runtime_db,
+                    permit.cas_guard(),
+                )
+                .unwrap();
+        }
+        let read = store
+            .begin_terminal_seat_transfer_discovery(root_id)
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_terminal_seat_transfer_discovery(read).is_err());
+        let mut read = store
+            .begin_terminal_seat_transfer_discovery(root_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024 * 1024)
+                .unwrap()
+        );
+        assert!(store.finish_terminal_seat_transfer_discovery(read).is_err());
+        let mut read = store
+            .begin_terminal_seat_transfer_discovery(root_id)
+            .unwrap()
+            .unwrap();
+        while !store
+            .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024 * 1024)
+            .unwrap()
+        {}
+        let scope = store.finish_terminal_seat_transfer_discovery(read).unwrap();
+        assert!(scope.is_for_store(&store));
+        assert_eq!(scope.identities().count(), 0);
+        assert_eq!(scope.anchor().chain_root_id(), root_id);
+        let foreign = test_store();
+        let foreign_scope = TerminalSeatTransferDiscoveryScope {
+            store: scope.store.clone(),
+            anchor: scope.anchor.clone(),
+            identities: scope.identities.clone(),
+            freezes: scope.freezes.clone(),
+        };
+        assert!(
+            foreign
+                .qualify_terminal_seat_transfer_retirement(foreign_scope, &[], &[])
+                .is_err()
+        );
+        let qualified = store
+            .qualify_terminal_seat_transfer_retirement(scope, &[], &[])
+            .unwrap();
+        assert_eq!(qualified.exclusions.len(), 1);
+        assert_eq!(qualified.exclusions[0], qualified.anchor);
+        let g = store.lock().unwrap();
+        let lock = g.state_db.acquire_existing_chain_lock(root_id).unwrap();
+        // Completed local identity discovery is not phase/finalization/Remove
+        // admission, and cannot independently remove the historical veto.
+        assert!(StateStore::terminal_chain_is_signed_seat_under_lock(&g, root_id, &lock).unwrap());
+    }
+
+    #[test]
+    fn terminal_transfer_discovery_poison_and_store_mismatch_cannot_finish() {
+        let store = Arc::new(test_store());
+        let root_id = "T-terminal-discovery-poison";
+        {
+            let permit = store.acquire_write_permit().unwrap();
+            let g = store.lock().unwrap();
+            let snapshot = ryeos_state::objects::ThreadSnapshotBuilder::new(
+                root_id,
+                root_id,
+                "seat_session",
+                "directive:test",
+                "test-executor",
+            )
+            .status(ThreadStatus::Completed)
+            .captured_history_policy(thread_record(root_id, root_id).captured_history_policy)
+            .build();
+            let _publication = g
+                .state_db
+                .create_chain_admitted(
+                    root_id,
+                    snapshot,
+                    g.signer.as_ref(),
+                    &g.runtime_db,
+                    permit.cas_guard(),
+                )
+                .unwrap();
+        }
+        let mut read = store
+            .begin_terminal_seat_transfer_discovery(root_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .read_terminal_seat_transfer_discovery_page(&mut read, 0, 1024)
+                .is_err()
+        );
+        assert!(
+            store
+                .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024)
+                .is_err()
+        );
+        assert!(store.finish_terminal_seat_transfer_discovery(read).is_err());
+        let other = test_store();
+        let mut read = store
+            .begin_terminal_seat_transfer_discovery(root_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            other
+                .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024)
+                .is_err()
+        );
+        // A foreign owner refuses without consuming progress of this owner.
+        assert!(
+            store
+                .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024)
+                .unwrap()
+        );
+        assert!(other.finish_terminal_seat_transfer_discovery(read).is_err());
+    }
+
+    #[test]
+    fn signed_seat_retirement_veto_preserves_due_non_seat_gc() {
+        let store = test_store();
+        let thread_id = "T-direct-due-retirement-control";
+        let mut direct = thread_record(thread_id, thread_id);
+        direct.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 1 };
+        store.create_thread_for_test(&direct).unwrap();
+        store.mark_thread_running(thread_id, None).unwrap();
+        store
+            .finalize_thread(
+                thread_id,
+                &FinalizeThreadRecord {
+                    status: "completed".into(),
+                    outcome_code: None,
+                    result_json: None,
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .unwrap();
+        let retired = store
+            .retire_due_terminal_chains("2100-01-01T00:00:00Z", false, |_| Ok(0))
+            .unwrap();
+        assert_eq!(retired.retired_chains, 1);
+        assert!(store.get_thread(thread_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn reaping_seat_owner_inspection_requires_exact_claimed_lease() {
+        let store = test_store();
+        let mut seat = thread_record("T-seat-owner-inspection", "T-seat-owner-inspection");
+        seat.kind = "seat_session".into();
+        store.create_thread_for_test(&seat).unwrap();
+        store.mark_thread_running(&seat.thread_id, None).unwrap();
+        assert!(
+            store
+                .claimed_running_seat_root_snapshot(&seat.thread_id)
+                .unwrap()
+                .is_none()
+        );
+        {
+            let g = store.lock().unwrap();
+            g.runtime_db
+                .touch_seat_lease(
+                    &seat.thread_id,
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                )
+                .unwrap();
+            let chain_lock = g
+                .state_db
+                .acquire_existing_chain_lock(&seat.chain_root_id)
+                .unwrap();
+            assert!(
+                StateStore::inspect_reaping_seat_settlement_owners_under_lock(
+                    &g,
+                    &seat.thread_id,
+                    &chain_lock,
+                    &|_| Ok(0),
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        assert!(
+            store
+                .claim_expired_seat_lease(&seat.thread_id, i64::MAX)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .claimed_running_seat_root_snapshot(&seat.thread_id)
+                .unwrap()
+                .expect("claimed exact signed running seat")
+                .owner,
+            "fp:test"
+        );
+        let g = store.lock().unwrap();
+        let chain_lock = g
+            .state_db
+            .acquire_existing_chain_lock(&seat.chain_root_id)
+            .unwrap();
+        let claim = StateStore::inspect_reaping_seat_settlement_owners_under_lock(
+            &g,
+            &seat.thread_id,
+            &chain_lock,
+            &|_| Ok(0),
+        )
+        .unwrap()
+        .expect("exact claimed lease owner");
+        assert_eq!(claim.owner, "fp:test");
+        assert_eq!(claim.surface, seat.item_ref);
+        assert_eq!(claim.client_ref, seat.executor_ref);
+        assert!(claim.reaping_at_ms > 0);
+        assert!(
+            StateStore::inspect_reaping_seat_settlement_owners_under_lock(
+                &g,
+                &seat.thread_id,
+                &chain_lock,
+                &|_| Ok(1),
+            )
+            .unwrap()
+            .is_none()
+        );
+        drop(chain_lock);
+        drop(g);
+        let refused = store
+            .finalize_thread(
+                &seat.thread_id,
+                &FinalizeThreadRecord {
+                    status: "completed".into(),
+                    outcome_code: None,
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .expect_err("claimed seat needs lifecycle transfer clearance");
+        assert!(refused.to_string().contains("lifecycle transfer clearance"));
+        let g = store.lock().unwrap();
+        let chain_lock = g
+            .state_db
+            .acquire_existing_chain_lock(&seat.chain_root_id)
+            .unwrap();
+        assert!(
+            StateStore::inspect_reaping_seat_settlement_owners_under_lock(
+                &g,
+                &seat.thread_id,
+                &chain_lock,
+                &|_| Ok(0),
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn retained_thread_event_lookup_reads_canonical_cas_not_projection_shape() {
+        let store = test_store();
+        let thread_id = "T-retained-event-by-hash";
+        let persisted = store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create durable thread event");
+        let event_hash = persisted[0]
+            .event_hash
+            .as_deref()
+            .expect("durable event hash");
+
+        let retained = store
+            .retained_thread_event_by_hash(event_hash)
+            .expect("load retained event")
+            .expect("retained event exists");
+        assert_eq!(retained.thread_id, thread_id);
+        assert_eq!(retained.chain_root_id, thread_id);
+        assert_eq!(retained.chain_seq, persisted[0].chain_seq as u64);
+        assert_eq!(
+            ryeos_state::objects::thread_event::hash_event(&retained).unwrap(),
+            event_hash
+        );
+
+        assert!(
+            store
+                .retained_thread_event_by_hash(&"f".repeat(64))
+                .expect("canonical absent hash")
+                .is_none()
+        );
+        assert!(
+            store
+                .retained_thread_event_by_hash(&"AA".repeat(32))
+                .unwrap_err()
+                .to_string()
+                .contains("not canonical")
+        );
+    }
+
+    #[test]
+    fn retained_thread_event_lookup_rejects_non_event_cas_object() {
+        let store = test_store();
+        let hash = store
+            .state_authority
+            .cas_store()
+            .unwrap()
+            .store_object(&json!({"kind": "not_a_thread_event"}))
+            .expect("store non-event object");
+        let error = store.retained_thread_event_by_hash(&hash).unwrap_err();
+        assert!(error.to_string().contains("decode retained thread event"));
+    }
+
+    #[test]
+    fn retained_thread_event_lookup_rejects_oversized_cas_object_before_decode() {
+        let store = test_store();
+        let hash = store
+            .state_authority
+            .cas_store()
+            .unwrap()
+            .store_object(&json!({
+                "oversized": "x".repeat(
+                    ryeos_state::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1
+                )
+            }))
+            .expect("store oversized canonical object");
+
+        let error = store.retained_thread_event_by_hash(&hash).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeds")
+                && error
+                    .to_string()
+                    .contains(&ryeos_state::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES.to_string()),
+            "the byte ceiling must reject the object before typed decoding: {error:#}"
+        );
+    }
+
+    #[test]
+    fn authoritative_thread_event_lookup_requires_current_chain_membership() {
+        let store = test_store();
+        let thread_id = "T-authoritative-event-by-hash";
+        let persisted = store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create durable thread event");
+        let event_hash = persisted[0]
+            .event_hash
+            .as_deref()
+            .expect("durable event hash");
+        let chain_seq = persisted[0].chain_seq as u64;
+
+        let member = store
+            .authoritative_thread_event_by_hash(
+                thread_id,
+                thread_id,
+                event_hash,
+                chain_seq,
+                16,
+                1024 * 1024,
+            )
+            .expect("walk authoritative history")
+            .expect("event is a canonical member");
+        assert_eq!(member.thread_id, thread_id);
+
+        let coordinates = vec![(event_hash.to_owned(), chain_seq)];
+        let batch = store
+            .authoritative_thread_events_by_coordinates(
+                thread_id,
+                thread_id,
+                &coordinates,
+                16,
+                1024 * 1024,
+            )
+            .expect("authenticate exact batch")
+            .expect("canonical batch present");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0, event_hash);
+        assert!(
+            store
+                .authoritative_thread_events_by_coordinates(
+                    thread_id,
+                    thread_id,
+                    &[coordinates[0].clone(), coordinates[0].clone()],
+                    16,
+                    1024 * 1024,
+                )
+                .is_err()
+        );
+
+        let mut unlinked = member;
+        unlinked.event_type = "contract.test.unlinked.v1".to_string();
+        unlinked
+            .validate()
+            .expect("unlinked event remains well shaped");
+        let unlinked_hash = store
+            .state_authority
+            .cas_store()
+            .unwrap()
+            .store_object(&unlinked.to_value())
+            .expect("store valid but unlinked event");
+        assert!(
+            store
+                .retained_thread_event_by_hash(&unlinked_hash)
+                .expect("load retained unlinked event")
+                .is_some()
+        );
+        assert!(
+            store
+                .authoritative_thread_event_by_hash(
+                    thread_id,
+                    thread_id,
+                    &unlinked_hash,
+                    chain_seq,
+                    16,
+                    1024 * 1024,
+                )
+                .expect("walk authoritative history")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fixed_thread_event_anchor_advances_in_bounded_newest_first_pages() {
+        let store = test_store();
+        let thread_id = "T-fixed-thread-event-anchor";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create anchored thread");
+        store
+            .append_events(
+                thread_id,
+                thread_id,
+                &[
+                    NewEventRecord {
+                        event_type: "contract.test.anchor.one.v1".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"order":1}),
+                    },
+                    NewEventRecord {
+                        event_type: "contract.test.anchor.two.v1".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"order":2}),
+                    },
+                ],
+            )
+            .expect("append anchored history");
+        let anchor = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .expect("capture fixed anchor")
+            .expect("thread anchor exists");
+        let (tip_hash, tip_seq) = anchor.tip().expect("anchor has a tip");
+
+        // A later head advance must not move the already-authenticated endpoint.
+        let later = store
+            .append_events(
+                thread_id,
+                thread_id,
+                &[NewEventRecord {
+                    event_type: "contract.test.anchor.later.v1".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"order":3}),
+                }],
+            )
+            .expect("advance current head");
+        let later_hash = later[0].event_hash.as_deref().expect("later event hash");
+
+        assert!(
+            store
+                .read_thread_event_page(&anchor, None, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("byte work bound")
+        );
+
+        let mut progress = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = store
+                .read_thread_event_page(&anchor, progress.as_ref(), 1, 1024 * 1024)
+                .expect("read bounded fixed page");
+            assert!(page.events.len() <= 1);
+            observed.extend(page.events.into_iter().map(|(hash, _)| hash));
+            progress = page.progress;
+            if progress.is_none() {
+                break;
+            }
+        }
+        assert_eq!(observed.len() as u64, tip_seq);
+        assert_eq!(observed.first().map(String::as_str), Some(tip_hash));
+        assert!(!observed.iter().any(|hash| hash == later_hash));
+    }
+
+    #[test]
+    fn execution_candidate_proof_returns_signed_records_in_candidate_order() {
+        let store = test_store();
+        let thread_id = "T-execution-candidate-page";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create candidate thread");
+        let authored = (0..70)
+            .map(|index| NewEventRecord {
+                event_type: "contract.test.execution.candidate.v1".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"index": index}),
+            })
+            .collect::<Vec<_>>();
+        let records = store
+            .append_events(thread_id, thread_id, &authored)
+            .expect("append candidate events");
+        let candidates = vec![records[0].clone(), records[69].clone(), records[35].clone()];
+        let authenticated = store
+            .authenticate_execution_event_candidates(thread_id, &candidates)
+            .expect("prove candidates across bounded pages");
+        assert_eq!(authenticated.len(), candidates.len());
+        for (candidate, signed) in candidates.iter().zip(&authenticated) {
+            assert!(execution_event_candidate_matches(candidate, signed));
+        }
+        assert_eq!(authenticated[0].payload["index"], 0);
+        assert_eq!(authenticated[1].payload["index"], 69);
+        assert_eq!(authenticated[2].payload["index"], 35);
+    }
+
+    #[test]
+    fn execution_candidate_proof_refuses_projection_payload_and_thread_spoofing() {
+        let store = test_store();
+        let thread_id = "T-execution-candidate-refusal";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create candidate thread");
+        let mut candidate = store
+            .append_events(
+                thread_id,
+                thread_id,
+                &[NewEventRecord {
+                    event_type: "contract.test.execution.candidate.v1".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"secret": "signed"}),
+                }],
+            )
+            .expect("append candidate event")
+            .remove(0);
+        candidate.payload["secret"] = json!("projection-forgery");
+        assert!(
+            store
+                .authenticate_execution_event_candidates(thread_id, &[candidate.clone()])
+                .is_err()
+        );
+        candidate.payload["secret"] = json!("signed");
+        candidate.thread_id = "T-foreign".into();
+        assert!(
+            store
+                .authenticate_execution_event_candidates(thread_id, &[candidate])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn execution_navigation_proof_refuses_projected_thread_or_sequence() {
+        let store = test_store();
+        let thread_id = "T-execution-navigation-proof";
+        let record = store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create navigation thread")
+            .remove(0);
+        let reference = PersistedEventRef {
+            chain_root_id: record.chain_root_id.clone(),
+            chain_seq: record.chain_seq,
+            event_hash: record.event_hash.expect("durable event hash"),
+            thread_id: record.thread_id,
+        };
+        let authenticated = store
+            .authenticate_execution_event_refs(thread_id, std::slice::from_ref(&reference))
+            .expect("authenticate navigation reference");
+        assert_eq!(authenticated, vec![reference.clone()]);
+        let repeated = store
+            .authenticate_execution_event_refs(thread_id, &[reference.clone(), reference.clone()])
+            .expect("current and live head may be the same event");
+        assert_eq!(repeated, vec![reference.clone(), reference.clone()]);
+
+        let mut forged = reference.clone();
+        forged.thread_id = "T-foreign".into();
+        assert!(
+            store
+                .authenticate_execution_event_refs(thread_id, &[forged])
+                .is_err()
+        );
+        let mut forged = reference.clone();
+        forged.chain_seq += 1;
+        assert!(
+            store
+                .authenticate_execution_event_refs(thread_id, &[forged])
+                .is_err()
+        );
+        let mut contradictory = reference.clone();
+        contradictory.chain_seq += 1;
+        assert!(
+            store
+                .authenticate_execution_event_refs(thread_id, &[reference, contradictory])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn execution_tree_edge_proof_requires_signed_parent_witness_and_relation() {
+        let store = test_store();
+        let parent = "T-tree-proof-parent";
+        let child = "T-tree-proof-child";
+        store
+            .create_thread_for_test(&thread_record(parent, parent))
+            .expect("create parent");
+        store
+            .create_thread_for_test(&thread_record(child, child))
+            .expect("create child root");
+        let edge = ExecutionTreeEdgeCandidate {
+            parent_thread_id: parent.into(),
+            parent_chain_root_id: parent.into(),
+            child_thread_id: child.into(),
+            child_chain_root_id: child.into(),
+            relation: "follow".into(),
+        };
+        assert!(store.verify_execution_tree_edges(&[edge.clone()]).is_err());
+        store
+            .append_events(
+                parent,
+                parent,
+                &[NewEventRecord {
+                    event_type: ryeos_state::event_types::CHILD_THREAD_SPAWNED.into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"child_thread_id":child,"spawn_reason":"follow"}),
+                }],
+            )
+            .expect("append signed follow witness");
+        store
+            .verify_execution_tree_edges(&[edge.clone()])
+            .expect("signed follow edge");
+        let mut forged = edge;
+        forged.relation = "spawned".into();
+        assert!(store.verify_execution_tree_edges(&[forged]).is_err());
+    }
+
+    #[test]
+    fn execution_tree_continuation_requires_signed_child_and_parent_handoff() {
+        let store = test_store();
+        let parent = "T-tree-proof-continuation-parent";
+        let child = "T-tree-proof-continuation-child";
+        store
+            .create_thread_for_test(&thread_record(parent, parent))
+            .expect("create parent");
+        let mut successor = thread_record(child, parent);
+        successor.upstream_thread_id = Some(parent.into());
+        store
+            .create_thread_for_test(&successor)
+            .expect("create signed successor");
+        let edge = ExecutionTreeEdgeCandidate {
+            parent_thread_id: parent.into(),
+            parent_chain_root_id: parent.into(),
+            child_thread_id: child.into(),
+            child_chain_root_id: parent.into(),
+            relation: "continued".into(),
+        };
+        assert!(store.verify_execution_tree_edges(&[edge.clone()]).is_err());
+        store
+            .append_events(
+                parent,
+                parent,
+                &[NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_CONTINUED.into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"successor_thread_id":child}),
+                }],
+            )
+            .expect("append signed handoff witness");
+        store
+            .verify_execution_tree_edges(&[edge])
+            .expect("signed continuation edge");
+    }
+
+    #[test]
+    fn execution_tree_same_chain_spawn_requires_signed_parent_event() {
+        let store = test_store();
+        let parent = "T-tree-proof-same-chain-parent";
+        let child = "T-tree-proof-same-chain-child";
+        store
+            .create_thread_for_test(&thread_record(parent, parent))
+            .expect("create parent");
+        store
+            .create_thread_for_test(&thread_record(child, parent))
+            .expect("create same-chain child");
+        let edge = ExecutionTreeEdgeCandidate {
+            parent_thread_id: parent.into(),
+            parent_chain_root_id: parent.into(),
+            child_thread_id: child.into(),
+            child_chain_root_id: parent.into(),
+            relation: "spawned".into(),
+        };
+        assert!(store.verify_execution_tree_edges(&[edge.clone()]).is_err());
+        store
+            .append_events(
+                parent,
+                parent,
+                &[NewEventRecord {
+                    event_type: ryeos_state::event_types::CHILD_THREAD_SPAWNED.into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"child_thread_id":child,"spawn_reason":"dispatch"}),
+                }],
+            )
+            .expect("append same-chain spawn witness");
+        store
+            .verify_execution_tree_edges(&[edge])
+            .expect("signed same-chain spawn edge");
+    }
+
+    #[test]
+    fn conditional_append_commits_once_and_reports_stale_anchor_conflict() {
+        let store = test_store();
+        let thread_id = "T-conditional-event-append";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create conditional append thread");
+        let anchor = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .expect("capture append anchor")
+            .expect("append anchor exists");
+        let event = NewEventRecord {
+            event_type: "contract.test.conditional-append.v1".into(),
+            storage_class: "indexed".into(),
+            payload: json!({"attempt": 1}),
+        };
+
+        let committed = store
+            .append_events_if_anchor(thread_id, thread_id, std::slice::from_ref(&event), &anchor)
+            .expect("conditional append succeeds");
+        let ConditionalEventAppendResult::Committed(records) = committed else {
+            panic!("fresh anchor unexpectedly conflicted");
+        };
+        assert_eq!(records.len(), 1);
+
+        let conflict = store
+            .append_events_if_anchor(thread_id, thread_id, &[event], &anchor)
+            .expect("stale anchor is an ordinary conflict");
+        assert!(matches!(conflict, ConditionalEventAppendResult::Conflict));
+
+        let current = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .expect("capture current anchor")
+            .expect("current anchor exists");
+        assert_eq!(current.tip().map(|(_, seq)| seq), Some(2));
+    }
+
+    #[test]
+    fn multiple_exact_thread_read_anchors_guard_one_in_memory_action() {
+        let store = test_store();
+        let roots = ["T-read-cut-a", "T-read-cut-b"];
+        for root in roots {
+            store
+                .create_thread_for_test(&thread_record(root, root))
+                .expect("create signed thread");
+        }
+        let anchors = roots
+            .iter()
+            .map(|root| {
+                store
+                    .capture_thread_event_read_anchor(root, root)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            store
+                .with_thread_event_read_mixed_cut(
+                    roots[0],
+                    &[anchors[1].clone(), anchors[0].clone()],
+                    &[],
+                    || Ok(19),
+                )
+                .unwrap(),
+            Some(19)
+        );
+        assert!(
+            store
+                .with_thread_event_read_mixed_cut("T-absent-target", &anchors, &[], || Ok(()),)
+                .is_err()
+        );
+        let mut called = 0;
+        assert_eq!(
+            store
+                .with_thread_event_read_anchors(&[anchors[1].clone(), anchors[0].clone()], || {
+                    called += 1;
+                    Ok(17)
+                })
+                .unwrap(),
+            Some(17)
+        );
+        assert_eq!(called, 1);
+        assert!(
+            store
+                .with_thread_event_read_anchors(&[anchors[0].clone(), anchors[0].clone()], || {
+                    called += 1;
+                    Ok(())
+                })
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .with_thread_event_read_anchors::<()>(&[], || {
+                    called += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(called, 2);
+        let event = NewEventRecord {
+            event_type: "contract.test.read-cut-advance.v1".into(),
+            storage_class: "indexed".into(),
+            payload: json!({"advance": true}),
+        };
+        assert!(matches!(
+            store
+                .append_events_if_anchor(roots[1], roots[1], &[event], &anchors[1])
+                .unwrap(),
+            ConditionalEventAppendResult::Committed(_)
+        ));
+        let advanced = store
+            .capture_thread_event_read_anchor(roots[1], roots[1])
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .with_thread_event_read_mixed_cut(roots[0], &anchors, &[], || Ok(()),)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .with_thread_event_read_anchors(&[anchors[1].clone(), advanced], || {
+                    called += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .with_thread_event_read_anchors(&anchors, || {
+                    called += 1;
+                    Ok(23)
+                })
+                .unwrap(),
+            None
+        );
+        assert_eq!(called, 2);
+    }
+
+    #[test]
+    fn paired_seat_append_excludes_all_signed_dependency_heads() {
+        let store = test_store();
+        let mut source = thread_record("T-paired-append-source", "T-paired-append-source");
+        source.kind = "seat_session".into();
+        let mut dependency =
+            thread_record("T-paired-append-dependency", "T-paired-append-dependency");
+        dependency.kind = "seat_session".into();
+        store.create_thread_for_test(&source).unwrap();
+        store.create_thread_for_test(&dependency).unwrap();
+        store.mark_thread_running(&source.thread_id, None).unwrap();
+        let root = store
+            .capture_thread_event_read_anchor(&source.thread_id, &source.thread_id)
+            .unwrap()
+            .unwrap();
+        let other = store
+            .capture_thread_event_read_anchor(&dependency.thread_id, &dependency.thread_id)
+            .unwrap()
+            .unwrap();
+        let event = NewEventRecord {
+            event_type: "contract.test.paired-append.v1".into(),
+            storage_class: "indexed".into(),
+            payload: json!({"test": true}),
+        };
+        let append = |anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor]| {
+            store.append_seat_events_and_renew_if_anchors(
+                &source.thread_id,
+                &source.thread_id,
+                "fp:test",
+                &source.item_ref,
+                &source.executor_ref,
+                std::slice::from_ref(&event),
+                &root,
+                anchors,
+            )
+        };
+        assert!(append(&[other.clone()]).is_err());
+        assert!(matches!(
+            append(&[other.clone(), root.clone()]).unwrap(),
+            RunningConditionalEventAppendResult::Committed(_)
+        ));
+        let fresh_root = store
+            .capture_thread_event_read_anchor(&source.thread_id, &source.thread_id)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store
+                .append_events_if_anchor(
+                    &dependency.thread_id,
+                    &dependency.thread_id,
+                    &[NewEventRecord {
+                        event_type: "contract.test.dependency-advance.v1".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"advance": true}),
+                    }],
+                    &other
+                )
+                .unwrap(),
+            ConditionalEventAppendResult::Committed(_)
+        ));
+        assert!(matches!(
+            store
+                .append_seat_events_and_renew_if_anchors(
+                    &source.thread_id,
+                    &source.thread_id,
+                    "fp:test",
+                    &source.item_ref,
+                    &source.executor_ref,
+                    &[event],
+                    &fresh_root,
+                    &[fresh_root.clone(), other],
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        assert_eq!(
+            store
+                .capture_thread_event_read_anchor(&source.thread_id, &source.thread_id)
+                .unwrap()
+                .unwrap(),
+            fresh_root
+        );
+    }
+
+    #[test]
+    fn paired_seat_action_refuses_advanced_dependency_without_running_callback() {
+        let store = test_store();
+        let mut seat = thread_record("T-paired-action-root", "T-paired-action-root");
+        seat.kind = "seat_session".into();
+        let dependency = thread_record("T-paired-action-dependency", "T-paired-action-dependency");
+        store.create_thread_for_test(&seat).unwrap();
+        store.create_thread_for_test(&dependency).unwrap();
+        store.mark_thread_running(&seat.thread_id, None).unwrap();
+        let root = store
+            .capture_thread_event_read_anchor(&seat.thread_id, &seat.thread_id)
+            .unwrap()
+            .unwrap();
+        let other = store
+            .capture_thread_event_read_anchor(&dependency.thread_id, &dependency.thread_id)
+            .unwrap()
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let act = |anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor]| {
+            store.with_exact_seat_action_if_anchors(
+                &seat.thread_id,
+                &seat.thread_id,
+                &root,
+                anchors,
+                "fp:test",
+                &seat.item_ref,
+                &seat.executor_ref,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                },
+            )
+        };
+        assert!(act(&[other.clone()]).is_err());
+        assert_eq!(calls.get(), 0);
+        assert!(act(&[other.clone(), root.clone()]).unwrap().is_some());
+        assert_eq!(calls.get(), 1);
+        assert!(
+            store
+                .touch_seat_lease_if_anchors(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    &root,
+                    &[root.clone(), other.clone()],
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            store
+                .append_events_if_anchor(
+                    &dependency.thread_id,
+                    &dependency.thread_id,
+                    &[NewEventRecord {
+                        event_type: "contract.test.action-dependency.v1".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"advance": true})
+                    }],
+                    &other,
+                )
+                .unwrap(),
+            ConditionalEventAppendResult::Committed(_)
+        ));
+        assert!(
+            !store
+                .touch_seat_lease_if_anchors(
+                    &seat.thread_id,
+                    &seat.thread_id,
+                    &root,
+                    &[root.clone(), other.clone()],
+                    "fp:test",
+                    &seat.item_ref,
+                    &seat.executor_ref,
+                )
+                .unwrap()
+        );
+        assert!(act(&[root.clone(), other]).unwrap().is_none());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn running_conditional_append_distinguishes_lifecycle_and_anchor_fences() {
+        let store = test_store();
+        let thread_id = "T-running-conditional-append";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create conditional running thread");
+        let created_anchor = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .unwrap()
+            .unwrap();
+        let event = NewEventRecord {
+            event_type: "contract.test.running-conditional-append.v1".into(),
+            storage_class: "indexed".into(),
+            payload: json!({}),
+        };
+        assert!(matches!(
+            store
+                .append_events_if_thread_running_and_anchor(
+                    thread_id,
+                    thread_id,
+                    std::slice::from_ref(&event),
+                    &created_anchor,
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::NotRunning
+        ));
+
+        store
+            .claim_thread_launch(thread_id, "claim-running-anchor", "daemon:test")
+            .unwrap();
+        store.mark_thread_running(thread_id, None).unwrap();
+        let running_anchor = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store
+                .append_events_if_thread_running_and_anchor(
+                    thread_id,
+                    thread_id,
+                    std::slice::from_ref(&event),
+                    &running_anchor,
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::Committed(_)
+        ));
+        assert!(matches!(
+            store
+                .append_events_if_thread_running_and_anchor(
+                    thread_id,
+                    thread_id,
+                    &[event],
+                    &running_anchor,
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+    }
+
+    // Signed storage fixtures, not browser/session admission. The real reader,
+    // canonical anchors and two-chain storage locks are used. These fixtures
+    // deliberately do not prove UI admission; the lifecycle backend stays sealed.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TransferFixtureStage {
+        Inbound,
+        Prepared,
+        Accepted,
+    }
+
+    fn transfer_settlement_fixture(
+        source_id: &str,
+        destination_id: &str,
+        decision: Option<bool>,
+    ) -> (
+        Arc<StateStore>,
+        ryeos_ui_presentation_contract::transfer::TransferIdentity,
+    ) {
+        transfer_settlement_fixture_with_stage(
+            source_id,
+            destination_id,
+            decision,
+            TransferFixtureStage::Accepted,
+        )
+    }
+
+    fn transfer_settlement_fixture_with_stage(
+        source_id: &str,
+        destination_id: &str,
+        decision: Option<bool>,
+        stage: TransferFixtureStage,
+    ) -> (
+        Arc<StateStore>,
+        ryeos_ui_presentation_contract::transfer::TransferIdentity,
+    ) {
+        transfer_retirement_fixture_with_stage(source_id, destination_id, decision, stage, false)
+    }
+
+    fn transfer_retirement_fixture_with_stage(
+        source_id: &str,
+        destination_id: &str,
+        decision: Option<bool>,
+        stage: TransferFixtureStage,
+        terminal_retention: bool,
+    ) -> (
+        Arc<StateStore>,
+        ryeos_ui_presentation_contract::transfer::TransferIdentity,
+    ) {
+        use ryeos_ui_presentation_contract::{
+            payload_digest::seat_payload_digest, seat_control::*, transfer::*,
+        };
+        crate::object_contracts::install().unwrap();
+        let store = Arc::new(test_store());
+        let seat = |id: &str, presentation: &str| TransferSeat {
+            presentation_id: presentation.into(),
+            thread_id: id.into(),
+            chain_root_id: id.into(),
+            producer_incarnation: "ab".repeat(32),
+            revision: 1,
+        };
+        let export = json!({"mode":"copy", "data_only": "retained import"});
+        let transfer = TransferIdentity {
+            operation_id: "33333333-3333-4333-8333-333333333333".into(),
+            source: seat(source_id, "11111111-1111-4111-8111-111111111111"),
+            destination: seat(destination_id, "22222222-2222-4222-8222-222222222222"),
+            export_digest: seat_payload_digest(&export).unwrap(),
+        };
+        for seat in [&transfer.source, &transfer.destination] {
+            let mut row = thread_record(&seat.thread_id, &seat.chain_root_id);
+            row.kind = "seat_session".into();
+            if terminal_retention {
+                row.captured_history_policy.as_mut().unwrap().retention =
+                    ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 1 };
+            }
+            store.create_thread_for_test(&row).unwrap();
+            store.mark_thread_running(&seat.thread_id, None).unwrap();
+            let initialized = store
+                .append_events(
+                    &seat.chain_root_id,
+                    &seat.thread_id,
+                    &[NewEventRecord {
+                        event_type: "ui_seat.presentation_initialized.v1".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({
+                            "operation_id": seat.presentation_id,
+                            "initialization": {
+                                "schema": 2,
+                                "selection": {"kind":"configured_defaults"},
+                                "creation_request_id": seat.presentation_id,
+                                "presentation_id": seat.presentation_id,
+                                "root_binding": {
+                                    "binding_attachment_id": "root",
+                                    "binding_generation": 1,
+                                    "binding_digest": "aa"
+                                },
+                                "binding_attachments": [{
+                                    "binding_attachment_id": "root",
+                                    "binding_generation": 1,
+                                    "binding_digest": "aa",
+                                    "binding_request_bounds": {
+                                        "max_request_bytes": 4096,
+                                        "max_input_bytes": 1024,
+                                        "max_seat_append_bytes": 65536
+                                    }
+                                }]
+                            }
+                        }),
+                    }],
+                )
+                .unwrap();
+            let mut request = UiSeatControlRequest::Claim {
+                schema: 2,
+                operation_id: String::new(),
+                presentation_id: seat.presentation_id.clone(),
+                thread_id: seat.thread_id.clone(),
+                chain_root_id: seat.chain_root_id.clone(),
+                predecessor: UiSeatControlPredecessor::Initialization {
+                    event_hash: initialized[0].event_hash.clone().unwrap(),
+                },
+                intent_nonce: "44444444-4444-4444-8444-444444444444".into(),
+                claim: UiSeatProducerClaim::Fresh,
+            };
+            request.assign_identity().unwrap();
+            let control = UiSeatProducer {
+                schema_version: SEAT_PRODUCER_SCHEMA.into(),
+                operation_id: request.operation_id().into(),
+                request,
+                claim: Some(UiSeatProducerClaim::Fresh),
+                predecessor: None,
+                producer_incarnation: seat.producer_incarnation.clone(),
+                state: UiSeatProducerState::Active,
+                next_engine_seq: 0,
+            };
+            store
+                .append_events(
+                    &seat.chain_root_id,
+                    &seat.thread_id,
+                    &[NewEventRecord {
+                        event_type: SEAT_PRODUCER_EVENT.into(),
+                        storage_class: "indexed".into(),
+                        payload: serde_json::to_value(control).unwrap(),
+                    }],
+                )
+                .unwrap();
+        }
+        let inbound =
+            append_transfer_fixture_phase(&store, &transfer, TransferPhase::InboundCommitment);
+        if stage == TransferFixtureStage::Inbound {
+            return (store, transfer);
+        }
+        let preparation = append_transfer_fixture_phase(
+            &store,
+            &transfer,
+            TransferPhase::Prepared {
+                inbound,
+                freeze: None,
+                export,
+            },
+        );
+        if stage == TransferFixtureStage::Prepared {
+            return (store, transfer);
+        }
+        let reservation = json!({"destination_mount": 1});
+        let import_digest = seat_payload_digest(&reservation).unwrap();
+        let acceptance = append_transfer_fixture_phase(
+            &store,
+            &transfer,
+            TransferPhase::Accepted {
+                preparation: preparation.clone(),
+                reservation,
+                import_digest: import_digest.clone(),
+            },
+        );
+        if let Some(commit) = decision {
+            append_transfer_fixture_phase(
+                &store,
+                &transfer,
+                if commit {
+                    TransferPhase::Committed {
+                        preparation,
+                        acceptance,
+                        import_digest,
+                    }
+                } else {
+                    TransferPhase::Aborted { preparation }
+                },
+            );
+        }
+        (store, transfer)
+    }
+
+    fn append_transfer_fixture_phase(
+        store: &StateStore,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        phase: ryeos_ui_presentation_contract::transfer::TransferPhase,
+    ) -> ryeos_ui_presentation_contract::transfer::TransferEvidence {
+        use ryeos_ui_presentation_contract::transfer::*;
+        let record = TransferRecord {
+            schema: 1,
+            transfer: transfer.clone(),
+            phase,
+        };
+        let owner = record.event_owner().clone();
+        // Storage fixture only: production generic append refuses transfer
+        // phases until their dedicated two-seat admission is implemented.
+        let event = NewEventRecord {
+            event_type: TRANSFER_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(TransferEventPayload {
+                seq: 1,
+                operation_id: transfer.operation_id.clone(),
+                payload: record,
+            })
+            .unwrap(),
+        };
+        let persisted = append_transfer_storage_fixture_event(store, &owner, event);
+        TransferEvidence {
+            event_hash: persisted[0].event_hash.clone().unwrap(),
+            chain_seq: persisted[0].chain_seq as u64,
+        }
+    }
+
+    // Only tests can bypass the production transfer admission boundary to
+    // construct retained historical testimony for reader/recovery fixtures.
+    fn append_transfer_storage_fixture_event(
+        store: &StateStore,
+        owner: &ryeos_ui_presentation_contract::transfer::TransferSeat,
+        event: NewEventRecord,
+    ) -> Vec<PersistedEventRecord> {
+        let permit = store.acquire_write_permit().unwrap();
+        let g = store.lock().unwrap();
+        let committed = committed_value(
+            g.state_db
+                .append_events_admitted(
+                    &owner.chain_root_id,
+                    &owner.thread_id,
+                    convert_events(
+                        std::slice::from_ref(&event),
+                        &owner.chain_root_id,
+                        &owner.thread_id,
+                    ),
+                    vec![],
+                    g.signer.as_ref(),
+                    &g.runtime_db,
+                    permit.cas_guard(),
+                )
+                .unwrap(),
+        );
+        persisted_from_append(&committed, &[event]).unwrap()
+    }
+
+    #[test]
+    fn generic_transfer_phase_append_is_sealed_even_with_two_exact_anchors() {
+        use ryeos_ui_presentation_contract::transfer::*;
+        let (store, transfer) = transfer_settlement_fixture(
+            "T-transfer-guard-source",
+            "T-transfer-guard-destination",
+            None,
+        );
+        let record = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase: TransferPhase::Prepared {
+                freeze: None,
+                inbound: TransferEvidence {
+                    event_hash: "aa".repeat(32),
+                    chain_seq: 1,
+                },
+                export: json!({"mode":"copy", "data_only": "retained import"}),
+            },
+        };
+        let source = store
+            .capture_thread_event_read_anchor(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let destination = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let event = NewEventRecord {
+            event_type: TRANSFER_EVENT.into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(TransferEventPayload {
+                seq: 1,
+                operation_id: transfer.operation_id.clone(),
+                payload: record.clone(),
+            })
+            .unwrap(),
+        };
+        assert!(
+            store
+                .append_events(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    std::slice::from_ref(&event),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("transfer phase writer is sealed")
+        );
+        assert!(
+            store
+                .append_seat_events_and_renew_if_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    "fp:test",
+                    "directive:test",
+                    "native:test",
+                    &[event],
+                    &source,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("requires dedicated two-seat admission")
+        );
+        assert!(
+            store
+                .append_ui_transfer_phase_if_two_anchors(&record, &source, &destination,)
+                .unwrap_err()
+                .to_string()
+                .contains("transfer phase writer is sealed")
+        );
+    }
+
+    #[test]
+    fn generic_transfer_lifecycle_append_cannot_bypass_dedicated_admission() {
+        let (store, transfer) = transfer_settlement_fixture(
+            "T-lifecycle-guard-source",
+            "T-lifecycle-guard-destination",
+            Some(true),
+        );
+        let owner = &transfer.destination;
+        let before = store
+            .capture_thread_event_read_anchor(&owner.chain_root_id, &owner.thread_id)
+            .unwrap();
+        for event_type in [
+            ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT,
+            ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT,
+        ] {
+            let event = NewEventRecord {
+                event_type: event_type.into(),
+                storage_class: "indexed".into(),
+                payload: json!({"storage_fixture_only": true}),
+            };
+            assert!(
+                store
+                    .append_events(&owner.chain_root_id, &owner.thread_id, &[event.clone()])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires dedicated two-seat admission")
+            );
+            let anchor = before.as_ref().unwrap();
+            assert!(
+                store
+                    .append_seat_events_and_renew_if_anchor(
+                        &owner.chain_root_id,
+                        &owner.thread_id,
+                        "fp:test",
+                        "directive:test",
+                        "native:test",
+                        &[event],
+                        anchor,
+                    )
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires dedicated two-seat admission")
+            );
+        }
+        assert_eq!(
+            before,
+            store
+                .capture_thread_event_read_anchor(&owner.chain_root_id, &owner.thread_id)
+                .unwrap()
+        );
+    }
+
+    fn close_transfer_fixture_seat(
+        store: &StateStore,
+        seat: &ryeos_ui_presentation_contract::transfer::TransferSeat,
+    ) {
+        use ryeos_ui_presentation_contract::seat_control::*;
+        let anchor = store
+            .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+            .unwrap()
+            .unwrap();
+        let page = store
+            .read_thread_event_page(&anchor, None, 128, 2 * 1024 * 1024)
+            .unwrap();
+        let (predecessor, _) = page
+            .events
+            .iter()
+            .find(|(_, event)| event.event_type == SEAT_PRODUCER_EVENT)
+            .unwrap();
+        let mut request = UiSeatControlRequest::Close {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: seat.presentation_id.clone(),
+            thread_id: seat.thread_id.clone(),
+            chain_root_id: seat.chain_root_id.clone(),
+            predecessor: UiSeatControlPredecessor::Control {
+                event_hash: predecessor.clone(),
+            },
+            intent_nonce: "55555555-5555-4555-8555-555555555555".into(),
+            producer_incarnation: seat.producer_incarnation.clone(),
+        };
+        request.assign_identity().unwrap();
+        let control = UiSeatProducer {
+            schema_version: SEAT_PRODUCER_SCHEMA.into(),
+            operation_id: request.operation_id().into(),
+            request,
+            claim: None,
+            predecessor: Some(seat.producer_incarnation.clone()),
+            producer_incarnation: seat.producer_incarnation.clone(),
+            state: UiSeatProducerState::Closed,
+            next_engine_seq: 0,
+        };
+        store
+            .append_events(
+                &seat.chain_root_id,
+                &seat.thread_id,
+                &[NewEventRecord {
+                    event_type: SEAT_PRODUCER_EVENT.into(),
+                    storage_class: "indexed".into(),
+                    payload: serde_json::to_value(control).unwrap(),
+                }],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn signed_closed_tip_claims_only_matching_lease_and_complete_cut() {
+        use ryeos_ui_presentation_contract::seat_control::UiSeatProducer;
+        let (store, transfer) = transfer_settlement_fixture(
+            "T-closed-claim-source",
+            "T-closed-claim-destination",
+            None,
+        );
+        let seat = &transfer.source;
+        store
+            .touch_seat_lease(&seat.thread_id, "fp:test", "directive:test", "native:test")
+            .unwrap();
+        close_transfer_fixture_seat(&store, seat);
+        let anchor = store
+            .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+            .unwrap()
+            .unwrap();
+        let other = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let tip = store
+            .retained_thread_event_by_hash(anchor.tip().unwrap().0)
+            .unwrap()
+            .unwrap();
+        let closed: UiSeatProducer = serde_json::from_value(tip.payload).unwrap();
+        assert!(
+            store
+                .claim_closed_seat_lease_if_tip(
+                    &anchor,
+                    &[anchor.clone(), other.clone()],
+                    &[],
+                    &closed,
+                    "fp:test",
+                    "directive:test",
+                    "native:test",
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .seat_lease_is_reaping(&seat.thread_id)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_closed_seat_lease_if_tip(
+                    &anchor,
+                    &[anchor.clone(), other.clone()],
+                    &[],
+                    &closed,
+                    "another-owner",
+                    "directive:test",
+                    "native:test",
+                )
+                .unwrap()
+        );
+        store
+            .append_events(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+                &[NewEventRecord {
+                    event_type: "contract.test.closed-claim-dependency.v1".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"advanced":true}),
+                }],
+            )
+            .unwrap();
+        assert!(
+            !store
+                .claim_closed_seat_lease_if_tip(
+                    &anchor,
+                    &[anchor.clone(), other],
+                    &[],
+                    &closed,
+                    "fp:test",
+                    "directive:test",
+                    "native:test",
+                )
+                .unwrap()
+        );
+    }
+
+    fn read_transfer_settlement_fixture(
+        store: &Arc<StateStore>,
+        transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        side: crate::thread_lifecycle::presentation_transfer::TransferSettlementSide,
+    ) -> crate::thread_lifecycle::presentation_transfer::UiTransferSettlementRead {
+        use crate::thread_lifecycle::presentation_transfer::{begin_read, read_page};
+        let mut read = begin_read(store.clone(), transfer, side).unwrap();
+        while !read_page(&mut read, 2, 1024 * 1024).unwrap() {}
+        read
+    }
+
+    #[test]
+    fn selected_live_phase_writer_refuses_missing_paired_prerequisites() {
+        use crate::thread_lifecycle::presentation_transfer::read_complete_fixed_history;
+
+        let (store, transfer) = transfer_settlement_fixture_with_stage(
+            "T-phase-source",
+            "T-phase-destination",
+            None,
+            TransferFixtureStage::Prepared,
+        );
+        let proof = read_complete_fixed_history(store.clone(), &transfer).unwrap();
+        let source = UiTransferPairSeat {
+            anchor: proof.source_anchor(),
+            owner: "owner",
+            surface: "surface",
+            client_ref: "client",
+            presentation_id: &transfer.source.presentation_id,
+            producer_incarnation: &transfer.source.producer_incarnation,
+            revision: transfer.source.revision,
+            next_engine_seq: 1,
+            max_append_bytes: 1024 * 1024,
+        };
+        let destination = UiTransferPairSeat {
+            anchor: proof.destination_anchor(),
+            owner: "owner",
+            surface: "surface",
+            client_ref: "client",
+            presentation_id: &transfer.destination.presentation_id,
+            producer_incarnation: &transfer.destination.producer_incarnation,
+            revision: transfer.destination.revision,
+            next_engine_seq: 1,
+            max_append_bytes: 1024 * 1024,
+        };
+        let admitted = std::cell::Cell::new(false);
+        assert!(
+            store
+                .append_ui_transfer_source_decision_if_two_anchors(
+                    &proof,
+                    UiTransferSourceDecision::Commit,
+                    &source,
+                    &destination,
+                    || {
+                        admitted.set(true);
+                        Ok(true)
+                    },
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .append_ui_transfer_activated_if_two_anchors(&proof, &destination, &source, || {
+                    admitted.set(true);
+                    Ok(true)
+                },)
+                .is_err()
+        );
+        assert!(
+            !admitted.get(),
+            "missing retained phase cannot enter session admission"
+        );
+        assert_eq!(
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id
+                )
+                .unwrap()
+                .unwrap(),
+            *proof.source_anchor(),
+        );
+        assert_eq!(
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id
+                )
+                .unwrap()
+                .unwrap(),
+            *proof.destination_anchor(),
+        );
+    }
+
+    #[test]
+    fn terminal_positive_clearance_requires_complete_settlement_and_poison_free_cuts() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            begin_terminal_transfer_clearance, finish_terminal_transfer_clearance,
+            read_complete_fixed_history, read_terminal_transfer_clearance_page,
+        };
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+        // Real signed storage/receipt/control fixture, not renderer admission
+        // or a live import grant. Positive terminal phase testimony is required.
+        let (store, transfer) =
+            transfer_settlement_fixture("T-clear-source", "T-clear-destination", Some(true));
+        let source_cut = || {
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let incomplete = begin_terminal_transfer_clearance(
+            store.clone(),
+            &source_cut(),
+            std::slice::from_ref(&transfer),
+        )
+        .unwrap();
+        assert!(finish_terminal_transfer_clearance(incomplete).is_err());
+        let mut unsettled = begin_terminal_transfer_clearance(
+            store.clone(),
+            &source_cut(),
+            std::slice::from_ref(&transfer),
+        )
+        .unwrap();
+        while !read_terminal_transfer_clearance_page(&mut unsettled).unwrap() {}
+        assert!(finish_terminal_transfer_clearance(unsettled).is_err());
+
+        let pair = read_complete_fixed_history(store.clone(), &transfer).unwrap();
+        let committed = pair.lifecycle().committed().unwrap();
+        let TransferPhase::Committed { import_digest, .. } = &committed.record.phase else {
+            panic!("fixture lacks commit");
+        };
+        let retained = append_transfer_fixture_phase(
+            &store,
+            &transfer,
+            TransferPhase::Retained {
+                commit: committed.evidence.clone(),
+                import_digest: import_digest.clone(),
+            },
+        );
+        append_transfer_fixture_phase(
+            &store,
+            &transfer,
+            TransferPhase::SettlementObserved {
+                settlement: retained,
+            },
+        );
+        let mut read = begin_terminal_transfer_clearance(
+            store.clone(),
+            &source_cut(),
+            std::slice::from_ref(&transfer),
+        )
+        .unwrap();
+        let mut turns = 0;
+        loop {
+            turns += 1;
+            if read_terminal_transfer_clearance_page(&mut read).unwrap() {
+                break;
+            }
+        }
+        assert!(turns >= 4); // two endpoint turns, then a page of each seat
+        let complete = finish_terminal_transfer_clearance(read).unwrap();
+        assert!(complete.belongs_to(&store));
+        assert_eq!(
+            complete.identities().get(&transfer.operation_id),
+            Some(&transfer)
+        );
+        assert_eq!(complete.anchors().len(), 2);
+        assert!(complete.retired().is_empty());
+
+        let mut poisoned = begin_terminal_transfer_clearance(
+            store.clone(),
+            &source_cut(),
+            std::slice::from_ref(&transfer),
+        )
+        .unwrap();
+        assert!(!read_terminal_transfer_clearance_page(&mut poisoned).unwrap());
+        assert!(!read_terminal_transfer_clearance_page(&mut poisoned).unwrap());
+        append_transfer_storage_fixture_event(
+            &store,
+            &transfer.source,
+            NewEventRecord {
+                event_type: "test.signed_advance".into(),
+                storage_class: "indexed".into(),
+                payload: json!({}),
+            },
+        );
+        let mut refused = false;
+        for _ in 0..3 {
+            if read_terminal_transfer_clearance_page(&mut poisoned).is_err() {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused);
+        assert!(read_terminal_transfer_clearance_page(&mut poisoned).is_err());
+        assert!(finish_terminal_transfer_clearance(poisoned).is_err());
+    }
+
+    #[test]
+    fn shared_fixed_seat_scan_proves_two_operations_without_repeating_histories() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            assemble_fixed_history_proof, begin_fixed_seat_read, finish_fixed_seat_read,
+            read_fixed_seat_page, reuse_fixed_seat_proof,
+        };
+        use ryeos_ui_presentation_contract::transfer::{
+            TransferIdentity, TransferPhase, TransferSeat,
+        };
+        use ryeos_ui_presentation_contract::transfer_state::TransferDestinationState;
+
+        // Retained storage fixture, not a current composition/producer-witness
+        // or UI admission qualification. Both operations share each exact
+        // seat, but their historical owner revisions deliberately differ.
+        let (store, first) =
+            transfer_settlement_fixture("T-shared-source", "T-shared-destination", None);
+        let mut second = first.clone();
+        second.operation_id = "66666666-6666-4666-8666-666666666666".into();
+        second.source.revision += 1;
+        second.destination.revision += 1;
+        let inbound =
+            append_transfer_fixture_phase(&store, &second, TransferPhase::InboundCommitment);
+        append_transfer_fixture_phase(
+            &store,
+            &second,
+            TransferPhase::Prepared {
+                inbound,
+                freeze: None,
+                export: json!({"mode":"copy", "data_only":"retained import"}),
+            },
+        );
+        let read_seat = |seat: &TransferSeat, requested: &[TransferIdentity]| {
+            let anchor = store
+                .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                .unwrap()
+                .unwrap();
+            let mut read = begin_fixed_seat_read(store.clone(), anchor, seat, requested).unwrap();
+            let mut pages = 0;
+            loop {
+                pages += 1;
+                if read_fixed_seat_page(&mut read, 1, 1024 * 1024).unwrap() {
+                    break;
+                }
+            }
+            assert!(pages > 1);
+            finish_fixed_seat_read(read).unwrap()
+        };
+        let requested = [first.clone(), second.clone()];
+        let source = Arc::new(read_seat(&first.source, &requested));
+        let destination = read_seat(&first.destination, &requested);
+        let first_proof = assemble_fixed_history_proof(&source, &destination, &first).unwrap();
+        let second_proof = assemble_fixed_history_proof(&source, &destination, &second).unwrap();
+        assert_eq!(first_proof.source_anchor(), second_proof.source_anchor());
+        assert_eq!(
+            first_proof.destination_anchor(),
+            second_proof.destination_anchor()
+        );
+        assert_eq!(
+            first_proof.lifecycle().destination_state(),
+            TransferDestinationState::Reserved
+        );
+        assert_eq!(
+            second_proof.lifecycle().destination_state(),
+            TransferDestinationState::Unreserved
+        );
+        let hit = reuse_fixed_seat_proof(
+            store.as_ref(),
+            first_proof.source_anchor(),
+            &second.source,
+            std::slice::from_ref(&second),
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(&hit, &source),
+            "a subset must retain the broad completed proof"
+        );
+        let mut absent = second.clone();
+        absent.operation_id = "77777777-7777-4777-8777-777777777777".into();
+        assert!(
+            reuse_fixed_seat_proof(
+                store.as_ref(),
+                first_proof.source_anchor(),
+                &second.source,
+                &[absent],
+                &source
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut changed = second.clone();
+        changed.export_digest = "cd".repeat(32);
+        assert!(
+            reuse_fixed_seat_proof(
+                store.as_ref(),
+                first_proof.source_anchor(),
+                &second.source,
+                &[changed.clone()],
+                &source
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            reuse_fixed_seat_proof(
+                store.as_ref(),
+                first_proof.source_anchor(),
+                &second.source,
+                &[second.clone(), changed],
+                &source
+            )
+            .is_err()
+        );
+        assert!(
+            reuse_fixed_seat_proof(
+                store.as_ref(),
+                first_proof.source_anchor(),
+                &first.destination,
+                &[],
+                &source
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        // Missing requested coverage is not authenticated absence. Even a
+        // complete scan that saw the bytes cannot be repurposed after the fact.
+        let source_first_only = read_seat(&first.source, std::slice::from_ref(&first));
+        assert!(assemble_fixed_history_proof(&source_first_only, &destination, &second).is_err());
+        let destination_empty = read_seat(&first.destination, &[]);
+        assert!(assemble_fixed_history_proof(&source, &destination_empty, &first).is_err());
+        assert!(assemble_fixed_history_proof(&destination, &source, &first).is_err());
+
+        let (other_store, other_transfer) =
+            transfer_settlement_fixture("T-shared-source", "T-shared-destination", None);
+        assert!(
+            reuse_fixed_seat_proof(
+                other_store.as_ref(),
+                first_proof.source_anchor(),
+                &first.source,
+                std::slice::from_ref(&first),
+                &source
+            )
+            .unwrap()
+            .is_none()
+        );
+        let other_anchor = other_store
+            .capture_thread_event_read_anchor(
+                &other_transfer.destination.chain_root_id,
+                &other_transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let mut other_read = begin_fixed_seat_read(
+            other_store,
+            other_anchor,
+            &other_transfer.destination,
+            std::slice::from_ref(&other_transfer),
+        )
+        .unwrap();
+        while !read_fixed_seat_page(&mut other_read, 1, 1024 * 1024).unwrap() {}
+        let other_destination = finish_fixed_seat_read(other_read).unwrap();
+        assert!(assemble_fixed_history_proof(&source, &other_destination, &first).is_err());
+
+        store
+            .append_events(
+                &first.source.chain_root_id,
+                &first.source.thread_id,
+                &[NewEventRecord {
+                    event_type: "thread_notice".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"advance":true}),
+                }],
+            )
+            .unwrap();
+        let advanced = store
+            .capture_thread_event_read_anchor(&first.source.chain_root_id, &first.source.thread_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            reuse_fixed_seat_proof(
+                store.as_ref(),
+                &advanced,
+                &first.source,
+                &requested,
+                &source
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn fixed_seat_suffix_reuses_receipt_advanced_tip_and_authenticates_new_control() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            assemble_fixed_history_proof, begin_fixed_seat_read, begin_fixed_seat_read_from_proof,
+            finish_fixed_seat_read, read_fixed_seat_page,
+        };
+        use ryeos_ui_presentation_contract::{
+            identity::UiSeatAppendIdentity, payload_digest::seat_payload_digest, seat_control::*,
+            transfer::TransferPhase,
+        };
+
+        // Signed storage fixture only, not a UI composition or transfer ingress
+        // qualification. One-event pages expose the suffix join explicitly.
+        let (store, transfer) =
+            transfer_settlement_fixture("T-suffix-source", "T-suffix-destination", None);
+        let scan = |seat: &ryeos_ui_presentation_contract::transfer::TransferSeat| {
+            let anchor = store
+                .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                .unwrap()
+                .unwrap();
+            let mut read =
+                begin_fixed_seat_read(store.clone(), anchor, seat, std::slice::from_ref(&transfer))
+                    .unwrap();
+            while !read_fixed_seat_page(&mut read, 1, 1024 * 1024).unwrap() {}
+            Arc::new(finish_fixed_seat_read(read).unwrap())
+        };
+        let source = scan(&transfer.source);
+        let destination = scan(&transfer.destination);
+        let old = assemble_fixed_history_proof(&source, &destination, &transfer).unwrap();
+        let rows = store
+            .read_thread_event_page(old.source_anchor(), None, 128, 2 * 1024 * 1024)
+            .unwrap();
+        let active_hash = rows
+            .events
+            .iter()
+            .find(|(_, event)| event.event_type == SEAT_PRODUCER_EVENT)
+            .unwrap()
+            .0
+            .clone();
+        let payload = json!({"value": true});
+        let semantic = [SeatAppendSemanticEvent {
+            engine_seq: 0,
+            event_type: "seat.facet",
+            payload: &payload,
+        }];
+        let payload_digest = seat_payload_digest(&serde_json::to_value(semantic).unwrap()).unwrap();
+        let identity = UiSeatAppendIdentity {
+            presentation_id: transfer.source.presentation_id.clone(),
+            chain_root_id: transfer.source.chain_root_id.clone(),
+            thread_id: transfer.source.thread_id.clone(),
+            producer_incarnation: transfer.source.producer_incarnation.clone(),
+            first_engine_seq: 0,
+            last_engine_seq: 0,
+            event_count: 1,
+            payload_digest: payload_digest.clone(),
+        };
+        let receipt = SeatAppendReceipt {
+            schema_version: SEAT_APPEND_RECEIPT_SCHEMA.into(),
+            producer_incarnation: transfer.source.producer_incarnation.clone(),
+            operation_id: identity.derive_identity().unwrap(),
+            first_engine_seq: 0,
+            last_engine_seq: 0,
+            event_count: 1,
+            payload_digest,
+        };
+        for event in [
+            NewEventRecord {
+                event_type: "seat.facet".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"seq": 0, "payload": payload}),
+            },
+            NewEventRecord {
+                event_type: "ui_seat.append_receipt.v2".into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(receipt).unwrap(),
+            },
+        ] {
+            append_transfer_storage_fixture_event(&store, &transfer.source, event);
+        }
+        let advance = |cached| {
+            let anchor = store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap()
+                .unwrap();
+            let mut read = begin_fixed_seat_read_from_proof(
+                store.clone(),
+                anchor.clone(),
+                &transfer.source,
+                std::slice::from_ref(&transfer),
+                cached,
+            )
+            .unwrap();
+            assert!(read.is_suffix_read());
+            let mut pages = 0;
+            loop {
+                pages += 1;
+                if read_fixed_seat_page(&mut read, 1, 1024 * 1024).unwrap() {
+                    break;
+                }
+            }
+            let proof = Arc::new(finish_fixed_seat_read(read).unwrap());
+            let pair = assemble_fixed_history_proof(&proof, &destination, &transfer).unwrap();
+            assert_eq!(pair.source_anchor(), &anchor);
+            (proof, pages)
+        };
+        let (receipt_tip, pages) = advance(source);
+        assert_eq!(
+            pages, 3,
+            "two suffix events plus the exact cached tip, not genesis"
+        );
+
+        // Transfer-only advancement does not manufacture or consume an engine
+        // sequence. Its head frontier/control must come from the joined proof.
+        let acceptance = old.lifecycle().accepted().unwrap();
+        let TransferPhase::Accepted { import_digest, .. } = &acceptance.record.phase else {
+            panic!("fixture has an exact Accepted phase")
+        };
+        append_transfer_fixture_phase(
+            &store,
+            &transfer,
+            TransferPhase::Committed {
+                preparation: old.lifecycle().prepared().unwrap().evidence.clone(),
+                acceptance: acceptance.evidence.clone(),
+                import_digest: import_digest.clone(),
+            },
+        );
+        let (committed_tip, pages) = advance(receipt_tip);
+        assert_eq!(pages, 2, "one transfer plus the cached receipt tip");
+
+        // The cached head frontier is now one, while its latest Active control
+        // was recorded at zero. A correct join must keep those facts distinct.
+        let mut close = UiSeatControlRequest::Close {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: transfer.source.presentation_id.clone(),
+            thread_id: transfer.source.thread_id.clone(),
+            chain_root_id: transfer.source.chain_root_id.clone(),
+            predecessor: UiSeatControlPredecessor::Control {
+                event_hash: active_hash,
+            },
+            intent_nonce: "88888888-8888-4888-8888-888888888888".into(),
+            producer_incarnation: transfer.source.producer_incarnation.clone(),
+        };
+        close.assign_identity().unwrap();
+        let control = UiSeatProducer {
+            schema_version: SEAT_PRODUCER_SCHEMA.into(),
+            operation_id: close.operation_id().into(),
+            request: close,
+            claim: None,
+            predecessor: Some(transfer.source.producer_incarnation.clone()),
+            producer_incarnation: transfer.source.producer_incarnation.clone(),
+            state: UiSeatProducerState::Closed,
+            next_engine_seq: 1,
+        };
+        append_transfer_storage_fixture_event(
+            &store,
+            &transfer.source,
+            NewEventRecord {
+                event_type: SEAT_PRODUCER_EVENT.into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(control).unwrap(),
+            },
+        );
+        let (mut latest, pages) = advance(committed_tip);
+        assert_eq!(pages, 2, "one control plus the cached transfer tip");
+        for iteration in 0..2 {
+            store
+                .append_events(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    &[NewEventRecord {
+                        event_type: "thread_notice".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"suffix":iteration}),
+                    }],
+                )
+                .unwrap();
+            let (next, pages) = advance(latest);
+            assert_eq!(
+                pages, 2,
+                "each subsequent suffix stops at its immediate cache tip"
+            );
+            latest = next;
+        }
+    }
+
+    #[test]
+    fn fixed_seat_suffix_refuses_broken_join_and_repeated_or_unknown_phase() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            begin_fixed_seat_read, begin_fixed_seat_read_from_proof, finish_fixed_seat_read,
+            read_fixed_seat_page,
+        };
+        use ryeos_ui_presentation_contract::{
+            identity::UiSeatAppendIdentity, payload_digest::seat_payload_digest, seat_control::*,
+            transfer::*,
+        };
+
+        for defect in ["frontier", "producer", "partial", "duplicate", "unknown"] {
+            let (store, transfer) =
+                transfer_settlement_fixture("T-join-source", "T-join-destination", None);
+            let anchor = store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap()
+                .unwrap();
+            let mut cold = begin_fixed_seat_read(
+                store.clone(),
+                anchor.clone(),
+                &transfer.source,
+                std::slice::from_ref(&transfer),
+            )
+            .unwrap();
+            while !read_fixed_seat_page(&mut cold, 1, 1024 * 1024).unwrap() {}
+            let cached = Arc::new(finish_fixed_seat_read(cold).unwrap());
+            if matches!(defect, "duplicate" | "unknown") {
+                let prepared = store
+                    .read_thread_event_page(&anchor, None, 1, 1024 * 1024)
+                    .unwrap()
+                    .events
+                    .remove(0)
+                    .1;
+                assert_eq!(prepared.event_type, TRANSFER_EVENT);
+                append_transfer_storage_fixture_event(
+                    &store,
+                    &transfer.source,
+                    NewEventRecord {
+                        event_type: if defect == "unknown" {
+                            "contract.ryeos_ui.presentation_transfer.v999".into()
+                        } else {
+                            prepared.event_type
+                        },
+                        storage_class: "indexed".into(),
+                        payload: prepared.payload,
+                    },
+                );
+            } else {
+                let first_engine_seq = u64::from(defect == "frontier");
+                let payload = json!({"value": true});
+                let semantic = [SeatAppendSemanticEvent {
+                    engine_seq: first_engine_seq,
+                    event_type: "seat.facet",
+                    payload: &payload,
+                }];
+                let payload_digest =
+                    seat_payload_digest(&serde_json::to_value(semantic).unwrap()).unwrap();
+                let event_count = if defect == "partial" { 2 } else { 1 };
+                let producer_incarnation = if defect == "producer" {
+                    "cd".repeat(32)
+                } else {
+                    transfer.source.producer_incarnation.clone()
+                };
+                let identity = UiSeatAppendIdentity {
+                    presentation_id: transfer.source.presentation_id.clone(),
+                    chain_root_id: transfer.source.chain_root_id.clone(),
+                    thread_id: transfer.source.thread_id.clone(),
+                    producer_incarnation: producer_incarnation.clone(),
+                    first_engine_seq,
+                    last_engine_seq: first_engine_seq + event_count - 1,
+                    event_count,
+                    payload_digest: payload_digest.clone(),
+                };
+                let receipt = SeatAppendReceipt {
+                    schema_version: SEAT_APPEND_RECEIPT_SCHEMA.into(),
+                    producer_incarnation,
+                    operation_id: identity.derive_identity().unwrap(),
+                    first_engine_seq,
+                    last_engine_seq: identity.last_engine_seq,
+                    event_count: event_count as usize,
+                    payload_digest,
+                };
+                for event in [
+                    NewEventRecord {
+                        event_type: "seat.facet".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"seq":first_engine_seq,"payload":payload}),
+                    },
+                    NewEventRecord {
+                        event_type: "ui_seat.append_receipt.v2".into(),
+                        storage_class: "indexed".into(),
+                        payload: serde_json::to_value(receipt).unwrap(),
+                    },
+                ] {
+                    append_transfer_storage_fixture_event(&store, &transfer.source, event);
+                }
+            }
+            let advanced = store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap()
+                .unwrap();
+            let mut read = begin_fixed_seat_read_from_proof(
+                store.clone(),
+                advanced,
+                &transfer.source,
+                std::slice::from_ref(&transfer),
+                cached,
+            )
+            .unwrap();
+            loop {
+                match read_fixed_seat_page(&mut read, 1, 1024 * 1024) {
+                    Ok(false) => {}
+                    Ok(true) => panic!("invalid {defect} suffix must not complete"),
+                    Err(_) => break,
+                }
+            }
+            assert!(finish_fixed_seat_read(read).is_err(), "{defect}");
+        }
+    }
+
+    #[test]
+    fn shared_fixed_seat_scan_refuses_partial_poisoned_and_conflicting_scope() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            begin_fixed_seat_read, finish_fixed_seat_read, read_fixed_seat_page,
+        };
+        let (store, transfer) = transfer_settlement_fixture(
+            "T-shared-refusal-source",
+            "T-shared-refusal-destination",
+            None,
+        );
+        let anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let requested = std::slice::from_ref(&transfer);
+        let mut partial =
+            begin_fixed_seat_read(store.clone(), anchor.clone(), &transfer.source, requested)
+                .unwrap();
+        assert!(!read_fixed_seat_page(&mut partial, 1, 1024 * 1024).unwrap());
+        assert!(finish_fixed_seat_read(partial).is_err());
+
+        let mut poisoned =
+            begin_fixed_seat_read(store.clone(), anchor.clone(), &transfer.source, requested)
+                .unwrap();
+        assert!(read_fixed_seat_page(&mut poisoned, 0, 1024 * 1024).is_err());
+        assert!(read_fixed_seat_page(&mut poisoned, 1, 1024 * 1024).is_err());
+        assert!(finish_fixed_seat_read(poisoned).is_err());
+
+        let mut conflicting = transfer.clone();
+        conflicting.export_digest = "be".repeat(32);
+        assert!(
+            begin_fixed_seat_read(
+                store.clone(),
+                anchor.clone(),
+                &transfer.source,
+                &[transfer.clone(), conflicting]
+            )
+            .is_err()
+        );
+        assert!(begin_fixed_seat_read(store, anchor, &transfer.destination, requested).is_err());
+    }
+
+    #[test]
+    fn fixed_transfer_proof_tracks_both_exact_signed_heads() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            begin_fixed_history_read, finish_fixed_history_read, read_complete_fixed_history,
+            read_fixed_history_page,
+        };
+        use ryeos_ui_presentation_contract::transfer_state::{
+            TransferDestinationState, TransferSourceState,
+        };
+
+        let (store, transfer) =
+            transfer_settlement_fixture("T-proof-source", "T-proof-destination", None);
+        let mut incomplete = begin_fixed_history_read(store.clone(), &transfer).unwrap();
+        assert!(!read_fixed_history_page(&mut incomplete, 1, 1024 * 1024).unwrap());
+        assert!(finish_fixed_history_read(incomplete).is_err());
+        let mut paged = begin_fixed_history_read(store.clone(), &transfer).unwrap();
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            if read_fixed_history_page(&mut paged, 2, 1024 * 1024).unwrap() {
+                break;
+            }
+        }
+        assert!(pages > 1, "the pair proof must span bounded pages");
+        let paged_proof = finish_fixed_history_read(paged).unwrap();
+        let proof = read_complete_fixed_history(store.clone(), &transfer).unwrap();
+        assert!(proof.is_for_store(store.as_ref()));
+        let (another_store, _) =
+            transfer_settlement_fixture("T-other-proof-source", "T-other-proof-destination", None);
+        assert!(!proof.is_for_store(another_store.as_ref()));
+        assert_eq!(paged_proof.source_anchor(), proof.source_anchor());
+        assert_eq!(paged_proof.destination_anchor(), proof.destination_anchor());
+        assert_eq!(
+            proof.lifecycle().source_state(),
+            TransferSourceState::Frozen
+        );
+        assert_eq!(
+            proof.lifecycle().destination_state(),
+            TransferDestinationState::Reserved
+        );
+        assert_eq!(proof.lifecycle().transfer(), &transfer);
+        assert_eq!(
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap(),
+            Some(proof.source_anchor().clone())
+        );
+        store
+            .append_events(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+                &[NewEventRecord {
+                    event_type: "thread_notice".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"unrelated": true}),
+                }],
+            )
+            .unwrap();
+        assert_ne!(
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap(),
+            Some(proof.source_anchor().clone())
+        );
+        assert_eq!(
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id,
+                )
+                .unwrap(),
+            Some(proof.destination_anchor().clone())
+        );
+        let refreshed = read_complete_fixed_history(store.clone(), &transfer).unwrap();
+        assert_eq!(
+            refreshed.lifecycle().source_state(),
+            TransferSourceState::Frozen
+        );
+        assert_eq!(
+            refreshed.lifecycle().destination_state(),
+            TransferDestinationState::Reserved
+        );
+    }
+
+    #[test]
+    fn negative_terminal_closures_finalize_and_retire_in_both_orders() {
+        use crate::thread_lifecycle::presentation_transfer::{
+            begin_terminal_transfer_clearance, finish_terminal_transfer_clearance,
+            read_complete_fixed_history, read_terminal_transfer_clearance_page,
+        };
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+        for orphan in [false, true] {
+            for source_first in [false, true] {
+                let (store, transfer) = transfer_retirement_fixture_with_stage(
+                    "T-negative-source",
+                    "T-negative-destination",
+                    None,
+                    if orphan {
+                        TransferFixtureStage::Inbound
+                    } else {
+                        TransferFixtureStage::Prepared
+                    },
+                    true,
+                );
+                // Established signed storage fixtures only: no renderer grant.
+                // Finalization and Remove below use the actual production owner.
+                let proof = read_complete_fixed_history(store.clone(), &transfer).unwrap();
+                let phase = if orphan {
+                    TransferPhase::OrphanCancelled {
+                        inbound: proof.lifecycle().inbound().evidence.clone(),
+                    }
+                } else {
+                    TransferPhase::Aborted {
+                        preparation: proof.lifecycle().prepared().unwrap().evidence.clone(),
+                    }
+                };
+                append_transfer_fixture_phase(&store, &transfer, phase);
+                let read_clearance = |scope: &TerminalSeatTransferDiscoveryScope| {
+                    let requested = scope.identities().cloned().collect::<Vec<_>>();
+                    let mut read = begin_terminal_transfer_clearance(
+                        store.clone(),
+                        scope.anchor(),
+                        &requested,
+                    )
+                    .unwrap();
+                    let mut turns = 0;
+                    while !read_terminal_transfer_clearance_page(&mut read).unwrap() {
+                        turns += 1;
+                    }
+                    let clearance = finish_terminal_transfer_clearance(read).unwrap();
+                    assert_eq!(clearance.negative_closures().len(), 1);
+                    assert!(turns >= 2);
+                    clearance
+                };
+                for seat in [&transfer.source, &transfer.destination] {
+                    claim_transfer_fixture_seat(&store, seat);
+                    let claim = store
+                        .claimed_running_seat_root_snapshot(&seat.chain_root_id)
+                        .unwrap()
+                        .unwrap();
+                    let anchor = store
+                        .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                        .unwrap()
+                        .unwrap();
+                    let mut read = store
+                        .begin_claimed_seat_transfer_discovery(&seat.chain_root_id, anchor)
+                        .unwrap()
+                        .unwrap();
+                    while !store
+                        .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024 * 1024)
+                        .unwrap()
+                    {}
+                    let scope = store.finish_terminal_seat_transfer_discovery(read).unwrap();
+                    let clearance = read_clearance(&scope);
+                    assert!(
+                        store
+                            .finalize_claimed_seat_with_clearance(
+                                &scope,
+                                &clearance,
+                                &claim,
+                                |_| Ok(0)
+                            )
+                            .unwrap()
+                            .is_some()
+                    );
+                }
+                let order = if source_first {
+                    [&transfer.source, &transfer.destination]
+                } else {
+                    [&transfer.destination, &transfer.source]
+                };
+                let mut first_closure = None;
+                for seat in order {
+                    let mut read = store
+                        .begin_terminal_seat_transfer_discovery(&seat.chain_root_id)
+                        .unwrap()
+                        .unwrap();
+                    while !store
+                        .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024 * 1024)
+                        .unwrap()
+                    {}
+                    let scope = store.finish_terminal_seat_transfer_discovery(read).unwrap();
+                    if first_closure.is_some() {
+                        let requests = scope.identities().cloned().collect::<Vec<_>>();
+                        let mut partial = begin_terminal_transfer_clearance(
+                            store.clone(),
+                            scope.anchor(),
+                            &requests,
+                        )
+                        .unwrap();
+                        // Two endpoint captures, then only retired closure metadata;
+                        // none of these turns establishes completed history coverage.
+                        for _ in 0..3 {
+                            assert!(!read_terminal_transfer_clearance_page(&mut partial).unwrap());
+                        }
+                        assert!(finish_terminal_transfer_clearance(partial).is_err());
+                    }
+                    let clearance = read_clearance(&scope);
+                    if let Some(original) = &first_closure {
+                        assert_eq!(
+                            clearance.negative_closures(),
+                            std::slice::from_ref(original),
+                            "retired counterpart negative cut must be preserved, not rebased"
+                        );
+                        assert_eq!(clearance.retired().len(), 1);
+                    } else {
+                        first_closure = Some(clearance.negative_closures()[0].clone());
+                    }
+                    let candidate = store
+                        .qualify_terminal_transfer_clearance(scope, clearance)
+                        .unwrap();
+                    let mut wrong = candidate.negative_closures.clone();
+                    wrong[0].evidence.chain_seq += 1;
+                    {
+                        let authority = store.pinned_state_authority().unwrap();
+                        let guard = authority.acquire_shared_guard().unwrap();
+                        let g = store.lock().unwrap();
+                        let roots = candidate
+                            .exclusions
+                            .iter()
+                            .map(|anchor| anchor.chain_root_id().to_owned())
+                            .chain(
+                                candidate
+                                    .retired
+                                    .iter()
+                                    .map(|prefix| prefix.chain_root_id().to_owned()),
+                            )
+                            .filter(|root| root != candidate.anchor.chain_root_id())
+                            .collect::<Vec<_>>();
+                        assert!(g.state_db.with_terminal_retirement_exclusions(&guard, candidate.anchor.chain_root_id(),
+                            &candidate.exclusions, &candidate.retired, |lock| {
+                                g.state_db.remove_qualified_terminal_seat_head_ref_with_negative_closures(&guard,
+                                    &candidate.anchor, &roots, &wrong, lock)
+                            }).is_err(), "mutated decision/native evidence must not publish a retirement marker");
+                    }
+                    assert_eq!(
+                        store
+                            .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                            .unwrap(),
+                        Some(candidate.anchor.clone())
+                    );
+                    let retired = store
+                        .retire_qualified_terminal_seat(
+                            &candidate,
+                            "2099-01-01T00:00:00Z",
+                            false,
+                            |_| Ok(0),
+                        )
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(retired.retired_chains, 1);
+                }
+                let authority = store.pinned_state_authority().unwrap();
+                let guard = authority.acquire_exclusive_guard(false).unwrap();
+                assert!(
+                    authority
+                        .terminal_seat_retirement_object_roots(&guard, false)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    authority
+                        .terminal_seat_retirement_object_roots(&guard, false)
+                        .unwrap()
+                        .is_empty(),
+                    "durable release retry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_settlement_finalizes_and_retires_in_both_orders() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        for committed in [false, true] {
+            for source_first in [false, true] {
+                let (store, transfer) = transfer_retirement_fixture_with_stage(
+                    "T-positive-source",
+                    "T-positive-destination",
+                    Some(committed),
+                    TransferFixtureStage::Accepted,
+                    true,
+                );
+                // Established signed storage fixture; no renderer admission is
+                // claimed. Exercise the actual claimed-lease settlement writer
+                // without fabricating a browser Close after session loss.
+                for seat in [&transfer.source, &transfer.destination] {
+                    claim_transfer_fixture_seat(&store, seat);
+                }
+                let bound = crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536);
+                for side in [
+                    TransferSettlementSide::Destination,
+                    TransferSettlementSide::Source,
+                ] {
+                    let candidate =
+                        prepare_write(read_transfer_settlement_fixture(&store, &transfer, side))
+                            .unwrap();
+                    let SettlementPreparation::ReapingCandidate(reaping) = &candidate else {
+                        panic!("active predecessor must settle through the lease fence");
+                    };
+                    use ryeos_ui_presentation_contract::transfer::TransferPhase;
+                    assert!(matches!(
+                        (side, committed, &reaping.record().phase),
+                        (
+                            TransferSettlementSide::Destination,
+                            true,
+                            TransferPhase::Retained { .. }
+                        ) | (
+                            TransferSettlementSide::Destination,
+                            false,
+                            TransferPhase::Released { .. }
+                        ) | (
+                            TransferSettlementSide::Source,
+                            _,
+                            TransferPhase::SettlementObserved { .. }
+                        )
+                    ));
+                    let RunningConditionalEventAppendResult::Committed(records) = store
+                        .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                        .unwrap()
+                    else {
+                        panic!("claimed settlement must commit");
+                    };
+                    assert_eq!(records.len(), 1);
+                    assert_eq!(records[0].payload["fence"]["kind"], "lease_reaping");
+                }
+                let read_clearance = |scope: &TerminalSeatTransferDiscoveryScope| {
+                    let requested = scope.identities().cloned().collect::<Vec<_>>();
+                    assert_eq!(requested.len(), 1);
+                    let mut read = begin_terminal_transfer_clearance(
+                        store.clone(),
+                        scope.anchor(),
+                        &requested,
+                    )
+                    .unwrap();
+                    while !read_terminal_transfer_clearance_page(&mut read).unwrap() {}
+                    let clearance = finish_terminal_transfer_clearance(read).unwrap();
+                    assert!(
+                        clearance.negative_closures().is_empty(),
+                        "Accepted settlement must retain positive counterpart evidence"
+                    );
+                    clearance
+                };
+                for seat in [&transfer.source, &transfer.destination] {
+                    let claim = store
+                        .claimed_running_seat_root_snapshot(&seat.chain_root_id)
+                        .unwrap()
+                        .unwrap();
+                    let anchor = store
+                        .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                        .unwrap()
+                        .unwrap();
+                    let mut read = store
+                        .begin_claimed_seat_transfer_discovery(&seat.chain_root_id, anchor)
+                        .unwrap()
+                        .unwrap();
+                    while !store
+                        .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024 * 1024)
+                        .unwrap()
+                    {}
+                    let scope = store.finish_terminal_seat_transfer_discovery(read).unwrap();
+                    let clearance = read_clearance(&scope);
+                    assert!(
+                        store
+                            .finalize_claimed_seat_with_clearance(
+                                &scope,
+                                &clearance,
+                                &claim,
+                                |_| Ok(0)
+                            )
+                            .unwrap()
+                            .is_some()
+                    );
+                }
+                let order = if source_first {
+                    [&transfer.source, &transfer.destination]
+                } else {
+                    [&transfer.destination, &transfer.source]
+                };
+                for (index, seat) in order.into_iter().enumerate() {
+                    let mut read = store
+                        .begin_terminal_seat_transfer_discovery(&seat.chain_root_id)
+                        .unwrap()
+                        .unwrap();
+                    while !store
+                        .read_terminal_seat_transfer_discovery_page(&mut read, 1, 1024 * 1024)
+                        .unwrap()
+                    {}
+                    let scope = store.finish_terminal_seat_transfer_discovery(read).unwrap();
+                    let clearance = read_clearance(&scope);
+                    assert_eq!(
+                        clearance.retired().len(),
+                        index,
+                        "second retirement must authenticate the first seat's retained positive prefix"
+                    );
+                    let candidate = store
+                        .qualify_terminal_transfer_clearance(scope, clearance)
+                        .unwrap();
+                    assert_eq!(
+                        store
+                            .retire_qualified_terminal_seat(
+                                &candidate,
+                                "2099-01-01T00:00:00Z",
+                                false,
+                                |_| Ok(0)
+                            )
+                            .unwrap()
+                            .unwrap()
+                            .retired_chains,
+                        1
+                    );
+                    assert!(
+                        store
+                            .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                            .unwrap()
+                            .is_none()
+                    );
+                    if index == 0 {
+                        let authority = store.pinned_state_authority().unwrap();
+                        let guard = authority.acquire_exclusive_guard(false).unwrap();
+                        assert!(
+                            !authority
+                                .terminal_seat_retirement_object_roots(&guard, false)
+                                .unwrap()
+                                .is_empty(),
+                            "first retirement must retain evidence needed by the surviving counterpart"
+                        );
+                    }
+                }
+                let authority = store.pinned_state_authority().unwrap();
+                let guard = authority.acquire_exclusive_guard(false).unwrap();
+                for _ in 0..2 {
+                    assert!(
+                        authority
+                            .terminal_seat_retirement_object_roots(&guard, false)
+                            .unwrap()
+                            .is_empty(),
+                        "both durable retirements release the positive prefixes idempotently"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_and_periodic_recovery_settle_signed_claims_without_maintenance_schedule() {
+        let (store, transfer) = transfer_retirement_fixture_with_stage(
+            "T-startup-source",
+            "T-startup-destination",
+            Some(true),
+            TransferFixtureStage::Accepted,
+            true,
+        );
+        for seat in [&transfer.source, &transfer.destination] {
+            claim_transfer_fixture_seat(&store, seat);
+        }
+        let active = "T-active-unclaimed";
+        let mut row = thread_record(active, active);
+        row.kind = "seat_session".into();
+        store.create_thread_for_test(&row).unwrap();
+        store.mark_thread_running(active, None).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .touch_seat_lease(active, "fp:test", "surface:test", "native:test")
+            .unwrap();
+        // This lease would qualify under an expiry cutoff, but recovery may
+        // never create that claim. Only the two existing durable fences count.
+        assert!(
+            store
+                .expired_seat_leases(i64::MAX)
+                .unwrap()
+                .contains(&active.into())
+        );
+        let active_tip = store
+            .capture_thread_event_read_anchor(active, active)
+            .unwrap()
+            .unwrap();
+        let engine = Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ));
+        let events = Arc::new(crate::event_store_service::EventStoreService::new(
+            store.clone(),
+        ));
+        let lifecycle = crate::thread_lifecycle::ThreadLifecycleService::new_for_test_with_site_id(
+            store.clone(),
+            engine,
+            Arc::new(crate::kind_profiles::KindProfileRegistry::build(None)),
+            events,
+            Arc::new(crate::event_stream::ThreadEventHub::new(16)),
+            "site:startup-seat-test",
+        )
+        .unwrap();
+        let scheduler = Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap());
+        // This fresh fixture has no fire corpus. Publish its empty projection
+        // through the same invalidate/rebuild/finish lifecycle as startup.
+        scheduler.begin_fire_projection_rebuild().unwrap();
+        scheduler.finish_fire_projection_rebuild().unwrap();
+        assert!(
+            scheduler.list_specs(false, None).unwrap().is_empty(),
+            "no maintenance schedule supplies progress"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        lifecycle.set_scheduler_db(scheduler.clone(), gate.clone(), root.path().to_path_buf());
+        let route = serde_yaml::from_str(include_str!(
+            "../../../../bundles/ryeos-ui/.ai/node/routes/ui/session/seat/append.yaml"
+        ))
+        .unwrap();
+        lifecycle
+            .set_ui_seat_append_route_from_node_config(&crate::node_config::NodeConfigSnapshot {
+                external_execution: Vec::new(),
+                runtime_snapshot_production: Vec::new(),
+                guest_runtime_materialization: Vec::new(),
+                runtime_snapshot_qualification: Vec::new(),
+                bundles: Vec::new(),
+                routes: vec![route],
+                commands: Vec::new(),
+            })
+            .unwrap();
+        // Signed storage fixture, not a browser/compiler fixture. Hold the
+        // actual startup write gate: the driver must borrow it, never reacquire.
+        let exclusion = lifecycle.acquire_ui_seat_startup_exclusion().await.unwrap();
+        let startup = lifecycle
+            .recover_claimed_ui_seats_at_startup(&exclusion)
+            .unwrap();
+        assert_eq!(startup.claimed_roots, 2);
+        assert!(gate.try_read().is_err());
+        drop(exclusion);
+        // Bounded passes may need to retry signed reads/decisions. No timing
+        // assumption, scheduler firing, sleep, GC or direct writer shortcut.
+        for _ in 0..256 {
+            lifecycle.recover_claimed_ui_seats().await.unwrap();
+            if [&transfer.source, &transfer.destination]
+                .iter()
+                .all(|seat| store.get_thread(&seat.thread_id).unwrap().unwrap().status != "running")
+            {
+                break;
+            }
+        }
+        for seat in [&transfer.source, &transfer.destination] {
+            assert_ne!(
+                store.get_thread(&seat.thread_id).unwrap().unwrap().status,
+                "running"
+            );
+            let anchor = store
+                .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                .unwrap();
+            assert!(
+                anchor.is_some(),
+                "settlement/finalization must not retire signed history or run GC"
+            );
+        }
+        let proof = crate::thread_lifecycle::presentation_transfer::read_complete_fixed_history(
+            store.clone(),
+            &transfer,
+        )
+        .unwrap();
+        assert!(proof.lifecycle().retained().is_some());
+        assert!(proof.lifecycle().settlement_observed().is_some());
+        assert_eq!(
+            store
+                .capture_thread_event_read_anchor(active, active)
+                .unwrap()
+                .unwrap(),
+            active_tip
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .active_seat_lease_snapshot(active)
+                .unwrap()
+                .is_some()
+        );
+        assert!(scheduler.list_specs(false, None).unwrap().is_empty());
+    }
+
+    fn claim_transfer_fixture_seat(
+        store: &StateStore,
+        seat: &ryeos_ui_presentation_contract::transfer::TransferSeat,
+    ) {
+        {
+            let g = store.lock().unwrap();
+            assert!(
+                g.runtime_db
+                    .touch_seat_lease(&seat.thread_id, "fp:test", "directive:test", "native:test")
+                    .unwrap()
+            );
+        }
+        assert!(
+            store
+                .claim_expired_seat_lease(&seat.thread_id, i64::MAX)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn signed_transfer_locator_reaches_both_seat_identities_one_event_at_a_time() {
+        use crate::thread_lifecycle::presentation_transfer::read_signed_seat_transfer_identity_page;
+
+        let (store, transfer) =
+            transfer_settlement_fixture("T-locator-source", "T-locator-destination", Some(true));
+        for seat in [&transfer.source, &transfer.destination] {
+            store
+                .append_events(
+                    &seat.chain_root_id,
+                    &seat.thread_id,
+                    &[NewEventRecord {
+                        event_type: "thread_notice".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({"after_transfer": true}),
+                    }],
+                )
+                .unwrap();
+            let anchor = store
+                .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                .unwrap()
+                .expect("fixture seat has a signed head");
+            let mut progress = None;
+            let mut pages = 0;
+            let mut found = false;
+            loop {
+                let page = read_signed_seat_transfer_identity_page(
+                    &store,
+                    &seat.chain_root_id,
+                    &anchor,
+                    progress.as_ref(),
+                    1,
+                    1024 * 1024,
+                )
+                .unwrap();
+                pages += 1;
+                assert!(page.identities.len() <= 1);
+                if pages == 1 {
+                    assert!(page.identities.is_empty(), "newer notice is not a transfer");
+                }
+                found |= page.identities.iter().any(|identity| identity == &transfer);
+                progress = page.progress;
+                if progress.is_none() {
+                    break;
+                }
+                assert!(pages < 16, "bounded fixture locator must reach genesis");
+            }
+            assert!(pages > 1, "locator must exercise continuation");
+            assert!(found, "signed locator omitted the exact transfer identity");
+        }
+    }
+
+    #[test]
+    fn receipted_freeze_cancellation_publishes_once_and_permanently_fences_prepare() {
+        freeze_cancellation_fixture(true, false);
+    }
+
+    #[test]
+    fn pending_receipted_freeze_cancellation_never_mints_completion() {
+        freeze_cancellation_fixture(false, false);
+    }
+
+    #[test]
+    fn preparation_pair_derives_move_links_from_completed_receipted_source() {
+        freeze_cancellation_fixture(true, true);
+    }
+
+    fn freeze_cancellation_fixture(completed: bool, publish_prepare: bool) {
+        freeze_cancellation_fixture_options(completed, publish_prepare, None)
+    }
+
+    #[test]
+    fn receipted_freeze_with_inbound_requires_orphan_disposal_and_actual_cancellation() {
+        for orphan_first in [false, true] {
+            freeze_cancellation_fixture_options(true, false, Some(orphan_first));
+        }
+    }
+
+    fn freeze_cancellation_fixture_options(
+        completed: bool,
+        publish_prepare: bool,
+        orphan_first: Option<bool>,
+    ) {
+        use crate::thread_lifecycle::presentation_transfer::{
+            assemble_move_freeze_cancellation_proof, begin_fixed_seat_read, finish_fixed_seat_read,
+            read_fixed_seat_page,
+        };
+        use ryeos_ui_presentation_contract::{
+            identity::UiSeatAppendIdentity, payload_digest::seat_payload_digest, seat_control::*,
+        };
+        let (store, mut transfer) = transfer_settlement_fixture_with_stage(
+            "T-cancel-source",
+            "T-cancel-destination",
+            None,
+            TransferFixtureStage::Inbound,
+        );
+        transfer.operation_id = "44444444-4444-4444-8444-444444444444".into();
+        // Renderer-neutral commitment fixture only: the writer cannot release
+        // a Core freeze or admit this export's nested renderer semantics.
+        let root =
+            json!({"binding_attachment_id":"root","binding_generation":1,"binding_digest":"aa"});
+        let export = json!({"schema":1,"mode":"move","content":{"kind":"view_sets","active_set":null,"sets":[{
+            "handle":"empty","source_view_set_id":1,"source_owner":{"kind":"surface","presentation_id":transfer.source.presentation_id,"surface_instance_id":"surface"},"binding":root,
+            "seed":{"schema":2,"id":"empty","title":"Empty","root":null},"focused_view":null,"mounts":[]
+        }]}});
+        transfer.export_digest = seat_payload_digest(&export).unwrap();
+        let selected_inbound = orphan_first.map(|_| {
+            append_transfer_fixture_phase(
+                &store,
+                &transfer,
+                ryeos_ui_presentation_contract::transfer::TransferPhase::InboundCommitment,
+            )
+        });
+        let producer = json!({"presentation_id":transfer.source.presentation_id,"thread_id":transfer.source.thread_id,"producer_incarnation":transfer.source.producer_incarnation});
+        let bounds =
+            json!({"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536});
+        let mut body = json!({"kind":"move_freeze","request":{"schema":1,"transfer":transfer,"root_binding":root,"export":export,"instances":[],"view_sets":[1]}});
+        let id = ryeos_ui_presentation_contract::freeze_witness::preparation_identity(
+            2, &producer, 0, &root, &bounds, &body,
+        )
+        .unwrap();
+        body["request"]["operation_id"] = json!(id);
+        let preparation = json!({"schema":2,"operation_id":id,"producer":producer,"prepared_engine_seq":0,"root_binding":root,"request_bounds":bounds,"body":body});
+        let completion = json!({"operation_id":id,"result":{"schema":1,"operation_id":id,"transfer_operation_id":transfer.operation_id,"export_digest":transfer.export_digest,"source_revision":transfer.source.revision}});
+        let all_semantic = [
+            SeatAppendSemanticEvent {
+                engine_seq: 0,
+                event_type: "seat.presentation_operation.prepared",
+                payload: &preparation,
+            },
+            SeatAppendSemanticEvent {
+                engine_seq: 1,
+                event_type: "seat.presentation_operation.completed",
+                payload: &completion,
+            },
+        ];
+        let semantic = &all_semantic[..if completed { 2 } else { 1 }];
+        let next_engine_seq = semantic.len() as u64;
+        let digest = seat_payload_digest(&serde_json::to_value(semantic).unwrap()).unwrap();
+        let receipt = SeatAppendReceipt {
+            schema_version: SEAT_APPEND_RECEIPT_SCHEMA.into(),
+            producer_incarnation: transfer.source.producer_incarnation.clone(),
+            operation_id: UiSeatAppendIdentity {
+                presentation_id: transfer.source.presentation_id.clone(),
+                chain_root_id: transfer.source.chain_root_id.clone(),
+                thread_id: transfer.source.thread_id.clone(),
+                producer_incarnation: transfer.source.producer_incarnation.clone(),
+                first_engine_seq: 0,
+                last_engine_seq: next_engine_seq - 1,
+                event_count: next_engine_seq,
+                payload_digest: digest.clone(),
+            }
+            .derive_identity()
+            .unwrap(),
+            first_engine_seq: 0,
+            last_engine_seq: next_engine_seq - 1,
+            event_count: semantic.len(),
+            payload_digest: digest,
+        };
+        let mut events = vec![NewEventRecord {
+            event_type: "seat.presentation_operation.prepared".into(),
+            storage_class: "indexed".into(),
+            payload: json!({"seq":0,"payload":preparation}),
+        }];
+        if completed {
+            events.push(NewEventRecord {
+                event_type: "seat.presentation_operation.completed".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"seq":1,"payload":completion}),
+            });
+        }
+        events.push(NewEventRecord {
+            event_type: "ui_seat.append_receipt.v2".into(),
+            storage_class: "indexed".into(),
+            payload: serde_json::to_value(receipt).unwrap(),
+        });
+        store
+            .append_events(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+                &events,
+            )
+            .unwrap();
+        {
+            let g = store.lock().unwrap();
+            assert!(
+                g.runtime_db
+                    .touch_seat_lease(
+                        &transfer.source.thread_id,
+                        "fp:test",
+                        "directive:test",
+                        "native:test"
+                    )
+                    .unwrap()
+            );
+        }
+        let scan = |seat: &ryeos_ui_presentation_contract::transfer::TransferSeat| {
+            let anchor = store
+                .capture_thread_event_read_anchor(&seat.chain_root_id, &seat.thread_id)
+                .unwrap()
+                .unwrap();
+            let mut read =
+                begin_fixed_seat_read(store.clone(), anchor, seat, std::slice::from_ref(&transfer))
+                    .unwrap();
+            while !read_fixed_seat_page(&mut read, 1, 1024 * 1024).unwrap() {}
+            finish_fixed_seat_read(read).unwrap()
+        };
+        let source_cut = scan(&transfer.source);
+        let destination_cut = scan(&transfer.destination);
+        let proof =
+            assemble_move_freeze_cancellation_proof(&source_cut, &destination_cut, &transfer)
+                .unwrap();
+        assert_eq!(proof.freeze().completion.is_some(), completed);
+        let links = source_cut.preparation_freeze_links(&store, proof.source_anchor(), &transfer);
+        if completed {
+            let links = links.as_ref().unwrap();
+            assert_eq!(links.preparation, proof.freeze().preparation);
+            assert_eq!(Some(&links.completion), proof.freeze().completion.as_ref());
+        } else {
+            assert!(links.unwrap_err().to_string().contains("completion"));
+        }
+        assert!(
+            source_cut
+                .preparation_freeze_links(&test_store(), proof.source_anchor(), &transfer)
+                .is_err()
+        );
+        assert!(
+            source_cut
+                .preparation_freeze_links(&store, proof.destination_anchor(), &transfer)
+                .is_err()
+        );
+        assert!(
+            destination_cut
+                .preparation_freeze_links(&store, proof.destination_anchor(), &transfer)
+                .is_err()
+        );
+        let mut divergent = transfer.clone();
+        divergent.export_digest = "ff".repeat(32);
+        assert!(
+            source_cut
+                .preparation_freeze_links(&store, proof.source_anchor(), &divergent)
+                .is_err()
+        );
+        if let Some(orphan_first) = orphan_first {
+            use crate::thread_lifecycle::presentation_transfer::{
+                begin_terminal_transfer_clearance, finish_terminal_transfer_clearance,
+                read_terminal_transfer_clearance_page,
+            };
+            use ryeos_ui_presentation_contract::transfer::TransferPhase;
+            let clearance = || {
+                let anchor = store
+                    .capture_thread_event_read_anchor(
+                        &transfer.source.chain_root_id,
+                        &transfer.source.thread_id,
+                    )
+                    .unwrap()
+                    .unwrap();
+                let mut read = begin_terminal_transfer_clearance(
+                    store.clone(),
+                    &anchor,
+                    std::slice::from_ref(&transfer),
+                )
+                .unwrap();
+                while !read_terminal_transfer_clearance_page(&mut read).unwrap() {}
+                finish_terminal_transfer_clearance(read)
+            };
+            let orphan = || {
+                append_transfer_fixture_phase(
+                    &store,
+                    &transfer,
+                    TransferPhase::OrphanCancelled {
+                        inbound: selected_inbound.clone().unwrap(),
+                    },
+                )
+            };
+            assert!(
+                clearance().is_err(),
+                "ordinary receipted freeze cannot disappear with no source Prepared"
+            );
+            if orphan_first {
+                orphan();
+                assert!(
+                    clearance().is_err(),
+                    "destination orphan decision does not release source freeze"
+                );
+            }
+            let source = scan(&transfer.source);
+            let destination = scan(&transfer.destination);
+            let candidate =
+                assemble_move_freeze_cancellation_proof(&source, &destination, &transfer).unwrap();
+            assert_eq!(
+                candidate.destination_orphan_cancelled().is_some(),
+                orphan_first
+            );
+            let pair = UiTransferPairSeat {
+                anchor: candidate.source_anchor(),
+                owner: "fp:test",
+                surface: "directive:test",
+                client_ref: "native:test",
+                presentation_id: &transfer.source.presentation_id,
+                producer_incarnation: &transfer.source.producer_incarnation,
+                revision: transfer.source.revision,
+                next_engine_seq,
+                max_append_bytes: 65536,
+            };
+            assert!(matches!(
+                store
+                    .append_ui_move_freeze_cancellation(&candidate, &pair, || Ok(true))
+                    .unwrap(),
+                UiMoveFreezeCancellationAppendResult::Committed(_)
+            ));
+            if !orphan_first {
+                assert!(
+                    clearance().is_err(),
+                    "cancelled source still cannot erase destination inbound"
+                );
+                orphan();
+            }
+            let closed = clearance().unwrap();
+            assert_eq!(closed.negative_closures().len(), 1);
+            assert!(matches!(
+                closed.negative_closures()[0].decision.phase,
+                TransferPhase::OrphanCancelled { .. }
+            ));
+            return;
+        }
+        // The production maintenance reader must discover/retain the same
+        // receipted orphan without inventing a renderer-valid export proof.
+        {
+            use crate::thread_lifecycle::presentation_transfer::{
+                SettlementPreparation, TransferSettlementSide, begin_read, prepare_write,
+                read_page, read_signed_seat_transfer_identity_page,
+            };
+            let mut progress = None;
+            let mut located = false;
+            loop {
+                let page = read_signed_seat_transfer_identity_page(
+                    &store,
+                    &transfer.source.thread_id,
+                    proof.source_anchor(),
+                    progress.as_ref(),
+                    1,
+                    1024 * 1024,
+                )
+                .unwrap();
+                located |= page.identities.iter().any(|identity| identity == &transfer);
+                progress = page.progress;
+                if progress.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                located,
+                "ordinary freeze preparation must be a signed positive locator"
+            );
+            let mut read =
+                begin_read(store.clone(), &transfer, TransferSettlementSide::Source).unwrap();
+            while !read_page(&mut read, 1, 1024 * 1024).unwrap() {}
+            let SettlementPreparation::FreezeCancellation(candidate) = prepare_write(read).unwrap()
+            else {
+                panic!("completed orphan must reach existing cancellation publisher");
+            };
+            assert_eq!(candidate.source_anchor(), proof.source_anchor());
+            assert_eq!(candidate.destination_anchor(), proof.destination_anchor());
+        }
+        fn source<'a>(
+            anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+            transfer: &'a ryeos_ui_presentation_contract::transfer::TransferIdentity,
+            next_engine_seq: u64,
+        ) -> UiTransferPairSeat<'a> {
+            UiTransferPairSeat {
+                anchor,
+                owner: "fp:test",
+                surface: "directive:test",
+                client_ref: "native:test",
+                presentation_id: &transfer.source.presentation_id,
+                producer_incarnation: &transfer.source.producer_incarnation,
+                revision: transfer.source.revision,
+                next_engine_seq,
+                max_append_bytes: 65536,
+            }
+        }
+        let mut too_small = source(proof.source_anchor(), &transfer, next_engine_seq);
+        if publish_prepare {
+            {
+                let g = store.lock().unwrap();
+                assert!(
+                    g.runtime_db
+                        .touch_seat_lease(
+                            &transfer.destination.thread_id,
+                            "fp:test",
+                            "directive:test",
+                            "native:test",
+                        )
+                        .unwrap()
+                );
+            }
+            let destination = UiTransferPairSeat {
+                anchor: proof.destination_anchor(),
+                owner: "fp:test",
+                surface: "directive:test",
+                client_ref: "native:test",
+                presentation_id: &transfer.destination.presentation_id,
+                producer_incarnation: &transfer.destination.producer_incarnation,
+                revision: transfer.destination.revision,
+                next_engine_seq: 0,
+                max_append_bytes: 65536,
+            };
+            let pair = store
+                .append_ui_transfer_preparation_pair(
+                    &transfer,
+                    &export,
+                    &destination,
+                    &source(proof.source_anchor(), &transfer, next_engine_seq),
+                    &source_cut,
+                    &destination_cut,
+                    || Ok(true),
+                )
+                .unwrap();
+            let ryeos_state::state_db::ConditionalThreadEventPairAppendResult::Committed {
+                source: records,
+                ..
+            } = pair
+            else {
+                panic!("exact completed freeze must permit source preparation publication");
+            };
+            assert_eq!(records.value.events.len(), 1);
+            let prepared = ryeos_ui_presentation_contract::transfer::from_event_value(
+                &records.value.events[0].to_value(),
+            )
+            .unwrap();
+            let ryeos_ui_presentation_contract::transfer::TransferPhase::Prepared {
+                freeze: Some(actual),
+                ..
+            } = prepared.payload.phase
+            else {
+                panic!("MOVE preparation must retain its mandatory derived freeze links");
+            };
+            assert_eq!(actual.preparation, proof.freeze().preparation);
+            assert_eq!(Some(&actual.completion), proof.freeze().completion.as_ref());
+            assert!(
+                scan(&transfer.source)
+                    .preparation_freeze_links(
+                        &store,
+                        &store
+                            .capture_thread_event_read_anchor(
+                                &transfer.source.chain_root_id,
+                                &transfer.source.thread_id,
+                            )
+                            .unwrap()
+                            .unwrap(),
+                        &transfer
+                    )
+                    .is_err()
+            );
+            return;
+        }
+        too_small.max_append_bytes = 1;
+        assert!(
+            store
+                .append_ui_move_freeze_cancellation(&proof, &too_small, || Ok(true))
+                .is_err()
+        );
+        append_transfer_storage_fixture_event(&store, &transfer.destination, NewEventRecord {
+            event_type: ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT.into(), storage_class: "indexed".into(),
+            payload: serde_json::to_value(ryeos_ui_presentation_contract::transfer::TransferEventPayload {
+                seq: 0, operation_id: transfer.operation_id.clone(), payload: ryeos_ui_presentation_contract::transfer::TransferRecord {
+                    schema: 1, transfer: transfer.clone(), phase: ryeos_ui_presentation_contract::transfer::TransferPhase::InboundCommitment,
+                },
+            }).unwrap(),
+        });
+        assert!(
+            matches!(
+                store
+                    .append_ui_move_freeze_cancellation(
+                        &proof,
+                        &source(proof.source_anchor(), &transfer, next_engine_seq),
+                        || Ok(true)
+                    )
+                    .unwrap(),
+                UiMoveFreezeCancellationAppendResult::Conflict
+            ),
+            "destination-only publication must conflict with old paired absence proof"
+        );
+        let destination_cut = scan(&transfer.destination);
+        let proof =
+            assemble_move_freeze_cancellation_proof(&source_cut, &destination_cut, &transfer)
+                .unwrap();
+        let UiMoveFreezeCancellationAppendResult::Committed(records) = store
+            .append_ui_move_freeze_cancellation(
+                &proof,
+                &source(proof.source_anchor(), &transfer, next_engine_seq),
+                || Ok(true),
+            )
+            .unwrap()
+        else {
+            panic!("exact live source cancellation must publish");
+        };
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            store
+                .append_ui_move_freeze_cancellation(
+                    &proof,
+                    &source(proof.source_anchor(), &transfer, next_engine_seq),
+                    || Ok(true)
+                )
+                .unwrap(),
+            UiMoveFreezeCancellationAppendResult::Conflict
+        ));
+        let refreshed = scan(&transfer.source);
+        let retained =
+            assemble_move_freeze_cancellation_proof(&refreshed, &destination_cut, &transfer)
+                .unwrap();
+        assert!(
+            refreshed
+                .preparation_freeze_links(&store, retained.source_anchor(), &transfer)
+                .is_err()
+        );
+        assert!(matches!(
+            store
+                .append_ui_move_freeze_cancellation(
+                    &retained,
+                    &source(retained.source_anchor(), &transfer, next_engine_seq),
+                    || Ok(true)
+                )
+                .unwrap(),
+            UiMoveFreezeCancellationAppendResult::AlreadyRecorded(_)
+        ));
+        let destination = UiTransferPairSeat {
+            anchor: retained.destination_anchor(),
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.destination.presentation_id,
+            producer_incarnation: &transfer.destination.producer_incarnation,
+            revision: transfer.destination.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let error = store
+            .append_ui_transfer_preparation_pair(
+                &transfer,
+                &export,
+                &destination,
+                &source(retained.source_anchor(), &transfer, next_engine_seq),
+                &refreshed,
+                &destination_cut,
+                || Ok(true),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("permanently refused"));
+        let event = NewEventRecord {
+            event_type:
+                ryeos_ui_presentation_contract::move_freeze_lifecycle::MOVE_FREEZE_CANCELLED_EVENT
+                    .into(),
+            storage_class: "indexed".into(),
+            payload: json!({}),
+        };
+        assert!(
+            store
+                .append_events(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    &[event]
+                )
+                .is_err()
+        );
+        if !completed {
+            // Adversarial retained storage fixture: even a valid later
+            // producer receipt cannot turn a cancelled pending obligation
+            // into an executed/completed freeze.
+            let late = [SeatAppendSemanticEvent {
+                engine_seq: 1,
+                event_type: "seat.presentation_operation.completed",
+                payload: &completion,
+            }];
+            let digest = seat_payload_digest(&serde_json::to_value(late).unwrap()).unwrap();
+            let receipt = SeatAppendReceipt {
+                schema_version: SEAT_APPEND_RECEIPT_SCHEMA.into(),
+                producer_incarnation: transfer.source.producer_incarnation.clone(),
+                operation_id: UiSeatAppendIdentity {
+                    presentation_id: transfer.source.presentation_id.clone(),
+                    chain_root_id: transfer.source.chain_root_id.clone(),
+                    thread_id: transfer.source.thread_id.clone(),
+                    producer_incarnation: transfer.source.producer_incarnation.clone(),
+                    first_engine_seq: 1,
+                    last_engine_seq: 1,
+                    event_count: 1,
+                    payload_digest: digest.clone(),
+                }
+                .derive_identity()
+                .unwrap(),
+                first_engine_seq: 1,
+                last_engine_seq: 1,
+                event_count: 1,
+                payload_digest: digest,
+            };
+            store
+                .append_events(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    &[
+                        NewEventRecord {
+                            event_type: "seat.presentation_operation.completed".into(),
+                            storage_class: "indexed".into(),
+                            payload: json!({"seq":1,"payload":completion}),
+                        },
+                        NewEventRecord {
+                            event_type: "ui_seat.append_receipt.v2".into(),
+                            storage_class: "indexed".into(),
+                            payload: serde_json::to_value(receipt).unwrap(),
+                        },
+                    ],
+                )
+                .unwrap();
+            let anchor = store
+                .capture_thread_event_read_anchor(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                )
+                .unwrap()
+                .unwrap();
+            let mut read = begin_fixed_seat_read(
+                store.clone(),
+                anchor,
+                &transfer.source,
+                std::slice::from_ref(&transfer),
+            )
+            .unwrap();
+            while !read_fixed_seat_page(&mut read, 1, 1024 * 1024).unwrap() {}
+            assert!(
+                finish_fixed_seat_read(read).is_err(),
+                "late completion contradicts the exact retained pending cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn preparation_pair_links_exact_committed_inbound_and_refuses_stale_retry() {
+        use ryeos_state::state_db::ConditionalThreadEventPairAppendResult;
+        use ryeos_ui_presentation_contract::{
+            payload_digest::seat_payload_digest,
+            transfer::{TransferPhase, from_event_value},
+        };
+
+        let (store, mut transfer) =
+            transfer_settlement_fixture("T-pair-source", "T-pair-destination", Some(true));
+        let export = json!({"mode":"copy", "data_only":"fresh pair"});
+        transfer.operation_id = "44444444-4444-4444-8444-444444444444".into();
+        transfer.export_digest = seat_payload_digest(&export).unwrap();
+        // A child event advances the destination chain without advancing the
+        // seat root's thread sequence. Pair readback must keep these distinct.
+        let mut interleaved = thread_record("T-pair-child", &transfer.destination.chain_root_id);
+        interleaved.upstream_thread_id = Some(transfer.destination.thread_id.clone());
+        let child_events = store.create_thread_for_test(&interleaved).unwrap();
+        let child_chain_seq = child_events.last().unwrap().chain_seq as u64;
+        {
+            let g = store.lock().unwrap();
+            for seat in [&transfer.source, &transfer.destination] {
+                assert!(
+                    g.runtime_db
+                        .touch_seat_lease(
+                            &seat.thread_id,
+                            "fp:test",
+                            "directive:test",
+                            "native:test"
+                        )
+                        .unwrap()
+                );
+            }
+        }
+        let destination_anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            child_chain_seq > destination_anchor.tip().unwrap().1,
+            "fixture must separate chain and thread positions"
+        );
+        let source_anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let destination = UiTransferPairSeat {
+            anchor: &destination_anchor,
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.destination.presentation_id,
+            producer_incarnation: &transfer.destination.producer_incarnation,
+            revision: transfer.destination.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let source = UiTransferPairSeat {
+            anchor: &source_anchor,
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.source.presentation_id,
+            producer_incarnation: &transfer.source.producer_incarnation,
+            revision: transfer.source.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let mut source_read =
+            crate::thread_lifecycle::presentation_transfer::begin_fixed_seat_read(
+                store.clone(),
+                source_anchor.clone(),
+                &transfer.source,
+                std::slice::from_ref(&transfer),
+            )
+            .unwrap();
+        while !crate::thread_lifecycle::presentation_transfer::read_fixed_seat_page(
+            &mut source_read,
+            16,
+            1024 * 1024,
+        )
+        .unwrap()
+        {}
+        let source_proof =
+            crate::thread_lifecycle::presentation_transfer::finish_fixed_seat_read(source_read)
+                .unwrap();
+        let mut destination_read =
+            crate::thread_lifecycle::presentation_transfer::begin_fixed_seat_read(
+                store.clone(),
+                destination_anchor.clone(),
+                &transfer.destination,
+                std::slice::from_ref(&transfer),
+            )
+            .unwrap();
+        while !crate::thread_lifecycle::presentation_transfer::read_fixed_seat_page(
+            &mut destination_read,
+            16,
+            1024 * 1024,
+        )
+        .unwrap()
+        {}
+        let destination_proof =
+            crate::thread_lifecycle::presentation_transfer::finish_fixed_seat_read(
+                destination_read,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .read_ui_transfer_preparation_pair(&transfer, &export, &destination, &source)
+                .unwrap(),
+            UiTransferPairReadback::BothObservedUnchanged
+        );
+        let ConditionalThreadEventPairAppendResult::Committed {
+            destination: inbound,
+            source: prepared,
+        } = store
+            .append_ui_transfer_preparation_pair(
+                &transfer,
+                &export,
+                &destination,
+                &source,
+                &source_proof,
+                &destination_proof,
+                || Ok(true),
+            )
+            .unwrap()
+        else {
+            panic!("exact running seats must publish the linked pair");
+        };
+        assert_eq!(inbound.value.events.len(), 1);
+        assert_eq!(prepared.value.events.len(), 1);
+        assert!(
+            inbound.value.events[0].chain_seq > inbound.value.events[0].thread_seq,
+            "signed inbound must exercise divergent sequence domains"
+        );
+        let destination_after = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let (inbound_hash, _) = destination_after.tip().unwrap();
+        let source_wrapper = from_event_value(&prepared.value.events[0].to_value()).unwrap();
+        let TransferPhase::Prepared {
+            inbound: link,
+            freeze,
+            export: actual,
+        } = source_wrapper.payload.phase
+        else {
+            panic!("source half must be Prepared");
+        };
+        assert_eq!(actual, export);
+        assert!(freeze.is_none());
+        assert_eq!(link.event_hash, inbound_hash);
+        assert_eq!(link.chain_seq, inbound.value.events[0].chain_seq);
+        assert!(matches!(
+            store
+                .read_ui_transfer_preparation_pair(&transfer, &export, &destination, &source)
+                .unwrap(),
+            UiTransferPairReadback::LinkedPairObserved {
+                inbound: read_inbound,
+                ..
+            } if read_inbound == link
+        ));
+        assert!(matches!(
+            store
+                .append_ui_transfer_preparation_pair(
+                    &transfer,
+                    &export,
+                    &destination,
+                    &source,
+                    &source_proof,
+                    &destination_proof,
+                    || { Ok(true) }
+                )
+                .unwrap(),
+            ConditionalThreadEventPairAppendResult::Conflict
+        ));
+    }
+
+    #[test]
+    fn preparation_pair_readback_keeps_destination_only_prefix_inert() {
+        use ryeos_ui_presentation_contract::{
+            payload_digest::seat_payload_digest,
+            transfer::{
+                TRANSFER_EVENT, TRANSFER_SCHEMA, TransferEventPayload, TransferPhase,
+                TransferRecord,
+            },
+        };
+
+        let (store, mut transfer) =
+            transfer_settlement_fixture("T-partial-source", "T-partial-destination", Some(true));
+        let export = json!({"mode":"copy", "data_only":"partial pair"});
+        transfer.operation_id = "55555555-5555-4555-8555-555555555555".into();
+        transfer.export_digest = seat_payload_digest(&export).unwrap();
+        let destination_anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let source_anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let destination = UiTransferPairSeat {
+            anchor: &destination_anchor,
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.destination.presentation_id,
+            producer_incarnation: &transfer.destination.producer_incarnation,
+            revision: transfer.destination.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let source = UiTransferPairSeat {
+            anchor: &source_anchor,
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.source.presentation_id,
+            producer_incarnation: &transfer.source.producer_incarnation,
+            revision: transfer.source.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let inbound = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase: TransferPhase::InboundCommitment,
+        };
+        let committed = append_transfer_storage_fixture_event(
+            &store,
+            &transfer.destination,
+            NewEventRecord {
+                event_type: TRANSFER_EVENT.into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(TransferEventPayload {
+                    seq: 0,
+                    operation_id: transfer.operation_id.clone(),
+                    payload: inbound,
+                })
+                .unwrap(),
+            },
+        );
+        assert_eq!(
+            store
+                .read_ui_transfer_preparation_pair(&transfer, &export, &destination, &source)
+                .unwrap(),
+            UiTransferPairReadback::DestinationObservedOnly {
+                inbound: ryeos_ui_presentation_contract::transfer::TransferEvidence {
+                    event_hash: committed[0].event_hash.clone().unwrap(),
+                    chain_seq: committed[0].chain_seq as u64,
+                },
+            }
+        );
+        store
+            .append_events(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+                &[NewEventRecord {
+                    event_type: "thread_notice".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"unrelated":true}),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .read_ui_transfer_preparation_pair(&transfer, &export, &destination, &source)
+                .unwrap(),
+            UiTransferPairReadback::Ambiguous
+        );
+    }
+
+    #[test]
+    fn preparation_pair_readback_never_treats_source_only_as_retryable_absence() {
+        use ryeos_ui_presentation_contract::{
+            payload_digest::seat_payload_digest,
+            transfer::{
+                TRANSFER_EVENT, TRANSFER_SCHEMA, TransferEventPayload, TransferEvidence,
+                TransferPhase, TransferRecord,
+            },
+        };
+
+        let (store, transfer) = transfer_settlement_fixture_with_stage(
+            "T-source-only-prepared",
+            "T-source-only-destination",
+            None,
+            TransferFixtureStage::Inbound,
+        );
+        let export = json!({"mode":"copy", "data_only":"retained import"});
+        assert_eq!(
+            transfer.export_digest,
+            seat_payload_digest(&export).unwrap()
+        );
+        let destination_anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let source_anchor = store
+            .capture_thread_event_read_anchor(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+            )
+            .unwrap()
+            .unwrap();
+        let destination_tip = store
+            .read_thread_event_page(&destination_anchor, None, 1, 1024 * 1024)
+            .unwrap()
+            .events
+            .into_iter()
+            .next()
+            .expect("fixture has a signed inbound tip");
+        let destination = UiTransferPairSeat {
+            anchor: &destination_anchor,
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.destination.presentation_id,
+            producer_incarnation: &transfer.destination.producer_incarnation,
+            revision: transfer.destination.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let source = UiTransferPairSeat {
+            anchor: &source_anchor,
+            owner: "fp:test",
+            surface: "directive:test",
+            client_ref: "native:test",
+            presentation_id: &transfer.source.presentation_id,
+            producer_incarnation: &transfer.source.producer_incarnation,
+            revision: transfer.source.revision,
+            next_engine_seq: 0,
+            max_append_bytes: 65536,
+        };
+        let prepared = TransferRecord {
+            schema: TRANSFER_SCHEMA,
+            transfer: transfer.clone(),
+            phase: TransferPhase::Prepared {
+                freeze: None,
+                // The linked Inbound exists, but it was already part of the
+                // attempted destination anchor. No destination successor was
+                // observed alongside this source-only Prepared successor.
+                inbound: TransferEvidence {
+                    event_hash: destination_tip.0,
+                    chain_seq: destination_tip.1.chain_seq,
+                },
+                export: export.clone(),
+            },
+        };
+        append_transfer_storage_fixture_event(
+            &store,
+            &transfer.source,
+            NewEventRecord {
+                event_type: TRANSFER_EVENT.into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(TransferEventPayload {
+                    seq: 0,
+                    operation_id: transfer.operation_id.clone(),
+                    payload: prepared,
+                })
+                .unwrap(),
+            },
+        );
+        assert_eq!(
+            store
+                .read_ui_transfer_preparation_pair(&transfer, &export, &destination, &source)
+                .unwrap(),
+            UiTransferPairReadback::Ambiguous,
+            "a source-only Prepared event cannot prove either absence or a linked pair"
+        );
+    }
+
+    #[test]
+    fn orphan_cancellation_requires_both_claimed_seats_and_exact_signed_heads() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+
+        for (source, destination) in [
+            ("T-orphan-a-source", "T-orphan-z-destination"),
+            ("T-orphan-z-source", "T-orphan-a-destination"),
+        ] {
+            let (store, transfer) = transfer_settlement_fixture_with_stage(
+                source,
+                destination,
+                None,
+                TransferFixtureStage::Inbound,
+            );
+            if source == "T-orphan-a-source" {
+                close_transfer_fixture_seat(&store, &transfer.destination);
+            }
+            claim_transfer_fixture_seat(&store, &transfer.destination);
+            let candidate = prepare_write(read_transfer_settlement_fixture(
+                &store,
+                &transfer,
+                TransferSettlementSide::Destination,
+            ))
+            .unwrap();
+            let SettlementPreparation::ReapingCandidate(reaping) = &candidate else {
+                panic!("destination-only inbound must use the v2 lifecycle fence");
+            };
+            assert!(matches!(
+                reaping.record().phase,
+                TransferPhase::OrphanCancelled { .. }
+            ));
+            let bound = crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536);
+            assert!(matches!(
+                store
+                    .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                    .unwrap(),
+                RunningConditionalEventAppendResult::Conflict
+            ));
+            claim_transfer_fixture_seat(&store, &transfer.source);
+            let RunningConditionalEventAppendResult::Committed(records) = store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                .unwrap()
+            else {
+                panic!("both exact claimed seats must permit orphan cancellation");
+            };
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].payload["payload"]["phase"]["kind"],
+                "orphan_cancelled"
+            );
+            assert_eq!(
+                records[0].payload["fence"]["kind"],
+                if source == "T-orphan-a-source" {
+                    "closed_control"
+                } else {
+                    "lease_reaping"
+                }
+            );
+            assert!(matches!(
+                store
+                    .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                    .unwrap(),
+                RunningConditionalEventAppendResult::Conflict
+            ));
+        }
+    }
+
+    #[test]
+    fn orphan_cancellation_refuses_late_source_preparation() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+
+        let (store, transfer) = transfer_settlement_fixture_with_stage(
+            "T-orphan-late-source",
+            "T-orphan-late-destination",
+            None,
+            TransferFixtureStage::Inbound,
+        );
+        claim_transfer_fixture_seat(&store, &transfer.destination);
+        claim_transfer_fixture_seat(&store, &transfer.source);
+        let candidate = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Destination,
+        ))
+        .unwrap();
+        let before = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap();
+        let inbound_anchor = before.as_ref().expect("fixture has destination head");
+        let inbound_page = store
+            .read_thread_event_page(inbound_anchor, None, 128, 2 * 1024 * 1024)
+            .unwrap();
+        let inbound_evidence = inbound_page
+            .events
+            .iter()
+            .find(|(_, event)| {
+                event.event_type == ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT
+            })
+            .expect("fixture has signed inbound");
+        let inbound_evidence = ryeos_ui_presentation_contract::transfer::TransferEvidence {
+            event_hash: inbound_evidence.0.clone(),
+            chain_seq: inbound_evidence.1.chain_seq,
+        };
+        append_transfer_fixture_phase(
+            &store,
+            &transfer,
+            TransferPhase::Prepared {
+                inbound: inbound_evidence,
+                freeze: None,
+                export: json!({"mode":"copy", "data_only": "retained import"}),
+            },
+        );
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(
+                    &candidate,
+                    crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536),
+                    |_| Ok(0),
+                )
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        assert_eq!(
+            before,
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn reaping_v2_transfer_writer_commits_exact_destination_then_source() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT;
+
+        for (source, destination, committed) in [
+            ("T-v2-a-source", "T-v2-z-destination", true),
+            ("T-v2-z-source", "T-v2-a-destination", true),
+            ("T-v2-release-a-source", "T-v2-release-z-destination", false),
+            ("T-v2-release-z-source", "T-v2-release-a-destination", false),
+        ] {
+            let (store, transfer) =
+                transfer_settlement_fixture(source, destination, Some(committed));
+            for seat in [&transfer.source, &transfer.destination] {
+                close_transfer_fixture_seat(&store, seat);
+                claim_transfer_fixture_seat(&store, seat);
+            }
+            let bound = crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536);
+            for side in [
+                TransferSettlementSide::Destination,
+                TransferSettlementSide::Source,
+            ] {
+                let candidate =
+                    prepare_write(read_transfer_settlement_fixture(&store, &transfer, side))
+                        .unwrap();
+                let SettlementPreparation::Candidate(closed) = &candidate else {
+                    panic!("closed claimed seat must produce a v2 settlement candidate");
+                };
+                assert!(matches!(
+                    (side, committed, &closed.payload().payload.phase),
+                    (
+                        TransferSettlementSide::Destination,
+                        true,
+                        ryeos_ui_presentation_contract::transfer::TransferPhase::Retained { .. }
+                    ) | (
+                        TransferSettlementSide::Destination,
+                        false,
+                        ryeos_ui_presentation_contract::transfer::TransferPhase::Released { .. }
+                    ) | (
+                        TransferSettlementSide::Source,
+                        _,
+                        ryeos_ui_presentation_contract::transfer::TransferPhase::SettlementObserved { .. }
+                    )
+                ));
+                let RunningConditionalEventAppendResult::Committed(records) = store
+                    .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                    .unwrap()
+                else {
+                    panic!("exact claimed transfer settlement must commit");
+                };
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].event_type, TRANSFER_LIFECYCLE_V2_EVENT);
+                assert_eq!(records[0].payload["writer"], "node_lifecycle");
+                assert!(
+                    records[0].payload["fence"]["reaping_at_ms"]
+                        .as_i64()
+                        .is_some()
+                );
+                assert!(matches!(
+                    store
+                        .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                        .unwrap(),
+                    RunningConditionalEventAppendResult::Conflict
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn reaping_v2_transfer_writer_refuses_changed_counterpart_head() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        let (store, transfer) =
+            transfer_settlement_fixture("T-v2-head-source", "T-v2-head-destination", Some(true));
+        close_transfer_fixture_seat(&store, &transfer.destination);
+        claim_transfer_fixture_seat(&store, &transfer.destination);
+        let candidate = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Destination,
+        ))
+        .unwrap();
+        let before = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap();
+        store
+            .append_events(
+                &transfer.source.chain_root_id,
+                &transfer.source.thread_id,
+                &[NewEventRecord {
+                    event_type: "thread_notice".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"concurrent": true}),
+                }],
+            )
+            .unwrap();
+        let outcome = store
+            .append_reaping_ui_transfer_settlement_v2(
+                &candidate,
+                crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536),
+                |_| Ok(0),
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        assert_eq!(
+            before,
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn reaping_v2_transfer_writer_uses_lease_fence_without_browser_close() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT;
+
+        let (store, transfer) = transfer_settlement_fixture(
+            "T-v2-active-source",
+            "T-v2-active-destination",
+            Some(true),
+        );
+        claim_transfer_fixture_seat(&store, &transfer.destination);
+        let candidate = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Destination,
+        ))
+        .unwrap();
+        assert!(matches!(
+            candidate,
+            SettlementPreparation::ReapingCandidate(_)
+        ));
+        let bound = crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536);
+        let before = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(1))
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        assert_eq!(
+            before,
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id,
+                )
+                .unwrap()
+        );
+        let RunningConditionalEventAppendResult::Committed(records) = store
+            .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+            .unwrap()
+        else {
+            panic!("claimed active seat must settle as lease reaping, not browser Close");
+        };
+        assert_eq!(records[0].event_type, TRANSFER_LIFECYCLE_V2_EVENT);
+        assert_eq!(records[0].payload["fence"]["kind"], "lease_reaping");
+        assert!(
+            records[0].payload["fence"]["reaping_at_ms"]
+                .as_i64()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn closed_transfer_candidates_remain_sealed_in_both_chain_lock_orders() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+        for (source, destination) in [
+            ("T-a-source", "T-z-destination"),
+            ("T-z-source", "T-a-destination"),
+        ] {
+            let (store, transfer) = transfer_settlement_fixture(source, destination, Some(true));
+            close_transfer_fixture_seat(&store, &transfer.source);
+            close_transfer_fixture_seat(&store, &transfer.destination);
+            for side in [
+                TransferSettlementSide::Destination,
+                TransferSettlementSide::Source,
+            ] {
+                let read = read_transfer_settlement_fixture(&store, &transfer, side);
+                let SettlementPreparation::Candidate(candidate) = prepare_write(read).unwrap()
+                else {
+                    panic!("expected consistent Closed-shaped candidate")
+                };
+                let expected_phase = &candidate.payload().payload.phase;
+                assert!(matches!(
+                    (side, expected_phase),
+                    (
+                        TransferSettlementSide::Destination,
+                        TransferPhase::Retained { .. }
+                    ) | (
+                        TransferSettlementSide::Source,
+                        TransferPhase::SettlementObserved { .. }
+                    )
+                ));
+                let owner = candidate.payload().payload.event_owner();
+                let before = store
+                    .capture_thread_event_read_anchor(&owner.chain_root_id, &owner.thread_id)
+                    .unwrap();
+                assert!(
+                    store
+                        .append_closed_ui_transfer_settlement(&candidate)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("writer is sealed")
+                );
+                assert_eq!(
+                    before,
+                    store
+                        .capture_thread_event_read_anchor(&owner.chain_root_id, &owner.thread_id)
+                        .unwrap()
+                );
+                // Install retained bytes only as a storage fixture so the next
+                // read can check the exact terminal/observed link. This is not
+                // lifecycle admission or an invocation of the sealed backend.
+                let records = append_transfer_storage_fixture_event(&store, owner, NewEventRecord {
+                    event_type: ryeos_ui_presentation_contract::transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT.into(),
+                    storage_class: "indexed".into(),
+                    payload: serde_json::to_value(candidate.payload()).unwrap(),
+                });
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].payload["writer"], "node_lifecycle");
+                assert!(records[0].payload.get("seq").is_none());
+                assert!(
+                    store
+                        .append_closed_ui_transfer_settlement(&candidate)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("writer is sealed")
+                );
+                let retry =
+                    prepare_write(read_transfer_settlement_fixture(&store, &transfer, side))
+                        .unwrap();
+                assert!(matches!(
+                    retry,
+                    SettlementPreparation::Deferred(TransferSettlementPlan::AlreadyRecorded(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn closed_transfer_release_is_only_a_candidate_and_abort_requires_reaping_claim() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+        let (store, transfer) =
+            transfer_settlement_fixture("T-release-source", "T-release-destination", Some(false));
+        close_transfer_fixture_seat(&store, &transfer.destination);
+        let SettlementPreparation::Candidate(candidate) =
+            prepare_write(read_transfer_settlement_fixture(
+                &store,
+                &transfer,
+                TransferSettlementSide::Destination,
+            ))
+            .unwrap()
+        else {
+            panic!("expected release candidate")
+        };
+        assert!(matches!(
+            candidate.payload().payload.phase,
+            TransferPhase::Released { .. }
+        ));
+        assert!(
+            store
+                .append_closed_ui_transfer_settlement(&candidate)
+                .unwrap_err()
+                .to_string()
+                .contains("writer is sealed")
+        );
+
+        let (store, transfer) =
+            transfer_settlement_fixture("T-abort-source", "T-abort-destination", None);
+        close_transfer_fixture_seat(&store, &transfer.source);
+        let candidate = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Source,
+        ))
+        .unwrap();
+        let SettlementPreparation::ReapingCandidate(reaping) = &candidate else {
+            panic!("source Abort requires the v2 claimed-seat writer");
+        };
+        assert!(matches!(
+            reaping.record().phase,
+            TransferPhase::Aborted { .. }
+        ));
+        let bound = crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536);
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        claim_transfer_fixture_seat(&store, &transfer.source);
+        store
+            .append_events(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+                &[NewEventRecord {
+                    event_type: "thread_notice".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({"unrelated_destination_edit": true}),
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        let candidate = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Source,
+        ))
+        .unwrap();
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(1))
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+        let RunningConditionalEventAppendResult::Committed(records) = store
+            .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+            .unwrap()
+        else {
+            panic!("claimed source Abort must publish under both exact heads");
+        };
+        assert_eq!(records[0].payload["payload"]["phase"]["kind"], "aborted");
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                .unwrap(),
+            RunningConditionalEventAppendResult::Conflict
+        ));
+
+        // This fixture has a retained Accepted before source Abort. The
+        // decision must not discharge the destination reservation: reaping
+        // the destination must select and publish Released on its own seat.
+        close_transfer_fixture_seat(&store, &transfer.destination);
+        claim_transfer_fixture_seat(&store, &transfer.destination);
+        let release = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Destination,
+        ))
+        .unwrap();
+        let release_phase = match &release {
+            SettlementPreparation::Candidate(candidate) => &candidate.payload().payload.phase,
+            SettlementPreparation::ReapingCandidate(candidate) => &candidate.record().phase,
+            SettlementPreparation::FreezeCancellation(_) | SettlementPreparation::Deferred(_) => {
+                panic!("accepted source Abort must retain destination Release")
+            }
+        };
+        assert!(matches!(release_phase, TransferPhase::Released { .. }));
+        let RunningConditionalEventAppendResult::Committed(released) = store
+            .append_reaping_ui_transfer_settlement_v2(&release, bound, |_| Ok(0))
+            .unwrap()
+        else {
+            panic!("claimed destination must publish Release after source Abort");
+        };
+        assert_eq!(released[0].payload["payload"]["phase"]["kind"], "released");
+    }
+
+    #[test]
+    fn prepared_only_source_abort_keeps_no_reservation_discharge_sealed() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::transfer::TransferPhase;
+
+        let (store, transfer) = transfer_settlement_fixture_with_stage(
+            "T-prepared-abort-source",
+            "T-prepared-abort-destination",
+            None,
+            TransferFixtureStage::Prepared,
+        );
+        close_transfer_fixture_seat(&store, &transfer.source);
+        claim_transfer_fixture_seat(&store, &transfer.source);
+        let candidate = prepare_write(read_transfer_settlement_fixture(
+            &store,
+            &transfer,
+            TransferSettlementSide::Source,
+        ))
+        .unwrap();
+        let SettlementPreparation::ReapingCandidate(abort) = &candidate else {
+            panic!("prepared-only source decision needs claimed-seat Abort");
+        };
+        assert!(matches!(
+            abort.record().phase,
+            TransferPhase::Aborted { .. }
+        ));
+        let bound = crate::thread_lifecycle::AdmittedUiSeatAppendBound::for_test(65536);
+        assert!(matches!(
+            store
+                .append_reaping_ui_transfer_settlement_v2(&candidate, bound, |_| Ok(0))
+                .unwrap(),
+            RunningConditionalEventAppendResult::Committed(_)
+        ));
+        for side in [
+            TransferSettlementSide::Source,
+            TransferSettlementSide::Destination,
+        ] {
+            assert!(matches!(
+                prepare_write(read_transfer_settlement_fixture(&store, &transfer, side)).unwrap(),
+                SettlementPreparation::Deferred(TransferSettlementPlan::NoAcceptedReservation {
+                    source_abort: Some(_),
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn closed_transfer_reader_refuses_live_or_partial_history() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        let (store, transfer) =
+            transfer_settlement_fixture("T-fenced-source", "T-fenced-destination", Some(true));
+        assert!(
+            prepare_write(read_transfer_settlement_fixture(
+                &store,
+                &transfer,
+                TransferSettlementSide::Destination
+            ))
+            .is_err()
+        );
+        close_transfer_fixture_seat(&store, &transfer.destination);
+        let partial = begin_read(
+            store.clone(),
+            &transfer,
+            TransferSettlementSide::Destination,
+        )
+        .unwrap();
+        assert!(prepare_write(partial).is_err());
+    }
+
+    #[test]
+    fn transfer_candidate_signed_heads_do_not_certify_runtime_admission() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        let (store, transfer) =
+            transfer_settlement_fixture("T-runtime-source", "T-runtime-destination", Some(true));
+        close_transfer_fixture_seat(&store, &transfer.destination);
+        let SettlementPreparation::Candidate(candidate) =
+            prepare_write(read_transfer_settlement_fixture(
+                &store,
+                &transfer,
+                TransferSettlementSide::Destination,
+            ))
+            .unwrap()
+        else {
+            panic!("expected historical candidate")
+        };
+        let before = store
+            .capture_thread_event_read_anchor(
+                &transfer.destination.chain_root_id,
+                &transfer.destination.thread_id,
+            )
+            .unwrap();
+        store
+            .seed_launch_metadata(
+                &transfer.destination.thread_id,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .get_launch_metadata(&transfer.destination.thread_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            before,
+            store
+                .capture_thread_event_read_anchor(
+                    &transfer.destination.chain_root_id,
+                    &transfer.destination.thread_id,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .append_closed_ui_transfer_settlement(&candidate)
+                .unwrap_err()
+                .to_string()
+                .contains("writer is sealed")
+        );
+    }
+
+    #[test]
+    fn closed_shape_with_wrong_predecessor_never_mints_writer_admission() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        use ryeos_ui_presentation_contract::seat_control::*;
+        let (store, transfer) =
+            transfer_settlement_fixture("T-unproved-source", "T-unproved-destination", Some(true));
+        let seat = &transfer.destination;
+        let mut request = UiSeatControlRequest::Close {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: seat.presentation_id.clone(),
+            thread_id: seat.thread_id.clone(),
+            chain_root_id: seat.chain_root_id.clone(),
+            predecessor: UiSeatControlPredecessor::Control {
+                event_hash: "fe".repeat(32),
+            },
+            intent_nonce: "55555555-5555-4555-8555-555555555555".into(),
+            producer_incarnation: seat.producer_incarnation.clone(),
+        };
+        request.assign_identity().unwrap();
+        let control = UiSeatProducer {
+            schema_version: SEAT_PRODUCER_SCHEMA.into(),
+            operation_id: request.operation_id().into(),
+            request,
+            claim: None,
+            predecessor: Some(seat.producer_incarnation.clone()),
+            producer_incarnation: seat.producer_incarnation.clone(),
+            state: UiSeatProducerState::Closed,
+            next_engine_seq: 999,
+        };
+        control.validate().unwrap();
+        store
+            .append_events(
+                &seat.chain_root_id,
+                &seat.thread_id,
+                &[NewEventRecord {
+                    event_type: SEAT_PRODUCER_EVENT.into(),
+                    storage_class: "indexed".into(),
+                    payload: serde_json::to_value(control).unwrap(),
+                }],
+            )
+            .unwrap();
+        // A signed object with an impossible predecessor/frontier must fail
+        // complete-history reconstruction before it can become a candidate.
+        let mut read = begin_read(store, &transfer, TransferSettlementSide::Destination).unwrap();
+        let error = loop {
+            match read_page(&mut read, 2, 1024 * 1024) {
+                Ok(false) => continue,
+                Ok(true) => panic!("invalid control became a complete settlement history"),
+                Err(error) => break error,
+            }
+        };
+        assert!(error.to_string().contains("control") || error.to_string().contains("frontier"));
+        assert!(prepare_write(read).is_err());
+    }
+
+    // Exercise only the generic signed-head serialization primitive with an
+    // unrelated notice. It deliberately supplies no lifecycle fence/authority.
+    fn append_two_anchor_fixture_notice(
+        store: &StateStore,
+        candidate: &crate::thread_lifecycle::presentation_transfer::ClosedTransferSettlementCandidate,
+    ) -> ConditionalEventAppendResult {
+        let owner = candidate.payload().payload.event_owner();
+        let permit = store.acquire_write_permit().unwrap();
+        let g = store.lock().unwrap();
+        append_events_locked_inner_with_counterpart(
+            &g,
+            Some(permit.cas_guard()),
+            &owner.chain_root_id,
+            &owner.thread_id,
+            &[NewEventRecord {
+                event_type: "thread_notice".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"storage_fixture_only": true}),
+            }],
+            Some(candidate.owner_anchor()),
+            Some(candidate.counterpart_anchor()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn two_anchor_storage_append_checks_both_heads_and_seat_finalization_fence() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        for (source, destination) in [
+            ("T-a-source", "T-z-destination"),
+            ("T-z-source", "T-a-destination"),
+        ] {
+            let (store, transfer) = transfer_settlement_fixture(source, destination, Some(true));
+            close_transfer_fixture_seat(&store, &transfer.destination);
+            let SettlementPreparation::Candidate(candidate) =
+                prepare_write(read_transfer_settlement_fixture(
+                    &store,
+                    &transfer,
+                    TransferSettlementSide::Destination,
+                ))
+                .unwrap()
+            else {
+                panic!("expected candidate")
+            };
+            let ConditionalEventAppendResult::Committed(records) =
+                append_two_anchor_fixture_notice(&store, &candidate)
+            else {
+                panic!("expected exact two-anchor storage append")
+            };
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].event_type, "thread_notice");
+            assert!(matches!(
+                append_two_anchor_fixture_notice(&store, &candidate),
+                ConditionalEventAppendResult::Conflict
+            ));
+            let SettlementPreparation::Candidate(candidate) =
+                prepare_write(read_transfer_settlement_fixture(
+                    &store,
+                    &transfer,
+                    TransferSettlementSide::Destination,
+                ))
+                .unwrap()
+            else {
+                panic!("expected refreshed candidate")
+            };
+            store
+                .append_events(
+                    &transfer.source.chain_root_id,
+                    &transfer.source.thread_id,
+                    &[NewEventRecord {
+                        event_type: "thread_notice".into(),
+                        storage_class: "indexed".into(),
+                        payload: json!({}),
+                    }],
+                )
+                .unwrap();
+            assert!(matches!(
+                append_two_anchor_fixture_notice(&store, &candidate),
+                ConditionalEventAppendResult::Conflict
+            ));
+            let refused = store
+                .finalize_thread(
+                    &transfer.destination.thread_id,
+                    &FinalizeThreadRecord {
+                        status: "completed".into(),
+                        outcome_code: None,
+                        result_json: None,
+                        error_json: None,
+                        artifacts: vec![],
+                        final_cost: None,
+                        managed_envelope: None,
+                        result_project_snapshot_hash: None,
+                        result_workspace_output_capture_hash: None,
+                    },
+                )
+                .expect_err("ordinary finalization cannot retire a signed seat");
+            assert!(refused.to_string().contains("lifecycle transfer clearance"));
+            // The refusal publishes no terminal head. Refreshing the two
+            // anchors after the unrelated source notice still permits an
+            // ordinary storage event; lifecycle settlement remains sealed.
+            let SettlementPreparation::Candidate(candidate) =
+                prepare_write(read_transfer_settlement_fixture(
+                    &store,
+                    &transfer,
+                    TransferSettlementSide::Destination,
+                ))
+                .unwrap()
+            else {
+                panic!("expected historical candidate")
+            };
+            assert!(matches!(
+                append_two_anchor_fixture_notice(&store, &candidate),
+                ConditionalEventAppendResult::Committed(_)
+            ));
+            assert!(
+                store
+                    .append_closed_ui_transfer_settlement(&candidate)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("writer is sealed")
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_settlement_missing_counterpart_is_not_absence_release() {
+        use crate::thread_lifecycle::presentation_transfer::*;
+        let (store, mut transfer) =
+            transfer_settlement_fixture("T-present-source", "T-present-destination", Some(true));
+        transfer.source.thread_id = "T-never-a-transfer-source".into();
+        transfer.source.chain_root_id = transfer.source.thread_id.clone();
+        assert!(begin_read(store, &transfer, TransferSettlementSide::Destination).is_err());
     }
 
     fn launch_attempt_audit_events() -> Vec<NewEventRecord> {
@@ -26405,7 +35626,7 @@ mod tests {
         use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
         let root = tempfile::tempdir().unwrap();
         let key = root.path().join("node-key.pem");
-        let identity = crate::identity::NodeIdentity::create(&key).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap();
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
@@ -27391,8 +36612,9 @@ mod tests {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
         let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(

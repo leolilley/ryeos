@@ -172,7 +172,7 @@ pub mod test_support {
 
         ryeos_app::external_placement::test_support::install_test_placement_vault(state);
         let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
         let scopes = vec!["*".to_owned()];
         let site = state.threads.site_id().to_owned();
         let context = crate::executor::ExecutionContext {
@@ -401,7 +401,7 @@ pub mod test_support {
             .context("fixture selected products omit the admitted external runtime")?
             .manifest_hash
             .clone();
-        let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+        let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,
             &state.identity,
@@ -495,8 +495,8 @@ pub mod test_support {
                 subject,
             )?;
         let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-        let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,
             &state.identity,

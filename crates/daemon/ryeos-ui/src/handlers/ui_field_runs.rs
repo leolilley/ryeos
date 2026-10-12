@@ -11,12 +11,16 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::GraphRunListIdentity;
+use ryeos_app::state_store::AuthoritativeThreadSubject;
 use ryeos_app::thread_lifecycle::{ThreadListFilter, ThreadSort};
 use ryeos_executor::executor::ServiceAvailability;
 
 use super::ui_field::{
     FieldEvidenceRef, FieldFactEntity, FieldFactRelation, FieldFactSubject, FieldFactsBuilder,
+};
+use super::ui_threads::{
+    MAX_THREAD_LIST_CANDIDATES_SCANNED, collect_authorized_thread_items,
+    fold_inspection_facet_event, listed_thread_matches_signed_subject,
 };
 
 const SERVICE_REF: &str = "service:ui/ryeos-ui/field/runs";
@@ -34,6 +38,26 @@ const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
 /// emitted per response. Runs beyond this keep their summaries; only the
 /// anchor closure is truncated, and the truncation is declared.
 const MAX_RUN_DEFINITION_VERSIONS: usize = 32;
+const RUN_EVIDENCE_PAGE_EVENTS: u64 = 64;
+const RUN_EVIDENCE_PAGE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_RUN_EVIDENCE_PAGES: usize = 8;
+
+/// UI-only identity reconstructed from a signed graph event and the admitted
+/// program capsule. It is never supplied by the operational SQL projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphRunListIdentity {
+    definition_ref: String,
+    effective_definition_digest: String,
+    graph_run_id: String,
+    node: String,
+    step: u32,
+}
+
+struct VerifiedRunVersionCoordinate {
+    thread_id: String,
+    chain_root_id: String,
+    capsule_hash: String,
+}
 
 fn project_subject_identity(project_root: Option<&std::path::Path>) -> String {
     project_root
@@ -75,6 +99,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let project_root = caller.project_query_identity()?;
     let filter = ThreadListFilter {
+        // A mutable SQL scope cannot be a negative authorization proof: it
+        // could omit a signed in-scope run before the signed reader sees it.
+        // Discover a bounded global candidate slice and authorize each exact
+        // signed subject below. Exhaustion is explicitly reported.
         principal: None,
         status: None,
         kind: None,
@@ -82,27 +110,54 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         facet: None,
         active_only: false,
         exclude_item_prefixes: Vec::new(),
-        project_root: project_root.clone(),
+        project_root: None,
     };
-    let rows = state
-        .threads
-        .list_thread_views_query(MAX_SCAN, &filter, ThreadSort::Newest)?;
-    let thread_ids = rows
-        .iter()
-        .map(|row| row.item.thread_id.clone())
-        .collect::<Vec<_>>();
-    let graph_runs = state.state_store.graph_run_list_identities(&thread_ids)?;
-
+    // The projection is a bounded locator, not authority. Check each raw
+    // candidate's signed subject before display enrichment or graph/facet
+    // lookups; foreign first pages must not crowd out admitted project runs.
+    let (authorized, scanned) = collect_authorized_thread_items(
+        MAX_SCAN,
+        ThreadSort::Newest,
+        |page_limit, cursor| {
+            state.state_store.list_threads_candidate_page(
+                page_limit,
+                &filter,
+                ThreadSort::Newest,
+                cursor,
+            )
+        },
+        |item| {
+            let signed = match crate::thread_authorization::authorize_exact_thread_subjects(
+                &ctx,
+                &state,
+                &caller,
+                &[&item.thread_id],
+            ) {
+                Ok(mut subjects) => subjects.pop().expect("one signed subject requested"),
+                Err(HandlerError::NotFound) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if !listed_thread_matches_signed_subject(item, &signed) {
+                return Err(HandlerError::NotFound.into());
+            }
+            Ok(true)
+        },
+    )?;
+    let rows = state.threads.display_verified_thread_list_items(authorized);
+    let authorized_row_count = rows.len();
     let project_subject = project_subject_identity(project_root.as_deref());
-    let subject = if let Some(definition_ref) = request
-        .definition_ref
+    let subject = if let Some(item_or_definition_ref) = request
+        .item_ref
         .as_ref()
-        .or(request.item_ref.as_ref())
+        .or(request.definition_ref.as_ref())
     {
         FieldFactSubject {
             kind: "item".to_string(),
-            id: definition_ref.clone(),
-            definition_ref: Some(definition_ref.clone()),
+            id: item_or_definition_ref.clone(),
+            // An item filter is not a definition filter. When both are
+            // supplied, preserve the item as the primary subject and retain
+            // the independent definition constraint in its own field.
+            definition_ref: request.definition_ref.clone(),
             effective_definition_digest: request.effective_definition_digest.clone(),
         }
     } else {
@@ -110,31 +165,84 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             kind: "project".to_string(),
             id: project_subject,
             definition_ref: None,
-            effective_definition_digest: None,
+            // A digest-only runs query remains under the admitted project,
+            // but its filter must not disappear from its published subject.
+            effective_definition_digest: request.effective_definition_digest.clone(),
         }
     };
     let mut builder = FieldFactsBuilder::new("runs", SERVICE_REF, subject);
     let mut matched = 0usize;
-    let mut definition_versions: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut definition_versions: BTreeMap<(String, String), VerifiedRunVersionCoordinate> =
+        BTreeMap::new();
     let mut definition_versions_truncated = false;
-    for row in rows.iter().filter(|row| {
-        run_matches(
-            row,
-            graph_runs.get(&row.item.thread_id),
-            request.item_ref.as_deref(),
+    let mut facet_evidence_incomplete = false;
+    let mut graph_identity_incomplete = false;
+    for mut row in rows {
+        if request
+            .item_ref
+            .as_deref()
+            .is_some_and(|expected| row.item.item_ref != expected)
+        {
+            continue;
+        }
+        // The minimal signed-first display row intentionally has no SQL
+        // facets. Reconstruct this row's facet map from a complete fixed
+        // signed history before filtering or publishing any facet value.
+        let signed = crate::thread_authorization::authorize_exact_thread_subjects(
+            &ctx,
+            &state,
+            &caller,
+            &[&row.item.thread_id],
+        )?
+        .pop()
+        .expect("one signed subject requested");
+        if !listed_thread_matches_signed_subject(&row.item, &signed) {
+            return Err(HandlerError::NotFound.into());
+        }
+        let evidence = read_signed_run_evidence(&state, &signed)?;
+        let graph_run = match evidence.graph_identity {
+            Some(identity) => identity,
+            None => {
+                graph_identity_incomplete = true;
+                if request.definition_ref.is_some() || request.effective_definition_digest.is_some()
+                {
+                    continue;
+                }
+                None
+            }
+        };
+        if !run_matches(
+            graph_run.as_ref(),
             request.definition_ref.as_deref(),
             request.effective_definition_digest.as_deref(),
-            &facets,
-        )
-    }) {
+        ) {
+            continue;
+        }
+        match evidence.facets {
+            Some(signed_facets) => row.facets = signed_facets,
+            None => {
+                facet_evidence_incomplete = true;
+                if !facets.is_empty() {
+                    continue;
+                }
+                // An unfiltered summary may remain visible, but never
+                // manufacture a projected facet from an incomplete fold.
+                row.facets.clear();
+            }
+        }
+        if !facets
+            .iter()
+            .all(|(key, expected)| row.facets.get(key) == Some(expected))
+        {
+            continue;
+        }
         matched += 1;
         if matched > limit {
             builder.mark_truncated();
-            continue;
+            break;
         }
-        let graph_run = graph_runs.get(&row.item.thread_id);
-        add_run_summary(&mut builder, row, graph_run)?;
-        if let Some(identity) = graph_run {
+        add_run_summary(&mut builder, &row, graph_run.as_ref())?;
+        if let Some(identity) = graph_run.as_ref() {
             let key = (
                 identity.definition_ref.clone(),
                 identity.effective_definition_digest.clone(),
@@ -142,11 +250,34 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             if definition_versions.contains_key(&key) {
                 // keep the first representative thread
             } else if definition_versions.len() < MAX_RUN_DEFINITION_VERSIONS {
-                definition_versions.insert(key, row.item.thread_id.clone());
+                definition_versions.insert(
+                    key,
+                    VerifiedRunVersionCoordinate {
+                        thread_id: row.item.thread_id.clone(),
+                        chain_root_id: signed.chain_root_id.clone(),
+                        capsule_hash: signed.admitted_launch_capsule_hash.clone().ok_or_else(
+                            || anyhow::anyhow!("signed graph run lacks admitted capsule hash"),
+                        )?,
+                    },
+                );
             } else {
                 definition_versions_truncated = true;
             }
         }
+    }
+    if facet_evidence_incomplete {
+        builder.mark_truncated();
+        builder.warn(
+            "facet_evidence_incomplete",
+            "some run facets could not be reconstructed from a complete signed history",
+        );
+    }
+    if graph_identity_incomplete {
+        builder.mark_truncated();
+        builder.warn(
+            "graph_identity_incomplete",
+            "some graph-run identities could not be established from admitted program and signed step history",
+        );
     }
     if definition_versions_truncated {
         builder.mark_truncated();
@@ -159,11 +290,13 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         );
     }
     add_run_definition_versions(&mut builder, &state, &definition_versions)?;
-    if rows.len() == MAX_SCAN {
+    if authorized_row_count == MAX_SCAN || scanned == MAX_THREAD_LIST_CANDIDATES_SCANNED {
         builder.mark_truncated();
         builder.warn(
             "scan_limit",
-            format!("run source scanned the bounded maximum of {MAX_SCAN} threads"),
+            format!(
+                "run source reached its bounded authorized-row or locator-candidate scan limit ({MAX_SCAN}/{MAX_THREAD_LIST_CANDIDATES_SCANNED})"
+            ),
         );
     }
     let document = builder.finish()?;
@@ -171,16 +304,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
 }
 
 fn run_matches(
-    row: &ryeos_app::thread_lifecycle::ThreadListView,
     graph_run: Option<&GraphRunListIdentity>,
-    item_ref: Option<&str>,
     definition_ref: Option<&str>,
     effective_definition_digest: Option<&str>,
-    facets: &BTreeMap<String, String>,
 ) -> bool {
-    if item_ref.is_some_and(|expected| row.item.item_ref != expected) {
-        return false;
-    }
     if definition_ref.is_some_and(|expected| {
         graph_run.is_none_or(|identity| identity.definition_ref != expected)
     }) {
@@ -191,9 +318,129 @@ fn run_matches(
     }) {
         return false;
     }
-    facets
-        .iter()
-        .all(|(key, expected)| row.facets.get(key) == Some(expected))
+    true
+}
+
+struct SignedRunEvidence {
+    /// Outer None: the bounded walk cannot prove graph-step presence or
+    /// absence. Some(None): complete history proves no graph step occurred.
+    graph_identity: Option<Option<GraphRunListIdentity>>,
+    /// Only a complete fixed-anchor walk proves the facet map, including an
+    /// empty one. A malformed signed facet also leaves this unavailable.
+    facets: Option<BTreeMap<String, String>>,
+}
+
+/// One fixed signed anchor gives graph-step and facet facts the same event
+/// cut. The first newest graph step supplies the current run coordinate;
+/// the verified admitted capsule supplies its definition identity. Facets
+/// require the complete walk. Budget exhaustion never proves absence.
+fn read_signed_run_evidence(
+    state: &AppState,
+    signed: &AuthoritativeThreadSubject,
+) -> Result<SignedRunEvidence> {
+    let Some(anchor) = state
+        .state_store
+        .capture_thread_event_read_anchor(&signed.chain_root_id, &signed.thread_id)?
+    else {
+        return Ok(SignedRunEvidence {
+            graph_identity: None,
+            facets: None,
+        });
+    };
+    let mut progress = None;
+    let mut graph_identity = None;
+    let mut facets = BTreeMap::new();
+    let mut facets_valid = true;
+    for _ in 0..MAX_RUN_EVIDENCE_PAGES {
+        let page = state.state_store.read_thread_event_page(
+            &anchor,
+            progress.as_ref(),
+            RUN_EVIDENCE_PAGE_EVENTS,
+            RUN_EVIDENCE_PAGE_BYTES,
+        )?;
+        if page.events.is_empty() && page.progress.is_some() {
+            bail!("signed run-evidence history made no progress");
+        }
+        for (_, event) in page.events {
+            if facets_valid
+                && !fold_inspection_facet_event(
+                    &mut facets,
+                    &event.event_type,
+                    event.durability,
+                    &event.payload,
+                )
+            {
+                facets_valid = false;
+            }
+            if graph_identity.is_none() && event.event_type == "graph_step_started" {
+                let admitted = state
+                    .state_store
+                    .admitted_program_evidence(&signed.thread_id)?
+                    .ok_or_else(|| anyhow::anyhow!("signed graph step has no admitted program"))?;
+                if signed.admitted_launch_capsule_hash.as_deref()
+                    != Some(admitted.admitted_launch_capsule_hash.as_str())
+                {
+                    bail!("admitted graph program contradicts signed capsule identity");
+                }
+                graph_identity = Some(Some(validate_signed_graph_step_identity(
+                    &event.payload,
+                    &admitted.subject.kind,
+                    &admitted.subject.canonical_ref,
+                    admitted.effective_definition_digest.as_str(),
+                )?));
+            }
+        }
+        match page.progress {
+            Some(next) => progress = Some(next),
+            None => {
+                return Ok(SignedRunEvidence {
+                    graph_identity: Some(graph_identity.flatten()),
+                    facets: facets_valid.then_some(facets),
+                });
+            }
+        }
+    }
+    Ok(SignedRunEvidence {
+        graph_identity,
+        facets: None,
+    })
+}
+
+fn validate_signed_graph_step_identity(
+    payload: &Value,
+    admitted_kind: &str,
+    admitted_ref: &str,
+    admitted_digest: &str,
+) -> Result<GraphRunListIdentity> {
+    let payload = payload
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("signed graph-step payload is not an object"))?;
+    let field = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("signed graph-step lacks {key}"))
+    };
+    let definition_ref = field("definition_ref")?;
+    let digest = field("effective_definition_digest")?;
+    let graph_run_id = field("graph_run_id")?;
+    let node = field("node")?;
+    let step = payload
+        .get("step")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("signed graph-step has invalid step"))?;
+    if admitted_kind != "graph" || admitted_ref != definition_ref || admitted_digest != digest {
+        bail!("signed graph step contradicts admitted program identity");
+    }
+    Ok(GraphRunListIdentity {
+        definition_ref: definition_ref.to_string(),
+        effective_definition_digest: digest.to_string(),
+        graph_run_id: graph_run_id.to_string(),
+        node: node.to_string(),
+        step,
+    })
 }
 
 fn add_run_summary(
@@ -304,19 +551,28 @@ fn add_run_summary(
 
 /// Identity closure for every definition version the listed runs reference.
 ///
-/// `executes_definition` and `at_graph_node` point at entities this projection
-/// historically never created, and the client drops dangling relations. Once
-/// realizations split runs across digests, every run off the currently
-/// projected digest would silently lose its edges — so each referenced
-/// version gets its `definition-family:`/`definition:` anchors, its authored
-/// root source, and one `external-content:` entity per realized declaration,
-/// reconstructed from the run's own admitted capsule.
+/// `executes_definition` and `at_graph_node` require exact definition anchors;
+/// clients drop dangling relations. Realizations can split runs across
+/// digests, so every represented version gets its family/definition anchors,
+/// authored root source and realized external-content entities. The latter
+/// come only from the representative run's signed-capsule-bound closure.
 fn add_run_definition_versions(
     builder: &mut FieldFactsBuilder,
     state: &AppState,
-    versions: &BTreeMap<(String, String), String>,
+    versions: &BTreeMap<(String, String), VerifiedRunVersionCoordinate>,
 ) -> Result<()> {
-    for ((definition_ref, digest), thread_id) in versions {
+    for ((definition_ref, digest), coordinate) in versions {
+        let thread_id = &coordinate.thread_id;
+        // The representative was admitted through a signed subject and its
+        // graph event was checked against that subject's capsule hash. The
+        // later closure read must not follow a changed operational locator.
+        let (chain_root_id, capsule_hash, capsule) = state
+            .state_store
+            .admitted_launch_capsule_with_coordinates(thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("signed run capsule is unavailable"))?;
+        if chain_root_id != coordinate.chain_root_id || capsule_hash != coordinate.capsule_hash {
+            bail!("run capsule coordinate contradicts signed subject");
+        }
         let evidence = vec![FieldEvidenceRef::Thread {
             thread_id: thread_id.clone(),
         }];
@@ -368,23 +624,6 @@ fn add_run_definition_versions(
             provenance: builder.provenance(Vec::new()),
         })?;
 
-        let capsule = match state.state_store.admitted_launch_capsule(thread_id) {
-            Ok(Some(capsule)) => capsule,
-            Ok(None) => {
-                builder.warn(
-                    "definition_context_unavailable",
-                    format!("run `{thread_id}` has no admitted launch capsule"),
-                );
-                continue;
-            }
-            Err(error) => {
-                builder.warn(
-                    "definition_context_unavailable",
-                    format!("run `{thread_id}` capsule is unreadable: {error}"),
-                );
-                continue;
-            }
-        };
         if let Some(root) = capsule
             .exact_program
             .get("resolution_output")
@@ -738,6 +977,50 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_graph_step_requires_exact_admitted_program_identity() {
+        let digest = "a".repeat(64);
+        let payload = json!({
+            "definition_ref": "graph:test/build",
+            "effective_definition_digest": digest.clone(),
+            "graph_run_id": "run-1",
+            "node": "compile",
+            "step": 3,
+        });
+        let identity =
+            validate_signed_graph_step_identity(&payload, "graph", "graph:test/build", &digest)
+                .unwrap();
+        assert_eq!(identity.graph_run_id, "run-1");
+        assert_eq!(identity.node, "compile");
+        assert_eq!(identity.step, 3);
+        assert!(
+            validate_signed_graph_step_identity(&payload, "tool", "graph:test/build", &digest)
+                .is_err()
+        );
+        assert!(
+            validate_signed_graph_step_identity(&payload, "graph", "graph:test/other", &digest)
+                .is_err()
+        );
+        assert!(
+            validate_signed_graph_step_identity(
+                &payload,
+                "graph",
+                "graph:test/build",
+                &"b".repeat(64)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_signed_graph_step_identity(
+                &json!({"definition_ref":"graph:test/build"}),
+                "graph",
+                "graph:test/build",
+                &digest
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn facet_filters_are_closed_bounded_and_domain_opaque() {

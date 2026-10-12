@@ -2610,6 +2610,7 @@ dependencies = [
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "ryeos-node",
+ "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-provider-contract",
  "ryeos-runtime",
@@ -2660,11 +2661,13 @@ dependencies = [
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-node-runtime",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
  "ryeos-tracing",
+ "ryeos-ui-presentation-contract",
  "ryeos-vault",
  "serde",
  "serde_json",
@@ -2744,6 +2747,7 @@ dependencies = [
  "ryeos-directive-definition",
  "ryeos-engine",
  "ryeos-node",
+ "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-state",
  "serde",
@@ -2766,6 +2770,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "ryeos-engine",
+ "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2789,6 +2794,7 @@ dependencies = [
  "reqwest",
  "ryeos-cli",
  "ryeos-client-base",
+ "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2797,6 +2803,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]
@@ -2863,6 +2870,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-handler-protocol",
+ "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2984,6 +2992,7 @@ dependencies = [
  "ryeos-external-execution-contract",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-provider-contract",
  "ryeos-runtime",
@@ -3283,6 +3292,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-bundle-publication-contract",
  "ryeos-engine",
+ "ryeos-node-runtime",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3292,6 +3302,26 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "ryeos-node-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "directories",
+ "lillux",
+ "rand 0.8.6",
+ "ryeos-engine",
+ "ryeos-runtime",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -3407,6 +3437,7 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-external-execution-contract",
  "ryeos-tracing",
+ "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3457,6 +3488,7 @@ dependencies = [
  "ryeos-external-execution-contract",
  "ryeos-independent-runtime-verifier",
  "ryeos-isolation-protocol",
+ "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-state",
  "ryeosd",
@@ -3497,9 +3529,11 @@ dependencies = [
  "ryeos-client-base",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
+ "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3518,6 +3552,16 @@ dependencies = [
  "prettyplease 0.3.0",
  "syn 3.0.3",
  "ts-typegen-build",
+]
+
+[[package]]
+name = "ryeos-ui-presentation-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3599,6 +3643,7 @@ dependencies = [
  "ryeos-independent-runtime-verifier",
  "ryeos-isolation-protocol",
  "ryeos-node",
+ "ryeos-node-runtime",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",

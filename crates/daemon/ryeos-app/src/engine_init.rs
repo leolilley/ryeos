@@ -27,7 +27,7 @@ use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
-use crate::config::Config;
+use ryeos_node_runtime::config::Config;
 use crate::node_config::BundleRecord;
 use ryeos_isolation_protocol::{
     AdapterInspectionRequest, AdapterInspectionResponse, IsolationAdapterProtocolVersion,

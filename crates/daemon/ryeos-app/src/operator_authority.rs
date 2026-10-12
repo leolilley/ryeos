@@ -9,7 +9,7 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use crate::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use crate::state::AppState;
 
 /// Exact target-node operator grant retained by a remotely adopted execution.
@@ -38,7 +38,7 @@ impl AdmittedOperatorAuthority {
         {
             bail!("admitted operator authority is not canonical");
         }
-        crate::identity::validate_canonical_site_id(&self.origin_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)?;
         let mut scopes = self.scopes.clone();
         for scope in &scopes {
             ryeos_runtime::authorizer::validate_scope_pattern(scope)
@@ -153,7 +153,7 @@ pub fn admitted_operator_authority_digest(
     state: &AppState,
     operator_fingerprint: &str,
 ) -> anyhow::Result<String> {
-    let grant = crate::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -216,7 +216,7 @@ fn admitted_operator_authority_for_named_role(
     {
         bail!("{role} principal is not canonical");
     }
-    let grant = crate::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -282,7 +282,7 @@ pub fn retained_admitted_operator_authority(
     if !lillux::valid_hash(operator_fingerprint) {
         bail!("retained operator fingerprint is not canonical");
     }
-    let grant = crate::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,

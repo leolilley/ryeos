@@ -37,7 +37,7 @@ pub struct HandlerContext {
     pub verified: bool,
     /// Closed class from the node-signed authorized-key grant. `None` for
     /// non-RyeOS verifiers and synthetic contexts.
-    pub authorized_key_class: Option<crate::identity::AuthorizedKeyPrincipalClass>,
+    pub authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
     /// Site identity established by a remote-node request, or by a
     /// remote-operator request plus its source-node co-signature. Request
     /// payloads never populate this field. `None` denotes a local or non-RyeOS
@@ -91,7 +91,7 @@ impl HandlerContext {
         fingerprint: String,
         scopes: Vec<String>,
         verified: bool,
-        authorized_key_class: Option<crate::identity::AuthorizedKeyPrincipalClass>,
+        authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
         authenticated_origin_site_id: Option<String>,
     ) -> Self {
         Self {
@@ -108,7 +108,7 @@ impl HandlerContext {
     pub fn new_with_grant_authority(
         fingerprint: String,
         scopes: Vec<String>,
-        authorized_key_class: crate::identity::AuthorizedKeyPrincipalClass,
+        authorized_key_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass,
         authenticated_origin_site_id: Option<String>,
         authenticated_grant_authority:
             ryeos_engine::principal_contract::AuthenticatedGrantAuthority,
@@ -187,21 +187,21 @@ impl HandlerContext {
             anyhow::bail!("unverified handler context carries authenticated execution authority");
         }
         match self.authorized_key_class {
-            Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient)
                 if self.authenticated_origin_site_id.is_some() =>
             {
                 anyhow::bail!("local-client handler context carries a remote origin");
             }
             Some(
-                crate::identity::AuthorizedKeyPrincipalClass::RemoteNode
-                | crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
+                | ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
             ) if self.authenticated_origin_site_id.is_none() => {
                 anyhow::bail!("remote handler context has no authenticated origin");
             }
             _ => {}
         }
         if let Some(origin) = self.authenticated_origin_site_id.as_deref() {
-            crate::identity::validate_canonical_site_id(origin)?;
+            ryeos_node_runtime::identity::validate_canonical_site_id(origin)?;
         }
         if self.execution_origin(current_site_id) != origin_site_id {
             anyhow::bail!("handler origin differs from sealed execution origin");

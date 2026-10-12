@@ -32,6 +32,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
     ui_session_attachments::DETACH_DESCRIPTOR,
+    ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,
@@ -55,6 +56,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_gc::DESCRIPTOR,
     ui_seat::OPEN_DESCRIPTOR,
     ui_seat::APPEND_DESCRIPTOR,
+    ui_seat::TRANSFER_DESCRIPTOR,
     ui_seat::REPLAY_DESCRIPTOR,
     ui_seat::TOUCH_DESCRIPTOR,
     ui_seat::CLOSE_DESCRIPTOR,
@@ -81,6 +83,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_projects::CONFIG_GET_DESCRIPTOR,
     ui_projects::CONFIG_UPDATE_DESCRIPTOR,
     ui_projects::PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
+    ui_projects::PARTICULAR_SURFACE_RESUME_DESCRIPTOR,
     ui_remotes::REMOTES_LIST_DESCRIPTOR,
     ui_remotes::REMOTES_PROBE_DESCRIPTOR,
 ];
@@ -97,5 +100,23 @@ mod tests {
             matches!(desc.availability, ServiceAvailability::DaemonOnly),
             "ui.launch must be DaemonOnly (requires UiState from daemon composition)"
         );
+    }
+
+    #[test]
+    fn transfer_has_one_dedicated_daemon_owner() {
+        let descriptors = ALL
+            .iter()
+            .filter(|descriptor| {
+                descriptor.service_ref == "service:ui/seat/transfer"
+                    || descriptor.endpoint == "ui.seat.transfer"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].service_ref, "service:ui/seat/transfer");
+        assert_eq!(descriptors[0].endpoint, "ui.seat.transfer");
+        assert!(matches!(
+            descriptors[0].availability,
+            ServiceAvailability::DaemonOnly
+        ));
     }
 }

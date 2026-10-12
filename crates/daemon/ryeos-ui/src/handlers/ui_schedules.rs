@@ -14,26 +14,25 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
-
-    // Browser session = admin: no owner filtering, include disabled.
-    let specs = state.scheduler_db.list_specs_filtered(false, None, None)?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let specs = state
+        .scheduler_db
+        .list_specs_filtered(false, None, Some(caller.principal_id()))?;
 
     // Batch-load last fires to avoid N+1 queries
     let schedule_ids: Vec<String> = specs.iter().map(|s| s.schedule_id.clone()).collect();
     let last_fires = state.scheduler_db.get_last_fires_batch(&schedule_ids)?;
 
-    // Batch-load fire counts
+    // Read each fire count; a query failure must not be presented as zero.
     let fire_counts: std::collections::HashMap<String, usize> = schedule_ids
         .iter()
-        .filter_map(|id| {
+        .map(|id| {
             state
                 .scheduler_db
                 .count_fires(id, None)
-                .ok()
-                .map(|c| (id.clone(), c))
+                .map(|count| (id.clone(), count))
         })
-        .collect();
+        .collect::<std::result::Result<_, _>>()?;
 
     let schedules: Vec<Value> = specs
         .iter()
@@ -55,7 +54,10 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         })
         .collect();
 
-    Ok(serde_json::json!({ "schedules": schedules }))
+    Ok(serde_json::json!({ "schedules": schedules,
+        "identity_filtered": true, "owner_principal_id": caller.principal_id(),
+        "coverage":"current_caller_owned_schedules_not_node_or_project_totals"
+    }))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -65,3 +67,62 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };
+
+#[cfg(test)]
+pub(super) fn owner_fixture_spec(
+    id: &str,
+    principal: &str,
+    enabled: bool,
+) -> ryeos_scheduler::ScheduleSpecRecord {
+    ryeos_scheduler::ScheduleSpecRecord {
+        schedule_id: id.into(),
+        item_ref: "directive:test".into(),
+        ref_bindings: Default::default(),
+        params: "{}".into(),
+        schedule_type: "interval".into(),
+        expression: "60".into(),
+        timezone: "UTC".into(),
+        misfire_policy: "skip".into(),
+        overlap_policy: "skip".into(),
+        lateness_grace_secs: 60,
+        enabled,
+        project_root: None,
+        signer_fingerprint: "44".repeat(32),
+        spec_hash: "22".repeat(32),
+        registered_at: 1000,
+        execution: ryeos_scheduler::types::ScheduleExecution {
+            authority: ryeos_scheduler::types::ScheduleExecutionAuthority::Node {
+                principal_id: principal.into(),
+                effective_origin_site_id: "site:test".into(),
+            },
+            capabilities: vec!["ryeos.execute.*".into()],
+            policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn schedules_follow_execution_owner_not_signer_or_all_node_scope() {
+        let db = ryeos_scheduler::SchedulerDb::new_in_memory().unwrap();
+        let own = format!("fp:{}", "11".repeat(32));
+        let foreign = format!("fp:{}", "33".repeat(32));
+        db.upsert_spec(&owner_fixture_spec("own", &own, true))
+            .unwrap();
+        db.upsert_spec(&owner_fixture_spec("foreign", &foreign, true))
+            .unwrap();
+        let rows = db.list_specs_filtered(false, None, Some(&own)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].schedule_id, "own");
+        assert!(
+            db.list_specs_filtered(false, None, Some(&format!("fp:{}", "44".repeat(32))))
+                .unwrap()
+                .is_empty(),
+            "source signer is not execution owner"
+        );
+    }
+}

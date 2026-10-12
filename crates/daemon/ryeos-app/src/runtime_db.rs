@@ -934,6 +934,35 @@ pub struct ChainRecoveryPins {
     pub candidate_evidence: u64,
 }
 
+/// Exact durable lease claim observed under its seat-root chain lock. The
+/// first reaping timestamp is retained by idempotent claim retries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedSeatLeaseSnapshot {
+    pub seat_thread_id: String,
+    pub owner: String,
+    pub surface: String,
+    pub client_ref: String,
+    pub reaping_at_ms: i64,
+}
+
+/// Exact live lease identity observed while the caller holds the seat-root
+/// chain exclusion. A claimed lease is never an active producer lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSeatLeaseSnapshot {
+    pub seat_thread_id: String,
+    pub owner: String,
+    pub surface: String,
+    pub client_ref: String,
+}
+
+/// One bounded raw primary-key page. Eligibility is only a scheduling hint;
+/// the exact claim path rechecks it before mutation.
+pub struct SeatLeaseMaintenancePage {
+    pub eligible_ids: Vec<String>,
+    pub last_examined_id: Option<String>,
+    pub exhausted: bool,
+}
+
 impl ChainRecoveryPins {
     pub fn is_empty(&self) -> bool {
         self.runtime_membership_conflicts == 0
@@ -16561,6 +16590,66 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Read while the caller holds the authoritative chain runtime-pin lock.
+    /// The reaping marker remains durable until settlement removes the lease.
+    pub fn seat_lease_is_reaping(&self, seat_thread_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM seat_lease
+             WHERE seat_thread_id=?1 AND reaping_at_ms IS NOT NULL)",
+            params![seat_thread_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn claimed_seat_lease_snapshot(
+        &self,
+        seat_thread_id: &str,
+    ) -> Result<Option<ClaimedSeatLeaseSnapshot>> {
+        self.conn
+            .query_row(
+                "SELECT seat_thread_id, owner, surface, client_ref, reaping_at_ms
+               FROM seat_lease
+              WHERE seat_thread_id=?1 AND reaping_at_ms IS NOT NULL",
+                params![seat_thread_id],
+                |row| {
+                    Ok(ClaimedSeatLeaseSnapshot {
+                        seat_thread_id: row.get(0)?,
+                        owner: row.get(1)?,
+                        surface: row.get(2)?,
+                        client_ref: row.get(3)?,
+                        reaping_at_ms: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read exact claimed seat lease")
+    }
+
+    /// Read-only exact active lease lookup for a caller holding the seat-root
+    /// chain exclusion. It neither creates nor renews a lease.
+    pub fn active_seat_lease_snapshot(
+        &self,
+        seat_thread_id: &str,
+    ) -> Result<Option<ActiveSeatLeaseSnapshot>> {
+        self.conn
+            .query_row(
+                "SELECT seat_thread_id, owner, surface, client_ref
+                   FROM seat_lease
+                  WHERE seat_thread_id=?1 AND reaping_at_ms IS NULL",
+                params![seat_thread_id],
+                |row| {
+                    Ok(ActiveSeatLeaseSnapshot {
+                        seat_thread_id: row.get(0)?,
+                        owner: row.get(1)?,
+                        surface: row.get(2)?,
+                        client_ref: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read exact active seat lease")
+    }
+
     pub fn seat_leases_for_owner_client(
         &self,
         owner: &str,
@@ -16577,18 +16666,120 @@ impl RuntimeDb {
 
     pub fn expired_seat_leases(&self, cutoff_ms: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seat_thread_id FROM seat_lease WHERE last_seen_at_ms < ?1 ORDER BY last_seen_at_ms",
+            "SELECT seat_thread_id FROM seat_lease
+             WHERE reaping_at_ms IS NOT NULL OR last_seen_at_ms < ?1
+             ORDER BY last_seen_at_ms",
         )?;
         let rows = stmt.query_map(params![cutoff_ms], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Bounded keyset hints for lifecycle maintenance. This is scheduling,
+    /// not a lease claim or signed-seat absence proof; each returned row must
+    /// still pass the exact claim admission before any settlement attempt.
+    pub fn expired_seat_leases_slice(
+        &self,
+        cutoff_ms: i64,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+        limit: usize,
+    ) -> Result<SeatLeaseMaintenancePage> {
+        if limit == 0 || limit > 64 {
+            anyhow::bail!("seat lease maintenance slice limit must be 1..=64");
+        }
+        let limit_sql = i64::try_from(limit)?;
+        let rows: Vec<(String, i64, Option<i64>)> = if let Some(after_id) = after_id {
+            let mut stmt = self.conn.prepare(
+                "SELECT seat_thread_id, last_seen_at_ms, reaping_at_ms FROM seat_lease
+                 WHERE seat_thread_id > ?1 AND seat_thread_id <= ?2
+                 ORDER BY seat_thread_id LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![after_id, cycle_max_id, limit_sql], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT seat_thread_id, last_seen_at_ms, reaping_at_ms FROM seat_lease
+                 WHERE seat_thread_id <= ?1
+                 ORDER BY seat_thread_id LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![cycle_max_id, limit_sql], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let exhausted = rows.len() < limit;
+        let last_examined_id = rows.last().map(|row| row.0.clone());
+        let eligible_ids = rows
+            .into_iter()
+            .filter(|row| row.2.is_some() || row.1 < cutoff_ms)
+            .map(|row| row.0)
+            .collect();
+        Ok(SeatLeaseMaintenancePage {
+            eligible_ids,
+            last_examined_id,
+            exhausted,
+        })
+    }
+
+    pub fn max_seat_lease_id(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT MAX(seat_thread_id) FROM seat_lease", [], |row| {
+                row.get(0)
+            })?)
+    }
+
+    /// Read-only restart hints. Active leases, even expired ones, are excluded:
+    /// startup may retry an existing durable fence, never manufacture one.
+    pub fn claimed_seat_leases_slice(
+        &self,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        if limit == 0 || limit > 64 {
+            anyhow::bail!("claimed seat slice limit must be 1..=64");
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT seat_thread_id FROM seat_lease
+             WHERE reaping_at_ms IS NOT NULL AND seat_thread_id <= ?1
+               AND (?2 IS NULL OR seat_thread_id > ?2)
+             ORDER BY seat_thread_id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![cycle_max_id, after_id, i64::try_from(limit)?],
+            |row| row.get(0),
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn claim_expired_seat_lease(&self, seat_thread_id: &str, cutoff_ms: i64) -> Result<bool> {
         let now = lillux::time::timestamp_millis() as i64;
         Ok(self.conn.execute(
-            "UPDATE seat_lease SET reaping_at_ms=?3
-             WHERE seat_thread_id=?1 AND last_seen_at_ms < ?2",
+            "UPDATE seat_lease SET reaping_at_ms=COALESCE(reaping_at_ms, ?3)
+             WHERE seat_thread_id=?1
+               AND (reaping_at_ms IS NOT NULL OR last_seen_at_ms < ?2)",
             params![seat_thread_id, cutoff_ms, now],
+        )? > 0)
+    }
+
+    /// Mark an exact lease for lifecycle reaping after the caller has proved
+    /// a current signed Closed tip under the seat's ordered publication lock.
+    /// This method grants no signed-history authority by itself.
+    pub fn claim_closed_seat_lease(
+        &self,
+        seat_thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        Ok(self.conn.execute(
+            "UPDATE seat_lease SET reaping_at_ms=COALESCE(reaping_at_ms, ?5)
+             WHERE seat_thread_id=?1 AND owner=?2 AND surface=?3 AND client_ref=?4",
+            params![seat_thread_id, owner, surface, client_ref, now],
         )? > 0)
     }
 
@@ -21031,6 +21222,194 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
         (tmp, db)
+    }
+
+    #[test]
+    fn claimed_seat_lease_keyset_slice_is_bounded_and_keeps_claims() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO seat_lease
+                (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
+             VALUES ('T-a', 'owner', 'surface', 'client', 1, NULL),
+                    ('T-b', 'owner', 'surface', 'client', 50, 10),
+                    ('T-c', 'owner', 'surface', 'client', 50, NULL),
+                    ('T-d', 'owner', 'surface', 'client', 1, NULL);",
+            )
+            .unwrap();
+        assert_eq!(db.max_seat_lease_id().unwrap().as_deref(), Some("T-d"));
+        let first = db.expired_seat_leases_slice(2, None, "T-d", 2).unwrap();
+        assert_eq!(first.eligible_ids, vec!["T-a", "T-b"]);
+        assert_eq!(first.last_examined_id.as_deref(), Some("T-b"));
+        assert!(!first.exhausted);
+        let second = db
+            .expired_seat_leases_slice(2, Some("T-b"), "T-d", 2)
+            .unwrap();
+        assert_eq!(second.eligible_ids, vec!["T-d"]);
+        assert_eq!(second.last_examined_id.as_deref(), Some("T-d"));
+        assert!(!second.exhausted);
+        let ineligible = db
+            .expired_seat_leases_slice(2, Some("T-b"), "T-d", 1)
+            .unwrap();
+        assert!(ineligible.eligible_ids.is_empty());
+        assert_eq!(ineligible.last_examined_id.as_deref(), Some("T-c"));
+        assert!(!ineligible.exhausted);
+        let end = db
+            .expired_seat_leases_slice(2, Some("T-d"), "T-d", 2)
+            .unwrap();
+        assert!(end.eligible_ids.is_empty());
+        assert!(end.exhausted);
+        assert!(db.expired_seat_leases_slice(2, None, "T-b", 0).is_err());
+    }
+
+    #[test]
+    fn active_seat_lease_snapshot_excludes_claimed_and_missing_rows() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO seat_lease
+                    (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
+                 VALUES ('T-active', 'session:one', 'surface:one', 'client:one', 17, NULL),
+                        ('T-claimed', 'session:two', 'surface:two', 'client:two', 19, 23);",
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.active_seat_lease_snapshot("T-active").unwrap(),
+            Some(ActiveSeatLeaseSnapshot {
+                seat_thread_id: "T-active".into(),
+                owner: "session:one".into(),
+                surface: "surface:one".into(),
+                client_ref: "client:one".into(),
+            })
+        );
+        assert_eq!(db.active_seat_lease_snapshot("T-claimed").unwrap(), None);
+        assert_eq!(db.active_seat_lease_snapshot("T-missing").unwrap(), None);
+        assert_eq!(db.claimed_seat_lease_snapshot("T-active").unwrap(), None);
+        assert!(
+            db.claimed_seat_lease_snapshot("T-claimed")
+                .unwrap()
+                .is_some()
+        );
+        let last_seen: i64 = db
+            .conn
+            .query_row(
+                "SELECT last_seen_at_ms FROM seat_lease WHERE seat_thread_id='T-active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_seen, 17);
+    }
+
+    #[test]
+    fn expired_seat_lease_reclaim_preserves_the_original_reaping_fence() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO seat_lease
+                    (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
+                 VALUES ('T-seat', 'owner', 'surface', 'client', 1, 10)",
+                [],
+            )
+            .unwrap();
+        assert!(db.claim_expired_seat_lease("T-seat", 2).unwrap());
+        let reaping: i64 = db
+            .conn
+            .query_row(
+                "SELECT reaping_at_ms FROM seat_lease WHERE seat_thread_id='T-seat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reaping, 10);
+        let claim = db.claimed_seat_lease_snapshot("T-seat").unwrap().unwrap();
+        assert_eq!(claim.seat_thread_id, "T-seat");
+        assert_eq!(claim.owner, "owner");
+        assert_eq!(claim.surface, "surface");
+        assert_eq!(claim.client_ref, "client");
+        assert_eq!(claim.reaping_at_ms, 10);
+        assert!(!db.touch_existing_seat_lease("T-seat").unwrap());
+        db.conn
+            .execute(
+                "INSERT INTO seat_lease
+                    (seat_thread_id, owner, surface, client_ref, last_seen_at_ms)
+                 VALUES ('T-fresh', 'owner', 'surface', 'client', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(db.claim_expired_seat_lease("T-fresh", 2).unwrap());
+        let first: i64 = db
+            .conn
+            .query_row(
+                "SELECT reaping_at_ms FROM seat_lease WHERE seat_thread_id='T-fresh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(first > 0);
+        assert!(db.claim_expired_seat_lease("T-fresh", 2).unwrap());
+        let retried: i64 = db
+            .conn
+            .query_row(
+                "SELECT reaping_at_ms FROM seat_lease WHERE seat_thread_id='T-fresh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retried, first);
+    }
+
+    #[test]
+    fn startup_claimed_slice_never_expires_active_leases_and_is_keyset_bounded() {
+        let (_tmp, db) = fresh_db();
+        for (id, reaping) in [("A-active-expired", None), ("B-claimed", Some(10)),
+            ("C-active", None), ("D-claimed", Some(20))] {
+            db.conn.execute(
+                "INSERT INTO seat_lease (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
+                 VALUES (?1,'owner','surface','client',0,?2)",
+                params![id, reaping],
+            ).unwrap();
+        }
+        assert_eq!(db.claimed_seat_leases_slice(None, "D-claimed", 1).unwrap(), vec!["B-claimed"]);
+        assert_eq!(db.claimed_seat_leases_slice(Some("B-claimed"), "D-claimed", 1).unwrap(), vec!["D-claimed"]);
+        assert!(db.claimed_seat_leases_slice(Some("D-claimed"), "D-claimed", 1).unwrap().is_empty());
+        assert!(db.claimed_seat_leases_slice(None, "A-active-expired", 64).unwrap().is_empty());
+        assert!(db.active_seat_lease_snapshot("A-active-expired").unwrap().is_some());
+        assert_eq!(db.claimed_seat_lease_snapshot("B-claimed").unwrap().unwrap().reaping_at_ms, 10);
+        assert!(db.claimed_seat_leases_slice(None, "D-claimed", 0).is_err());
+        assert!(db.claimed_seat_leases_slice(None, "D-claimed", 65).is_err());
+    }
+
+    #[test]
+    fn claimed_seat_lease_stays_retryable_when_expiry_cutoff_moves() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO seat_lease
+                    (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
+                 VALUES ('T-claimed', 'owner', 'surface', 'client', 50, 10);
+                 INSERT INTO seat_lease
+                    (seat_thread_id, owner, surface, client_ref, last_seen_at_ms)
+                 VALUES ('T-unclaimed', 'owner', 'surface', 'client', 50);",
+            )
+            .unwrap();
+
+        assert_eq!(db.expired_seat_leases(25).unwrap(), vec!["T-claimed"]);
+        assert!(db.claim_expired_seat_lease("T-claimed", 25).unwrap());
+        assert!(!db.claim_expired_seat_lease("T-unclaimed", 25).unwrap());
+        assert_eq!(
+            db.claimed_seat_lease_snapshot("T-claimed")
+                .unwrap()
+                .unwrap()
+                .reaping_at_ms,
+            10
+        );
+        assert!(
+            db.claimed_seat_lease_snapshot("T-unclaimed")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(target_os = "linux")]

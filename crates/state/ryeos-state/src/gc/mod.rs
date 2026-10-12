@@ -480,6 +480,9 @@ pub fn run_gc_with_pinned_authority(
         );
     }
     operational_roots.extend(staged_roots.object_hashes.iter().cloned());
+    operational_roots.extend(authority.terminal_seat_retirement_object_roots(
+        cas_mutation_guard, params.dry_run,
+    ).context("qualify retired seat closure retention before CAS sweep")?);
 
     if params.compact {
         let compact_signer = signer.ok_or_else(|| {

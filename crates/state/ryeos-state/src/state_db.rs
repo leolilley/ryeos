@@ -399,6 +399,7 @@ fn ensure_existing_projection_cleanup_lease_available(
     let Some(lease) = directory.open_regular(&lease_name, true)? else {
         return Ok(());
     };
+
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -1130,6 +1131,16 @@ pub struct AuthoritativeRuntimePinAdmission {
     _chain_locks: Vec<crate::chain::ChainLock>,
 }
 
+impl AuthoritativeRuntimePinAdmission {
+    /// The exact chain lock held for this pin admission. Callers may inspect
+    /// signed state without releasing the lock or reacquiring it recursively.
+    fn chain_lock(&self, chain_root_id: &str) -> Option<&crate::chain::ChainLock> {
+        self._chain_locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == chain_root_id)
+    }
+}
+
 struct RecoveryObserverThrottle {
     next_update: std::time::Instant,
 }
@@ -1252,6 +1263,16 @@ fn replay_pending_into(
             }
         };
         let head = chain_lock.read_verified_head(trust_store)?;
+        if current.operation == HeadOperation::Set
+            && recovery
+                .read_retired_seat_marker(&current.chain_root_id)?
+                .is_some()
+        {
+            anyhow::bail!(
+                "retired seat marker contradicts pending Set for {}",
+                current.chain_root_id
+            );
+        }
         match current.operation {
             HeadOperation::Set => match classify_pending_set_head(&current, head.as_ref())? {
                 PendingSetHead::Published(head) => {
@@ -1783,6 +1804,164 @@ pub struct AuthoritativeThreadAppendHistoryReadback {
     pub events: Vec<(String, ThreadEvent)>,
 }
 
+/// Opaque, state-authenticated fixed endpoint for a resumable thread-event
+/// read. Its fields are deliberately not caller-constructible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritativeThreadEventReadAnchor {
+    chain_root_id: String,
+    thread_id: String,
+    chain_head_hash: String,
+    snapshot_hash: String,
+    thread_last_event_hash: Option<String>,
+    thread_last_seq: u64,
+}
+
+/// Positive historical event prefix authenticated by an immutable retired
+/// identity and its typed retention manifest. Not a signed current-head anchor,
+/// not a proof that some phase never existed, and not writer admission.
+#[derive(Debug, Clone)]
+pub struct RetiredSeatPositivePrefix {
+    endpoint: EventPrefixEndpoint,
+    manifest_hash: String,
+    marker_digest: String,
+    terminal_chain_seq: u64,
+    terminal_status: crate::objects::thread_snapshot::ThreadStatus,
+    closure_page_head: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalSeatRetirementClosureProgress {
+    marker_digest: String,
+    manifest_hash: String,
+    next_page_hash: String,
+    previous_root: Option<String>,
+    previous_operation: Option<String>,
+}
+
+pub struct TerminalSeatRetirementClosureReadPage {
+    pub counterpart_roots: Vec<String>,
+    pub negative_transfer_closures:
+        Vec<crate::objects::terminal_seat_retirement::TerminalTransferNegativeClosure>,
+    pub next_progress: Option<TerminalSeatRetirementClosureProgress>,
+    pub complete: bool,
+}
+
+impl RetiredSeatPositivePrefix {
+    pub fn terminal_status(&self) -> crate::objects::thread_snapshot::ThreadStatus {
+        self.terminal_status
+    }
+    pub fn chain_root_id(&self) -> &str {
+        &self.endpoint.chain_root_id
+    }
+    /// Exact opaque cut comparison for a separately authorized publisher.
+    /// A matching root or historical tip alone does not bind the marker and
+    /// retained closure inventory that made this prefix readable.
+    pub fn same_cut(&self, other: &Self) -> bool {
+        self.endpoint.chain_root_id == other.endpoint.chain_root_id
+            && self.endpoint.thread_id == other.endpoint.thread_id
+            && self.endpoint.chain_head_hash == other.endpoint.chain_head_hash
+            && self.endpoint.snapshot_hash == other.endpoint.snapshot_hash
+            && self.endpoint.thread_last_event_hash == other.endpoint.thread_last_event_hash
+            && self.endpoint.thread_last_seq == other.endpoint.thread_last_seq
+            && self.manifest_hash == other.manifest_hash
+            && self.marker_digest == other.marker_digest
+            && self.terminal_chain_seq == other.terminal_chain_seq
+            && self.terminal_status == other.terminal_status
+            && self.closure_page_head == other.closure_page_head
+    }
+    pub fn tip(&self) -> Option<(&str, u64, u64)> {
+        self.endpoint
+            .thread_last_event_hash
+            .as_deref()
+            .map(|hash| (hash, self.endpoint.thread_last_seq, self.terminal_chain_seq))
+    }
+}
+
+/// Internal bounded ancestry cursor coordinates shared by two distinct proof
+/// owners. This type is deliberately NOT an AuthoritativeThreadEventReadAnchor.
+#[derive(Debug, Clone)]
+struct EventPrefixEndpoint {
+    chain_root_id: String,
+    thread_id: String,
+    chain_head_hash: String,
+    snapshot_hash: String,
+    thread_last_event_hash: Option<String>,
+    thread_last_seq: u64,
+}
+
+/// Borrowed signed data captured while both exact chain locks remain held.
+/// This is not a lock handle, writer grant or reusable admission token.
+pub struct TwoAnchorAdmissionView<'a> {
+    pub target: &'a ThreadSnapshot,
+    pub counterpart: &'a ThreadSnapshot,
+    pub target_thread_ids: &'a [String],
+    pub counterpart_thread_ids: &'a [String],
+}
+
+impl AuthoritativeThreadEventReadAnchor {
+    pub fn chain_root_id(&self) -> &str {
+        &self.chain_root_id
+    }
+
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    pub fn tip(&self) -> Option<(&str, u64)> {
+        self.thread_last_event_hash
+            .as_deref()
+            .map(|hash| (hash, self.thread_last_seq))
+    }
+}
+
+/// State-minted continuation for the next bounded slice of one exact anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritativeThreadEventReadProgress {
+    chain_root_id: String,
+    thread_id: String,
+    chain_head_hash: String,
+    snapshot_hash: String,
+    next_event_hash: String,
+    next_thread_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadEventReadPage {
+    pub events: Vec<(String, ThreadEvent)>,
+    pub progress: Option<AuthoritativeThreadEventReadProgress>,
+}
+
+#[derive(Debug)]
+pub enum ConditionalThreadEventAppendResult {
+    Committed(CommittedWrite<AppendResult>),
+    Conflict,
+}
+
+/// Two signed heads cannot be published atomically. A caller must reconcile
+/// either uncertain variant from the signed heads before retrying either side.
+#[derive(Debug)]
+pub enum ConditionalThreadEventPairAppendResult {
+    Committed {
+        destination: CommittedWrite<AppendResult>,
+        source: CommittedWrite<AppendResult>,
+    },
+    Conflict,
+    DestinationUncertain {
+        error: anyhow::Error,
+    },
+    DestinationCommittedSourceUncertain {
+        destination: CommittedWrite<AppendResult>,
+        error: anyhow::Error,
+    },
+}
+
+#[derive(Debug)]
+pub enum SeatConditionalAppendResult {
+    Committed(CommittedWrite<AppendResult>),
+    Conflict,
+    Fenced,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthoritativeThreadEventChainReadback {
     pub snapshot: ThreadSnapshot,
@@ -1863,6 +2042,131 @@ pub struct StateDb {
     projection_repair_sink: Arc<dyn ProjectionRepairSink>,
 }
 
+/// Publish bounded immutable closure pages before their manifest is installed.
+fn publish_retirement_closure_pages(
+    cas: &lillux::CasStore,
+    owner: &str,
+    counterparts: &[String],
+    negative: &[crate::objects::terminal_seat_retirement::TerminalTransferNegativeClosure],
+) -> anyhow::Result<Option<String>> {
+    use crate::objects::terminal_seat_retirement::{
+        MAX_RETIREMENT_CLOSURE_PAGE_BYTES, TERMINAL_SEAT_RETIREMENT_CLOSURE_PAGE_KIND,
+        TerminalSeatRetirementClosurePage,
+    };
+    let empty = || TerminalSeatRetirementClosurePage {
+        schema: 1,
+        kind: TERMINAL_SEAT_RETIREMENT_CLOSURE_PAGE_KIND.into(),
+        chain_root_id: owner.into(),
+        counterpart_roots: Vec::new(),
+        negative_transfer_closures: Vec::new(),
+        next_page_hash: Some("f".repeat(64)),
+    };
+    let mut page = empty();
+    let mut pages = Vec::new();
+    for root in counterparts {
+        if page.counterpart_roots.len() + page.negative_transfer_closures.len() == 128 {
+            pages.push(page);
+            page = empty();
+        }
+        page.counterpart_roots.push(root.clone());
+        if serde_json::to_vec(&page)?.len() as u64 > MAX_RETIREMENT_CLOSURE_PAGE_BYTES {
+            page.counterpart_roots.pop();
+            anyhow::ensure!(
+                !page.counterpart_roots.is_empty() || !page.negative_transfer_closures.is_empty(),
+                "one counterpart exceeds retirement page bound"
+            );
+            pages.push(page);
+            page = empty();
+            page.counterpart_roots.push(root.clone());
+            page.validate()?;
+        }
+    }
+    for closure in negative {
+        if page.counterpart_roots.len() + page.negative_transfer_closures.len() == 128 {
+            pages.push(page);
+            page = empty();
+        }
+        page.negative_transfer_closures.push(closure.clone());
+        if serde_json::to_vec(&page)?.len() as u64 > MAX_RETIREMENT_CLOSURE_PAGE_BYTES {
+            page.negative_transfer_closures.pop();
+            anyhow::ensure!(
+                !page.counterpart_roots.is_empty() || !page.negative_transfer_closures.is_empty(),
+                "one negative closure exceeds retirement page bound"
+            );
+            pages.push(page);
+            page = empty();
+            page.negative_transfer_closures.push(closure.clone());
+            page.validate()?;
+        }
+    }
+    if !page.counterpart_roots.is_empty() || !page.negative_transfer_closures.is_empty() {
+        pages.push(page);
+    }
+    let mut next = None;
+    for mut page in pages.into_iter().rev() {
+        page.next_page_hash = next;
+        page.validate()?;
+        next = Some(cas.store_object(&serde_json::to_value(page)?)?);
+    }
+    Ok(next)
+}
+
+fn load_retirement_closure_page(
+    cas: &lillux::CasStore,
+    owner: &str,
+    hash: &str,
+    previous_root: Option<&str>,
+    previous_operation: Option<&str>,
+    max_bytes: u64,
+) -> anyhow::Result<(
+    crate::objects::terminal_seat_retirement::TerminalSeatRetirementClosurePage,
+    Option<String>,
+    Option<String>,
+)> {
+    use crate::objects::terminal_seat_retirement::{
+        MAX_RETIREMENT_CLOSURE_PAGE_BYTES, TerminalSeatRetirementClosurePage,
+    };
+    anyhow::ensure!(max_bytes > 0, "retirement page byte budget is empty");
+    let value = cas
+        .get_object_bounded(hash, max_bytes.min(MAX_RETIREMENT_CLOSURE_PAGE_BYTES))?
+        .ok_or_else(|| anyhow::anyhow!("retirement closure page absent"))?;
+    anyhow::ensure!(
+        lillux::sha256_hex(lillux::canonical_json(&value)?.as_bytes()) == hash,
+        "retirement page hash differs"
+    );
+    let page = TerminalSeatRetirementClosurePage::from_value(&value)?;
+    anyhow::ensure!(
+        page.chain_root_id == owner,
+        "retirement closure page belongs to another owner"
+    );
+    if let Some(first) = page.counterpart_roots.first() {
+        anyhow::ensure!(
+            previous_root.is_none_or(|prior| prior < first.as_str()),
+            "retirement counterpart order repeats across pages"
+        );
+    }
+    if let Some(first) = page.negative_transfer_closures.first() {
+        anyhow::ensure!(
+            previous_operation
+                .is_none_or(|prior| prior < first.decision.transfer.operation_id.as_str()),
+            "negative retirement closure order repeats across pages"
+        );
+    }
+    let previous_root = page
+        .counterpart_roots
+        .last()
+        .map(String::as_str)
+        .or(previous_root)
+        .map(str::to_owned);
+    let previous_operation = page
+        .negative_transfer_closures
+        .last()
+        .map(|closure| closure.decision.transfer.operation_id.as_str())
+        .or(previous_operation)
+        .map(str::to_owned);
+    Ok((page, previous_root, previous_operation))
+}
+
 /// Cloneable, descriptor-bound authority for maintenance work that must run
 /// after releasing the [`StateDb`] mutex.
 ///
@@ -1891,6 +2195,553 @@ impl std::fmt::Display for MachineContinuationBoundary {
 impl std::error::Error for MachineContinuationBoundary {}
 
 impl PinnedStateAuthority {
+    /// Capture only a positively retained immutable terminal prefix. A retired
+    /// head is never reconstructed into the live fixed-head anchor type.
+    pub fn capture_retired_seat_positive_prefix(
+        &self,
+        root: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<RetiredSeatPositivePrefix>> {
+        self.ensure_guard(guard)?;
+        let recovery = self.require_recovery()?;
+        let lock = crate::chain::ChainLock::acquire_existing_in_refs_directory(
+            &self.refs_directory,
+            &self.cas_directory,
+            recovery,
+            root,
+        )?;
+        if recovery.read_pending(root)?.is_some()
+            || lock
+                .read_verified_head(self.trust_store.as_ref())?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(marker) = recovery.read_retired_seat_marker(root)? else {
+            return Ok(None);
+        };
+        let Some(hash) = marker.terminal_retirement_manifest_hash.as_ref() else {
+            return Ok(None);
+        };
+        if recovery.read_retired_closure_release(&marker)?.is_some() {
+            return Ok(None);
+        }
+        let cas = self.cas_store()?;
+        let manifest_value = cas
+            .get_object_bounded(
+                hash,
+                crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("retired positive prefix manifest absent"))?;
+        let manifest =
+            crate::objects::terminal_seat_retirement::TerminalSeatRetirement::from_value(
+                &manifest_value,
+            )?;
+        anyhow::ensure!(
+            manifest.chain_root_id == root
+                && manifest.retired_head_hash == marker.expected_head_hash,
+            "retired positive prefix manifest differs from permanent marker"
+        );
+        let snapshot_value = cas
+            .get_object_bounded(
+                &manifest.snapshot_hash,
+                crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("retired positive prefix snapshot absent"))?;
+        let snapshot: ThreadSnapshot = serde_json::from_value(snapshot_value)?;
+        snapshot.validate()?;
+        anyhow::ensure!(
+            snapshot.chain_root_id == root
+                && snapshot.thread_id == root
+                && snapshot.kind_name == "seat_session"
+                && snapshot.status.is_terminal(),
+            "retired positive prefix snapshot has another owner or is nonterminal"
+        );
+        if let Some(tip) = &manifest.terminal_event_hash {
+            let value = cas
+                .get_object_bounded(
+                    tip,
+                    crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+                )?
+                .ok_or_else(|| anyhow::anyhow!("retired positive prefix terminal tip absent"))?;
+            let event: ThreadEvent = serde_json::from_value(value)?;
+            event.validate()?;
+            anyhow::ensure!(
+                event.chain_root_id == root
+                    && event.thread_id == root
+                    && event.thread_seq == manifest.terminal_thread_seq
+                    && event.chain_seq == manifest.terminal_chain_seq,
+                "retired positive prefix terminal native coordinates differ"
+            );
+        }
+        Ok(Some(RetiredSeatPositivePrefix {
+            endpoint: EventPrefixEndpoint {
+                chain_root_id: root.to_owned(),
+                thread_id: root.to_owned(),
+                chain_head_hash: marker.expected_head_hash.clone(),
+                snapshot_hash: manifest.snapshot_hash,
+                thread_last_event_hash: manifest.terminal_event_hash,
+                thread_last_seq: manifest.terminal_thread_seq,
+            },
+            manifest_hash: hash.clone(),
+            marker_digest: RecoveryStore::retired_marker_digest(&marker)?,
+            terminal_chain_seq: manifest.terminal_chain_seq,
+            terminal_status: snapshot.status,
+            closure_page_head: manifest.closure_page_head,
+        }))
+    }
+
+    pub fn read_retired_seat_positive_prefix_page(
+        &self,
+        prefix: &RetiredSeatPositivePrefix,
+        progress: Option<&AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<AuthoritativeThreadEventReadPage> {
+        self.ensure_guard(guard)?;
+        let marker = self
+            .require_recovery()?
+            .read_retired_seat_marker(prefix.chain_root_id())?
+            .ok_or_else(|| anyhow::anyhow!("retired prefix lost permanent marker"))?;
+        anyhow::ensure!(
+            marker.terminal_retirement_manifest_hash.as_deref()
+                == Some(prefix.manifest_hash.as_str())
+                && RecoveryStore::retired_marker_digest(&marker)? == prefix.marker_digest,
+            "retired prefix belongs to another immutable marker"
+        );
+        self.read_event_prefix_page(&prefix.endpoint, progress, max_events, max_bytes, guard)
+    }
+
+    /// One immutable closure page, never a completed absence or lifecycle proof.
+    pub fn read_retired_seat_retirement_closure_page(
+        &self,
+        prefix: &RetiredSeatPositivePrefix,
+        progress: Option<&TerminalSeatRetirementClosureProgress>,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<TerminalSeatRetirementClosureReadPage> {
+        self.ensure_guard(guard)?;
+        let marker = self
+            .require_recovery()?
+            .read_retired_seat_marker(prefix.chain_root_id())?
+            .ok_or_else(|| anyhow::anyhow!("retired closure lost permanent marker"))?;
+        anyhow::ensure!(
+            marker.terminal_retirement_manifest_hash.as_deref()
+                == Some(prefix.manifest_hash.as_str())
+                && RecoveryStore::retired_marker_digest(&marker)? == prefix.marker_digest,
+            "retired closure cursor belongs to another marker"
+        );
+        let hash = match progress {
+            Some(progress) => {
+                anyhow::ensure!(
+                    progress.marker_digest == prefix.marker_digest
+                        && progress.manifest_hash == prefix.manifest_hash,
+                    "retired closure progress belongs to another prefix"
+                );
+                Some(progress.next_page_hash.as_str())
+            }
+            None => prefix.closure_page_head.as_deref(),
+        };
+        let Some(hash) = hash else {
+            return Ok(TerminalSeatRetirementClosureReadPage {
+                counterpart_roots: Vec::new(),
+                negative_transfer_closures: Vec::new(),
+                next_progress: None,
+                complete: true,
+            });
+        };
+        let (page, previous_root, previous_operation) = load_retirement_closure_page(
+            &self.cas_store()?,
+            prefix.chain_root_id(),
+            hash,
+            progress.and_then(|value| value.previous_root.as_deref()),
+            progress.and_then(|value| value.previous_operation.as_deref()),
+            max_bytes,
+        )?;
+        let next_progress =
+            page.next_page_hash
+                .as_ref()
+                .map(|hash| TerminalSeatRetirementClosureProgress {
+                    marker_digest: prefix.marker_digest.clone(),
+                    manifest_hash: prefix.manifest_hash.clone(),
+                    next_page_hash: hash.clone(),
+                    previous_root,
+                    previous_operation,
+                });
+        Ok(TerminalSeatRetirementClosureReadPage {
+            counterpart_roots: page.counterpart_roots,
+            negative_transfer_closures: page.negative_transfer_closures,
+            complete: next_progress.is_none(),
+            next_progress,
+        })
+    }
+
+    /// Conditional roots owned by retired identities. GC must hold its exact
+    /// exclusive CAS guard. No partial marker scan may omit a retention root.
+    /// Release records precede collection, so a crash/retry never needs a CAS
+    /// manifest that a previous successful sweep already collected.
+    pub fn terminal_seat_retirement_object_roots(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        dry_run: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        self.ensure_guard(guard)?;
+        anyhow::ensure!(
+            guard.is_exclusive(),
+            "retirement root collection requires exclusive CAS guard"
+        );
+        let recovery = self.require_recovery()?;
+        let cas = self.cas_store()?;
+        let mut roots = Vec::new();
+        for marker in recovery.retained_seat_markers()? {
+            let Some(hash) = marker.terminal_retirement_manifest_hash.as_ref() else {
+                continue;
+            };
+            if recovery.read_retired_closure_release(&marker)?.is_some() {
+                continue;
+            }
+            let value = cas
+                .get_object_bounded(
+                    hash,
+                    crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+                )?
+                .ok_or_else(|| anyhow::anyhow!("unreleased terminal retirement manifest absent"))?;
+            let manifest =
+                crate::objects::terminal_seat_retirement::TerminalSeatRetirement::from_value(
+                    &value,
+                )?;
+            anyhow::ensure!(
+                manifest.chain_root_id == marker.chain_root_id
+                    && manifest.retired_head_hash == marker.expected_head_hash,
+                "retirement manifest differs from immutable retired identity"
+            );
+            // Exhaust the immutable page graph before deciding any root may
+            // be omitted. Like the existing local-maintenance mark pass,
+            // finite total lifetime size is not an admission ceiling. Each
+            // object stays bounded and strict cross-page ordering rejects cycles.
+            let mut counterparts = std::collections::BTreeSet::new();
+            let mut negative_counterparts = std::collections::BTreeSet::new();
+            let mut next = manifest.closure_page_head.clone();
+            let mut previous_root = None;
+            let mut previous_operation = None;
+            while let Some(hash) = next {
+                let (page, root, operation) = load_retirement_closure_page(
+                    &cas,
+                    &marker.chain_root_id,
+                    &hash,
+                    previous_root.as_deref(),
+                    previous_operation.as_deref(),
+                    crate::objects::terminal_seat_retirement::MAX_RETIREMENT_CLOSURE_PAGE_BYTES,
+                )?;
+                counterparts.extend(page.counterpart_roots);
+                for closure in page.negative_transfer_closures {
+                    let transfer = closure.decision.transfer;
+                    negative_counterparts.insert(
+                        if transfer.source.chain_root_id == marker.chain_root_id {
+                            transfer.destination.chain_root_id
+                        } else {
+                            transfer.source.chain_root_id
+                        },
+                    );
+                }
+                previous_root = root;
+                previous_operation = operation;
+                next = page.next_page_hash;
+            }
+            anyhow::ensure!(
+                negative_counterparts.is_subset(&counterparts),
+                "negative retirement closure counterpart is not retained"
+            );
+            let mut all_roots = counterparts.into_iter().collect::<Vec<_>>();
+            all_roots.push(marker.chain_root_id.clone());
+            all_roots.sort();
+            let mut locks = Vec::with_capacity(all_roots.len());
+            for root in &all_roots {
+                locks.push(crate::chain::ChainLock::acquire_existing_in_refs_directory(
+                    &self.refs_directory,
+                    &self.cas_directory,
+                    recovery,
+                    root,
+                )?);
+            }
+            let mut counterpart_markers = std::collections::BTreeMap::new();
+            let mut releasable = true;
+            for lock in &locks {
+                let root = lock.chain_root_id();
+                let retired = recovery.read_retired_seat_marker(root)?;
+                if recovery.read_pending(root)?.is_some()
+                    || lock
+                        .read_verified_head(self.trust_store.as_ref())?
+                        .is_some()
+                    || retired.is_none()
+                {
+                    releasable = false;
+                    break;
+                }
+                let retired = retired.expect("verified marker exists");
+                if root == marker.chain_root_id {
+                    anyhow::ensure!(
+                        retired == marker,
+                        "retirement marker changed under exclusion"
+                    );
+                } else {
+                    counterpart_markers.insert(
+                        root.to_owned(),
+                        RecoveryStore::retired_marker_digest(&retired)?,
+                    );
+                }
+            }
+            if releasable {
+                if !dry_run {
+                    recovery.publish_retired_closure_release(&marker, counterpart_markers)?;
+                }
+            } else {
+                roots.push(hash.clone());
+            }
+        }
+        Ok(roots)
+    }
+
+    /// Retirement discovery starts only at an exact signed terminal seat.
+    /// Snapshot qualification and ordinary fixed-anchor minting share one
+    /// retained chain lock; no separately captured tip is promoted to terminal.
+    pub fn capture_terminal_seat_event_read_anchor(
+        &self,
+        chain_root_id: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<AuthoritativeThreadEventReadAnchor>> {
+        self.ensure_guard(guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_existing_in_refs_directory(
+            &self.refs_directory,
+            &self.cas_directory,
+            self.require_recovery()?,
+            chain_root_id,
+        )?;
+        let pending = self.require_recovery()?.read_pending(chain_root_id)?;
+        if pending.as_ref().is_some_and(|pending| {
+            pending.operation != HeadOperation::Remove
+                || pending.terminal_retirement_manifest_hash.is_none()
+        }) {
+            anyhow::bail!("terminal seat discovery has an unqualified pending head transition");
+        }
+        let mut cache = HeadCache::new();
+        let Some(snapshot) = chain::read_thread_snapshot_with_trust(
+            self.cas_directory.path(),
+            self.refs_directory.path(),
+            &chain_lock,
+            chain_root_id,
+            chain_root_id,
+            self.trust_store.as_ref(),
+            &mut cache,
+        )?
+        else {
+            return Ok(None);
+        };
+        if snapshot.thread_id != chain_root_id || snapshot.chain_root_id != chain_root_id {
+            anyhow::bail!("terminal seat discovery changed exact signed root");
+        }
+        if snapshot.kind_name != "seat_session" || !snapshot.status.is_terminal() {
+            return Ok(None);
+        }
+        let readback = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+            self.cas_directory.path(),
+            self.refs_directory.path(),
+            &chain_lock,
+            chain_root_id,
+            chain_root_id,
+            self.trust_store.as_ref(),
+            &mut cache,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("terminal seat discovery lost its signed anchor"))?;
+        if pending.as_ref().is_some_and(|pending| {
+            pending.expected_previous_hash.as_deref() != Some(readback.chain_head_hash.as_str())
+        }) {
+            anyhow::bail!("terminal retirement discovery differs from pending Remove cut");
+        }
+        self.ensure_guard(guard)?;
+        Ok(Some(AuthoritativeThreadEventReadAnchor {
+            chain_root_id: chain_root_id.to_owned(),
+            thread_id: chain_root_id.to_owned(),
+            chain_head_hash: readback.chain_head_hash,
+            snapshot_hash: readback.snapshot_hash,
+            thread_last_event_hash: readback.thread_last_event_hash,
+            thread_last_seq: readback.thread_last_seq,
+        }))
+    }
+
+    /// Capture a fixed signed-head-derived thread frontier while briefly
+    /// holding the existing chain lock.
+    pub fn capture_thread_event_read_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<AuthoritativeThreadEventReadAnchor>> {
+        self.ensure_guard(guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self.refs_directory,
+            &self.cas_directory,
+            self.require_recovery()?,
+            chain_root_id,
+        )?;
+        let readback = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+            self.cas_directory.path(),
+            self.refs_directory.path(),
+            &chain_lock,
+            chain_root_id,
+            thread_id,
+            self.trust_store.as_ref(),
+            &mut HeadCache::new(),
+        )?;
+        self.ensure_guard(guard)?;
+        Ok(readback.map(|readback| AuthoritativeThreadEventReadAnchor {
+            chain_root_id: chain_root_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            chain_head_hash: readback.chain_head_hash,
+            snapshot_hash: readback.snapshot_hash,
+            thread_last_event_hash: readback.thread_last_event_hash,
+            thread_last_seq: readback.thread_last_seq,
+        }))
+    }
+
+    /// Authenticate at most one caller-bounded slice from an immutable anchor.
+    /// No chain lock is retained while walking event objects. Exhaustion returns
+    /// opaque progress rather than treating a partial walk as absence.
+    pub fn read_thread_event_page(
+        &self,
+        anchor: &AuthoritativeThreadEventReadAnchor,
+        progress: Option<&AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<AuthoritativeThreadEventReadPage> {
+        let endpoint = EventPrefixEndpoint {
+            chain_root_id: anchor.chain_root_id.clone(),
+            thread_id: anchor.thread_id.clone(),
+            chain_head_hash: anchor.chain_head_hash.clone(),
+            snapshot_hash: anchor.snapshot_hash.clone(),
+            thread_last_event_hash: anchor.thread_last_event_hash.clone(),
+            thread_last_seq: anchor.thread_last_seq,
+        };
+        self.read_event_prefix_page(&endpoint, progress, max_events, max_bytes, guard)
+    }
+
+    fn read_event_prefix_page(
+        &self,
+        anchor: &EventPrefixEndpoint,
+        progress: Option<&AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<AuthoritativeThreadEventReadPage> {
+        self.ensure_guard(guard)?;
+        if max_events == 0 || max_bytes == 0 {
+            anyhow::bail!("authoritative thread event page bounds must be positive");
+        }
+        let (mut next_hash, mut next_seq) = match progress {
+            Some(progress)
+                if progress.chain_root_id == anchor.chain_root_id
+                    && progress.thread_id == anchor.thread_id
+                    && progress.chain_head_hash == anchor.chain_head_hash
+                    && progress.snapshot_hash == anchor.snapshot_hash
+                    && progress.next_thread_seq > 0 =>
+            {
+                (
+                    Some(progress.next_event_hash.clone()),
+                    progress.next_thread_seq,
+                )
+            }
+            Some(_) => anyhow::bail!("thread event progress belongs to another fixed anchor"),
+            None => (
+                anchor.thread_last_event_hash.clone(),
+                anchor.thread_last_seq,
+            ),
+        };
+        if next_seq == 0 {
+            if next_hash.is_some() {
+                anyhow::bail!("thread event anchor extends before sequence one");
+            }
+            return Ok(AuthoritativeThreadEventReadPage {
+                events: Vec::new(),
+                progress: None,
+            });
+        }
+        if next_hash.is_none() {
+            anyhow::bail!("thread event anchor ended before its fixed sequence");
+        }
+        let cas = self.cas_store()?;
+        let mut events = Vec::new();
+        let mut inspected_bytes = 0u64;
+        while next_seq != 0 && (events.len() as u64) < max_events {
+            let hash = next_hash.take().expect("nonzero sequence has a hash");
+            let remaining = max_bytes.saturating_sub(inspected_bytes);
+            let limit = (crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64).min(remaining);
+            if limit == 0 {
+                next_hash = Some(hash);
+                break;
+            }
+            let (file, size) = cas
+                .open_object(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("thread event page CAS object is absent: {hash}"))?;
+            if size > limit {
+                if events.is_empty() {
+                    anyhow::bail!(
+                        "thread event page object exceeds the byte work bound; increase the per-page byte budget"
+                    );
+                }
+                next_hash = Some(hash);
+                break;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(file, limit + 1), &mut bytes)?;
+            if bytes.len() as u64 > limit || lillux::sha256_hex(&bytes) != hash {
+                anyhow::bail!("thread event page object changed or exceeded its byte bound");
+            }
+            let event: ThreadEvent =
+                serde_json::from_slice(&bytes).context("decode bounded thread event page")?;
+            let canonical = lillux::canonical_json(&event.to_value())
+                .context("canonicalize bounded thread event page")?;
+            if canonical.as_bytes() != bytes.as_slice()
+                || lillux::sha256_hex(canonical.as_bytes()) != hash
+            {
+                anyhow::bail!("thread event page object is not canonically encoded");
+            }
+            event.validate()?;
+            if event.chain_root_id != anchor.chain_root_id
+                || event.thread_id != anchor.thread_id
+                || event.thread_seq != next_seq
+            {
+                anyhow::bail!("thread event page differs from its fixed anchor");
+            }
+            inspected_bytes = inspected_bytes
+                .checked_add(canonical.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("thread event page byte count overflow"))?;
+            next_hash.clone_from(&event.prev_thread_event_hash);
+            events.push((hash, event));
+            next_seq -= 1;
+        }
+        let progress = if next_seq == 0 {
+            if next_hash.is_some() {
+                anyhow::bail!("thread event history extends before sequence one");
+            }
+            None
+        } else {
+            Some(AuthoritativeThreadEventReadProgress {
+                chain_root_id: anchor.chain_root_id.clone(),
+                thread_id: anchor.thread_id.clone(),
+                chain_head_hash: anchor.chain_head_hash.clone(),
+                snapshot_hash: anchor.snapshot_hash.clone(),
+                next_event_hash: next_hash.ok_or_else(|| {
+                    anyhow::anyhow!("thread event page ended before sequence {next_seq}")
+                })?,
+                next_thread_seq: next_seq,
+            })
+        };
+        self.ensure_guard(guard)?;
+        Ok(AuthoritativeThreadEventReadPage { events, progress })
+    }
+
     /// Exact continuation lineage through one signed head, without a runtime
     /// database or projection lookup. The caller supplies an existing CAS guard.
     pub fn read_machine_continuation_lineage(
@@ -2744,6 +3595,13 @@ impl StateDb {
         chain_lock: &crate::chain::ChainLock,
     ) -> anyhow::Result<Option<CancelledPreparedRemove>> {
         ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        if self
+            .recovery
+            .read_retired_seat_marker(chain_root_id)?
+            .is_some()
+        {
+            anyhow::bail!("retired seat identity cannot converge a new chain head");
+        }
         let cas = self.pinned_cas()?;
         let Some(pending) = self.recovery.read_pending(chain_root_id)? else {
             return Ok(None);
@@ -3153,6 +4011,13 @@ impl StateDb {
             &self.recovery,
             chain_root_id,
         )?;
+        if self
+            .recovery
+            .read_retired_seat_marker(chain_root_id)?
+            .is_some()
+        {
+            anyhow::bail!("retired seat identity cannot enter ordinary chain repair");
+        }
         let head = chain_lock
             .read_verified_head(self.trust_store.as_ref())?
             .ok_or_else(|| anyhow::anyhow!("chain {chain_root_id} has no signed head"))?;
@@ -3253,6 +4118,539 @@ impl StateDb {
             head_hash: head.target_hash,
             _chain_locks: vec![chain_lock],
         })
+    }
+
+    /// Serialize one non-CAS UI action admission with the exact signed seat
+    /// frontier. The callback must not reenter state/CAS and may only publish
+    /// an already-prepared token or session attachment.
+    pub fn with_running_seat_action_if_anchor<T>(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        expected_owner: &str,
+        expected_item_ref: &str,
+        expected_executor_ref: &str,
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.with_running_seat_action_if_anchors(
+            chain_root_id,
+            thread_id,
+            expected,
+            std::slice::from_ref(expected),
+            expected_owner,
+            expected_item_ref,
+            expected_executor_ref,
+            action,
+        )
+    }
+
+    /// The same short action owner, conditioned on every signed dependency
+    /// head of a completed paired cut. No callback may reenter StateDb/CAS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_running_seat_action_if_anchors<T>(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        expected_owner: &str,
+        expected_item_ref: &str,
+        expected_executor_ref: &str,
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        if chain_root_id != thread_id
+            || expected.chain_root_id != chain_root_id
+            || expected.thread_id != thread_id
+        {
+            anyhow::bail!("seat action requires its exact signed root anchor");
+        }
+        if anchors.is_empty() || !anchors.iter().any(|anchor| anchor == expected) {
+            anyhow::bail!("seat action dependency cut omits its exact root anchor");
+        }
+        let mut by_root =
+            std::collections::BTreeMap::<&str, Vec<&AuthoritativeThreadEventReadAnchor>>::new();
+        for anchor in anchors {
+            if anchor.chain_root_id.is_empty() || anchor.thread_id.is_empty() {
+                anyhow::bail!("seat action dependency has empty coordinates");
+            }
+            let scoped = by_root.entry(anchor.chain_root_id.as_str()).or_default();
+            if let Some(prior) = scoped
+                .iter()
+                .find(|prior| prior.thread_id == anchor.thread_id)
+            {
+                if *prior != anchor {
+                    anyhow::bail!("seat action dependency has contradictory anchors");
+                }
+            } else {
+                scoped.push(anchor);
+            }
+        }
+        let mut locks = Vec::with_capacity(by_root.len());
+        for root in by_root.keys() {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        let chain_lock = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == chain_root_id)
+            .expect("exact root anchor was included");
+        {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for (root, scoped) in &by_root {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == *root)
+                    .expect("ordered chain lock was acquired");
+                if self.recovery.read_pending(root)?.is_some() {
+                    return Ok(None);
+                }
+                for anchor in scoped {
+                    let current = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock,
+                        root,
+                        &anchor.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?;
+                    if !current.is_some_and(|current| {
+                        current.chain_head_hash == anchor.chain_head_hash
+                            && current.snapshot_hash == anchor.snapshot_hash
+                            && current.thread_last_event_hash == anchor.thread_last_event_hash
+                            && current.thread_last_seq == anchor.thread_last_seq
+                    }) {
+                        return Ok(None);
+                    }
+                }
+            }
+            if self.recovery.read_pending(chain_root_id)?.is_some()
+                || !chain::thread_append_anchor_matches_under_lock(
+                    &self.cas_root,
+                    &self.refs_root,
+                    chain_root_id,
+                    thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                    &chain_lock,
+                    chain::ExpectedThreadAppendAnchor {
+                        chain_head_hash: &expected.chain_head_hash,
+                        thread_last_event_hash: expected.thread_last_event_hash.as_deref(),
+                        thread_last_seq: expected.thread_last_seq,
+                    },
+                )?
+            {
+                return Ok(None);
+            }
+            let Some(snapshot) = chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+            )?
+            else {
+                return Ok(None);
+            };
+            if snapshot.chain_root_id != chain_root_id
+                || snapshot.thread_id != thread_id
+                || snapshot.kind_name != "seat_session"
+                || snapshot.status != crate::objects::ThreadStatus::Running
+                || snapshot.requested_by.as_deref() != Some(expected_owner)
+                || snapshot.item_ref != expected_item_ref
+                || snapshot.executor_ref != expected_executor_ref
+            {
+                return Ok(None);
+            }
+        }
+        action().map(Some)
+    }
+
+    /// Short existing UI action under a strict mixed live/retired cut. The
+    /// target stays a live running root; retired prefixes are dependencies only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_running_seat_action_if_mixed_cut<T>(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredSeatPositivePrefix],
+        expected_owner: &str,
+        expected_item_ref: &str,
+        expected_executor_ref: &str,
+        guard: &crate::recovery::CasMutationGuard,
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        if chain_root_id != thread_id
+            || expected.chain_root_id != chain_root_id
+            || expected.thread_id != thread_id
+            || !anchors.iter().any(|anchor| anchor == expected)
+        {
+            anyhow::bail!("mixed seat action requires exact live root anchor");
+        }
+        self.with_live_and_retired_seat_exclusions(
+            guard,
+            chain_root_id,
+            anchors,
+            retired,
+            |root_lock| {
+                let mut cache = self.head_cache.lock().expect("head_cache lock");
+                let snapshot = chain::read_thread_snapshot_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    root_lock,
+                    chain_root_id,
+                    thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                )?;
+                let Some(snapshot) = snapshot else {
+                    return Ok(None);
+                };
+                if snapshot.chain_root_id != chain_root_id
+                    || snapshot.thread_id != thread_id
+                    || snapshot.kind_name != "seat_session"
+                    || snapshot.status != crate::objects::ThreadStatus::Running
+                    || snapshot.requested_by.as_deref() != Some(expected_owner)
+                    || snapshot.item_ref != expected_item_ref
+                    || snapshot.executor_ref != expected_executor_ref
+                {
+                    return Ok(None);
+                }
+                drop(cache);
+                action().map(Some)
+            },
+        )
+        .map(Option::flatten)
+    }
+
+    /// Run a short callback only while every supplied thread is still at its
+    /// exact trust-verified signed head. Read-only for this database and CAS;
+    /// a separate owner may publish an already-authorized in-memory projection
+    /// through its previously acquired lock. All existing chain locks remain
+    /// held: no state/CAS reentry, further lock acquisition, I/O or durable writes.
+    /// Head exclusion alone never admits that other owner's publication.
+    pub fn with_thread_event_read_anchors<T>(
+        &self,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        if anchors.is_empty() {
+            anyhow::bail!("thread read action requires at least one exact anchor");
+        }
+        let mut by_root =
+            std::collections::BTreeMap::<&str, Vec<&AuthoritativeThreadEventReadAnchor>>::new();
+        for anchor in anchors {
+            if anchor.chain_root_id.is_empty() || anchor.thread_id.is_empty() {
+                anyhow::bail!("thread read action has an empty chain or thread scope");
+            }
+            let scoped = by_root.entry(anchor.chain_root_id.as_str()).or_default();
+            if let Some(prior) = scoped
+                .iter()
+                .find(|prior| prior.thread_id == anchor.thread_id)
+            {
+                if *prior != anchor {
+                    anyhow::bail!("thread read action has contradictory exact anchors");
+                }
+            } else {
+                scoped.push(anchor);
+            }
+        }
+        let mut locks = Vec::with_capacity(by_root.len());
+        for root in by_root.keys() {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for (root, scoped) in by_root {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == root)
+                    .expect("exact chain lock was acquired");
+                if self.recovery.read_pending(root)?.is_some() {
+                    return Ok(None);
+                }
+                for anchor in scoped {
+                    let current = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock,
+                        root,
+                        &anchor.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?;
+                    if !current.is_some_and(|current| {
+                        current.chain_head_hash == anchor.chain_head_hash
+                            && current.snapshot_hash == anchor.snapshot_hash
+                            && current.thread_last_event_hash == anchor.thread_last_event_hash
+                            && current.thread_last_seq == anchor.thread_last_seq
+                    }) {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        action().map(Some)
+    }
+
+    /// Read-only exclusion for a historical cut containing retired roots and
+    /// optional current dependencies. This verifies exact current heads plus
+    /// permanent marker identity and absent retired heads under ordered chain
+    /// locks; it supplies no target lock, running writer, or session authority.
+    /// All exclusions remain held through a short in-memory callback. It must
+    /// not acquire other locks, reenter state/CAS, perform I/O or write storage.
+    pub fn with_retired_seat_read_prefixes<T>(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        current: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredSeatPositivePrefix],
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.ensure_cas_mutation_guard(guard)?;
+        if retired.is_empty() {
+            anyhow::bail!("retired read exclusion requires a nonempty cut");
+        }
+        let mut current_by_root = std::collections::BTreeMap::new();
+        for anchor in current {
+            if anchor.chain_root_id.is_empty() || anchor.thread_id != anchor.chain_root_id {
+                anyhow::bail!("historical read exclusion has invalid current root cut");
+            }
+            if let Some(prior) = current_by_root.insert(anchor.chain_root_id.as_str(), anchor) {
+                if prior != anchor {
+                    anyhow::bail!("historical read exclusion has conflicting current cuts");
+                }
+            }
+        }
+        let mut by_root = std::collections::BTreeMap::new();
+        for prefix in retired {
+            if prefix.chain_root_id().is_empty() {
+                anyhow::bail!("retired read exclusion has empty root scope");
+            }
+            if current_by_root.contains_key(prefix.chain_root_id()) {
+                anyhow::bail!("historical read exclusion mixes live and retired roots");
+            }
+            if let Some(prior) = by_root.insert(prefix.chain_root_id(), prefix) {
+                if !prior.same_cut(prefix) {
+                    anyhow::bail!("retired read exclusion has conflicting prefix cuts");
+                }
+            }
+        }
+        let roots = current_by_root
+            .keys()
+            .copied()
+            .chain(by_root.keys().copied())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut locks = Vec::with_capacity(roots.len());
+        for root in roots {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for (root, anchor) in current_by_root {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == root)
+                    .expect("current read root lock was acquired");
+                if self.recovery.read_pending(root)?.is_some() {
+                    return Ok(None);
+                }
+                let actual = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    lock,
+                    root,
+                    &anchor.thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                )?;
+                if !actual.is_some_and(|actual| {
+                    actual.chain_head_hash == anchor.chain_head_hash
+                        && actual.snapshot_hash == anchor.snapshot_hash
+                        && actual.thread_last_event_hash == anchor.thread_last_event_hash
+                        && actual.thread_last_seq == anchor.thread_last_seq
+                }) {
+                    return Ok(None);
+                }
+            }
+        }
+        for (root, prefix) in by_root {
+            let lock = locks
+                .iter()
+                .find(|lock| lock.chain_root_id() == root)
+                .expect("retired read root lock was acquired");
+            if self.recovery.read_pending(root)?.is_some()
+                || lock
+                    .read_verified_head(self.trust_store.as_ref())?
+                    .is_some()
+            {
+                return Ok(None);
+            }
+            let Some(marker) = self.recovery.read_retired_seat_marker(root)? else {
+                return Ok(None);
+            };
+            if marker.terminal_retirement_manifest_hash.as_deref()
+                != Some(prefix.manifest_hash.as_str())
+                || RecoveryStore::retired_marker_digest(&marker)? != prefix.marker_digest
+            {
+                anyhow::bail!("retired read exclusion differs from exact immutable marker");
+            }
+        }
+        action().map(Some)
+    }
+
+    /// Existing terminal-removal owner exclusion. Unlike the read-only
+    /// disclosure callback above, this supplies the already-held target lock
+    /// to the existing Remove path. Callers must hold the mutation/GC permit,
+    /// authenticate exhaustive transfer clearance separately, and must not
+    /// acquire another chain lock or reenter StateDb from the callback.
+    ///
+    /// A retired marker joins only the exact previously authenticated cut;
+    /// it does not authenticate transfer lifecycle or missing phase absence.
+    pub fn with_terminal_retirement_exclusions<T>(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        target_root: &str,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredSeatPositivePrefix],
+        action: impl FnOnce(&crate::chain::ChainLock) -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.with_mixed_root_exclusions_inner(guard, target_root, anchors, retired, true, action)
+    }
+
+    /// Existing ordered mixed-endpoint exclusion with strict live anchors.
+    /// Unlike retirement's removal inspection, no current dependency may be
+    /// satisfied by a newly absent head, even if a marker now exists.
+    pub fn with_live_and_retired_seat_exclusions<T>(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        target_root: &str,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredSeatPositivePrefix],
+        action: impl FnOnce(&crate::chain::ChainLock) -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.with_mixed_root_exclusions_inner(guard, target_root, anchors, retired, false, action)
+    }
+
+    fn with_mixed_root_exclusions_inner<T>(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        target_root: &str,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredSeatPositivePrefix],
+        allow_absent_live_dependency: bool,
+        action: impl FnOnce(&crate::chain::ChainLock) -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        self.ensure_cas_mutation_guard(guard)?;
+        let mut by_root = std::collections::BTreeMap::new();
+        for anchor in anchors {
+            if anchor.chain_root_id.is_empty() || anchor.thread_id != anchor.chain_root_id {
+                anyhow::bail!("terminal retirement exclusion requires exact root-seat cuts");
+            }
+            if let Some(prior) = by_root.insert(anchor.chain_root_id.as_str(), anchor) {
+                if prior != anchor {
+                    anyhow::bail!("terminal retirement exclusion has conflicting root cuts");
+                }
+            }
+        }
+        if !by_root.contains_key(target_root) {
+            anyhow::bail!("terminal retirement exclusion omits its target cut");
+        }
+        let mut retired_by_root = std::collections::BTreeMap::new();
+        for prefix in retired {
+            if by_root.contains_key(prefix.chain_root_id()) || prefix.chain_root_id() == target_root
+            {
+                anyhow::bail!("retirement exclusion mixes live and retired root cuts");
+            }
+            if let Some(prior) = retired_by_root.insert(prefix.chain_root_id(), prefix) {
+                if prior.manifest_hash != prefix.manifest_hash
+                    || prior.marker_digest != prefix.marker_digest
+                {
+                    anyhow::bail!("retirement exclusion has conflicting retired prefix cuts");
+                }
+            }
+        }
+        let roots = by_root
+            .keys()
+            .chain(retired_by_root.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut locks = Vec::with_capacity(roots.len());
+        for root in roots {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        for (root, prefix) in retired_by_root {
+            let lock = locks
+                .iter()
+                .find(|lock| lock.chain_root_id() == root)
+                .expect("retired prefix root lock acquired");
+            if self.recovery.read_pending(root)?.is_some()
+                || lock
+                    .read_verified_head(self.trust_store.as_ref())?
+                    .is_some()
+            {
+                return Ok(None);
+            }
+            let Some(marker) = self.recovery.read_retired_seat_marker(root)? else {
+                return Ok(None);
+            };
+            if marker.terminal_retirement_manifest_hash.as_deref()
+                != Some(prefix.manifest_hash.as_str())
+                || RecoveryStore::retired_marker_digest(&marker)? != prefix.marker_digest
+            {
+                anyhow::bail!("retired exclusion differs from exact immutable marker");
+            }
+        }
+        {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for (root, anchor) in &by_root {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == *root)
+                    .expect("retirement root lock was acquired");
+                if let Some(pending) = self.recovery.read_pending(root)? {
+                    if !allow_absent_live_dependency
+                        || *root != target_root
+                        || pending.operation != HeadOperation::Remove
+                        || pending.terminal_retirement_manifest_hash.is_none()
+                        || pending.expected_previous_hash.as_deref()
+                            != Some(anchor.chain_head_hash.as_str())
+                    {
+                        return Ok(None);
+                    }
+                }
+                let current = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    lock,
+                    root,
+                    &anchor.thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                )?;
+                match current {
+                    Some(current)
+                        if current.chain_head_hash == anchor.chain_head_hash
+                            && current.snapshot_hash == anchor.snapshot_hash
+                            && current.thread_last_event_hash == anchor.thread_last_event_hash
+                            && current.thread_last_seq == anchor.thread_last_seq => {}
+                    Some(_) => return Ok(None),
+                    None if allow_absent_live_dependency
+                        && *root != target_root
+                        && self
+                            .retired_seat_read_anchor_absent_head_under_lock(anchor, lock)? => {}
+                    None => return Ok(None),
+                }
+            }
+        }
+        let target = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == target_root)
+            .expect("retirement target lock was acquired");
+        action(target).map(Some)
     }
 
     /// Reserve a runtime pin for a not-yet-created child chain. The future
@@ -3789,15 +5187,21 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AppendResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.append_events_inner(
+        match self.append_events_inner(
             chain_root_id,
             thread_id,
             events,
             snapshot_updates,
             signer,
             None,
+            None,
             &guard,
-        )
+        )? {
+            ConditionalThreadEventAppendResult::Committed(committed) => Ok(committed),
+            ConditionalThreadEventAppendResult::Conflict => {
+                unreachable!("unconditional append cannot conflict")
+            }
+        }
     }
 
     // Admission authority, signer, liveness proof, and the held CAS guard stay
@@ -3813,6 +5217,38 @@ impl StateDb {
         runtime_liveness: &dyn RuntimeLivenessInspector,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<AppendResult>> {
+        match self.append_events_inner(
+            chain_root_id,
+            thread_id,
+            events,
+            snapshot_updates,
+            signer,
+            Some(runtime_liveness),
+            None,
+            cas_mutation_guard,
+        )? {
+            ConditionalThreadEventAppendResult::Committed(committed) => Ok(committed),
+            ConditionalThreadEventAppendResult::Conflict => {
+                unreachable!("unconditional append cannot conflict")
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_events_admitted_if_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: Vec<ThreadEvent>,
+        snapshot_updates: Vec<SnapshotUpdate>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        if expected.chain_root_id != chain_root_id || expected.thread_id != thread_id {
+            anyhow::bail!("conditional append anchor belongs to another thread");
+        }
         self.append_events_inner(
             chain_root_id,
             thread_id,
@@ -3820,7 +5256,48 @@ impl StateDb {
             snapshot_updates,
             signer,
             Some(runtime_liveness),
+            Some(expected),
             cas_mutation_guard,
+        )
+    }
+
+    /// Lifecycle terminal publication while its caller retains every paired
+    /// root exclusion. This supplies serialization, not transfer clearance.
+    /// The application owner must authenticate exhaustive obligations and its
+    /// durable reaping claim before invoking this method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_qualified_seat_terminal_under_lock(
+        &self,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        event: ThreadEvent,
+        snapshot_update: SnapshotUpdate,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        anyhow::ensure!(
+            expected.chain_root_id == expected.thread_id
+                && event.chain_root_id == expected.chain_root_id
+                && event.thread_id == expected.thread_id
+                && event.durability.is_cas_stored()
+                && snapshot_update.thread_id == expected.thread_id
+                && snapshot_update.new_snapshot.thread_id == expected.thread_id
+                && snapshot_update.new_snapshot.chain_root_id == expected.chain_root_id
+                && snapshot_update.new_snapshot.kind_name == "seat_session"
+                && snapshot_update.new_snapshot.status.is_terminal(),
+            "qualified terminal append changes its exact root-seat identity"
+        );
+        self.append_events_under_chain_lock(
+            &expected.chain_root_id,
+            &expected.thread_id,
+            vec![event],
+            vec![snapshot_update],
+            signer,
+            Some(runtime_liveness),
+            Some(expected),
+            chain_lock,
         )
     }
 
@@ -3833,8 +5310,9 @@ impl StateDb {
         snapshot_updates: Vec<SnapshotUpdate>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
+        expected: Option<&AuthoritativeThreadEventReadAnchor>,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
-    ) -> anyhow::Result<CommittedWrite<AppendResult>> {
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::append_events cannot persist ephemeral events");
         }
@@ -3846,6 +5324,885 @@ impl StateDb {
             &self.recovery,
             chain_root_id,
         )?;
+        self.append_events_under_chain_lock(
+            chain_root_id,
+            thread_id,
+            events,
+            snapshot_updates,
+            signer,
+            runtime_liveness,
+            expected,
+            &chain_lock,
+        )
+    }
+
+    /// Append only while two exact retained chain anchors remain current.
+    /// Both existing chain locks are acquired in root-ID order and held through
+    /// target publication. The counterpart is never modified. This is a state
+    /// serialization primitive, not domain or lifecycle-writer authorization.
+    /// Neither missing heads nor pending publication/removal are repaired here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_events_admitted_if_two_anchors(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        counterpart: &AuthoritativeThreadEventReadAnchor,
+        required_target_kind: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.append_running_events_admitted_if_two_anchors_with_admission(
+            chain_root_id,
+            thread_id,
+            events,
+            signer,
+            runtime_liveness,
+            expected,
+            counterpart,
+            required_target_kind,
+            cas_mutation_guard,
+            |_| Ok(true),
+        )
+    }
+
+    /// Domain admission under both ordered chain locks, after exact anchors
+    /// and signed target state are checked, immediately before publication.
+    /// `admit` may read caller-owned runtime state but must not reenter StateDb
+    /// or acquire either chain lock. A false result is a clean conflict; an
+    /// error publishes nothing and leaves retry policy with the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_events_admitted_if_two_anchors_with_admission(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        counterpart: &AuthoritativeThreadEventReadAnchor,
+        required_target_kind: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(TwoAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.append_running_events_admitted_if_mixed_cut_with_admission(
+            chain_root_id,
+            thread_id,
+            events,
+            signer,
+            runtime_liveness,
+            expected,
+            counterpart,
+            &[expected.clone(), counterpart.clone()],
+            &[],
+            required_target_kind,
+            cas_mutation_guard,
+            admit,
+        )
+    }
+
+    /// Single target publication with the same two live actor checks, while
+    /// excluding every current or retired dependency of their replay cut.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_events_admitted_if_mixed_cut_with_admission(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        counterpart: &AuthoritativeThreadEventReadAnchor,
+        current_anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[RetiredSeatPositivePrefix],
+        required_target_kind: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(TwoAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        if expected.chain_root_id != chain_root_id
+            || expected.thread_id != thread_id
+            || counterpart.chain_root_id == chain_root_id
+            || events.is_empty()
+            || events.iter().any(|event| !event.durability.is_cas_stored())
+        {
+            anyhow::bail!("two-anchor append requires distinct exact chains and durable events");
+        }
+        let mut live = std::collections::BTreeMap::new();
+        for anchor in current_anchors.iter().chain([expected, counterpart]) {
+            if anchor.chain_root_id.is_empty() {
+                anyhow::bail!("append dependency has empty chain identity");
+            }
+            if let Some(prior) = live.insert(anchor.chain_root_id.as_str(), anchor)
+                && prior != anchor
+            {
+                anyhow::bail!("append dependencies have conflicting exact live cuts");
+            }
+        }
+        let mut retired = std::collections::BTreeMap::new();
+        for prefix in retired_prefixes {
+            if prefix.chain_root_id().is_empty() || live.contains_key(prefix.chain_root_id()) {
+                anyhow::bail!("append dependency mixes live and retired cuts");
+            }
+            if let Some(prior) = retired.insert(prefix.chain_root_id(), prefix)
+                && !prior.same_cut(prefix)
+            {
+                anyhow::bail!("append dependencies have conflicting retired cuts");
+            }
+        }
+        let roots = live
+            .keys()
+            .chain(retired.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut locks = Vec::with_capacity(roots.len());
+        for root in roots {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        for (root, prefix) in retired {
+            let lock = locks
+                .iter()
+                .find(|lock| lock.chain_root_id() == root)
+                .expect("retired append dependency lock acquired");
+            if self.recovery.read_pending(root)?.is_some()
+                || lock
+                    .read_verified_head(self.trust_store.as_ref())?
+                    .is_some()
+            {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+            let Some(marker) = self.recovery.read_retired_seat_marker(root)? else {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            };
+            if marker.terminal_retirement_manifest_hash.as_deref()
+                != Some(prefix.manifest_hash.as_str())
+                || RecoveryStore::retired_marker_digest(&marker)? != prefix.marker_digest
+            {
+                anyhow::bail!("retired append dependency differs from immutable marker");
+            }
+        }
+        let (target_snapshot, counterpart_snapshot) = {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for anchor in live.into_values() {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == anchor.chain_root_id)
+                    .expect("both exact chain locks were acquired");
+                if self.recovery.read_pending(&anchor.chain_root_id)?.is_some()
+                    || chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock,
+                        &anchor.chain_root_id,
+                        &anchor.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?
+                    .is_none_or(|current| {
+                        current.chain_head_hash != anchor.chain_head_hash
+                            || current.snapshot_hash != anchor.snapshot_hash
+                            || current.thread_last_event_hash != anchor.thread_last_event_hash
+                            || current.thread_last_seq != anchor.thread_last_seq
+                    })
+                {
+                    return Ok(ConditionalThreadEventAppendResult::Conflict);
+                }
+            }
+            let target_lock = locks
+                .iter()
+                .find(|lock| lock.chain_root_id() == chain_root_id)
+                .expect("target chain lock was acquired");
+            let Some(snapshot) = chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                target_lock,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+            )?
+            else {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            };
+            if snapshot.chain_root_id != chain_root_id
+                || snapshot.thread_id != thread_id
+                || snapshot.status != crate::objects::ThreadStatus::Running
+                || snapshot.kind_name != required_target_kind
+            {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+            let counterpart_lock = locks
+                .iter()
+                .find(|lock| lock.chain_root_id() == counterpart.chain_root_id)
+                .expect("counterpart chain lock was acquired");
+            let Some(counterpart_snapshot) = chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                counterpart_lock,
+                &counterpart.chain_root_id,
+                &counterpart.thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+            )?
+            else {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            };
+            if counterpart_snapshot.chain_root_id != counterpart.chain_root_id
+                || counterpart_snapshot.thread_id != counterpart.thread_id
+            {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+            (snapshot, counterpart_snapshot)
+        };
+        let target_lock = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == chain_root_id)
+            .expect("target chain lock was acquired");
+        let counterpart_lock = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == counterpart.chain_root_id)
+            .expect("counterpart chain lock was acquired");
+        let target_thread_ids = self
+            .authoritative_chain_thread_ids_under_lock(chain_root_id, target_lock)?
+            .ok_or_else(|| anyhow::anyhow!("two-anchor target lost signed membership"))?;
+        let counterpart_thread_ids = self
+            .authoritative_chain_thread_ids_under_lock(
+                &counterpart.chain_root_id,
+                counterpart_lock,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("two-anchor counterpart lost signed membership"))?;
+        if !admit(TwoAnchorAdmissionView {
+            target: &target_snapshot,
+            counterpart: &counterpart_snapshot,
+            target_thread_ids: &target_thread_ids,
+            counterpart_thread_ids: &counterpart_thread_ids,
+        })? {
+            return Ok(ConditionalThreadEventAppendResult::Conflict);
+        }
+        let target_index = locks
+            .iter()
+            .position(|lock| lock.chain_root_id() == chain_root_id)
+            .expect("target chain lock was acquired");
+        let target_lock = locks.remove(target_index);
+        // `locks` retains the counterpart until this complete append returns.
+        // The target helper consumes the held lock; it must never reacquire it.
+        let result = self.append_events_under_chain_lock(
+            chain_root_id,
+            thread_id,
+            events,
+            vec![],
+            signer,
+            Some(runtime_liveness),
+            Some(expected),
+            &target_lock,
+        );
+        drop(locks);
+        result
+    }
+
+    /// Publish a destination event before a causally linked source event under
+    /// both existing chain exclusions. This is a logical pair, not a two-head
+    /// transaction: every outcome after destination publication is explicitly
+    /// partial/uncertain and must be reconciled from signed history. The
+    /// callbacks must not reenter StateDb or acquire either chain lock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_event_pair_admitted_if_anchors(
+        &self,
+        destination: &AuthoritativeThreadEventReadAnchor,
+        source: &AuthoritativeThreadEventReadAnchor,
+        destination_events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        required_destination_kind: &str,
+        required_source_kind: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(TwoAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+        build_source: impl FnOnce(
+            &CommittedWrite<AppendResult>,
+            &AuthoritativeThreadEventReadAnchor,
+        ) -> anyhow::Result<Vec<ThreadEvent>>,
+    ) -> anyhow::Result<ConditionalThreadEventPairAppendResult> {
+        self.append_running_event_pair_admitted_if_mixed_cut(
+            destination,
+            source,
+            &[destination.clone(), source.clone()],
+            &[],
+            destination_events,
+            signer,
+            runtime_liveness,
+            required_destination_kind,
+            required_source_kind,
+            cas_mutation_guard,
+            admit,
+            build_source,
+        )
+    }
+
+    /// The pair and all prior causal dependencies share one ordered lock set.
+    /// Retired dependencies are positive immutable marker testimony, never
+    /// substitutes for either live actor's exact selected append anchor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_event_pair_admitted_if_mixed_cut(
+        &self,
+        destination: &AuthoritativeThreadEventReadAnchor,
+        source: &AuthoritativeThreadEventReadAnchor,
+        current_anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired_prefixes: &[RetiredSeatPositivePrefix],
+        destination_events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        required_destination_kind: &str,
+        required_source_kind: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(TwoAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+        build_source: impl FnOnce(
+            &CommittedWrite<AppendResult>,
+            &AuthoritativeThreadEventReadAnchor,
+        ) -> anyhow::Result<Vec<ThreadEvent>>,
+    ) -> anyhow::Result<ConditionalThreadEventPairAppendResult> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        if destination.chain_root_id == source.chain_root_id
+            || destination_events.is_empty()
+            || destination_events
+                .iter()
+                .any(|event| !event.durability.is_cas_stored())
+        {
+            anyhow::bail!(
+                "pair append requires distinct exact chains and durable destination events"
+            );
+        }
+        let mut live = std::collections::BTreeMap::new();
+        for anchor in current_anchors.iter().chain([destination, source]) {
+            if anchor.chain_root_id.is_empty() {
+                anyhow::bail!("pair dependency has empty chain identity");
+            }
+            if let Some(prior) = live.insert(anchor.chain_root_id.as_str(), anchor)
+                && prior != anchor
+            {
+                anyhow::bail!("pair dependencies have conflicting exact live cuts");
+            }
+        }
+        let mut retired = std::collections::BTreeMap::new();
+        for prefix in retired_prefixes {
+            if prefix.chain_root_id().is_empty() || live.contains_key(prefix.chain_root_id()) {
+                anyhow::bail!("pair dependency mixes live and retired cuts");
+            }
+            if let Some(prior) = retired.insert(prefix.chain_root_id(), prefix)
+                && !prior.same_cut(prefix)
+            {
+                anyhow::bail!("pair dependencies have conflicting retired cuts");
+            }
+        }
+        let roots = live
+            .keys()
+            .chain(retired.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut locks = Vec::with_capacity(roots.len());
+        for root in roots {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        for (root, prefix) in retired {
+            let lock = locks
+                .iter()
+                .find(|lock| lock.chain_root_id() == root)
+                .expect("retired pair dependency lock acquired");
+            if self.recovery.read_pending(root)?.is_some()
+                || lock
+                    .read_verified_head(self.trust_store.as_ref())?
+                    .is_some()
+            {
+                return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+            }
+            let Some(marker) = self.recovery.read_retired_seat_marker(root)? else {
+                return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+            };
+            if marker.terminal_retirement_manifest_hash.as_deref()
+                != Some(prefix.manifest_hash.as_str())
+                || RecoveryStore::retired_marker_digest(&marker)? != prefix.marker_digest
+            {
+                anyhow::bail!("retired pair dependency differs from immutable marker");
+            }
+        }
+        let destination_lock = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == destination.chain_root_id)
+            .expect("destination lock acquired");
+        let source_lock = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == source.chain_root_id)
+            .expect("source lock acquired");
+        let (destination_snapshot, source_snapshot) = {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for (root, anchor) in live {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == root)
+                    .expect("live pair dependency lock acquired");
+                if self.recovery.read_pending(&anchor.chain_root_id)?.is_some()
+                    || chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock,
+                        &anchor.chain_root_id,
+                        &anchor.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?
+                    .is_none_or(|current| {
+                        current.chain_head_hash != anchor.chain_head_hash
+                            || current.snapshot_hash != anchor.snapshot_hash
+                            || current.thread_last_event_hash != anchor.thread_last_event_hash
+                            || current.thread_last_seq != anchor.thread_last_seq
+                    })
+                {
+                    return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+                }
+            }
+            let read_snapshot = |anchor: &AuthoritativeThreadEventReadAnchor,
+                                 lock: &crate::chain::ChainLock,
+                                 cache: &mut HeadCache| {
+                chain::read_thread_snapshot_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    lock,
+                    &anchor.chain_root_id,
+                    &anchor.thread_id,
+                    self.trust_store.as_ref(),
+                    cache,
+                )
+            };
+            let Some(destination_snapshot) =
+                read_snapshot(destination, destination_lock, &mut cache)?
+            else {
+                return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+            };
+            let Some(source_snapshot) = read_snapshot(source, source_lock, &mut cache)? else {
+                return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+            };
+            if destination_snapshot.chain_root_id != destination.chain_root_id
+                || destination_snapshot.thread_id != destination.thread_id
+                || destination_snapshot.kind_name != required_destination_kind
+                || destination_snapshot.status != crate::objects::ThreadStatus::Running
+                || source_snapshot.chain_root_id != source.chain_root_id
+                || source_snapshot.thread_id != source.thread_id
+                || source_snapshot.kind_name != required_source_kind
+                || source_snapshot.status != crate::objects::ThreadStatus::Running
+            {
+                return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+            }
+            (destination_snapshot, source_snapshot)
+        };
+        let destination_thread_ids = self
+            .authoritative_chain_thread_ids_under_lock(
+                &destination.chain_root_id,
+                destination_lock,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("destination lost signed membership"))?;
+        let source_thread_ids = self
+            .authoritative_chain_thread_ids_under_lock(&source.chain_root_id, source_lock)?
+            .ok_or_else(|| anyhow::anyhow!("source lost signed membership"))?;
+        if !admit(TwoAnchorAdmissionView {
+            target: &destination_snapshot,
+            counterpart: &source_snapshot,
+            target_thread_ids: &destination_thread_ids,
+            counterpart_thread_ids: &source_thread_ids,
+        })? {
+            return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+        }
+        let destination_committed = match self.append_events_under_chain_lock(
+            &destination.chain_root_id,
+            &destination.thread_id,
+            destination_events,
+            vec![],
+            signer,
+            Some(runtime_liveness),
+            Some(destination),
+            destination_lock,
+        ) {
+            Ok(ConditionalThreadEventAppendResult::Committed(committed)) => committed,
+            Ok(ConditionalThreadEventAppendResult::Conflict) => {
+                return Ok(ConditionalThreadEventPairAppendResult::Conflict);
+            }
+            Err(error) => {
+                return Ok(ConditionalThreadEventPairAppendResult::DestinationUncertain { error });
+            }
+        };
+        let source_attempt = (|| -> anyhow::Result<CommittedWrite<AppendResult>> {
+            let destination_after = {
+                let mut cache = self.head_cache.lock().expect("head_cache lock");
+                chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    destination_lock,
+                    &destination.chain_root_id,
+                    &destination.thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                )?
+            }
+            .ok_or_else(|| anyhow::anyhow!("committed destination anchor disappeared"))?;
+            if destination_after.chain_head_hash != destination_committed.value.chain_state_hash {
+                anyhow::bail!("committed destination anchor changed under pair lock");
+            }
+            let appended_count = u64::try_from(destination_committed.value.event_count)?;
+            if destination_after.thread_last_seq
+                != destination
+                    .thread_last_seq
+                    .checked_add(appended_count)
+                    .ok_or_else(|| anyhow::anyhow!("destination sequence overflow"))?
+                || destination_after.thread_last_event_hash.is_none()
+            {
+                anyhow::bail!("destination signed tip does not identify committed batch");
+            }
+            let evidence = AuthoritativeThreadEventReadAnchor {
+                chain_root_id: destination.chain_root_id.clone(),
+                thread_id: destination.thread_id.clone(),
+                chain_head_hash: destination_after.chain_head_hash,
+                snapshot_hash: destination_after.snapshot_hash,
+                thread_last_event_hash: destination_after.thread_last_event_hash,
+                thread_last_seq: destination_after.thread_last_seq,
+            };
+            let source_events = build_source(&destination_committed, &evidence)?;
+            if source_events.is_empty()
+                || source_events
+                    .iter()
+                    .any(|event| !event.durability.is_cas_stored())
+            {
+                anyhow::bail!("pair source builder must return durable events");
+            }
+            match self.append_events_under_chain_lock(
+                &source.chain_root_id,
+                &source.thread_id,
+                source_events,
+                vec![],
+                signer,
+                Some(runtime_liveness),
+                Some(source),
+                source_lock,
+            )? {
+                ConditionalThreadEventAppendResult::Committed(committed) => Ok(committed),
+                ConditionalThreadEventAppendResult::Conflict => {
+                    anyhow::bail!("source anchor conflicted after destination publication")
+                }
+            }
+        })();
+        Ok(match source_attempt {
+            Ok(source_committed) => ConditionalThreadEventPairAppendResult::Committed {
+                destination: destination_committed,
+                source: source_committed,
+            },
+            Err(error) => {
+                ConditionalThreadEventPairAppendResult::DestinationCommittedSourceUncertain {
+                    destination: destination_committed,
+                    error,
+                }
+            }
+        })
+    }
+
+    /// Single exact-seat writer: signed running state, anchor, lease renewal,
+    /// and append are serialized by one authoritative chain lock. The lease
+    /// callback runs before CAS publication so an ambiguous write error cannot
+    /// leave a published producer event with an expired lease.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_seat_events_and_renew_if_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        renew_lease: impl FnOnce() -> anyhow::Result<bool>,
+    ) -> anyhow::Result<SeatConditionalAppendResult> {
+        self.append_running_seat_events_and_renew_if_anchors(
+            chain_root_id,
+            thread_id,
+            owner,
+            surface,
+            client_ref,
+            events,
+            signer,
+            runtime_liveness,
+            expected,
+            std::slice::from_ref(expected),
+            cas_mutation_guard,
+            renew_lease,
+        )
+    }
+
+    /// The paired-history writer holds every dependency's exact signed head
+    /// through the existing running-seat append and lease renewal. The root
+    /// anchor must be included; unrelated or contradictory scopes are refused.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_seat_events_and_renew_if_anchors(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        renew_lease: impl FnOnce() -> anyhow::Result<bool>,
+    ) -> anyhow::Result<SeatConditionalAppendResult> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        if chain_root_id != thread_id
+            || expected.chain_root_id != chain_root_id
+            || expected.thread_id != thread_id
+            || events.is_empty()
+            || events.iter().any(|event| !event.durability.is_cas_stored())
+        {
+            anyhow::bail!("seat append requires one exact root, anchor, and durable batch");
+        }
+        if anchors.is_empty() || !anchors.iter().any(|anchor| anchor == expected) {
+            anyhow::bail!("seat append dependency cut omits its exact root anchor");
+        }
+        let mut by_root =
+            std::collections::BTreeMap::<&str, Vec<&AuthoritativeThreadEventReadAnchor>>::new();
+        for anchor in anchors {
+            if anchor.chain_root_id.is_empty() || anchor.thread_id.is_empty() {
+                anyhow::bail!("seat append dependency has empty coordinates");
+            }
+            let scoped = by_root.entry(anchor.chain_root_id.as_str()).or_default();
+            if let Some(prior) = scoped
+                .iter()
+                .find(|prior| prior.thread_id == anchor.thread_id)
+            {
+                if *prior != anchor {
+                    anyhow::bail!("seat append dependency has contradictory anchors");
+                }
+            } else {
+                scoped.push(anchor);
+            }
+        }
+        let mut locks = Vec::with_capacity(by_root.len());
+        for root in by_root.keys() {
+            locks.push(self.acquire_existing_chain_lock(root)?);
+        }
+        let chain_lock = locks
+            .iter()
+            .find(|lock| lock.chain_root_id() == chain_root_id)
+            .expect("exact root anchor was included");
+        {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for (root, scoped) in &by_root {
+                let lock = locks
+                    .iter()
+                    .find(|lock| lock.chain_root_id() == *root)
+                    .expect("ordered chain lock was acquired");
+                if self.recovery.read_pending(root)?.is_some() {
+                    return Ok(SeatConditionalAppendResult::Conflict);
+                }
+                for anchor in scoped {
+                    let current = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock,
+                        root,
+                        &anchor.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?;
+                    if !current.is_some_and(|current| {
+                        current.chain_head_hash == anchor.chain_head_hash
+                            && current.snapshot_hash == anchor.snapshot_hash
+                            && current.thread_last_event_hash == anchor.thread_last_event_hash
+                            && current.thread_last_seq == anchor.thread_last_seq
+                    }) {
+                        return Ok(SeatConditionalAppendResult::Conflict);
+                    }
+                }
+            }
+            if self.recovery.read_pending(chain_root_id)?.is_some()
+                || !chain::thread_append_anchor_matches_under_lock(
+                    &self.cas_root,
+                    &self.refs_root,
+                    chain_root_id,
+                    thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                    &chain_lock,
+                    chain::ExpectedThreadAppendAnchor {
+                        chain_head_hash: &expected.chain_head_hash,
+                        thread_last_event_hash: expected.thread_last_event_hash.as_deref(),
+                        thread_last_seq: expected.thread_last_seq,
+                    },
+                )?
+            {
+                return Ok(SeatConditionalAppendResult::Conflict);
+            }
+            let Some(snapshot) = chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+            )?
+            else {
+                return Ok(SeatConditionalAppendResult::Conflict);
+            };
+            if snapshot.thread_id != thread_id
+                || snapshot.chain_root_id != chain_root_id
+                || snapshot.kind_name != "seat_session"
+                || snapshot.status != crate::objects::ThreadStatus::Running
+                || snapshot.requested_by.as_deref() != Some(owner)
+                || snapshot.item_ref != surface
+                || snapshot.executor_ref != client_ref
+            {
+                return Ok(SeatConditionalAppendResult::Fenced);
+            }
+        }
+        if !renew_lease()? {
+            return Ok(SeatConditionalAppendResult::Fenced);
+        }
+        match self.append_events_under_chain_lock(
+            chain_root_id,
+            thread_id,
+            events,
+            vec![],
+            signer,
+            Some(runtime_liveness),
+            Some(expected),
+            &chain_lock,
+        )? {
+            ConditionalThreadEventAppendResult::Committed(committed) => {
+                Ok(SeatConditionalAppendResult::Committed(committed))
+            }
+            ConditionalThreadEventAppendResult::Conflict => {
+                Ok(SeatConditionalAppendResult::Conflict)
+            }
+        }
+    }
+
+    /// Existing root append, with historical retired dependencies excluded by
+    /// exact immutable markers and all current dependencies held live.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_running_seat_events_and_renew_if_mixed_cut(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        expected: &AuthoritativeThreadEventReadAnchor,
+        anchors: &[AuthoritativeThreadEventReadAnchor],
+        retired: &[RetiredSeatPositivePrefix],
+        guard: &crate::recovery::CasMutationGuard,
+        renew_lease: impl FnOnce() -> anyhow::Result<bool>,
+    ) -> anyhow::Result<SeatConditionalAppendResult> {
+        if chain_root_id != thread_id
+            || expected.chain_root_id != chain_root_id
+            || expected.thread_id != thread_id
+            || !anchors.iter().any(|anchor| anchor == expected)
+            || events.is_empty()
+            || events.iter().any(|event| !event.durability.is_cas_stored())
+        {
+            anyhow::bail!("mixed seat append requires live root and durable batch");
+        }
+        self.with_live_and_retired_seat_exclusions(
+            guard,
+            chain_root_id,
+            anchors,
+            retired,
+            |root_lock| {
+                let mut cache = self.head_cache.lock().expect("head_cache lock");
+                let Some(snapshot) = chain::read_thread_snapshot_with_trust(
+                    &self.cas_root,
+                    &self.refs_root,
+                    root_lock,
+                    chain_root_id,
+                    thread_id,
+                    self.trust_store.as_ref(),
+                    &mut cache,
+                )?
+                else {
+                    return Ok(SeatConditionalAppendResult::Conflict);
+                };
+                if snapshot.chain_root_id != chain_root_id
+                    || snapshot.thread_id != thread_id
+                    || snapshot.kind_name != "seat_session"
+                    || snapshot.status != crate::objects::ThreadStatus::Running
+                    || snapshot.requested_by.as_deref() != Some(owner)
+                    || snapshot.item_ref != surface
+                    || snapshot.executor_ref != client_ref
+                {
+                    return Ok(SeatConditionalAppendResult::Fenced);
+                }
+                drop(cache);
+                if !renew_lease()? {
+                    return Ok(SeatConditionalAppendResult::Fenced);
+                }
+                match self.append_events_under_chain_lock(
+                    chain_root_id,
+                    thread_id,
+                    events,
+                    vec![],
+                    signer,
+                    Some(runtime_liveness),
+                    Some(expected),
+                    root_lock,
+                )? {
+                    ConditionalThreadEventAppendResult::Committed(committed) => {
+                        Ok(SeatConditionalAppendResult::Committed(committed))
+                    }
+                    ConditionalThreadEventAppendResult::Conflict => {
+                        Ok(SeatConditionalAppendResult::Conflict)
+                    }
+                }
+            },
+        )
+        .map(|outcome| outcome.unwrap_or(SeatConditionalAppendResult::Conflict))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_events_under_chain_lock(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: Vec<ThreadEvent>,
+        snapshot_updates: Vec<SnapshotUpdate>,
+        signer: &dyn Signer,
+        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
+        expected: Option<&AuthoritativeThreadEventReadAnchor>,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        ensure_state_chain_lock(&self.refs_root, &chain_lock, chain_root_id)?;
+        if let Some(expected) = expected {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            if !chain::thread_append_anchor_matches_under_lock(
+                &self.cas_root,
+                &self.refs_root,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+                &chain_lock,
+                chain::ExpectedThreadAppendAnchor {
+                    chain_head_hash: &expected.chain_head_hash,
+                    thread_last_event_hash: expected.thread_last_event_hash.as_deref(),
+                    thread_last_seq: expected.thread_last_seq,
+                },
+            )? {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+        }
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
             ProspectiveChainMutation::UpdateSnapshots(&snapshot_updates),
@@ -3858,21 +6215,40 @@ impl StateDb {
             &chain_lock,
         )?;
         let mut cache = self.head_cache.lock().expect("head_cache lock");
-        let result = match chain::append_events_with_trust_under_lock(
-            chain::AppendEventsInput {
-                cas_root: &self.cas_root,
-                refs_root: &self.refs_root,
-                chain_root_id,
-                thread_id,
-                events,
-                snapshot_updates: snapshot_updates.clone(),
-                signer,
-            },
-            self.trust_store.as_ref(),
-            &mut cache,
-            &chain_lock,
-        ) {
-            Ok(result) => result,
+        let input = chain::AppendEventsInput {
+            cas_root: &self.cas_root,
+            refs_root: &self.refs_root,
+            chain_root_id,
+            thread_id,
+            events,
+            snapshot_updates: snapshot_updates.clone(),
+            signer,
+        };
+        let appended = match expected {
+            Some(expected) => chain::append_events_with_trust_under_lock_if_anchor(
+                input,
+                self.trust_store.as_ref(),
+                &mut cache,
+                &chain_lock,
+                chain::ExpectedThreadAppendAnchor {
+                    chain_head_hash: &expected.chain_head_hash,
+                    thread_last_event_hash: expected.thread_last_event_hash.as_deref(),
+                    thread_last_seq: expected.thread_last_seq,
+                },
+            ),
+            None => chain::append_events_with_trust_under_lock(
+                input,
+                self.trust_store.as_ref(),
+                &mut cache,
+                &chain_lock,
+            )
+            .map(chain::ConditionalAppendResult::Appended),
+        };
+        let result = match appended {
+            Ok(chain::ConditionalAppendResult::Appended(result)) => result,
+            Ok(chain::ConditionalAppendResult::Conflict) => {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
             Err(error) => {
                 let error = self.failed_write_after_cancelled_remove(
                     chain_root_id,
@@ -3926,13 +6302,15 @@ impl StateDb {
         );
 
         let committed_hash = result.chain_state_hash.clone();
-        Ok(self.committed_write_locked(
-            result,
-            chain_root_id,
-            &committed_hash,
-            "append_events",
-            projected,
-            &chain_lock,
+        Ok(ConditionalThreadEventAppendResult::Committed(
+            self.committed_write_locked(
+                result,
+                chain_root_id,
+                &committed_hash,
+                "append_events",
+                projected,
+                &chain_lock,
+            ),
         ))
     }
 
@@ -4472,6 +6850,16 @@ impl StateDb {
         self.projection.list_due_terminal_chains(now, limit, after)
     }
 
+    pub fn due_signed_seat_retirement_slice(
+        &self,
+        now: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        self.projection
+            .due_signed_seat_retirement_slice(now, after, limit)
+    }
+
     pub fn chain_retention_projection(
         &self,
         chain_root_id: &str,
@@ -4578,6 +6966,29 @@ impl StateDb {
             &self.cas_root,
             &self.refs_root,
             &chain_lock,
+            chain_root_id,
+            thread_id,
+            self.trust_store.as_ref(),
+            &mut head_cache,
+        )
+    }
+
+    /// Read a trust-verified snapshot while retaining the same cross-process
+    /// chain lock that serializes runtime pin creation with lifecycle reaping.
+    pub fn read_authoritative_thread_snapshot_under_runtime_pin_admission(
+        &self,
+        admission: &AuthoritativeRuntimePinAdmission,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<ThreadSnapshot>> {
+        let chain_lock = admission.chain_lock(chain_root_id).ok_or_else(|| {
+            anyhow::anyhow!("runtime pin admission does not retain chain {chain_root_id}")
+        })?;
+        let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+        chain::read_thread_snapshot_with_trust(
+            &self.cas_root,
+            &self.refs_root,
+            chain_lock,
             chain_root_id,
             thread_id,
             self.trust_store.as_ref(),
@@ -4949,6 +7360,63 @@ impl StateDb {
         load_terminal_chain_from_cas(&cas, chain_root_id, &head.target_hash)
     }
 
+    /// Exact signed membership for nonterminal as well as terminal chains.
+    /// The caller retains the chain lock through any structural owner check.
+    pub fn authoritative_chain_thread_ids_under_lock(
+        &self,
+        chain_root_id: &str,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        let Some(head) = chain_lock.read_verified_head(self.trust_store.as_ref())? else {
+            return Ok(None);
+        };
+        let cas = lillux::CasStore::from_pinned_root(self._cas_directory.try_clone()?);
+        crate::chain::validate_authoritative_history_with_cas(
+            &cas,
+            chain_root_id,
+            &head.target_hash,
+            None,
+        )?;
+        let chain_state: crate::ChainState = load_hashed_cas_object(&cas, &head.target_hash)?;
+        chain_state.validate()?;
+        if chain_state.chain_root_id != chain_root_id {
+            anyhow::bail!("signed chain root differs from {chain_root_id}");
+        }
+        let mut thread_ids = Vec::with_capacity(chain_state.threads.len());
+        for (thread_id, entry) in &chain_state.threads {
+            let snapshot: ThreadSnapshot = load_hashed_cas_object(&cas, &entry.snapshot_hash)?;
+            snapshot.validate()?;
+            if snapshot.thread_id != *thread_id
+                || snapshot.chain_root_id != chain_root_id
+                || snapshot.status != entry.status
+            {
+                anyhow::bail!("signed chain member {thread_id} contradicts its snapshot");
+            }
+            thread_ids.push(thread_id.clone());
+        }
+        Ok(Some(thread_ids))
+    }
+
+    pub fn read_authoritative_thread_snapshot_under_chain_lock(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<Option<ThreadSnapshot>> {
+        ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        chain::read_thread_snapshot_with_trust(
+            &self.cas_root,
+            &self.refs_root,
+            chain_lock,
+            chain_root_id,
+            thread_id,
+            self.trust_store.as_ref(),
+            &mut cache,
+        )
+    }
+
     /// Recover authoritative cleanup IDs from the CAS hash retained by a
     /// pending Remove after its signed head has already been durably unlinked.
     pub fn pending_removed_terminal_chain(
@@ -5007,6 +7475,113 @@ impl StateDb {
         }
         let head = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         classify_pending_remove_head(&pending, head.as_ref())
+    }
+
+    /// A marker is irrevocable retirement cutover, not a hint to re-evaluate
+    /// due dates or runtime pins. Validate its exact pending Remove and visible
+    /// head (if any) before recovery resumes unlink or cleanup.
+    pub fn retired_seat_marker_for_pending_remove_under_lock(
+        &self,
+        chain_root_id: &str,
+        transition_id: &str,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<bool> {
+        ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        let Some(marker) = self.recovery.read_retired_seat_marker(chain_root_id)? else {
+            return Ok(false);
+        };
+        let pending = self
+            .recovery
+            .read_pending(chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("retired seat marker has no pending Remove"))?;
+        if pending.operation != HeadOperation::Remove
+            || pending.transition_id != transition_id
+            || marker.remove_transition_id != pending.transition_id
+            || marker.terminal_retirement_manifest_hash != pending.terminal_retirement_manifest_hash
+            || pending.expected_previous_hash.as_deref() != Some(marker.expected_head_hash.as_str())
+        {
+            anyhow::bail!("retired seat marker differs from exact pending Remove");
+        }
+        if let Some(head) = chain_lock.read_verified_head(self.trust_store.as_ref())? {
+            if head.target_hash != marker.expected_head_hash {
+                anyhow::bail!("retired seat marker encountered an advanced signed head");
+            }
+            let root = self
+                .read_authoritative_thread_snapshot_under_chain_lock(
+                    chain_root_id,
+                    chain_root_id,
+                    chain_lock,
+                )?
+                .ok_or_else(|| anyhow::anyhow!("marked seat has no signed root"))?;
+            if root.kind_name != "seat_session"
+                || root.thread_id != chain_root_id
+                || root.chain_root_id != chain_root_id
+                || !root.status.is_terminal()
+            {
+                anyhow::bail!("retired seat marker contradicts visible terminal seat");
+            }
+        }
+        Ok(true)
+    }
+
+    /// Positive forward-only proof that this exact absent seat head crossed
+    /// the durable no-rebirth boundary. Marker absence (including pre-cutover
+    /// historical removals) is never a source-absence proof.
+    pub fn retired_seat_identity_absent_head_under_lock(
+        &self,
+        chain_root_id: &str,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<bool> {
+        ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        let Some(marker) = self.recovery.read_retired_seat_marker(chain_root_id)? else {
+            return Ok(false);
+        };
+        if chain_lock
+            .read_verified_head(self.trust_store.as_ref())?
+            .is_some()
+        {
+            anyhow::bail!("retired seat marker has not yet unlinked its signed head");
+        }
+        // A crash may leave the exact Remove pending; completed cleanup may
+        // have acknowledged it. Neither state permits a competing Set or a
+        // different Remove to turn absence into a release witness.
+        if let Some(pending) = self.recovery.read_pending(chain_root_id)? {
+            if pending.operation != HeadOperation::Remove
+                || pending.transition_id != marker.remove_transition_id
+                || marker.terminal_retirement_manifest_hash
+                    != pending.terminal_retirement_manifest_hash
+                || pending.expected_previous_hash.as_deref()
+                    != Some(marker.expected_head_hash.as_str())
+            {
+                anyhow::bail!("retired seat marker contradicts pending transition");
+            }
+        }
+        Ok(true)
+    }
+
+    /// Join a previously minted fixed cut to the exact no-rebirth Remove
+    /// marker. This is positive provenance, not phase/retirement clearance.
+    /// The caller retains this lock together with every applicable counterpart
+    /// lock before using it in any eligibility decision.
+    pub fn retired_seat_read_anchor_absent_head_under_lock(
+        &self,
+        anchor: &AuthoritativeThreadEventReadAnchor,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<bool> {
+        if anchor.chain_root_id != anchor.thread_id {
+            anyhow::bail!("retired seat anchor is not an exact root thread");
+        }
+        if !self.retired_seat_identity_absent_head_under_lock(&anchor.chain_root_id, chain_lock)? {
+            return Ok(false);
+        }
+        let marker = self
+            .recovery
+            .read_retired_seat_marker(&anchor.chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("retired seat marker disappeared under lock"))?;
+        if marker.expected_head_hash != anchor.chain_head_hash {
+            anyhow::bail!("retired seat marker does not authenticate the retained anchor");
+        }
+        Ok(true)
     }
 
     /// Read-only proof for a dry-run that an observed stale Remove is followed
@@ -5142,13 +7717,237 @@ impl StateDb {
         chain_root_id: &str,
         chain_lock: &crate::chain::ChainLock,
     ) -> anyhow::Result<bool> {
+        self.remove_chain_head_ref_with_retirement_manifest(chain_root_id, chain_lock, None)
+    }
+
+    /// Qualified retirement retains a narrow positive terminal prefix before
+    /// preparing Remove. Exact signed cut verification and manifest construction
+    /// occur under the already-held target exclusion, never from caller hashes.
+    /// Counterpart lifecycle clearance belongs to the app retirement owner.
+    pub fn remove_qualified_terminal_seat_head_ref(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        anchor: &AuthoritativeThreadEventReadAnchor,
+        counterpart_roots: &[String],
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<bool> {
+        self.remove_qualified_terminal_seat_head_ref_with_negative_closures(
+            guard,
+            anchor,
+            counterpart_roots,
+            &[],
+            chain_lock,
+        )
+    }
+
+    pub fn remove_qualified_terminal_seat_head_ref_with_negative_closures(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        anchor: &AuthoritativeThreadEventReadAnchor,
+        counterpart_roots: &[String],
+        negative: &[crate::objects::terminal_seat_retirement::TerminalTransferNegativeClosure],
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<bool> {
+        self.ensure_cas_mutation_guard(guard)?;
+        ensure_state_chain_lock(&self.refs_root, chain_lock, &anchor.chain_root_id)?;
+        let current = chain::capture_authoritative_thread_event_read_anchor_with_trust(
+            &self.cas_root,
+            &self.refs_root,
+            chain_lock,
+            &anchor.chain_root_id,
+            &anchor.thread_id,
+            self.trust_store.as_ref(),
+            &mut HeadCache::new(),
+        )?;
+        if !current.is_some_and(|current| {
+            current.chain_head_hash == anchor.chain_head_hash
+                && current.snapshot_hash == anchor.snapshot_hash
+                && current.thread_last_event_hash == anchor.thread_last_event_hash
+                && current.thread_last_seq == anchor.thread_last_seq
+        }) {
+            return Ok(false);
+        }
+        let root = self
+            .read_authoritative_thread_snapshot_under_chain_lock(
+                &anchor.chain_root_id,
+                &anchor.thread_id,
+                chain_lock,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("qualified terminal seat snapshot absent"))?;
+        anyhow::ensure!(
+            anchor.chain_root_id == anchor.thread_id
+                && root.kind_name == "seat_session"
+                && root.status.is_terminal(),
+            "qualified retirement is not an exact signed terminal root seat"
+        );
+        let cas = self.pinned_authority()?.cas_store()?;
+        let chain_seq = match &anchor.thread_last_event_hash {
+            Some(hash) => {
+                let value = cas
+                    .get_object_bounded(
+                        hash,
+                        crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+                    )?
+                    .ok_or_else(|| anyhow::anyhow!("qualified terminal event absent"))?;
+                let event: ThreadEvent = serde_json::from_value(value)?;
+                event.validate()?;
+                anyhow::ensure!(
+                    event.chain_root_id == anchor.chain_root_id
+                        && event.thread_id == anchor.thread_id
+                        && event.thread_seq == anchor.thread_last_seq,
+                    "qualified retirement terminal event differs from signed cut"
+                );
+                event.chain_seq
+            }
+            None => 0,
+        };
+        anyhow::ensure!(
+            counterpart_roots
+                .windows(2)
+                .all(|roots| roots[0] < roots[1])
+                && !counterpart_roots
+                    .iter()
+                    .any(|root| root == anchor.chain_root_id()),
+            "retirement counterpart roots duplicated or unordered"
+        );
+        anyhow::ensure!(
+            negative
+                .windows(2)
+                .all(|closures| closures[0].decision.transfer.operation_id
+                    < closures[1].decision.transfer.operation_id),
+            "negative retirement closures duplicated or unordered"
+        );
+        for closure in negative {
+            closure.validate()?;
+            let transfer = &closure.decision.transfer;
+            let other = if transfer.source.chain_root_id == anchor.chain_root_id {
+                &transfer.destination.chain_root_id
+            } else {
+                anyhow::ensure!(
+                    transfer.destination.chain_root_id == anchor.chain_root_id,
+                    "negative closure does not touch retirement owner"
+                );
+                &transfer.source.chain_root_id
+            };
+            anyhow::ensure!(
+                counterpart_roots.binary_search(other).is_ok(),
+                "negative closure counterpart is not retained"
+            );
+        }
+        let manifest = crate::objects::terminal_seat_retirement::TerminalSeatRetirement {
+            schema: 2,
+            kind: crate::objects::terminal_seat_retirement::TERMINAL_SEAT_RETIREMENT_KIND.into(),
+            chain_root_id: anchor.chain_root_id.clone(),
+            retired_head_hash: anchor.chain_head_hash.clone(),
+            snapshot_hash: anchor.snapshot_hash.clone(),
+            terminal_event_hash: anchor.thread_last_event_hash.clone(),
+            terminal_thread_seq: anchor.thread_last_seq,
+            terminal_chain_seq: chain_seq,
+            closure_page_head: publish_retirement_closure_pages(
+                &cas,
+                anchor.chain_root_id(),
+                counterpart_roots,
+                negative,
+            )?,
+        };
+        manifest.validate()?;
+        for closure in negative {
+            let load = |hash: &str| -> anyhow::Result<ThreadEvent> {
+                let value = cas
+                    .get_object_bounded(
+                        hash,
+                        crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64,
+                    )?
+                    .ok_or_else(|| anyhow::anyhow!("negative terminal closure object absent"))?;
+                let event: ThreadEvent = serde_json::from_value(value)?;
+                event.validate()?;
+                anyhow::ensure!(
+                    crate::objects::thread_event::hash_event(&event)? == hash,
+                    "negative closure hash differs"
+                );
+                Ok(event)
+            };
+            for (seat, tip) in [
+                (&closure.decision.transfer.source, &closure.source_tip),
+                (
+                    &closure.decision.transfer.destination,
+                    &closure.destination_tip,
+                ),
+            ] {
+                let event = load(&tip.event_hash)?;
+                anyhow::ensure!(
+                    event.chain_root_id == seat.chain_root_id
+                        && event.thread_id == seat.thread_id
+                        && event.thread_seq == tip.thread_seq
+                        && event.chain_seq == tip.chain_seq,
+                    "negative closure prefix tip coordinates differ"
+                );
+            }
+            let event = load(&closure.evidence.event_hash)?;
+            use ryeos_ui_presentation_contract::{
+                transfer, transfer_lifecycle, transfer_lifecycle_v2,
+            };
+            let record = match event.event_type.as_str() {
+                transfer::TRANSFER_EVENT => {
+                    transfer::from_event_value(&event.to_value()).map(|value| value.payload)
+                }
+                transfer_lifecycle::TRANSFER_LIFECYCLE_EVENT => {
+                    transfer_lifecycle::from_event_value(&event.to_value())
+                        .map(|value| value.payload)
+                }
+                transfer_lifecycle_v2::TRANSFER_LIFECYCLE_V2_EVENT => {
+                    transfer_lifecycle_v2::from_event_value(&event.to_value())
+                        .map(|value| value.payload)
+                }
+                _ => anyhow::bail!("negative closure decision event family differs"),
+            }
+            .map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                event.chain_seq == closure.evidence.chain_seq && record == closure.decision,
+                "negative closure decision differs from exact retained event"
+            );
+        }
+        let manifest_hash = cas.store_object(&serde_json::to_value(&manifest)?)?;
+        self.remove_chain_head_ref_with_retirement_manifest(
+            &anchor.chain_root_id,
+            chain_lock,
+            Some(&manifest_hash),
+        )
+    }
+
+    fn remove_chain_head_ref_with_retirement_manifest(
+        &self,
+        chain_root_id: &str,
+        chain_lock: &crate::chain::ChainLock,
+        manifest_hash: Option<&str>,
+    ) -> anyhow::Result<bool> {
         ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
         let current = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         let current = match current {
             Some(current) => current,
             None => return Ok(false),
         };
+        let root = self
+            .read_authoritative_thread_snapshot_under_chain_lock(
+                chain_root_id,
+                chain_root_id,
+                chain_lock,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("removing chain has no signed root snapshot"))?;
+        if root.thread_id != chain_root_id || root.chain_root_id != chain_root_id {
+            anyhow::bail!("removing chain has mismatched signed root identity");
+        }
+        let exact_seat = root.kind_name == "seat_session";
+        if !exact_seat
+            && self
+                .recovery
+                .read_retired_seat_marker(chain_root_id)?
+                .is_some()
+        {
+            anyhow::bail!("retired seat marker contradicts non-seat signed root");
+        }
 
+        let mut retained_manifest_hash = manifest_hash.map(str::to_owned);
         if let Some(pending) = self.recovery.read_pending(chain_root_id)? {
             match pending.operation {
                 HeadOperation::Set => {
@@ -5164,12 +7963,26 @@ impl StateDb {
                         );
                     }
                 }
-                HeadOperation::Remove => {}
+                HeadOperation::Remove => {
+                    if manifest_hash.is_some()
+                        && pending.terminal_retirement_manifest_hash.as_deref() != manifest_hash
+                    {
+                        anyhow::bail!("terminal Remove retry differs from retained manifest");
+                    }
+                    retained_manifest_hash = pending.terminal_retirement_manifest_hash;
+                }
             }
         }
-        let pending =
+        let pending = self.recovery.prepare_remove_with_retirement_manifest(
+            chain_lock,
+            chain_root_id,
+            &current.target_hash,
+            retained_manifest_hash.as_deref(),
+        )?;
+        if exact_seat {
             self.recovery
-                .prepare_remove(chain_lock, chain_root_id, &current.target_hash)?;
+                .publish_retired_seat_marker(chain_lock, &pending)?;
+        }
         self.projection_repair_sink
             .request_repair(ProjectionRepairRequest {
                 chain_root_id: chain_root_id.to_string(),
@@ -5241,6 +8054,13 @@ impl StateDb {
         chain_lock: &crate::chain::ChainLock,
     ) -> anyhow::Result<bool> {
         ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        if self
+            .recovery
+            .read_retired_seat_marker(chain_root_id)?
+            .is_some()
+        {
+            anyhow::bail!("marked retired seat Remove cannot be cancelled");
+        }
         let pending = match self.recovery.read_pending(chain_root_id)? {
             Some(pending) if pending.operation == HeadOperation::Remove => pending,
             Some(_) => anyhow::bail!("chain {chain_root_id} pending transition is not Remove"),
@@ -5351,6 +8171,13 @@ impl StateDb {
             &self.recovery,
             chain_root_id,
         )?;
+        if self
+            .recovery
+            .read_retired_seat_marker(chain_root_id)?
+            .is_some()
+        {
+            anyhow::bail!("retired seat identity cannot import or repair a chain head");
+        }
         let current = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         let current_hash = current.as_ref().map(|head| head.target_hash.as_str());
         let required_anchor = if let Some(transition) = writer_transition {
@@ -6280,12 +9107,915 @@ fn verify_chain_writer_transition_adoption(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::objects::ThreadStatus;
     use crate::objects::thread_snapshot::{
         CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
         CapturedThreadHistoryPolicy, ThreadHistoryRetention, ThreadSnapshot, ThreadSnapshotBuilder,
     };
     use crate::operational::{OPERATIONAL_DB_FILENAME, OPERATIONAL_INITIALIZED_FILENAME};
     use crate::signer::TestSigner;
+
+    fn create_mixed_cut_fixture_root(
+        db: &StateDb,
+        root: &str,
+        terminal: bool,
+        signer: &TestSigner,
+    ) {
+        let mut snapshot = test_root_snapshot("directive:system/test");
+        snapshot.thread_id = root.into();
+        snapshot.chain_root_id = root.into();
+        if terminal {
+            snapshot.kind_name = "seat_session".into();
+        }
+        let mut snapshot = db
+            .create_chain(root, snapshot, signer)
+            .unwrap()
+            .value
+            .snapshot;
+        snapshot.status = ThreadStatus::Running;
+        snapshot.started_at = Some(lillux::time::iso8601_now());
+        db.append_events(
+            root,
+            root,
+            vec![crate::objects::thread_event::NewEvent::new(root, root, "thread_started").build()],
+            vec![SnapshotUpdate {
+                thread_id: root.into(),
+                new_snapshot: snapshot.clone(),
+            }],
+            signer,
+        )
+        .unwrap();
+        if terminal {
+            snapshot.status = ThreadStatus::Completed;
+            snapshot.finished_at = Some(lillux::time::iso8601_now());
+            db.append_events(
+                root,
+                root,
+                vec![
+                    crate::objects::thread_event::NewEvent::new(root, root, "thread_completed")
+                        .build(),
+                ],
+                vec![SnapshotUpdate {
+                    thread_id: root.into(),
+                    new_snapshot: snapshot,
+                }],
+                signer,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn mixed_single_phase_excludes_extra_live_and_retired_dependencies() {
+        struct NoRecovery;
+        impl RuntimeLivenessInspector for NoRecovery {
+            fn chain_has_live_recovery_state(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+        }
+        let signer = TestSigner::default();
+        let (_directory, db) = open_temp_trusted(&signer);
+        for root in [
+            "T-phase-target",
+            "T-phase-peer",
+            "T-phase-dependency",
+            "T-phase-retired",
+        ] {
+            let mut snapshot = test_root_snapshot("directive:system/test");
+            snapshot.thread_id = root.into();
+            snapshot.chain_root_id = root.into();
+            if root == "T-phase-retired" {
+                snapshot.kind_name = "seat_session".into();
+            }
+            let created = db.create_chain(root, snapshot, &signer).unwrap();
+            let mut running = created.value.snapshot;
+            running.status = ThreadStatus::Running;
+            running.started_at = Some(lillux::time::iso8601_now());
+            db.append_events(
+                root,
+                root,
+                vec![
+                    crate::objects::thread_event::NewEvent::new(root, root, "thread_started")
+                        .build(),
+                ],
+                vec![SnapshotUpdate {
+                    thread_id: root.into(),
+                    new_snapshot: running.clone(),
+                }],
+                &signer,
+            )
+            .unwrap();
+            if root == "T-phase-retired" {
+                running.status = ThreadStatus::Completed;
+                running.finished_at = Some(lillux::time::iso8601_now());
+                db.append_events(
+                    root,
+                    root,
+                    vec![
+                        crate::objects::thread_event::NewEvent::new(root, root, "thread_completed")
+                            .build(),
+                    ],
+                    vec![SnapshotUpdate {
+                        thread_id: root.into(),
+                        new_snapshot: running,
+                    }],
+                    &signer,
+                )
+                .unwrap();
+            }
+        }
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let terminal = authority
+            .capture_terminal_seat_event_read_anchor("T-phase-retired", &guard)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.with_terminal_retirement_exclusions(
+                &guard,
+                "T-phase-retired",
+                std::slice::from_ref(&terminal),
+                &[],
+                |lock| db.remove_qualified_terminal_seat_head_ref(&guard, &terminal, &[], lock),
+            )
+            .unwrap(),
+            Some(true)
+        );
+        // Qualified removal publishes the manifest and one-shot marker; its
+        // pending projection cleanup must finish before positive-prefix reads.
+        {
+            let lock = db.acquire_existing_chain_lock("T-phase-retired").unwrap();
+            db.delete_chain_projection("T-phase-retired", &lock)
+                .unwrap();
+            assert!(
+                db.acknowledge_chain_removal_cleanup("T-phase-retired", &lock)
+                    .unwrap()
+            );
+        }
+        let retired = authority
+            .capture_retired_seat_positive_prefix("T-phase-retired", &guard)
+            .unwrap()
+            .unwrap();
+        let capture = |root| {
+            authority
+                .capture_thread_event_read_anchor(root, root, &guard)
+                .unwrap()
+                .unwrap()
+        };
+        let target = capture("T-phase-target");
+        let peer = capture("T-phase-peer");
+        let dependency = capture("T-phase-dependency");
+        let event = |root| {
+            crate::objects::thread_event::NewEvent::new(root, root, "contract.test.phase.v1")
+                .build()
+        };
+        let entered = std::cell::Cell::new(false);
+        let append = |target: &AuthoritativeThreadEventReadAnchor,
+                      dependency: &AuthoritativeThreadEventReadAnchor| {
+            db.append_running_events_admitted_if_mixed_cut_with_admission(
+                "T-phase-target",
+                "T-phase-target",
+                vec![event("T-phase-target")],
+                &signer,
+                &NoRecovery,
+                target,
+                &peer,
+                std::slice::from_ref(dependency),
+                std::slice::from_ref(&retired),
+                "directive",
+                &guard,
+                |_| {
+                    entered.set(true);
+                    Ok(true)
+                },
+            )
+        };
+        let mut wrong_snapshot = dependency.clone();
+        wrong_snapshot.snapshot_hash = "00".repeat(32);
+        assert!(matches!(
+            append(&target, &wrong_snapshot).unwrap(),
+            ConditionalThreadEventAppendResult::Conflict
+        ));
+        assert!(!entered.get());
+        db.append_events(
+            "T-phase-dependency",
+            "T-phase-dependency",
+            vec![event("T-phase-dependency")],
+            vec![],
+            &signer,
+        )
+        .unwrap();
+        assert!(matches!(
+            append(&target, &dependency).unwrap(),
+            ConditionalThreadEventAppendResult::Conflict
+        ));
+        assert!(!entered.get());
+        assert_eq!(capture("T-phase-target"), target);
+        assert_eq!(capture("T-phase-peer"), peer);
+        let dependency = capture("T-phase-dependency");
+        assert!(matches!(
+            append(&target, &dependency).unwrap(),
+            ConditionalThreadEventAppendResult::Committed(_)
+        ));
+        assert!(entered.get());
+        entered.set(false);
+        let target = capture("T-phase-target");
+        let marker = db
+            .recovery
+            .runtime_directory()
+            .path()
+            .join("recovery/thread-projection/retired-seats")
+            .join(format!("{}.json", lillux::sha256_hex(b"T-phase-retired")));
+        std::fs::rename(&marker, marker.with_extension("parked")).unwrap();
+        assert!(matches!(
+            append(&target, &dependency).unwrap(),
+            ConditionalThreadEventAppendResult::Conflict
+        ));
+        assert!(!entered.get());
+        assert_eq!(capture("T-phase-target"), target);
+        assert_eq!(capture("T-phase-peer"), peer);
+    }
+
+    #[test]
+    fn mixed_pair_rejects_stale_extra_cut_before_admission_or_either_write() {
+        struct NoRecovery;
+        impl RuntimeLivenessInspector for NoRecovery {
+            fn chain_has_live_recovery_state(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+        }
+        let signer = TestSigner::default();
+        let (_directory, db) = open_temp_trusted(&signer);
+        for root in ["T-pair-source", "T-pair-destination", "T-dependency"] {
+            create_mixed_cut_fixture_root(&db, root, false, &signer);
+        }
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let capture = |root| {
+            authority
+                .capture_thread_event_read_anchor(root, root, &guard)
+                .unwrap()
+                .unwrap()
+        };
+        let source = capture("T-pair-source");
+        let destination = capture("T-pair-destination");
+        let dependency = capture("T-dependency");
+        let mut stale = dependency.clone();
+        stale.snapshot_hash = "00".repeat(32);
+        let entered = std::cell::Cell::new(false);
+        let built = std::cell::Cell::new(false);
+        let events = || {
+            vec![
+                crate::objects::thread_event::NewEvent::new(
+                    "T-pair-destination",
+                    "T-pair-destination",
+                    "contract.test.pair.v1",
+                )
+                .build(),
+            ]
+        };
+        let result = db
+            .append_running_event_pair_admitted_if_mixed_cut(
+                &destination,
+                &source,
+                &[stale],
+                &[],
+                events(),
+                &signer,
+                &NoRecovery,
+                "directive",
+                "directive",
+                &guard,
+                |_| {
+                    entered.set(true);
+                    Ok(true)
+                },
+                |_, _| {
+                    built.set(true);
+                    Ok(vec![
+                        crate::objects::thread_event::NewEvent::new(
+                            "T-pair-source",
+                            "T-pair-source",
+                            "contract.test.pair.v1",
+                        )
+                        .build(),
+                    ])
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ConditionalThreadEventPairAppendResult::Conflict
+        ));
+        assert!(!entered.get());
+        assert!(!built.get());
+        assert_eq!(capture("T-pair-source"), source);
+        assert_eq!(capture("T-pair-destination"), destination);
+        db.append_events(
+            "T-dependency",
+            "T-dependency",
+            vec![
+                crate::objects::thread_event::NewEvent::new(
+                    "T-dependency",
+                    "T-dependency",
+                    "contract.test.dependency-advance.v1",
+                )
+                .build(),
+            ],
+            vec![],
+            &signer,
+        )
+        .unwrap();
+        entered.set(false);
+        let result = db
+            .append_running_event_pair_admitted_if_mixed_cut(
+                &destination,
+                &source,
+                &[dependency.clone()],
+                &[],
+                events(),
+                &signer,
+                &NoRecovery,
+                "directive",
+                "directive",
+                &guard,
+                |_| {
+                    entered.set(true);
+                    Ok(true)
+                },
+                |_, _| unreachable!(),
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ConditionalThreadEventPairAppendResult::Conflict
+        ));
+        assert!(!entered.get());
+        assert_eq!(capture("T-pair-source"), source);
+        assert_eq!(capture("T-pair-destination"), destination);
+        let dependency = capture("T-dependency");
+        // Exact dependency reaches admission while retaining all exclusions.
+        let result = db
+            .append_running_event_pair_admitted_if_mixed_cut(
+                &destination,
+                &source,
+                &[dependency.clone()],
+                &[],
+                events(),
+                &signer,
+                &NoRecovery,
+                "directive",
+                "directive",
+                &guard,
+                |_| {
+                    entered.set(true);
+                    Ok(false)
+                },
+                |_, _| unreachable!(),
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ConditionalThreadEventPairAppendResult::Conflict
+        ));
+        assert!(entered.get());
+        assert_eq!(capture("T-pair-source"), source);
+        assert_eq!(capture("T-pair-destination"), destination);
+        let result = db
+            .append_running_event_pair_admitted_if_mixed_cut(
+                &destination,
+                &source,
+                &[dependency],
+                &[],
+                events(),
+                &signer,
+                &NoRecovery,
+                "directive",
+                "directive",
+                &guard,
+                |_| Ok(true),
+                |_, _| {
+                    built.set(true);
+                    Ok(vec![
+                        crate::objects::thread_event::NewEvent::new(
+                            "T-pair-source",
+                            "T-pair-source",
+                            "contract.test.pair.v1",
+                        )
+                        .build(),
+                    ])
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ConditionalThreadEventPairAppendResult::Committed { .. }
+        ));
+        assert!(built.get());
+        assert_ne!(capture("T-pair-source"), source);
+        assert_ne!(capture("T-pair-destination"), destination);
+    }
+
+    #[test]
+    fn mixed_pair_requires_real_retired_dependency_marker_through_publication() {
+        struct NoRecovery;
+        impl RuntimeLivenessInspector for NoRecovery {
+            fn chain_has_live_recovery_state(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+        }
+        let signer = TestSigner::default();
+        let (_directory, db) = open_temp_trusted(&signer);
+        for root in ["T-source", "T-destination", "T-retired"] {
+            create_mixed_cut_fixture_root(&db, root, root == "T-retired", &signer);
+        }
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let terminal = authority
+            .capture_terminal_seat_event_read_anchor("T-retired", &guard)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.with_terminal_retirement_exclusions(
+                &guard,
+                "T-retired",
+                std::slice::from_ref(&terminal),
+                &[],
+                |lock| db.remove_qualified_terminal_seat_head_ref(&guard, &terminal, &[], lock)
+            )
+            .unwrap(),
+            Some(true)
+        );
+        {
+            let lock = db.acquire_existing_chain_lock("T-retired").unwrap();
+            db.delete_chain_projection("T-retired", &lock).unwrap();
+            assert!(
+                db.acknowledge_chain_removal_cleanup("T-retired", &lock)
+                    .unwrap()
+            );
+        }
+        let prefix = authority
+            .capture_retired_seat_positive_prefix("T-retired", &guard)
+            .unwrap()
+            .unwrap();
+        let capture = |root| {
+            authority
+                .capture_thread_event_read_anchor(root, root, &guard)
+                .unwrap()
+                .unwrap()
+        };
+        let source = capture("T-source");
+        let destination = capture("T-destination");
+        let event = |root| {
+            crate::objects::thread_event::NewEvent::new(root, root, "contract.test.retired-pair.v1")
+                .build()
+        };
+        assert!(matches!(
+            db.append_running_event_pair_admitted_if_mixed_cut(
+                &destination,
+                &source,
+                &[],
+                std::slice::from_ref(&prefix),
+                vec![event("T-destination")],
+                &signer,
+                &NoRecovery,
+                "directive",
+                "directive",
+                &guard,
+                |_| Ok(true),
+                |_, _| Ok(vec![event("T-source")]),
+            )
+            .unwrap(),
+            ConditionalThreadEventPairAppendResult::Committed { .. }
+        ));
+        let source = capture("T-source");
+        let destination = capture("T-destination");
+        // Fault injection removes the actual durable marker, not an altered
+        // opaque prefix. The original authenticated prefix cannot mask loss.
+        let marker_path = db
+            .recovery
+            .runtime_directory()
+            .path()
+            .join("recovery/thread-projection/retired-seats")
+            .join(format!("{}.json", lillux::sha256_hex(b"T-retired")));
+        let parked_marker = marker_path.with_extension("parked");
+        std::fs::rename(&marker_path, &parked_marker).unwrap();
+        let entered = std::cell::Cell::new(false);
+        let result = db
+            .append_running_event_pair_admitted_if_mixed_cut(
+                &destination,
+                &source,
+                &[],
+                std::slice::from_ref(&prefix),
+                vec![event("T-destination")],
+                &signer,
+                &NoRecovery,
+                "directive",
+                "directive",
+                &guard,
+                |_| {
+                    entered.set(true);
+                    Ok(true)
+                },
+                |_, _| unreachable!(),
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ConditionalThreadEventPairAppendResult::Conflict
+        ));
+        assert!(!entered.get());
+        assert_eq!(capture("T-source"), source);
+        assert_eq!(capture("T-destination"), destination);
+        std::fs::rename(&parked_marker, &marker_path).unwrap();
+        assert!(
+            authority
+                .capture_retired_seat_positive_prefix("T-retired", &guard)
+                .unwrap()
+                .unwrap()
+                .same_cut(&prefix)
+        );
+    }
+
+    #[test]
+    fn retirement_closure_continuations_keep_every_counterpart_and_reject_wrong_owner_order() {
+        let (_directory, db) = open_temp();
+        let authority = db.pinned_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        // More than one publication batch; this is a page-work ceiling, not
+        // an operation or counterpart lifetime ceiling.
+        let roots = (0..300)
+            .map(|index| format!("T-counterpart-{index:06}"))
+            .collect::<Vec<_>>();
+        let mut next = publish_retirement_closure_pages(&cas, "T-owner", &roots, &[]).unwrap();
+        let mut previous_root = None;
+        let mut previous_operation = None;
+        let mut observed = Vec::new();
+        let mut count = 0;
+        while let Some(hash) = next {
+            assert!(
+                load_retirement_closure_page(&cas, "T-other", &hash, None, None, 512 * 1024)
+                    .is_err()
+            );
+            assert!(load_retirement_closure_page(&cas, "T-owner", &hash, None, None, 1).is_err());
+            let (page, root, operation) = load_retirement_closure_page(
+                &cas,
+                "T-owner",
+                &hash,
+                previous_root.as_deref(),
+                previous_operation.as_deref(),
+                512 * 1024,
+            )
+            .unwrap();
+            if let Some(last) = page.counterpart_roots.last() {
+                assert!(
+                    load_retirement_closure_page(
+                        &cas,
+                        "T-owner",
+                        &hash,
+                        Some(last),
+                        None,
+                        512 * 1024
+                    )
+                    .is_err()
+                );
+            }
+            observed.extend(page.counterpart_roots);
+            previous_root = root;
+            previous_operation = operation;
+            next = page.next_page_hash;
+            count += 1;
+        }
+        assert_eq!(count, 3);
+        assert_eq!(observed, roots);
+        assert!(
+            publish_retirement_closure_pages(&cas, "T-owner", &[], &[])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_retirement_prefix_retention_releases_in_both_orders() {
+        for order in [["T-root", "T-other"], ["T-other", "T-root"]] {
+            let (_dir, db) = open_temp();
+            for root in ["T-root", "T-other"] {
+                create_mixed_cut_fixture_root(&db, root, true, &TestSigner::default());
+            }
+            let authority = db.pinned_authority().unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let first = authority
+                .capture_terminal_seat_event_read_anchor(order[0], &guard)
+                .unwrap()
+                .unwrap();
+            let second = authority
+                .capture_terminal_seat_event_read_anchor(order[1], &guard)
+                .unwrap()
+                .unwrap();
+            // Storage-owner fixture only: no application lifecycle clearance
+            // is inferred from these transfer-free synthetic terminal roots.
+            assert_eq!(
+                db.with_terminal_retirement_exclusions(
+                    &guard,
+                    order[0],
+                    &[second.clone(), first.clone()],
+                    &[],
+                    |lock| {
+                        db.remove_qualified_terminal_seat_head_ref(
+                            &guard,
+                            &first,
+                            &[order[1].into()],
+                            lock,
+                        )
+                    }
+                )
+                .unwrap(),
+                Some(true)
+            );
+            {
+                let lock = db.acquire_existing_chain_lock(order[0]).unwrap();
+                db.delete_chain_projection(order[0], &lock).unwrap();
+                db.acknowledge_chain_removal_cleanup(order[0], &lock)
+                    .unwrap();
+            }
+            let prefix = authority
+                .capture_retired_seat_positive_prefix(order[0], &guard)
+                .unwrap()
+                .unwrap();
+            assert_eq!(prefix.chain_root_id(), order[0]);
+            assert_eq!(prefix.terminal_status(), ThreadStatus::Completed);
+            let mut altered_status = prefix.clone();
+            altered_status.terminal_status = ThreadStatus::Cancelled;
+            assert!(!prefix.same_cut(&altered_status));
+            let mut altered_prefix = prefix.clone();
+            altered_prefix.marker_digest = "0".repeat(64);
+            assert!(!prefix.same_cut(&altered_prefix));
+            assert!(prefix.same_cut(&prefix.clone()));
+            let metadata = authority
+                .read_retired_seat_retirement_closure_page(&prefix, None, 512 * 1024, &guard)
+                .unwrap();
+            assert_eq!(metadata.counterpart_roots, vec![order[1].to_owned()]);
+            assert!(metadata.negative_transfer_closures.is_empty());
+            assert!(metadata.complete && metadata.next_progress.is_none());
+            let mut progress = None;
+            let mut events = Vec::new();
+            loop {
+                let page = authority
+                    .read_retired_seat_positive_prefix_page(
+                        &prefix,
+                        progress.as_ref(),
+                        1,
+                        1024 * 1024,
+                        &guard,
+                    )
+                    .unwrap();
+                events.extend(page.events);
+                progress = page.progress;
+                if progress.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                !events.is_empty(),
+                "retired prefix retains signed lifecycle events"
+            );
+            drop(guard);
+            {
+                let exclusive = authority.acquire_exclusive_guard(false).unwrap();
+                let retained = authority
+                    .terminal_seat_retirement_object_roots(&exclusive, false)
+                    .unwrap();
+                assert_eq!(retained, vec![prefix.manifest_hash.clone()]);
+                assert!(
+                    db.recovery
+                        .read_retired_closure_release(
+                            &db.recovery
+                                .read_retired_seat_marker(order[0])
+                                .unwrap()
+                                .unwrap()
+                        )
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let guard = authority.acquire_shared_guard().unwrap();
+            let mut mixed_called = 0;
+            assert_eq!(
+                db.with_live_and_retired_seat_exclusions(
+                    &guard,
+                    order[1],
+                    std::slice::from_ref(&second),
+                    std::slice::from_ref(&prefix),
+                    |_| {
+                        mixed_called += 1;
+                        Ok(17)
+                    },
+                )
+                .unwrap(),
+                Some(17)
+            );
+            assert_eq!(mixed_called, 1);
+            assert!(
+                db.with_live_and_retired_seat_exclusions(
+                    &guard,
+                    order[1],
+                    &[first.clone(), second.clone()],
+                    std::slice::from_ref(&prefix),
+                    |_| {
+                        mixed_called += 1;
+                        Ok(())
+                    },
+                )
+                .is_err()
+            );
+            assert_eq!(mixed_called, 1);
+            assert_eq!(
+                db.with_terminal_retirement_exclusions(
+                    &guard,
+                    order[1],
+                    std::slice::from_ref(&second),
+                    std::slice::from_ref(&prefix),
+                    |lock| {
+                        db.remove_qualified_terminal_seat_head_ref(
+                            &guard,
+                            &second,
+                            &[order[0].into()],
+                            lock,
+                        )
+                    }
+                )
+                .unwrap(),
+                Some(true)
+            );
+            assert!(
+                db.with_live_and_retired_seat_exclusions(
+                    &guard,
+                    order[1],
+                    std::slice::from_ref(&second),
+                    std::slice::from_ref(&prefix),
+                    |_| {
+                        mixed_called += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(mixed_called, 1);
+            {
+                let lock = db.acquire_existing_chain_lock(order[1]).unwrap();
+                db.delete_chain_projection(order[1], &lock).unwrap();
+                db.acknowledge_chain_removal_cleanup(order[1], &lock)
+                    .unwrap();
+            }
+            drop(guard);
+            let exclusive = authority.acquire_exclusive_guard(false).unwrap();
+            assert!(
+                authority
+                    .terminal_seat_retirement_object_roots(&exclusive, true)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                db.recovery
+                    .read_retired_closure_release(
+                        &db.recovery
+                            .read_retired_seat_marker(order[0])
+                            .unwrap()
+                            .unwrap()
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                authority
+                    .terminal_seat_retirement_object_roots(&exclusive, false)
+                    .unwrap()
+                    .is_empty()
+            );
+            // Durable retry can omit roots without reconstructing a collected
+            // whole chain-state head or treating filesystem absence as proof.
+            assert!(
+                authority
+                    .terminal_seat_retirement_object_roots(&exclusive, false)
+                    .unwrap()
+                    .is_empty()
+            );
+            for root in order {
+                let marker = db.recovery.read_retired_seat_marker(root).unwrap().unwrap();
+                let release = db
+                    .recovery
+                    .read_retired_closure_release(&marker)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(release.schema, 2);
+                assert_eq!(release.counterpart_count, 1);
+                assert_eq!(release.counterpart_marker_digest.len(), 64);
+                assert!(serde_json::to_vec(&release).unwrap().len() < 1024);
+                assert!(
+                    db.recovery
+                        .read_retired_closure_release(&marker)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    authority
+                        .capture_retired_seat_positive_prefix(root, &exclusive)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retired_positive_prefix_refuses_wrong_snapshot_owner_tip_and_native_positions() {
+        for corruption in [
+            "manifest_root",
+            "snapshot_owner",
+            "tip_owner",
+            "native_position",
+        ] {
+            let (_dir, db) = open_temp();
+            for root in ["T-root", "T-other"] {
+                let mut snapshot = test_root_snapshot("directive:system/test");
+                snapshot.thread_id = root.into();
+                snapshot.chain_root_id = root.into();
+                snapshot.kind_name = "seat_session".into();
+                snapshot.status = ThreadStatus::Completed;
+                db.create_chain_with_events(
+                    root,
+                    snapshot,
+                    vec![
+                        crate::objects::thread_event::NewEvent::new(
+                            root,
+                            root,
+                            "test.retained_notice",
+                        )
+                        .build(),
+                    ],
+                    &TestSigner::default(),
+                )
+                .unwrap();
+            }
+            let authority = db.pinned_authority().unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let source = authority
+                .capture_terminal_seat_event_read_anchor("T-root", &guard)
+                .unwrap()
+                .unwrap();
+            let other = authority
+                .capture_terminal_seat_event_read_anchor("T-other", &guard)
+                .unwrap()
+                .unwrap();
+            let mut manifest = crate::objects::terminal_seat_retirement::TerminalSeatRetirement {
+                schema: 2,
+                kind: "terminal_seat_retirement".into(),
+                chain_root_id: "T-root".into(),
+                retired_head_hash: source.chain_head_hash.clone(),
+                snapshot_hash: source.snapshot_hash.clone(),
+                terminal_event_hash: source.thread_last_event_hash.clone(),
+                terminal_thread_seq: 1,
+                terminal_chain_seq: 1,
+                closure_page_head: None,
+            };
+            match corruption {
+                "manifest_root" => {
+                    manifest.chain_root_id = "T-other".into();
+                }
+                "snapshot_owner" => manifest.snapshot_hash = other.snapshot_hash.clone(),
+                "tip_owner" => manifest.terminal_event_hash = other.thread_last_event_hash.clone(),
+                "native_position" => {
+                    manifest.terminal_thread_seq = 2;
+                    manifest.terminal_chain_seq = 2;
+                }
+                _ => unreachable!(),
+            }
+            manifest.validate().unwrap();
+            let hash = authority
+                .cas_store()
+                .unwrap()
+                .store_object(&serde_json::to_value(&manifest).unwrap())
+                .unwrap();
+            {
+                let lock = db.acquire_existing_chain_lock("T-root").unwrap();
+                // Deliberately malformed STORAGE fixture via private owner:
+                // production qualified publication constructs its own manifest
+                // from the exact signed cut and never accepts this value.
+                db.remove_chain_head_ref_with_retirement_manifest("T-root", &lock, Some(&hash))
+                    .unwrap();
+                db.delete_chain_projection("T-root", &lock).unwrap();
+                db.acknowledge_chain_removal_cleanup("T-root", &lock)
+                    .unwrap();
+            }
+            assert!(
+                authority
+                    .capture_retired_seat_positive_prefix("T-root", &guard)
+                    .is_err(),
+                "{corruption}"
+            );
+        }
+    }
 
     fn test_trust_store() -> Arc<TrustStore> {
         let signer = TestSigner::default();
@@ -6361,6 +10091,206 @@ mod tests {
         .unwrap()
         .value
         .chain_state_hash
+    }
+
+    #[test]
+    fn retired_exact_seat_marker_survives_cleanup_and_rejects_rebirth() {
+        let (dir, db) = open_temp();
+        let mut seat = test_root_snapshot("directive:system/test");
+        seat.kind_name = "seat_session".into();
+        db.create_chain("T-root", seat.clone(), &TestSigner::default())
+            .unwrap();
+        let lock = db.acquire_chain_lock("T-root").unwrap();
+        assert!(db.remove_chain_head_ref("T-root", &lock).unwrap());
+        let marker = db
+            .recovery
+            .read_retired_seat_marker("T-root")
+            .unwrap()
+            .unwrap();
+        let direct = SignedRef::new(
+            "chains/T-root/head".into(),
+            marker.expected_head_hash.clone(),
+            "2026-10-06T00:00:00Z".into(),
+            TestSigner::default().fingerprint().to_string(),
+        );
+        assert!(
+            lock.write_signed_head(direct, &TestSigner::default())
+                .unwrap_err()
+                .to_string()
+                .contains("retired seat identity")
+        );
+        assert_eq!(
+            marker.expected_head_hash,
+            db.recovery
+                .read_pending("T-root")
+                .unwrap()
+                .unwrap()
+                .expected_previous_hash
+                .unwrap()
+        );
+        assert!(
+            db.retired_seat_identity_absent_head_under_lock("T-root", &lock)
+                .unwrap()
+        );
+        db.delete_chain_projection("T-root", &lock).unwrap();
+        assert!(
+            db.acknowledge_chain_removal_cleanup("T-root", &lock)
+                .unwrap()
+        );
+        assert!(
+            db.retired_seat_identity_absent_head_under_lock("T-root", &lock)
+                .unwrap()
+        );
+        drop(lock);
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        assert!(
+            db.write_chain_head_ref_admitted(
+                "T-root",
+                &marker.expected_head_hash,
+                &TestSigner::default(),
+                &guard,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("retired seat identity")
+        );
+        drop(guard);
+        drop(db);
+
+        let reopened = StateDb::open(dir.path(), test_trust_store()).unwrap();
+        let reopened_marker = reopened
+            .recovery
+            .read_retired_seat_marker("T-root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened_marker, marker);
+        let reopened_lock = reopened.acquire_chain_lock("T-root").unwrap();
+        let direct = SignedRef::new(
+            "chains/T-root/head".into(),
+            reopened_marker.expected_head_hash.clone(),
+            "2026-10-06T00:00:00Z".into(),
+            TestSigner::default().fingerprint().to_string(),
+        );
+        assert!(
+            reopened_lock
+                .write_signed_head(direct, &TestSigner::default())
+                .unwrap_err()
+                .to_string()
+                .contains("retired seat identity")
+        );
+        assert!(
+            reopened
+                .retired_seat_identity_absent_head_under_lock("T-root", &reopened_lock)
+                .unwrap()
+        );
+        drop(reopened_lock);
+        let reopened_authority = reopened.pinned_authority().unwrap();
+        let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
+        assert!(
+            reopened
+                .write_chain_head_ref_admitted(
+                    "T-root",
+                    &reopened_marker.expected_head_hash,
+                    &TestSigner::default(),
+                    &reopened_guard,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("retired seat identity")
+        );
+        drop(reopened_guard);
+        assert!(
+            reopened
+                .create_chain("T-root", seat, &TestSigner::default())
+                .unwrap_err()
+                .to_string()
+                .contains("retired seat identity")
+        );
+    }
+
+    #[test]
+    fn terminal_seat_capture_and_retired_anchor_join_require_exact_signed_cut() {
+        let (_dir, db) = open_temp();
+        let mut seat = test_root_snapshot("directive:system/test");
+        seat.kind_name = "seat_session".into();
+        seat.status = ThreadStatus::Completed;
+        db.create_chain("T-root", seat, &TestSigner::default())
+            .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let anchor = authority
+            .capture_terminal_seat_event_read_anchor("T-root", &guard)
+            .unwrap()
+            .unwrap();
+        let lock = db.acquire_chain_lock("T-root").unwrap();
+        assert!(
+            !db.retired_seat_read_anchor_absent_head_under_lock(&anchor, &lock)
+                .unwrap()
+        );
+        assert!(db.remove_chain_head_ref("T-root", &lock).unwrap());
+        assert!(
+            db.retired_seat_read_anchor_absent_head_under_lock(&anchor, &lock)
+                .unwrap()
+        );
+        let mut wrong = anchor.clone();
+        wrong.chain_head_hash = "ab".repeat(32);
+        assert!(
+            db.retired_seat_read_anchor_absent_head_under_lock(&wrong, &lock)
+                .is_err()
+        );
+        let mut wrong = anchor;
+        wrong.thread_id = "another-thread".into();
+        assert!(
+            db.retired_seat_read_anchor_absent_head_under_lock(&wrong, &lock)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_seat_capture_refuses_running_and_nonseat_roots() {
+        let (_dir, db) = open_temp();
+        let mut root = test_root_snapshot("directive:system/test");
+        root.status = ThreadStatus::Completed;
+        db.create_chain("T-root", root, &TestSigner::default())
+            .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        assert!(
+            authority
+                .capture_terminal_seat_event_read_anchor("T-root", &guard)
+                .unwrap()
+                .is_none()
+        );
+        let (_running_dir, running) = open_temp();
+        let mut root = test_root_snapshot("directive:system/test");
+        root.kind_name = "seat_session".into();
+        root.status = ThreadStatus::Running;
+        running
+            .create_chain("T-root", root, &TestSigner::default())
+            .unwrap();
+        let authority = running.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        assert!(
+            authority
+                .capture_terminal_seat_event_read_anchor("T-root", &guard)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_chain_removal_does_not_publish_a_seat_marker() {
+        let (_dir, db) = open_temp();
+        create_test_root_chain(&db);
+        let lock = db.acquire_chain_lock("T-root").unwrap();
+        assert!(db.remove_chain_head_ref("T-root", &lock).unwrap());
+        assert!(
+            db.recovery
+                .read_retired_seat_marker("T-root")
+                .unwrap()
+                .is_none()
+        );
     }
 
     struct AlwaysCancelledRecovery;
@@ -7807,17 +11737,17 @@ mod tests {
 
         let projection_path = {
             let db = StateDb::open(&root, test_trust_store()).unwrap();
-            let snapshot = test_root_snapshot("directive:apps/tv-tracker/ai_chat");
+            let snapshot = test_root_snapshot("directive:apps/example-app/ai_chat");
             db.create_chain("T-root", snapshot, &signer).unwrap();
 
             let created =
                 crate::objects::thread_event::NewEvent::new("T-root", "T-root", "thread_created")
                     .payload(serde_json::json!({
-                        "item_ref": "directive:apps/tv-tracker/ai_chat",
+                        "item_ref": "directive:apps/example-app/ai_chat",
                         "executor_ref": "runtime:directive-runtime",
                         "launch_mode": "wait",
                         "usage_subject": {
-                            "namespace": "tv-tracker",
+                            "namespace": "example-app",
                             "subject": "csm01"
                         },
                         "usage_subject_asserted_by": "fp:backend"
@@ -7867,7 +11797,7 @@ mod tests {
             .connection()
             .query_row(
                 "SELECT COUNT(*) FROM thread_usage_subjects WHERE chain_root_id = 'T-root' \
-                 AND namespace = 'tv-tracker' AND subject = 'csm01' \
+                 AND namespace = 'example-app' AND subject = 'csm01' \
                  AND asserted_by = 'fp:backend'",
                 [],
                 |row| row.get(0),
@@ -8032,6 +11962,7 @@ mod tests {
         let target_hash = "2".repeat(64);
         let unrelated_hash = "3".repeat(64);
         let transition = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: None,
             schema: 1,
             transition_id: "transition-1".into(),
             chain_root_id: "T-root".into(),
@@ -8080,6 +12011,7 @@ mod tests {
         let expected_hash = "1".repeat(64);
         let advanced_hash = "2".repeat(64);
         let transition = PendingChainHeadTransition {
+            terminal_retirement_manifest_hash: None,
             schema: 1,
             transition_id: "transition-1".into(),
             chain_root_id: "T-root".into(),

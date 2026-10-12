@@ -26,5 +26,5 @@ config_schema:
       description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
-      description: "Realm/app namespace, e.g. tv-tracker."
+      description: "Realm/app namespace, e.g. example-app."
   required: [realm_id]

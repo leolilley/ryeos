@@ -12,6 +12,7 @@ sources:
       limit: 500
       project_path: "@session:project_root"
     collection: items
+    coverage: coverage
     requires_project: true
 projections:
   columns:
@@ -41,6 +42,8 @@ affordances:
       facet: selection
       value:
         item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
   - id: explain
     label: Explain
     invoke:

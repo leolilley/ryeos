@@ -81,6 +81,8 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "ryeos.source_closure_manifest",
     "source_manifest",
     "state_manifest",
+    "terminal_seat_retirement",
+    "terminal_seat_retirement_closure_page",
     "thread_event",
     "thread_snapshot",
     "workspace_output_capture",
@@ -212,6 +214,16 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::RETAINED_LIFECYCLE_ARTIFACTS_KIND,
         validate: validate_retained_lifecycle_artifacts,
         links: links_retained_lifecycle_artifacts,
+    },
+    ObjectContract {
+        kind: crate::objects::terminal_seat_retirement::TERMINAL_SEAT_RETIREMENT_KIND,
+        validate: validate_terminal_seat_retirement,
+        links: links_terminal_seat_retirement,
+    },
+    ObjectContract {
+        kind: crate::objects::terminal_seat_retirement::TERMINAL_SEAT_RETIREMENT_CLOSURE_PAGE_KIND,
+        validate: validate_terminal_seat_retirement_closure_page,
+        links: links_terminal_seat_retirement_closure_page,
     },
     ObjectContract {
         kind: crate::objects::EFFECTIVE_SOURCE_BINDING_KIND,
@@ -437,7 +449,8 @@ fn validate_state_manifest(value: &Value) -> anyhow::Result<()> {
 
 fn validate_thread_event(value: &Value) -> anyhow::Result<()> {
     let object = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())?;
-    object.validate()
+    object.validate()?;
+    super::validate_registered_event(value)
 }
 
 fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
@@ -1348,6 +1361,13 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
             )?;
         }
     }
+    if let Some(registered) = super::links_registered_event(value)? {
+        links.object_edges.extend(registered.object_edges);
+        links.blob_hashes.extend(registered.blob_hashes);
+        links
+            .large_object_hashes
+            .extend(registered.large_object_hashes);
+    }
     Ok(links)
 }
 
@@ -1448,6 +1468,73 @@ fn links_guest_runtime_materialization_subject(value: &Value) -> Result<Contract
         None,
         &mut links.object_edges,
     )?;
+    Ok(links)
+}
+
+fn validate_terminal_seat_retirement(value: &Value) -> anyhow::Result<()> {
+    crate::objects::terminal_seat_retirement::TerminalSeatRetirement::from_value(value)?;
+    Ok(())
+}
+
+fn links_terminal_seat_retirement(value: &Value) -> Result<ContractLinks, String> {
+    let manifest =
+        crate::objects::terminal_seat_retirement::TerminalSeatRetirement::from_value(value)
+            .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &manifest.snapshot_hash,
+        ExpectedObject::Kind("thread_snapshot"),
+        None,
+        &mut links.object_edges,
+    )?;
+    if let Some(hash) = manifest.terminal_event_hash {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind("thread_event"),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    if let Some(hash) = manifest.closure_page_head {
+        super::push_typed_hash(&hash, ExpectedObject::Kind(crate::objects::terminal_seat_retirement::TERMINAL_SEAT_RETIREMENT_CLOSURE_PAGE_KIND), None, &mut links.object_edges)?;
+    }
+    Ok(links)
+}
+
+fn validate_terminal_seat_retirement_closure_page(value: &Value) -> anyhow::Result<()> {
+    crate::objects::terminal_seat_retirement::TerminalSeatRetirementClosurePage::from_value(value)?;
+    Ok(())
+}
+
+fn links_terminal_seat_retirement_closure_page(value: &Value) -> Result<ContractLinks, String> {
+    use crate::objects::terminal_seat_retirement::{
+        TERMINAL_SEAT_RETIREMENT_CLOSURE_PAGE_KIND, TerminalSeatRetirementClosurePage,
+    };
+    let page =
+        TerminalSeatRetirementClosurePage::from_value(value).map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    if let Some(hash) = page.next_page_hash {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind(TERMINAL_SEAT_RETIREMENT_CLOSURE_PAGE_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    for closure in page.negative_transfer_closures {
+        for hash in [
+            &closure.evidence.event_hash,
+            &closure.source_tip.event_hash,
+            &closure.destination_tip.event_hash,
+        ] {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind("thread_event"),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
     Ok(links)
 }
 

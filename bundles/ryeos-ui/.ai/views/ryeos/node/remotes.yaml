@@ -2,29 +2,36 @@
 name: node-remotes
 title: Remotes
 version: "1.0.0"
-description: Configured remote nodes
+description: Remote configuration and invalid entries; no reachability probe is performed
 
-widget: table
+widget: sections
 sources:
   default:
     ref: service:ui/ryeos-ui/remotes/list
     params: {}
+sections:
+  - title: Configured — not probed
+    source_channel: default
     collection: remotes
-projections:
-  columns:
-    - label: remote
-      field: name
-    - label: url
-      field: url
-    - label: scope
-      field: scope
-selection:
-  activate: aim-site
-affordances:
-  - id: aim-site
-    label: Aim input at site
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        site: "{record.name}"
+    projection:
+      identity: name
+      primary: name
+      meta: url
+      expand:
+        fields: [name, scope, url, principal_id, site_id, config_path, project_bindings]
+  - title: Invalid configuration
+    source_channel: default
+    collection: invalid_remotes
+    projection:
+      identity: name
+      primary: name
+      meta: error
+      expand:
+        fields: [name, scope, config_path, url, error, repair_hint]
+  - title: Repair guidance
+    source_channel: default
+    collection: invalid_remotes
+    projection:
+      identity: name
+      primary: name
+      meta: repair_hint

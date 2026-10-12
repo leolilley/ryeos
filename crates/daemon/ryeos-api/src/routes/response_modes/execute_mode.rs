@@ -253,7 +253,7 @@ pub fn resolve_execution_project_authority(
         PinnedProjectRealization, PinnedTerminalPublication,
     };
 
-    ryeos_app::identity::validate_canonical_site_id(project_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(project_site_id)?;
 
     // Authorization scopes are a set. Authorized-key files and composed
     // grants need not preserve a particular ordering, while the immutable
@@ -901,7 +901,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
         // This assertion belongs to the authenticated wire ingress. Nested
         // admission consumes verified handler authority, not a second proof.
-        ryeos_app::identity::validate_forwarding_origin_assertion(
+        ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
             request.required_origin_site_id.as_deref(),
             ctx.principal.authorized_key_class,
             ctx.principal.authenticated_origin_site_id.as_deref(),
@@ -1073,8 +1073,8 @@ pub(crate) async fn admit_execution(
     }
 
     // Capability check: derive the required cap from the item_ref
-    // (e.g. "directive:apps/tv-tracker/ai_chat" →
-    //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+    // (e.g. "directive:apps/example-app/ai_chat" →
+    //  "ryeos.execute.directive.apps/example-app/ai_chat") and check
     // via the unified Authorizer. This replaces the old ad-hoc
     // `s == "*" || s == "execute"` check, supporting fine-grained
     // `ryeos.execute.<kind>.<subject>` scopes and wildcards like

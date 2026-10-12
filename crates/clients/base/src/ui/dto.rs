@@ -227,6 +227,8 @@ pub struct RyeOsDimensionDto {
     #[serde(default)]
     pub remotes: Vec<RyeOsRemoteDto>,
     #[serde(default)]
+    pub invalid_remotes: Vec<RyeOsInvalidRemoteDto>,
+    #[serde(default)]
     pub threads: RyeOsThreadSummaryDto,
     #[serde(default)]
     pub schedules: RyeOsScheduleSummaryDto,
@@ -239,7 +241,9 @@ pub struct RyeOsSessionDto {
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
-    pub surface_ref: String,
+    pub root_ref: String,
+    #[serde(default)]
+    pub title: String,
     #[serde(default)]
     pub user_principal_id: Option<String>,
 }
@@ -360,6 +364,9 @@ pub struct RyeOsThreadSummaryDto {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsScheduleSummaryDto {
+    pub identity_filtered: bool,
+    pub owner_principal_id: String,
+    pub coverage: String,
     #[serde(default)]
     pub total: usize,
     #[serde(default)]
@@ -369,9 +376,19 @@ pub struct RyeOsScheduleSummaryDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsGcSummaryDto {
     #[serde(default)]
-    pub running: bool,
+    pub activity: String,
+    #[serde(default)]
+    pub coverage: String,
     #[serde(default)]
     pub recent_events: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsInvalidRemoteDto {
+    pub name: String,
+    pub scope: String,
+    pub error: String,
+    pub repair_hint: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

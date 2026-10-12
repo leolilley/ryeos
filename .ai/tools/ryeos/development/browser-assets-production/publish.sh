@@ -12,6 +12,10 @@ root="$(git rev-parse --show-toplevel)"
 web="$root/crates/clients/web"
 package="$web/pkg"
 registry="$root/crates/daemon/ryeos-ui/generate_asset_registry.py"
+build_target="${CARGO_TARGET_DIR:-$root/target}"
+if [[ "$build_target" != /* ]]; then
+  build_target="$root/$build_target"
+fi
 stage="$(mktemp -d "$web/.asset-stage.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 
@@ -24,7 +28,7 @@ fi
 cargo build -q -p ryeos-client-web --target wasm32-unknown-unknown --release --lib
 mkdir -p "$stage/wasm" "$stage/renderer" "$stage/final"
 wasm-bindgen \
-  "$root/target/wasm32-unknown-unknown/release/ryeos_client_web.wasm" \
+  "$build_target/wasm32-unknown-unknown/release/ryeos_client_web.wasm" \
   --target web \
   --out-dir "$stage/wasm" \
   --out-name ryeos_web

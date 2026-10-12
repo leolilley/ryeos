@@ -2,7 +2,7 @@
 name: development-execution
 title: Execution
 version: "1.0.0"
-description: Bounded live execution field for the work selected as this view set's conversation route
+description: Bounded execution field for the explicitly selected work placement
 
 widget: field
 sources:

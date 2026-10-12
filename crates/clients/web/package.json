@@ -8,6 +8,8 @@
   },
   "packageManager": "npm@11.19.0",
   "scripts": {
+    "dev": "vite",
+    "dev:launch": "node dev-launch.mjs",
     "build:renderer": "vite build && node browser/validate-stage.mjs",
     "check:renderer": "svelte-check --tsconfig ./tsconfig.json",
     "test:renderer-root": "node tests/browser/svelte-root.mjs",

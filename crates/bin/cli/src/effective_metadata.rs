@@ -20,7 +20,7 @@ pub fn build_effective_item_engine(
     project_path: Option<&Path>,
     bundle_roots: &[PathBuf],
 ) -> anyhow::Result<Engine> {
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })?;

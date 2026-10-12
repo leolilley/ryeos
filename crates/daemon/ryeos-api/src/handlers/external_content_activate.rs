@@ -2755,7 +2755,7 @@ mod tests {
 
     fn test_state_store(root: &std::path::Path) -> ryeos_app::state_store::StateStore {
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
@@ -2923,7 +2923,7 @@ mod tests {
         let runtime_state = root.path().join(".ai/state");
         let runtime_db = root.path().join("runtime.sqlite3");
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
                 .unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),

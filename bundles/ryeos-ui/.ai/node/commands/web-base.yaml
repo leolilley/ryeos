@@ -2,9 +2,9 @@
 tokens:
 - web
 - base
-description: Open the observation-only browser RyeOS UI base surface.
+description: Open the RyeOS browser presentation with its authored observation-only Home Surface.
 defaults:
-  surface: surface:ryeos/ui/base-observe
+  presentation: config:ryeos/ui/presentation
 project:
   resolution: optional
   bind_parameter: project

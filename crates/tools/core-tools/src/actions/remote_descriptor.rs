@@ -309,7 +309,7 @@ mod tests {
         admission_enabled: bool,
         allow_loopback_http: bool,
     ) {
-        let identity = ryeos_app::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &app_root.join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
@@ -350,7 +350,7 @@ admission_enabled: {admission_enabled}
         std::fs::create_dir_all(&identity_dir).unwrap();
         let identity_path = identity_dir.join("private_key.pem");
         let node_identity = if identity_path.exists() {
-            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         } else {
             std::fs::write(
                 &identity_path,
@@ -360,7 +360,7 @@ admission_enabled: {admission_enabled}
                     .as_bytes(),
             )
             .unwrap();
-            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         };
         ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", trust_dir, None)
             .unwrap();
@@ -377,7 +377,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_advertises_enabled_admission_without_inventing_capabilities() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -403,7 +403,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_rejects_public_http_under_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -431,7 +431,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_allows_loopback_http_under_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -456,7 +456,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_allows_ipv6_loopback_http_under_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -481,7 +481,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_rejects_loopback_looking_hostname_under_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -509,7 +509,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_rejects_admission_mode_override_under_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -537,7 +537,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_keeps_capabilities_as_explicit_informational_labels() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -562,7 +562,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_allows_capability_subset_under_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -588,7 +588,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_omits_admission_when_explicitly_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
@@ -613,7 +613,7 @@ admission_enabled: {admission_enabled}
     fn remote_descriptor_rejects_loopback_http_when_operator_disallows_it() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();

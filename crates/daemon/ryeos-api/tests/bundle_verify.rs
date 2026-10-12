@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ryeos_api::handlers::bundle_verify::{DESCRIPTOR, Request};
 use ryeos_api::registry::build_service_registry;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use serde_json::{Value, json};
 
 const CAP: &str = "ryeos.execute.service.bundle/verify";

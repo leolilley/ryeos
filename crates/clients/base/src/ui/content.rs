@@ -44,6 +44,9 @@ impl TimelineRole {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewBinding {
+    /// Closed Rust-owned presentation metadata, not a second executable source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_projection: Option<super::local_projection::ViewLocalProjection>,
     /// Canonical parent ref retained by the engine's effective composer as
     /// provenance. The client consumes the already-composed fields and never
     /// resolves this ref itself.
@@ -360,6 +363,9 @@ impl FieldCursorScopeBinding {
 pub struct InputBlock {
     /// Unique within the view (instance keying).
     pub id: String,
+    /// Filter this ordinary View's Rust local projection without a source call.
+    #[serde(default)]
+    pub local_filter: bool,
     #[serde(default)]
     pub placeholder: Option<String>,
     /// Optional author label for the prompt's target strip; else derived
@@ -555,7 +561,7 @@ impl InputBlock {
     /// and the renderer composes it as a filter line above its widget rather
     /// than replacing the widget with a prompt.
     pub fn is_live_filter(&self) -> bool {
-        self.feeds.is_some() && self.submit.is_none()
+        (self.local_filter || self.feeds.is_some()) && self.submit.is_none()
     }
 }
 
@@ -575,6 +581,10 @@ pub struct SourceBinding {
     /// text).
     #[serde(default)]
     pub collection: Option<String>,
+    /// Optional response path to a bounded collection-coverage statement.
+    /// This is presentation metadata, never proof of authority or absence.
+    #[serde(default)]
+    pub coverage: Option<String>,
     /// Per-channel liveness policy. When present it overrides the containing
     /// view's refresh rule for this source only.
     #[serde(default)]
@@ -1440,6 +1450,31 @@ pub fn feeds_param_collision(binding: &ViewBinding) -> Option<String> {
 }
 
 fn source_contract_error(binding: &ViewBinding) -> Option<String> {
+    if let Some(input) = binding.input.as_ref().filter(|input| input.local_filter) {
+        if binding.local_projection.is_none() {
+            return Some("input.local_filter requires an ordinary local_projection View".into());
+        }
+        if input.feeds.is_some()
+            || input.completion.is_some()
+            || input.mentions.is_some()
+            || input.submit.is_some()
+            || input.command_submit.is_some()
+            || input.thread_control.is_some()
+            || input.target.is_some()
+        {
+            return Some("input.local_filter cannot compose source feeds, network suggestions, submission or route controls".into());
+        }
+    }
+    if binding.local_projection.is_some() {
+        if !matches!(binding.widget.as_str(), "rows" | "table") {
+            return Some("local_projection requires a rows or table widget".into());
+        }
+        if !binding.sources.is_empty() || binding.facet.is_some() || !binding.sections.is_empty() {
+            return Some(
+                "local_projection cannot compose executable sources, facets or sections".into(),
+            );
+        }
+    }
     if binding.widget == "field" && binding.sources.is_empty() {
         return Some("field views require at least one named source".to_string());
     }
@@ -1507,6 +1542,109 @@ fn source_contract_error(binding: &ViewBinding) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod local_projection_contract_tests {
+    use super::*;
+
+    #[test]
+    fn local_projection_is_closed_and_never_an_executable_source() {
+        let binding: ViewBinding = serde_json::from_value(serde_json::json!({
+            "widget":"rows", "local_projection":"launcher",
+        }))
+        .unwrap();
+        assert!(source_contract_error(&binding).is_none());
+        assert!(
+            serde_json::from_value::<ViewBinding>(serde_json::json!({
+                "widget":"rows", "local_projection":"runtime:anything",
+            }))
+            .is_err()
+        );
+        for payload in [
+            serde_json::json!({"widget":"text", "local_projection":"launcher"}),
+            serde_json::json!({"widget":"rows", "local_projection":"launcher", "facet":"selection"}),
+            serde_json::json!({"widget":"rows", "local_projection":"launcher", "sources":{"default":{"ref":"service:test/read"}}}),
+            serde_json::json!({"widget":"rows", "local_projection":"shortcuts", "sections":[{"title":"x","source_channel":"default","collection":"rows","projection":{}}]}),
+        ] {
+            let binding: ViewBinding = serde_json::from_value(payload).unwrap();
+            assert!(source_contract_error(&binding).is_some());
+        }
+    }
+
+    #[test]
+    fn local_filter_is_explicit_and_cannot_contact_or_retarget_a_source() {
+        let valid = serde_json::json!({"widget":"rows","local_projection":"launcher","input":{"id":"query","local_filter":true}});
+        let binding: ViewBinding = serde_json::from_value(valid.clone()).unwrap();
+        assert!(source_contract_error(&binding).is_none());
+        assert!(binding.input.as_ref().unwrap().is_live_filter());
+        let mut missing_projection = valid.clone();
+        missing_projection
+            .as_object_mut()
+            .unwrap()
+            .remove("local_projection");
+        assert!(
+            source_contract_error(&serde_json::from_value(missing_projection).unwrap()).is_some()
+        );
+        for (field, value) in [
+            ("feeds", serde_json::json!({"param":"query"})),
+            (
+                "completion",
+                serde_json::json!({"ref":"service:test/suggestions"}),
+            ),
+            (
+                "mentions",
+                serde_json::json!({"ref":"service:test/mentions","reference":"ref"}),
+            ),
+            ("submit", serde_json::json!("route")),
+            ("command_submit", serde_json::json!("commands")),
+            ("thread_control", serde_json::json!("control")),
+            ("target", serde_json::json!({"cycle":"route_chains"})),
+        ] {
+            let mut payload = valid.clone();
+            payload["input"][field] = value;
+            assert!(
+                source_contract_error(&serde_json::from_value(payload).unwrap()).is_some(),
+                "{field}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ViewBinding>(
+                serde_json::json!({"widget":"rows","input":{"id":"query","local_filter":"true"}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ViewBinding>(
+                serde_json::json!({"widget":"rows","input":{"id":"query","mode":"live_filter"}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn authored_view_kind_composes_and_types_local_projection_and_filter() {
+        let schema: Value = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/standard/.ai/node/engine/kinds/view/view.kind-schema.yaml"
+        ))
+        .unwrap();
+        let fields = schema["composer_config"]["fields"].as_array().unwrap();
+        let projection = fields
+            .iter()
+            .find(|field| field["name"] == "local_projection")
+            .unwrap();
+        assert_eq!(projection["strategy"], "replace_root_last");
+        assert_eq!(projection["expect_value_type"], "string");
+        assert_eq!(
+            schema["composed_value_contract"]["optional"]["local_projection"]["enum"],
+            serde_json::json!(["launcher", "shortcuts", "session_details"])
+        );
+        assert_eq!(
+            schema["composed_value_contract"]["optional"]["input"]["contract"]["optional"]["local_filter"]
+                ["prim"],
+            "boolean"
+        );
+    }
 }
 
 fn value_contains_exact_string(value: &Value, needle: &str) -> bool {
@@ -1628,6 +1766,14 @@ pub enum AffordanceInvoke {
         context: Value,
         persist_affordance: String,
     },
+    SaveActiveSurface {
+        context: Value,
+        persist_affordance: String,
+    },
+    SaveParticularSurface {
+        context: Value,
+        persist_affordance: String,
+    },
     Ui {
         facet: String,
         value: Option<Value>,
@@ -1721,6 +1867,26 @@ pub fn resolve_affordance_invoke(
                             context: value,
                             persist_affordance: companion.to_owned(),
                         })
+                    }
+                    "save_active_surface" | "save_particular_surface" => {
+                        let companion = invoke.get("persist_affordance")?.as_str()?;
+                        if companion.is_empty()
+                            || companion.trim() != companion
+                            || companion.chars().any(char::is_control)
+                        {
+                            return None;
+                        }
+                        if operation == "save_active_surface" {
+                            Some(AffordanceInvoke::SaveActiveSurface {
+                                context: value,
+                                persist_affordance: companion.to_owned(),
+                            })
+                        } else {
+                            Some(AffordanceInvoke::SaveParticularSurface {
+                                context: value,
+                                persist_affordance: companion.to_owned(),
+                            })
+                        }
                     }
                     _ => None,
                 };
@@ -2647,6 +2813,438 @@ mod tests {
     }
 
     #[test]
+    fn authored_item_inspector_projects_nested_response_and_inline_summary() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/views/ryeos/item/inspector.yaml");
+        let authored: Value =
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": authored["widget"],
+            "projections": authored["projections"]
+        }))
+        .unwrap();
+        let response = json!({
+            "schema_version": "ryeos-ui.item.inspect.v1",
+            "item": {
+                "canonical_ref": "tool:example/check",
+                "item_kind": "tool",
+                "space": "bundle",
+                "executable": true,
+                "trust": {"class": "trusted"}
+            },
+            "effective": {"description": "Check input"},
+            "effective_coverage": {"state": "available", "reason": "read_succeeded"},
+            "raw_coverage": {"state": "not_requested", "reason": "not_requested"}
+        });
+        let detail = project_detail(&binding, &response);
+        assert!(detail.contains(&("item.canonical_ref".into(), "tool:example/check".into())));
+        assert!(detail.contains(&("item.item_kind".into(), "tool".into())));
+        assert!(detail.iter().any(|(key, _)| key == "effective"));
+        assert!(detail.contains(&("effective_coverage.state".into(), "available".into())));
+        assert!(detail.contains(&("raw_coverage.state".into(), "not_requested".into())));
+        let failed = project_detail(
+            &binding,
+            &json!({
+                "effective_coverage": {"state": "failed", "reason": "read_failed"}
+            }),
+        );
+        assert!(failed.contains(&("effective_coverage.state".into(), "failed".into())));
+        assert!(failed.contains(&("effective_coverage.reason".into(), "read_failed".into())));
+        let summary = project_detail(
+            &binding,
+            &json!({"title": "Failure", "detail": "Exact cause"}),
+        );
+        assert_eq!(
+            summary,
+            vec![
+                ("title".into(), "Failure".into()),
+                ("detail".into(), "Exact cause".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn authored_catalogue_inspection_preserves_attachment_project_scope() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        let read = |relative: &str| -> Value {
+            serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap()).unwrap()
+        };
+        let inspector = read("item/inspector.yaml");
+        for relative in ["items/space.yaml", "item/inspector.yaml"] {
+            let view = read(relative);
+            let source: SourceBinding =
+                serde_json::from_value(view["sources"]["default"].clone()).unwrap();
+            assert!(!source.requires_project, "{relative}");
+            assert!(source.params.get("project_path").is_none(), "{relative}");
+        }
+        let project = read("project/items.yaml");
+        assert_eq!(project["sources"]["default"]["requires_project"], true);
+        for relative in ["items/space.yaml", "project/items.yaml"] {
+            let view = read(relative);
+            let action = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["id"] == "inspect")
+                .unwrap();
+            assert_eq!(action["invoke"]["plane"], "ui");
+            assert_eq!(action["invoke"]["facet"], "selection");
+            assert_eq!(
+                action["invoke"]["value"],
+                json!({"item": "{record.canonical_ref}"})
+            );
+            assert_eq!(action["invoke"]["open_view"], "view:ryeos/item/inspector");
+            assert_eq!(action["invoke"]["drill"], true);
+            let resolved = resolve_params(&inspector["sources"]["default"]["params"], |key| {
+                (key == "selection").then(|| json!({"item": "tool:example/check"}))
+            });
+            assert_eq!(resolved["canonical_ref"], "tool:example/check");
+            assert!(resolved.get("project_path").is_none());
+        }
+    }
+
+    #[test]
+    fn authored_node_inspection_has_no_conversation_route_and_declares_exact_view_targets() {
+        fn refs(value: &Value, queue: &mut Vec<String>) {
+            match value {
+                Value::String(value) if value.starts_with("view:") => queue.push(value.clone()),
+                Value::Array(values) => values.iter().for_each(|value| refs(value, queue)),
+                Value::Object(values) => values.values().for_each(|value| refs(value, queue)),
+                _ => {}
+            }
+        }
+        let root = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai");
+        let node: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join("surfaces/ryeos/ui/node.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert!(node.get("input").is_none());
+        assert!(node.get("affordances").is_none());
+        assert_eq!(
+            node["tiles"],
+            json!([
+                "view:ryeos/node/threads/history",
+                "view:ryeos/projects/list",
+                "view:ryeos/node/events"
+            ])
+        );
+        let mut queue = Vec::new();
+        refs(&node, &mut queue);
+        let mut visited = std::collections::BTreeSet::new();
+        let mut sources = std::collections::BTreeSet::new();
+        let mut actions = std::collections::BTreeSet::new();
+        while let Some(view_ref) = queue.pop() {
+            if !visited.insert(view_ref.clone()) {
+                continue;
+            }
+            let path = root
+                .join("views")
+                .join(format!("{}.yaml", view_ref.strip_prefix("view:").unwrap()));
+            let view: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            refs(&view, &mut queue);
+            for source in view
+                .get("sources")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|map| map.values())
+            {
+                let target = source["ref"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("service:")
+                    .unwrap();
+                sources.insert(format!("ryeos.execute.service.{target}"));
+            }
+            for action in view
+                .get("affordances")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if action["invoke"]["plane"] == "rye" {
+                    let target = action["invoke"]["ref"]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("service:")
+                        .unwrap();
+                    actions.insert(format!("ryeos.execute.service.{target}"));
+                }
+            }
+        }
+        for (lane, expected) in [("sources", sources), ("affordances", actions)] {
+            let declared: std::collections::BTreeSet<String> = node["capabilities"][lane]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(declared, expected, "{lane}");
+            assert!(declared.iter().all(|capability| !capability.contains('*')));
+        }
+        let gc: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join("views/ryeos/node/gc.yaml")).unwrap(),
+        )
+        .unwrap();
+        let source: SourceBinding =
+            serde_json::from_value(gc["sources"]["default"].clone()).unwrap();
+        assert!(!source.requires_project);
+        assert_eq!(source.params, json!({}));
+        assert_eq!(source.item_ref, "service:ui/ryeos-ui/gc/status");
+        let service: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join("services/ui/ryeos-ui/gc/status.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(service["ui_read_only"], true);
+        assert_eq!(service["state_access"], "read_only_existing");
+    }
+
+    #[test]
+    fn authored_remotes_show_invalid_entries_without_network_probe() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/views/ryeos/node/remotes.yaml");
+        let view: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(view["widget"], "sections");
+        assert_eq!(view["sources"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            view["sources"]["default"]["ref"],
+            "service:ui/ryeos-ui/remotes/list"
+        );
+        assert!(view.get("affordances").is_none());
+        let sections: Vec<SectionBinding> =
+            serde_json::from_value(view["sections"].clone()).unwrap();
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.collection.as_deref() == Some("remotes")
+                    && section.title.contains("not probed"))
+        );
+        let invalid = json!({"name": "broken", "error": "invalid configuration", "repair_hint": "repair this entry"});
+        let invalid_sections: Vec<_> = sections
+            .iter()
+            .filter(|section| section.collection.as_deref() == Some("invalid_remotes"))
+            .collect();
+        assert_eq!(invalid_sections.len(), 2);
+        let projected: Vec<_> = invalid_sections
+            .iter()
+            .map(|section| project_record(&invalid, &section.projection))
+            .collect();
+        assert!(projected.iter().all(|row| row.primary == "broken"));
+        assert!(
+            projected
+                .iter()
+                .any(|row| row.meta.as_deref() == Some("invalid configuration"))
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|row| row.meta.as_deref() == Some("repair this entry"))
+        );
+        assert!(sections.iter().all(|section| section.activate.is_none()));
+        let configured = sections
+            .iter()
+            .find(|section| section.collection.as_deref() == Some("remotes"))
+            .unwrap();
+        let fields = expand_fields_from_projection(&configured.projection);
+        for field in [
+            "scope",
+            "principal_id",
+            "site_id",
+            "config_path",
+            "project_bindings",
+        ] {
+            assert!(fields.iter().any(|candidate| candidate == field));
+        }
+        let remote = json!({"name":"build", "scope":"project", "principal_id":"principal", "site_id":"site", "config_path":"config/remote.yaml", "project_bindings":[]});
+        assert_eq!(field_text(&remote, "scope").as_deref(), Some("project"));
+        assert!(invalid_sections.iter().any(|section| {
+            expand_fields_from_projection(&section.projection)
+                .iter()
+                .any(|field| field == "repair_hint")
+        }));
+        assert!(
+            sections
+                .iter()
+                .all(|section| section.projection["identity"] == "name")
+        );
+    }
+
+    #[test]
+    fn authored_outcome_coverage_remains_visible_without_a_result() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        for relative in ["work/evidence.yaml", "threads/detail.yaml"] {
+            let authored: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap())
+                    .unwrap();
+            let sections: Vec<SectionBinding> =
+                serde_json::from_value(authored["sections"].clone()).unwrap();
+            let section = sections
+                .iter()
+                .find(|section| section.collection.as_deref() == Some("outcome_coverage"))
+                .unwrap();
+            assert!(section.activate.is_none());
+            for (state, reason, status) in [
+                (
+                    "pending",
+                    "nonterminal_snapshot_has_no_outcome_fields_yet",
+                    "running",
+                ),
+                (
+                    "absent",
+                    "terminal_snapshot_declares_no_outcome_fields",
+                    "completed",
+                ),
+                ("available", "signed_outcome_fields_retained", "failed"),
+            ] {
+                let rows = project_section(
+                    section,
+                    &json!({"result":null,
+                    "outcome_coverage":{"state":state,"reason":reason,"thread_status":status}}),
+                );
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].primary, state);
+                assert_eq!(rows[0].meta.as_deref(), Some(reason));
+                assert_eq!(
+                    field_text(&rows[0].raw, "thread_status").as_deref(),
+                    Some(status)
+                );
+                assert!(
+                    expand_fields_from_projection(&section.projection)
+                        .contains(&"thread_status".to_string())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authored_artifact_sections_show_signed_identity_and_metadata_without_blob_actions() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        for relative in ["work/evidence.yaml", "threads/detail.yaml"] {
+            let authored: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap())
+                    .unwrap();
+            let sections: Vec<SectionBinding> =
+                serde_json::from_value(authored["sections"].clone()).unwrap();
+            let section = sections
+                .iter()
+                .find(|section| section.collection.as_deref() == Some("artifacts"))
+                .unwrap();
+            assert!(section.activate.is_none());
+            assert_eq!(section.projection["identity"], "artifact_id");
+            let artifact = json!({
+                "artifact_id":42, "artifact_type":"diagnostic_report", "uri":"", "content_hash":null,
+                "metadata":{"outcome":"passed", "checks":3}
+            });
+            let rows = project_section(section, &json!({"artifacts":[artifact.clone()]}));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].primary, "diagnostic_report");
+            assert_eq!(rows[0].meta.as_deref(), Some("42"));
+            let fields = expand_fields_from_projection(&section.projection);
+            assert_eq!(fields, vec!["artifact_id", "artifact_type", "metadata"]);
+            assert_eq!(
+                serde_json::from_str::<Value>(&field_text(&artifact, &fields[2]).unwrap()).unwrap(),
+                artifact["metadata"]
+            );
+            assert!(
+                !fields
+                    .iter()
+                    .any(|field| field == "uri" || field == "content_hash")
+            );
+        }
+    }
+
+    #[test]
+    fn authored_schedule_lists_do_not_activate_mutations_on_selection() {
+        for relative in ["schedules/list.yaml", "project/schedules.yaml"] {
+            let path = ryeos_engine::test_support::workspace_root()
+                .join("bundles/ryeos-ui/.ai/views/ryeos")
+                .join(relative);
+            let authored: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(authored.get("selection").is_none(), "{relative}");
+            let actions = authored["affordances"].as_array().unwrap();
+            assert!(actions.iter().any(|action| action["id"] == "pause"));
+            assert!(actions.iter().any(|action| action["id"] == "resume"));
+        }
+    }
+
+    #[test]
+    fn authored_execution_inspection_uses_selection_without_conversation_routing() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        let read = |relative: &str| -> Value {
+            serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap()).unwrap()
+        };
+        for (relative, id, destination) in [
+            ("node/threads/history.yaml", "watch", "threads/detail"),
+            ("node/threads/history.yaml", "tree", "thread/tree"),
+            ("node/events.yaml", "watch-thread", "threads/detail"),
+            ("home/overview.yaml", "watch-thread", "threads/detail"),
+            ("thread/tree.yaml", "watch", "threads/detail"),
+            ("threads/list.yaml", "tree", "thread/tree"),
+            ("threads/history.yaml", "tree", "thread/tree"),
+        ] {
+            let view = read(relative);
+            let action = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["id"] == id)
+                .unwrap();
+            assert_eq!(action["invoke"]["plane"], "ui", "{relative}:{id}");
+            assert_eq!(action["invoke"]["facet"], "selection", "{relative}:{id}");
+            assert_eq!(
+                action["invoke"]["value"],
+                json!({"thread_id": "{record.thread_id}"})
+            );
+            assert_eq!(
+                action["invoke"]["open_view"],
+                format!("view:ryeos/{destination}")
+            );
+            assert_eq!(action["invoke"]["drill"], true);
+            let target = read(&format!("{destination}.yaml"));
+            for source in target["sources"].as_object().unwrap().values() {
+                assert_eq!(source["params"]["thread_id"], "@facet:selection.thread_id");
+                let resolved = resolve_params(&source["params"], |key| {
+                    (key == "selection").then(|| json!({"thread_id": "T-inspected"}))
+                });
+                assert_eq!(resolved["thread_id"], "T-inspected");
+                let unresolved = resolve_params(&source["params"], |key| {
+                    (key == "input.route").then(|| json!({"thread": "T-conversation"}))
+                });
+                assert!(unresolved["thread_id"].is_null());
+            }
+        }
+        // Generic execution lists inspect executions, not conversation routes.
+        for relative in ["threads/list.yaml", "threads/history.yaml"] {
+            let view = read(relative);
+            let watch = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["id"] == "watch")
+                .unwrap();
+            assert_eq!(watch["invoke"]["facet"], "selection");
+            assert_eq!(
+                watch["invoke"]["value"],
+                json!({"thread_id":"{record.thread_id}"})
+            );
+            assert_eq!(watch["invoke"]["open_view"], "view:ryeos/threads/detail");
+        }
+        assert_eq!(
+            read("thread/transcript.yaml")["sources"]["default"]["params"]["chain_root_id"],
+            "@facet:input.route.chain_root"
+        );
+        assert_eq!(
+            read("thread/conversation.yaml")["extends"],
+            "view:ryeos/thread/transcript"
+        );
+    }
+
+    #[test]
     fn facet_params_resolve_explicitly() {
         let params = json!({ "chain_root_id": "@facet:input.route.thread", "limit": 5 });
         let resolved = resolve_params(&params, |key| {
@@ -3096,6 +3694,54 @@ mod tests {
         }))
         .unwrap();
         assert!(refresh_keys_error(&binding).is_some());
+    }
+
+    #[test]
+    fn saved_surface_operations_require_resolved_context_and_exact_companion() {
+        let record = json!({"context":{"expected_revision":4}});
+        for operation in ["save_active_surface", "save_particular_surface"] {
+            let mut affordance = json!({"invoke":{
+                "plane":"ui", "operation":operation,
+                "value":"{record.context}", "persist_affordance":"persist"
+            }});
+            let parsed = resolve_affordance_invoke(
+                &affordance,
+                Producer::Selection,
+                &Payload::Selection(&record),
+            );
+            let (context, companion) = match parsed.unwrap() {
+                AffordanceInvoke::SaveActiveSurface {
+                    context,
+                    persist_affordance,
+                }
+                | AffordanceInvoke::SaveParticularSurface {
+                    context,
+                    persist_affordance,
+                } => (context, persist_affordance),
+                _ => panic!("Surface operation parsed as another operation"),
+            };
+            assert_eq!(context, record["context"]);
+            assert_eq!(companion, "persist");
+            assert!(
+                resolve_affordance_invoke(
+                    &affordance,
+                    Producer::Selection,
+                    &Payload::Selection(&json!({})),
+                )
+                .is_none()
+            );
+            for companion in ["", " persist", "persist\n"] {
+                affordance["invoke"]["persist_affordance"] = json!(companion);
+                assert!(
+                    resolve_affordance_invoke(
+                        &affordance,
+                        Producer::Selection,
+                        &Payload::Selection(&record),
+                    )
+                    .is_none()
+                );
+            }
+        }
     }
 
     #[test]

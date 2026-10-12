@@ -16,11 +16,8 @@ use serde_json::Value;
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-
-use crate::state::get_ui_state;
 
 // ── Response view-model ─────────────────────────────────────────────
 
@@ -35,6 +32,7 @@ pub struct RyeOsDimensionProjection {
     pub project: Option<ProjectInfo>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<RemoteSummary>,
+    pub invalid_remotes: Vec<InvalidRemoteSummary>,
     pub threads: ThreadSummary,
     pub schedules: ScheduleSummary,
     pub gc: GcSummary,
@@ -44,7 +42,8 @@ pub struct RyeOsDimensionProjection {
 #[serde(deny_unknown_fields)]
 pub struct SessionInfo {
     pub session_id: String,
-    pub surface_ref: String,
+    pub root_ref: String,
+    pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_principal_id: Option<String>,
     pub binding_digest: String,
@@ -125,6 +124,15 @@ pub struct RemoteSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct InvalidRemoteSummary {
+    pub name: String,
+    pub scope: &'static str,
+    pub error: String,
+    pub repair_hint: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadSummary {
     pub active_count: i64,
 }
@@ -132,6 +140,9 @@ pub struct ThreadSummary {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleSummary {
+    pub identity_filtered: bool,
+    pub owner_principal_id: String,
+    pub coverage: &'static str,
     pub total: usize,
     pub enabled: usize,
 }
@@ -139,28 +150,16 @@ pub struct ScheduleSummary {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcSummary {
-    pub running: bool,
+    pub activity: &'static str,
+    pub coverage: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_events: Vec<Value>,
 }
 
 // ── Handler ────────────────────────────────────────────────────────
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let attachment = crate::seat_auth::compiled_ui_attachment().ok_or_else(|| {
-        HandlerError::Forbidden("compiled UI attachment required for ryeos-ui dimension".into())
-    })?;
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (session, attachment) = crate::seat_auth::require_compiled_ui_session(&ctx, &state)?;
 
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
     let project_path = project_access
@@ -280,23 +279,24 @@ fn build_dimension_projection(
     });
 
     // ── Remotes (configured only, no probes) ──
-    let remotes = load_remotes(state, project_path);
+    let (remotes, invalid_remotes) = load_remotes(state, project_path)?;
 
     // ── Threads ──
-    let active_threads = state.state_store.active_thread_count().unwrap_or(0);
+    let active_threads = state.state_store.active_thread_count()?;
 
     // ── Schedules ──
-    let (total_schedules, enabled_schedules) = load_schedule_summary(state);
+    let schedules = load_schedule_summary(state, &session.principal_id)?;
 
     // ── GC ──
-    let gc = load_gc_summary(state);
+    let gc = load_gc_summary(state)?;
 
     Ok(RyeOsDimensionProjection {
-        schema_version: "ryeos.ui.dimension.v1",
+        schema_version: "ryeos.ui.dimension.v3",
         generated_at: lillux::time::iso8601_now(),
         session: SessionInfo {
             session_id: session.session_id.clone(),
-            surface_ref: attachment.surface_ref.clone(),
+            root_ref: attachment.root_ref.clone(),
+            title: attachment.presentation.definition.title().to_owned(),
             user_principal_id: session.user_principal_id.clone(),
             binding_digest: attachment.compiled_binding.binding_digest.clone(),
             posture: attachment.compiled_binding.posture,
@@ -313,101 +313,170 @@ fn build_dimension_projection(
         },
         project,
         remotes,
+        invalid_remotes,
         threads: ThreadSummary {
             active_count: active_threads,
         },
-        schedules: ScheduleSummary {
-            total: total_schedules,
-            enabled: enabled_schedules,
-        },
+        schedules,
         gc,
     })
 }
 
 // ── Data-loading helpers ────────────────────────────────────────────
 
-/// Load configured remotes without probing. Returns empty on error.
-fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteSummary> {
-    // Import remote config loading from ryeos-api's remote module.
-    // We can't directly depend on ryeos-api's remote module from ryeos-ui,
-    // so we load remotes using the layered config function exposed via
-    // the AppState's app_root.
+/// Load configured remotes without probing; configuration errors are not absence.
+fn load_remotes(
+    state: &AppState,
+    project_path: Option<&PathBuf>,
+) -> Result<(Vec<RemoteSummary>, Vec<InvalidRemoteSummary>)> {
     let project = project_path.map(|p| p.as_path());
-    let app_root = &state.config.app_root;
+    let report =
+        ryeos_api::remote::config::load_remotes_layered_report(&state.config.app_root, project)?;
+    Ok(remote_summaries(report))
+}
 
-    // Try to load remotes — the config module is in ryeos-api which we
-    // depend on transitively. Use the public config loading function.
-    match ryeos_api::remote::config::load_remotes_layered(app_root, project) {
-        Ok(remotes_map) => {
-            let mut entries: Vec<RemoteSummary> = remotes_map
-                .values()
-                .map(|r| RemoteSummary {
-                    name: r.name.clone(),
-                    url: r.url.clone(),
-                    principal_id: r.principal_id.clone(),
-                })
-                .collect();
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            entries
-        }
-        Err(_) => Vec::new(),
+fn remote_summaries(
+    report: ryeos_api::remote::config::RemotesLoadReport,
+) -> (Vec<RemoteSummary>, Vec<InvalidRemoteSummary>) {
+    let mut entries: Vec<RemoteSummary> = report
+        .remotes
+        .values()
+        .map(|loaded| RemoteSummary {
+            name: loaded.config.name.clone(),
+            url: loaded.config.url.clone(),
+            principal_id: loaded.config.principal_id.clone(),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut invalid: Vec<_> = report
+        .invalid
+        .into_iter()
+        .map(|entry| InvalidRemoteSummary {
+            name: entry.name,
+            scope: entry.scope.label(),
+            error: entry.error,
+            repair_hint: entry.repair_hint,
+        })
+        .collect();
+    invalid.sort_by(|a, b| (a.name.as_str(), a.scope).cmp(&(b.name.as_str(), b.scope)));
+    (entries, invalid)
+}
+
+/// Current caller-owned schedules, using the scheduler's execution authority.
+fn load_schedule_summary(state: &AppState, principal: &str) -> Result<ScheduleSummary> {
+    let specs = state
+        .scheduler_db
+        .list_specs_filtered(false, None, Some(principal))?;
+    Ok(schedule_summary(
+        principal,
+        specs.iter().map(|spec| spec.enabled),
+    ))
+}
+
+fn schedule_summary(principal: &str, enabled: impl Iterator<Item = bool>) -> ScheduleSummary {
+    let (total, enabled) = enabled.fold((0, 0), |(total, count), enabled| {
+        (total + 1, count + usize::from(enabled))
+    });
+    ScheduleSummary {
+        identity_filtered: true,
+        owner_principal_id: principal.into(),
+        coverage: "current_caller_owned_schedules_not_node_or_project_totals",
+        total,
+        enabled,
     }
 }
 
-/// Load schedule summary counts. Returns (total, enabled).
-fn load_schedule_summary(state: &AppState) -> (usize, usize) {
-    match state.scheduler_db.list_specs_filtered(false, None, None) {
-        Ok(specs) => {
-            let total = specs.len();
-            let enabled = specs.iter().filter(|s| s.enabled).count();
-            (total, enabled)
-        }
-        Err(_) => (0, 0),
-    }
-}
-
-/// Load GC read-only status: check lock file, read recent event log.
-fn load_gc_summary(state: &AppState) -> GcSummary {
+/// Read bounded historical observations, never infer live ownership from files.
+fn load_gc_summary(state: &AppState) -> Result<GcSummary> {
     let runtime_state_dir = state.config.runtime_state_dir();
-
-    // Check if GC is currently running (lock file + state sidecar exist).
-    let lock_path = runtime_state_dir.join("gc.lock");
-    let state_sidecar = runtime_state_dir.join("gc.state.json");
-    let running = lock_path.exists() && state_sidecar.exists();
-
-    // Read recent GC events from the JSONL log.
     let log_path = runtime_state_dir.join("logs").join("gc.jsonl");
-    let recent_events = read_recent_gc_events(&log_path, 5);
-
-    GcSummary {
-        running,
-        recent_events,
-    }
+    gc_summary_from_log(&log_path)
 }
 
-/// Read the last N lines from the GC event log as JSON values.
-fn read_recent_gc_events(log_path: &std::path::Path, limit: usize) -> Vec<Value> {
-    let content = match std::fs::read_to_string(log_path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+fn gc_summary_from_log(log_path: &std::path::Path) -> Result<GcSummary> {
+    Ok(GcSummary {
+        activity: "unknown",
+        coverage: "bounded_log_observations_not_live_or_exhaustive",
+        recent_events: super::ui_gc::read_recent_gc_events(log_path, 5)?,
+    })
+}
 
-    let mut events: Vec<Value> = Vec::new();
-    for line in content.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_summary_is_explicitly_scoped_to_execution_owner() {
+        let db = ryeos_scheduler::SchedulerDb::new_in_memory().unwrap();
+        let own = format!("fp:{}", "11".repeat(32));
+        let foreign = format!("fp:{}", "33".repeat(32));
+        for (id, principal, enabled) in [
+            ("own-enabled", &own, true),
+            ("own-disabled", &own, false),
+            ("foreign", &foreign, true),
+        ] {
+            db.upsert_spec(&super::super::ui_schedules::owner_fixture_spec(
+                id, principal, enabled,
+            ))
+            .unwrap();
         }
-        if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
-            events.push(event);
-            if events.len() >= limit {
-                break;
-            }
-        }
+        let specs = db.list_specs_filtered(false, None, Some(&own)).unwrap();
+        let summary = schedule_summary(&own, specs.iter().map(|spec| spec.enabled));
+        assert!(summary.identity_filtered);
+        assert_eq!(summary.owner_principal_id, own);
+        assert_eq!((summary.total, summary.enabled), (2, 1));
+        assert_eq!(
+            summary.coverage,
+            "current_caller_owned_schedules_not_node_or_project_totals"
+        );
+        let other = format!("fp:{}", "55".repeat(32));
+        let specs = db.list_specs_filtered(false, None, Some(&other)).unwrap();
+        let empty = schedule_summary(&other, specs.iter().map(|spec| spec.enabled));
+        assert_eq!((empty.total, empty.enabled), (0, 0));
+        assert!(empty.identity_filtered);
     }
-    // Reverse so events are in chronological order (oldest first).
-    events.reverse();
-    events
+
+    #[test]
+    fn invalid_only_remote_configuration_is_not_reported_as_absence() {
+        use ryeos_api::remote::config::{InvalidRemote, RemoteConfigScope, RemotesLoadReport};
+        let report = RemotesLoadReport {
+            remotes: Default::default(),
+            invalid: vec![InvalidRemote {
+                name: "broken".into(),
+                scope: RemoteConfigScope::Operator,
+                config_path: PathBuf::from("unused"),
+                error: "missing trust pin".into(),
+                url: None,
+                repair_hint: "configure the remote".into(),
+            }],
+        };
+        let (valid, invalid) = remote_summaries(report);
+        assert!(valid.is_empty());
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].name, "broken");
+        assert_eq!(invalid[0].scope, "operator");
+        assert_eq!(invalid[0].error, "missing trust pin");
+        assert_eq!(invalid[0].repair_hint, "configure the remote");
+    }
+
+    #[test]
+    fn gc_summary_does_not_claim_liveness_or_hide_corrupt_observations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gc.jsonl");
+        let absent = serde_json::to_value(gc_summary_from_log(&path).unwrap()).unwrap();
+        assert_eq!(absent["activity"], "unknown");
+        assert!(absent.get("running").is_none());
+        assert_eq!(
+            absent["coverage"],
+            "bounded_log_observations_not_live_or_exhaustive"
+        );
+        std::fs::write(&path, "not json\n").unwrap();
+        assert!(gc_summary_from_log(&path).is_err());
+        std::fs::write(&path, "{\"phase\":\"finished\"}\n").unwrap();
+        let observed = gc_summary_from_log(&path).unwrap();
+        assert_eq!(observed.activity, "unknown");
+        assert_eq!(observed.recent_events[0]["phase"], "finished");
+    }
 }
 
 // ── Descriptor ──────────────────────────────────────────────────────

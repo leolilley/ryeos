@@ -29,7 +29,7 @@ pub struct CandidateAuthoringBundle {
 /// use tuple only after independently previewing the signed Worker source.
 pub fn sign_candidate_qualification_inputs(
     bundle_root: &Path,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     external_runtime_manifest_hash: &str,
     qualification_runtime_manifest_hash: &str,
     parameters: &serde_json::Value,
@@ -301,7 +301,7 @@ mod runtime_recipe_tests {
 pub fn write_candidate_authoring_bundle(
     repository_source_root: &Path,
     root: &Path,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     external_runtime_manifest_hash: &str,
     qualification_runtime_manifest_hash: &str,
     real_codex: bool,
@@ -991,7 +991,7 @@ pub fn joined_external_candidate_requirement() -> ExternalCandidateRequirement {
 }
 
 pub fn signed_candidate_operation_sources(
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> BTreeMap<String, (Vec<u8>, u32)> {
     let metadata = |description: &str, workspace_access: &str| {
         format!(

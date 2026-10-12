@@ -1861,7 +1861,7 @@ mod tests {
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
     use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
-    use ryeos_app::identity::NodeIdentity;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::{NewThreadRecord, StateStore};
@@ -2206,7 +2206,7 @@ mod tests {
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
         let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+            ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
         let state = AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),

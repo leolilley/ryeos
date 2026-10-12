@@ -161,7 +161,7 @@ impl RemoteConfig {
         }
         validate_url(&self.url)?;
         self.pinned_signing_key()?;
-        ryeos_app::identity::validate_canonical_site_id(&self.site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.site_id)
             .with_context(|| format!("remote '{}' site_id is not canonical", self.name))?;
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote '{}' vault_fingerprint must not be empty", self.name);

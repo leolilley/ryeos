@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use ryeos_app::event_store_service::EventStoreService;
 use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
-use ryeos_app::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::kind_profiles::KindProfileRegistry;
 use ryeos_app::state_store::{NodeIdentitySigner, StateStore};
 use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
