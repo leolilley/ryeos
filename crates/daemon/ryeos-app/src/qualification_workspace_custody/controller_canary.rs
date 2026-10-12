@@ -114,7 +114,7 @@ impl OriginalCanary {
         require_private_single_link(&file)?;
         let observed = file.observation()?;
         let file_identity = {
-            let _lease = lillux::exec::retain_fork_sensitive_descriptors();
+            let _lease = lillux::exec::try_retain_fork_sensitive_descriptors()?;
             lillux::pinned_regular_file_identity(&file.try_clone_descriptor()?)?
         };
         let public = QControllerCanaryFileObservation {
@@ -199,7 +199,7 @@ impl OriginalCanary {
 }
 
 fn require_private_single_link(file: &PinnedRegularFile) -> Result<()> {
-    let _lease = lillux::exec::retain_fork_sensitive_descriptors();
+    let _lease = lillux::exec::try_retain_fork_sensitive_descriptors()?;
     let descriptor = file.try_clone_descriptor()?;
     let identity = lillux::require_effective_user_owned_regular(&descriptor)?;
     file.require_owner(identity.owner())?;

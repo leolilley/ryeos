@@ -3996,7 +3996,7 @@ mod tests {
         use ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority;
         let root = tempfile::tempdir().unwrap();
         let source = {
-            let _lease = lillux::retain_fork_sensitive_descriptors();
+            let _lease = lillux::try_retain_fork_sensitive_descriptors().unwrap();
             lillux::PinnedDirectory::open(root.path())
                 .unwrap()
                 .unwrap()

@@ -186,6 +186,23 @@ impl RetainedOccupancyClock {
         }
         self.window_at_tick(limit, cleanup, super::occupancy_tick_ns_fixed()?)
     }
+    /// Fixed service edge of this original window: the full observation runs
+    /// once here, then the edge needs only a BOOTTIME read. Computed from the
+    /// immutable start and limit, so it renews nothing and equals the
+    /// Service boundary of the full observation exactly.
+    pub fn service_edge(&self, limit: &OccupancyLimit, cleanup: Duration)
+        -> Result<OccupancyServiceEdge, &'static str> {
+        let OccupancyWindowState::Service { .. } = self.window_fixed(limit, cleanup)? else {
+            return Err("original service interval exhausted before edge capture");
+        };
+        let cleanup_ns = u64::try_from(cleanup.as_nanos())
+            .map_err(|_| "cleanup allowance overflow")?;
+        let service = limit.maximum_occupancy_ns.checked_sub(cleanup_ns)
+            .ok_or("cleanup consumes original limit")?;
+        let end_tick_ns = limit.start.tick_ns.checked_add(service)
+            .ok_or("retained occupancy interval overflow")?;
+        Ok(OccupancyServiceEdge { start_tick_ns: limit.start.tick_ns, end_tick_ns })
+    }
     fn window_at_tick(
         &self,
         limit: &OccupancyLimit,
@@ -223,6 +240,69 @@ impl RetainedOccupancyClock {
     }
 }
 
+/// In-memory service edge of one original occupancy window. Checking it reads
+/// only `CLOCK_BOOTTIME`, which keeps counting across host suspend, so a
+/// suspended process cannot carry service work past the edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccupancyServiceEdge {
+    start_tick_ns: u64,
+    end_tick_ns: u64,
+}
+
+impl OccupancyServiceEdge {
+    /// Refuses at or past the edge, and before the window start, matching
+    /// the Service boundary of the full original-window observation.
+    pub fn require_service_fixed(&self) -> Result<(), &'static str> {
+        self.require_service_at(occupancy_tick()?)
+    }
+    /// Block the calling thread until `before` ahead of the edge, on
+    /// `CLOCK_BOOTTIME` with an absolute expiry: a point already past returns
+    /// at once, and host suspend counts toward it. A point before the window
+    /// start is the window start.
+    pub fn sleep_until_before_edge(&self, before: Duration) -> Result<(), &'static str> {
+        let before = u64::try_from(before.as_nanos()).map_err(|_| "edge offset overflow")?;
+        let tick = self.end_tick_ns.saturating_sub(before).max(self.start_tick_ns);
+        sleep_until_tick(tick)
+    }
+    fn require_service_at(&self, tick: u64) -> Result<(), &'static str> {
+        if tick < self.start_tick_ns { return Err("retained occupancy clock moved backwards"); }
+        if tick >= self.end_tick_ns { return Err("original native service edge reached"); }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn occupancy_tick() -> Result<u64, &'static str> { super::occupancy_tick_ns_fixed() }
+#[cfg(target_os = "linux")]
+fn sleep_until_tick(tick_ns: u64) -> Result<(), &'static str> {
+    let request = libc::timespec {
+        tv_sec: libc::time_t::try_from(tick_ns / 1_000_000_000)
+            .map_err(|_| "edge timer second coordinate overflow")?,
+        // Below one second, so it fits every platform's nanosecond field.
+        tv_nsec: (tick_ns % 1_000_000_000) as _,
+    };
+    loop {
+        // SAFETY: `request` is a valid timespec for the call; no remainder is
+        // requested with an absolute expiry.
+        let code = unsafe {
+            libc::clock_nanosleep(libc::CLOCK_BOOTTIME, libc::TIMER_ABSTIME, &request, std::ptr::null_mut())
+        };
+        match code {
+            0 => return Ok(()),
+            libc::EINTR => continue,
+            _ => return Err("BOOTTIME edge timer refused"),
+        }
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn sleep_until_tick(_tick_ns: u64) -> Result<(), &'static str> {
+    Err("retained occupancy clock unavailable on this platform")
+}
+#[cfg(not(target_os = "linux"))]
+fn occupancy_tick() -> Result<u64, &'static str> {
+    Err("retained occupancy clock unavailable on this platform")
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod controls {
     #[test]
@@ -248,6 +328,22 @@ mod controls {
         assert!(super::fixed_binding_digest(1, 1, &invalid).is_err());
     }
     use super::*;
+    #[test]
+    fn service_edge_matches_window_service_boundary() {
+        let clock = RetainedOccupancyClock::capture().unwrap();
+        let limit = OccupancyLimit::new(clock.start().clone(), 3_600_000_000_000).unwrap();
+        let cleanup = Duration::from_secs(60);
+        let edge = clock.service_edge(&limit, cleanup).unwrap();
+        let start = clock.start.tick_ns;
+        for tick in [start, start + 1, edge.end_tick_ns - 1, edge.end_tick_ns, edge.end_tick_ns + 1] {
+            let service = matches!(clock.window_at_tick(&limit, cleanup, tick).unwrap(),
+                OccupancyWindowState::Service { .. });
+            assert_eq!(edge.require_service_at(tick).is_ok(), service, "tick {tick}");
+        }
+        assert!(edge.require_service_at(start - 1).is_err());
+        assert!(clock.window_at_tick(&limit, cleanup, start - 1).is_err());
+        edge.require_service_fixed().unwrap();
+    }
     #[test]
     fn live_original_observer_preserves_start_and_exact_phase_boundaries() {
         let clock = RetainedOccupancyClock::capture().unwrap();

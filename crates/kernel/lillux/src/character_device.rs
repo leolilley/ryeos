@@ -80,7 +80,7 @@ impl CharacterDeviceSet {
         }
         let mut previous_role: Option<&str> = None;
         let mut destinations = BTreeSet::new();
-        let lease = crate::retain_fork_sensitive_descriptors();
+        let lease = crate::try_retain_fork_sensitive_descriptors()?;
         let mut identities = Vec::with_capacity(specs.len());
         let mut authorities = Vec::with_capacity(specs.len());
         for spec in specs {

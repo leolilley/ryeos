@@ -530,7 +530,7 @@ mod native_settlement_custody_tests {
 pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut fds = [-1; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(format!(
@@ -572,7 +572,7 @@ pub fn supervised_launcher_attachment_status_pipe()
 -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut status_fds = [-1; 2];
     if unsafe { libc::pipe2(status_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(format!(
@@ -776,7 +776,7 @@ fn sealed_memfd_with_flags_and_write(
     use std::io::Seek as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
     if fd < 0 {
         return Err(format!(
@@ -1068,23 +1068,31 @@ impl InheritedReadonlyDocument {
         }
         #[cfg(unix)]
         {
-            use std::os::fd::FromRawFd as _;
-            let lease = retain_fork_sensitive_descriptors();
-            // Duplicate before constructing an owned File. An inherited raw
-            // coordinate can be repeated in hostile process environment; the
-            // successful duplicate gives this call unique ownership and
-            // closing the transport coordinate makes any repeated adoption
-            // fail without creating aliased File owners.
-            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } < 0 {
+                return Err(format!(
+                    "adopt inherited document descriptor: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: the coordinate was consumed from launch transport above
+            // and is open. Adopt it before any fallible step, so that a
+            // refused lease closes it instead of leaving it unowned. Dropping
+            // this transport owner closes the coordinate on every path, which
+            // makes any repeated adoption of the same number fail.
+            let transport = unsafe { std::fs::File::from_raw_fd(descriptor) };
+            let lease = try_retain_fork_sensitive_descriptors()?;
+            // Duplicate under the lease. The registered duplicate gives this
+            // call unique ownership of a coordinate no other owner can name.
+            let duplicate =
+                unsafe { libc::fcntl(transport.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
             if duplicate < 0 {
                 return Err(format!(
                     "adopt inherited document descriptor: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            unsafe {
-                libc::close(descriptor);
-            }
+            drop(transport);
             // SAFETY: F_DUPFD_CLOEXEC returned this uniquely owned descriptor.
             let file = unsafe { std::fs::File::from_raw_fd(duplicate) };
             let authority = InheritedDescriptorAuthority::from_owned_file(file, &lease)?;
@@ -1271,7 +1279,7 @@ impl InheritedDescriptorAuthority {
             use std::os::fd::{AsRawFd as _, FromRawFd as _};
             let minimum = i32::try_from(minimum_fd.max(3))
                 .map_err(|_| "minimum inherited descriptor exceeds RawFd".to_owned())?;
-            let lease = retain_fork_sensitive_descriptors();
+            let lease = try_retain_fork_sensitive_descriptors()?;
             let duplicate =
                 unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
             if duplicate < 0 {
@@ -1356,6 +1364,60 @@ impl InheritedDescriptorAuthority {
                 .map_err(|error| error.to_string())?;
             self.bind_to_subprocess_request(request, target_fd)?;
             request.cmd = format!("/proc/self/fd/{target_fd}");
+            Ok(())
+        }
+    }
+
+    /// Prove that `request` makes this exact executable, and only it, the
+    /// subprocess image at child descriptor `target_fd`. The proof is made
+    /// against the parent's own source descriptor and the recorded child
+    /// mapping; the parent's descriptor table at `target_fd` is irrelevant
+    /// because the coordinate exists only in the child after the pre-exec
+    /// mapping is installed.
+    pub fn require_bound_as_subprocess_executable(
+        &self,
+        request: &SubprocessRequest,
+        target_fd: u32,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (request, target_fd);
+            return Err("descriptor-bound subprocess executables require Linux".to_owned());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if target_fd <= libc::STDERR_FILENO as u32 {
+                return Err("subprocess executable descriptor overlaps standard I/O".to_owned());
+            }
+            self.require_owned_executable()
+                .map_err(|error| error.to_string())?;
+            let source = self.inherited_descriptor()?;
+            let mut targeted = 0usize;
+            for mapping in &request.inherited_fd_mappings {
+                let mapped_source = mapping.source_descriptor()?;
+                if mapping.target_fd == target_fd {
+                    targeted += 1;
+                    if mapped_source != source {
+                        return Err(format!(
+                            "subprocess executable descriptor {target_fd} maps a different source"
+                        ));
+                    }
+                } else if mapped_source == source {
+                    return Err(format!(
+                        "subprocess executable source {source} is mapped to another descriptor"
+                    ));
+                }
+            }
+            if targeted != 1 {
+                return Err(format!(
+                    "subprocess executable descriptor {target_fd} is not mapped exactly once"
+                ));
+            }
+            if request.cmd != format!("/proc/self/fd/{target_fd}") {
+                return Err(format!(
+                    "subprocess image is not the executable mapped at descriptor {target_fd}"
+                ));
+            }
             Ok(())
         }
     }
@@ -1661,7 +1723,7 @@ impl InheritedDescriptorAuthority {
 
     #[cfg(unix)]
     pub fn directory_identity(&self) -> anyhow::Result<crate::secure_fs::PinnedDirectoryIdentity> {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let root = crate::secure_fs::PinnedDirectory::from_open_directory(
             self.path.clone(),
             self.file().try_clone()?,
@@ -1679,7 +1741,7 @@ impl InheritedDescriptorAuthority {
         &self,
         diagnostic_path: std::path::PathBuf,
     ) -> anyhow::Result<crate::secure_fs::PinnedDirectory> {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let root = crate::secure_fs::PinnedDirectory::from_inherited_directory_descriptor(
             diagnostic_path,
             self.file().try_clone()?,
@@ -1695,7 +1757,7 @@ impl InheritedDescriptorAuthority {
         &self,
         relative: &std::path::Path,
     ) -> anyhow::Result<Option<Self>> {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let root = crate::secure_fs::PinnedDirectory::from_open_directory(
             self.path.clone(),
             self.file().try_clone()?,
@@ -1740,7 +1802,7 @@ impl InheritedDescriptorAuthority {
         {
             anyhow::bail!("private directory descendant must be bounded canonical relative components");
         }
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         // A workspace view may be held with O_PATH. Reopen only its exact
         // inode, not its diagnostic pathname, for mkdirat/fsync traversal.
         let fd = unsafe {
@@ -1800,7 +1862,7 @@ impl InheritedDescriptorAuthority {
         {
             anyhow::bail!("directory descendant must have bounded canonical relative components");
         }
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let mut directory = self.try_clone_pinned_directory(self.path.clone())?;
         for component in relative.components() {
             let Component::Normal(name) = component else {
@@ -1970,13 +2032,12 @@ pub unsafe fn take_inherited_descriptor_authority(
             std::io::Error::last_os_error()
         ));
     }
-    let lease = retain_fork_sensitive_descriptors();
-    // SAFETY: upheld by the caller; ownership is immediately transferred into
-    // the registered Lillux authority.
-    InheritedDescriptorAuthority::from_owned_file(
-        unsafe { std::fs::File::from_raw_fd(raw) },
-        &lease,
-    )
+    // SAFETY: upheld by the caller. Adopt before any fallible step, so that a
+    // refused lease closes the descriptor instead of leaving it unowned. This
+    // is adoption of an already-open coordinate, not an open or duplicate.
+    let file = unsafe { std::fs::File::from_raw_fd(raw) };
+    let lease = try_retain_fork_sensitive_descriptors()?;
+    InheritedDescriptorAuthority::from_owned_file(file, &lease)
 }
 
 #[cfg(not(unix))]
@@ -2264,7 +2325,7 @@ mod inherited_directory_traversal_tests {
     fn registered_authority_duplication_avoids_fixed_target_coordinates() {
         let fixture = tempfile::tempdir().unwrap();
         let authority = {
-            let lease = retain_fork_sensitive_descriptors();
+            let lease = try_retain_fork_sensitive_descriptors().unwrap();
             let file = std::fs::File::open(fixture.path()).unwrap();
             InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
         };
@@ -2289,7 +2350,7 @@ mod inherited_directory_traversal_tests {
         let original = parent.path().join("source");
         std::fs::create_dir(&original).unwrap();
         let root = {
-            let lease = retain_fork_sensitive_descriptors();
+            let lease = try_retain_fork_sensitive_descriptors().unwrap();
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -2439,7 +2500,7 @@ mod inherited_pipe_writer_tests {
     }
 
     fn authority(open: impl FnOnce() -> std::fs::File) -> InheritedDescriptorAuthority {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
         let file = open();
         InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
     }
@@ -2714,7 +2775,7 @@ pub(crate) fn inherited_descriptor_path(
     }
     #[cfg(target_os = "linux")]
     {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         // The consumed pinned source predates this child-inheritance owner.
         // Create its new registered descriptor under the lease and retire the
         // old source before reopening the fork window. Received mount owners
@@ -2970,7 +3031,7 @@ pub fn inherited_duplex_channel_pair()
 -> Result<(InheritedDuplexChannel, InheritedDuplexChannelChildAuthority), String> {
     use std::os::fd::OwnedFd;
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let (parent, child) = std::os::unix::net::UnixStream::pair()
         .map_err(|error| format!("create inherited duplex channel: {error}"))?;
     protect_descriptor_from_exec(&parent)?;
@@ -3381,9 +3442,10 @@ unsafe fn take_inherited_duplex_channel(
         ));
     }
     // SAFETY: the caller guarantees unique ownership of this live descriptor.
-    // Adopt it before any fallible inspection so every error path closes it.
-    let lease = retain_fork_sensitive_descriptors();
+    // Adopt it before any fallible step, the lease included, so every error
+    // path closes it.
     let owned = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let descriptor = owned.as_raw_fd();
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
     if flags < 0 {
@@ -3857,6 +3919,20 @@ pub(crate) struct OccupancyWatchdog {
 
 #[cfg(target_os = "linux")]
 impl OccupancyWatchdog {
+    /// Cancel a watchdog that never acknowledged readiness, and reap it
+    /// within `bound`, killing it on overrun rather than waiting on it. The
+    /// PID is relinquished either way: an unexited child passes to a reaper.
+    fn cancel_and_reap_bounded(&mut self, bound: Duration, context: &str) -> Result<(), String> {
+        if let Some(mut cancel) = self.cancel.take() {
+            let _ = cancel.write_all(&[1]);
+        }
+        let pid = std::mem::replace(&mut self.pid, -1);
+        if pid <= 0 {
+            return Err("original watchdog has no retained exclusive reap authority".into());
+        }
+        reap_fork_holder_until(pid, Instant::now() + bound, context).map(|_| ())
+    }
+
     pub(crate) fn cancel_and_reap(&mut self) -> Result<(), String> {
         if self.pid <= 0 {
             return Err("original watchdog has no retained exclusive reap authority".into());
@@ -4178,6 +4254,18 @@ fn arm_occupancy_watchdog_inner(
         Duration::from_nanos(remaining_ns).min(Duration::from_secs(5)))
         .ok_or("watchdog fork deadline overflow")?;
     let fork_guard = quiesce_fork_sensitive_descriptors(setup_deadline)?;
+    // The parent write end stays open until the fork has happened or failed.
+    // Any end without the acknowledgement settles through the witness. The
+    // child fixes descriptors 3..=8 before its scrub, so keep the witness
+    // above them: replacing it there would hang it up too early.
+    let witnessed = fork_guard
+        .witness_creation("occupancy watchdog creation")
+        .map_err(|error| format!("create occupancy watchdog creation witness: {error}"))?;
+    // Declared before the write end, so that on any early return the write
+    // end drops first and the custody's own settlement observes the witness.
+    let fork_custody = witnessed.0;
+    let fork_custody_witness = witness_writer_at_or_above(witnessed.1, 9)
+        .map_err(|error| format!("place occupancy watchdog creation witness: {error}"))?;
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
@@ -4199,6 +4287,7 @@ fn arm_occupancy_watchdog_inner(
             )
         }
     }
+    drop(fork_custody_witness);
     drop(ready_writer);
     drop(child_cancel_reader);
     drop(child_timer);
@@ -4222,28 +4311,29 @@ fn arm_occupancy_watchdog_inner(
     if !acknowledged {
         let mut cancel = std::fs::File::from(cancel_writer);
         let _ = cancel.write_all(&[1]);
-        let mut status = 0;
-        let reaped = loop {
-            let result = unsafe { libc::waitpid(child, &mut status, 0) };
-            if result == child { break true; }
-            if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            break false;
-        };
-        if !reaped {
-            // No disposal or death proof: retain exclusion rather than permit
-            // parent close to claim this potentially inherited lock settled.
-            std::mem::forget(fork_guard);
-            return Err("watchdog child disposal unproved; fork exclusion retained".to_owned());
-        }
-        return Err(
-            "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned(),
+        drop(cancel);
+        // Cancellation ends a live watchdog promptly; one that does not end
+        // within the bound is killed rather than waited on.
+        let reaped = reap_fork_holder_until(
+            child,
+            Instant::now() + ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+            "unacknowledged occupancy watchdog",
         );
+        // Without proof of disposal, only the witness may reopen the window,
+        // else it strands with its fact; it never blocks here.
+        let custody = fork_custody.settle();
+        let refusal =
+            "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned();
+        return Err(match (reaped, custody) {
+            (Ok(_), Ok(())) => refusal,
+            (Err(reap), Ok(())) => format!("{refusal}; {reap}"),
+            (Ok(_), Err(fact)) => format!("{refusal}; {fact}"),
+            (Err(reap), Err(fact)) => format!("{refusal}; {reap}; {fact}"),
+        });
     }
     // Readiness is emitted only after dup2 and close_range consumed all
     // unrelated inherited descriptors, including registered native leases.
-    drop(fork_guard);
+    fork_custody.release_observed();
     let watchdog = OccupancyWatchdog {
         pid: child,
         cancel: Some(std::fs::File::from(cancel_writer)),
@@ -4507,6 +4597,26 @@ struct DescriptorForkBarrierState {
     // recursively entering this barrier through another registered Drop.
     // At most one entry per descriptor already registered at quiescence.
     deferred_child_closes: Vec<(i32, std::fs::File)>,
+    // Pending fork-control writers dropped while the window was stranded.
+    // Each stays in `pending_fork_control_fds` until the window reopens.
+    deferred_control_closes: Vec<(i32, std::fs::File)>,
+    // Set only while `fork_quiesced` is held by no live owner: process
+    // creation ended without proof that every created process has disposed
+    // of its pre-exec descriptor table. Acquisition refuses with this fact
+    // instead of waiting; observing the witness closed reopens the window.
+    stranded_fork_custody: Option<StrandedForkCustody>,
+}
+
+struct StrandedForkCustody {
+    fact: String,
+    // Read end of the creation witness, when one existed. `None` means no
+    // later observation can prove disposal and the window stays closed.
+    witness: Option<std::fs::File>,
+    // Whether the creator can no longer fork with the window's close snapshot.
+    // Only then may a registered descriptor close during the strand: a live
+    // creator's later child would scrub a snapshot number which the parent
+    // may meanwhile have reused for one of that creator's own descriptors.
+    creator_settled: bool,
 }
 
 const BORROWED_CHILD_CLOSE_LIMIT: usize = 64;
@@ -4721,16 +4831,83 @@ pub struct ForkSensitiveDescriptorLease {
     _not_send: PhantomData<Rc<()>>,
 }
 
-/// Retain the process-wide fork-sensitive descriptor lease.
+/// Why a fork-sensitive descriptor lease was not granted. The refusal is the
+/// caller's to propagate; no lease, descriptor or owner was created for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkSensitiveDescriptorLeaseRefused {
+    cause: ForkSensitiveDescriptorLeaseRefusal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForkSensitiveDescriptorLeaseRefusal {
+    /// A failed or abandoned process creation left the fork window closed and
+    /// its creation witness still open. The recorded fact names that window.
+    Stranded(String),
+    /// The caller's operation deadline elapsed before the window opened.
+    DeadlineElapsed,
+}
+
+impl ForkSensitiveDescriptorLeaseRefused {
+    /// The stranded-window fact, when that is the refusal's cause.
+    pub fn stranded_fact(&self) -> Option<&str> {
+        match &self.cause {
+            ForkSensitiveDescriptorLeaseRefusal::Stranded(fact) => Some(fact),
+            ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed => None,
+        }
+    }
+
+    pub fn deadline_elapsed(&self) -> bool {
+        matches!(self.cause, ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed)
+    }
+}
+
+impl std::fmt::Display for ForkSensitiveDescriptorLeaseRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.cause {
+            ForkSensitiveDescriptorLeaseRefusal::Stranded(fact) => {
+                write!(formatter, "fork-sensitive descriptor lease refused: {fact}")
+            }
+            ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed => {
+                formatter.write_str("descriptor lease deadline elapsed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ForkSensitiveDescriptorLeaseRefused {}
+
+impl From<ForkSensitiveDescriptorLeaseRefused> for std::io::Error {
+    fn from(refused: ForkSensitiveDescriptorLeaseRefused) -> Self {
+        let kind = if refused.deadline_elapsed() {
+            std::io::ErrorKind::TimedOut
+        } else {
+            std::io::ErrorKind::Other
+        };
+        std::io::Error::new(kind, refused)
+    }
+}
+
+impl From<ForkSensitiveDescriptorLeaseRefused> for String {
+    fn from(refused: ForkSensitiveDescriptorLeaseRefused) -> Self {
+        refused.to_string()
+    }
+}
+
+/// Retain the process-wide fork-sensitive descriptor lease without a caller
+/// deadline.
 ///
 /// Acquire this before opening or locking descriptor-backed authority and keep
 /// it until those descriptors/locks have been released. Acquisition is
-/// intentionally infallible after poisoning: the barrier protects process
+/// intentionally unaffected by poisoning: the barrier protects process
 /// topology, not data whose consistency could be invalidated by a panic.
+///
+/// Waiting is only for a live process-creation owner, which always reopens
+/// the window or strands it within a bounded time. A stranded window is the
+/// one refusal; it is returned with its fact, never waited on.
 #[track_caller]
-pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
+pub fn try_retain_fork_sensitive_descriptors()
+-> Result<ForkSensitiveDescriptorLease, ForkSensitiveDescriptorLeaseRefused> {
     retain_fork_sensitive_descriptors_inner(None)
-        .expect("undeadlined descriptor lease acquisition cannot expire")
 }
 
 /// The same fork barrier, bounded by the caller's existing operation deadline.
@@ -4747,13 +4924,33 @@ pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
 pub fn retain_fork_sensitive_descriptors_until(
     deadline: crate::time::MonotonicDeadline,
 ) -> std::io::Result<ForkSensitiveDescriptorLease> {
-    retain_fork_sensitive_descriptors_inner(Some(deadline))
+    retain_fork_sensitive_descriptors_inner(Some(deadline)).map_err(std::io::Error::from)
+}
+
+/// Whether the calling thread currently retains any fork-sensitive descriptor
+/// lease.
+///
+/// Such a thread cannot start a process: process creation refuses outright
+/// when the requesting thread is itself a lease holder, and every other
+/// thread's process creation waits until all leases drop. Work that may start
+/// a process can use this to refuse at its own entry, naming its own cause,
+/// instead of failing later at the process-creation barrier. This is an
+/// observation only; it neither acquires nor releases a lease.
+pub fn current_thread_retains_fork_sensitive_descriptors() -> bool {
+    let barrier = direct_attachment_fork_barrier();
+    let owner = thread::current().id();
+    barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retained_scope_owners
+        .contains_key(&owner)
 }
 
 #[track_caller]
 fn retain_fork_sensitive_descriptors_inner(
     deadline: Option<crate::time::MonotonicDeadline>,
-) -> std::io::Result<ForkSensitiveDescriptorLease> {
+) -> Result<ForkSensitiveDescriptorLease, ForkSensitiveDescriptorLeaseRefused> {
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
     let caller = std::panic::Location::caller();
@@ -4766,16 +4963,26 @@ fn retain_fork_sensitive_descriptors_inner(
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    while state.fork_quiesced
-        || (state.waiting_forks != 0 && !state.retained_scope_owners.contains_key(&owner))
-    {
+    loop {
+        if state.stranded_fork_custody.is_some() {
+            settle_stranded_fork_custody_locked(&mut state).map_err(|fact| {
+                ForkSensitiveDescriptorLeaseRefused {
+                    cause: ForkSensitiveDescriptorLeaseRefusal::Stranded(fact),
+                }
+            })?;
+            barrier.changed.notify_all();
+        }
+        if !(state.fork_quiesced
+            || (state.waiting_forks != 0 && !state.retained_scope_owners.contains_key(&owner)))
+        {
+            break;
+        }
         state = if let Some(deadline) = deadline {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "descriptor lease deadline elapsed",
-                ));
+                return Err(ForkSensitiveDescriptorLeaseRefused {
+                    cause: ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed,
+                });
             }
             barrier
                 .changed
@@ -4790,10 +4997,9 @@ fn retain_fork_sensitive_descriptors_inner(
         };
     }
     if deadline.is_some_and(|deadline| deadline.has_elapsed()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "descriptor lease deadline elapsed",
-        ));
+        return Err(ForkSensitiveDescriptorLeaseRefused {
+            cause: ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed,
+        });
     }
     state.retained_scopes = state
         .retained_scopes
@@ -4877,6 +5083,9 @@ impl Drop for ForkSensitiveDescriptorLease {
 pub(crate) struct QuiescedForkSensitiveDescriptors {
     barrier_identity: usize,
     parent_pid: u32,
+    // Cleared only when the owner hands the closed window to the barrier's
+    // stranded record; Drop then has nothing left to release.
+    armed: bool,
 }
 
 /// Fresh bookkeeping allocated by the parent before fork, with no FD ownership.
@@ -5038,6 +5247,7 @@ impl ForkChildCloseFile {
                 return Err("registered close barrier poisoned".into());
             }
         };
+        reopen_settled_strand_locked(barrier, &mut state);
         if state.fork_quiesced || original.has_elapsed() {
             return Ok(false);
         }
@@ -5128,7 +5338,8 @@ impl Drop for ForkChildCloseFile {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.fork_quiesced {
+        reopen_settled_strand_locked(barrier, &mut state);
+        if state.fork_quiesced && !stranded_without_live_creator(&state) {
             // Returning a timed operation must not wait in this destructor.
             // Preserve the exact live fd and its registration until the
             // snapshot owner releases its protected fork window. This is NOT
@@ -5140,7 +5351,9 @@ impl Drop for ForkChildCloseFile {
             assert!(state.deferred_child_closes.len() <= state.fork_child_close_fds.len());
         } else {
             // Close before deregistration, while no fork can consume a stale
-            // coordinate or see an unregistered live authority.
+            // coordinate or see an unregistered live authority. A window
+            // stranded with its creator settled is included: see
+            // `stranded_without_live_creator` for why that is safe.
             drop(self.file.take());
             state.owned_registration_generations.remove(&self.fd);
             assert!(
@@ -5190,6 +5403,7 @@ fn selected_close_inherited_copies(
             return Err("selected descriptor barrier poisoned".into());
         }
     };
+    reopen_settled_strand_locked(barrier, &mut state);
     if state.fork_quiesced || original.has_elapsed() {
         return Ok(false);
     }
@@ -5294,6 +5508,7 @@ impl PendingForkControlDescriptor {
                     continue;
                 }
             };
+            reopen_settled_strand_locked(barrier, &mut state);
             if state.fork_quiesced {
                 drop(state);
                 mode.pause(deadline);
@@ -5347,6 +5562,36 @@ impl Drop for PendingForkControlDescriptor {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         while state.fork_quiesced {
+            if state.stranded_fork_custody.is_some() {
+                if settle_stranded_fork_custody_locked(&mut state).is_ok() {
+                    barrier.changed.notify_all();
+                    continue;
+                }
+                if stranded_without_live_creator(&state) {
+                    // Close and deregister below, exactly as with the window
+                    // open; `stranded_without_live_creator` explains why.
+                    break;
+                }
+                // A detached creator may still fork with its snapshot, and
+                // the window cannot reopen yet. Keep the writer open and
+                // registered rather than block this destructor; reopening the
+                // window closes and deregisters it.
+                assert!(
+                    state.pending_fork_control_fds.contains(&self.fd),
+                    "pending fork-control descriptor was not registered"
+                );
+                let writer = self.writer.take().expect("pending fork-control writer present");
+                state.deferred_control_closes.push((self.fd, writer));
+                let previous_closers = barrier
+                    .waiting_descriptor_closers
+                    .fetch_sub(1, Ordering::SeqCst);
+                assert_ne!(
+                    previous_closers, 0,
+                    "pending fork-control closer count underflow"
+                );
+                barrier.changed.notify_all();
+                return;
+            }
             state = barrier
                 .changed
                 .wait(state)
@@ -5392,7 +5637,8 @@ fn register_pending_fork_control_file(file: std::fs::File) -> PendingForkControl
 
 impl Drop for QuiescedForkSensitiveDescriptors {
     fn drop(&mut self) {
-        if self.parent_pid != std::process::id()
+        if !self.armed
+            || self.parent_pid != std::process::id()
             || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
         { return; }
         let barrier = direct_attachment_fork_barrier();
@@ -5401,16 +5647,385 @@ impl Drop for QuiescedForkSensitiveDescriptors {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
-        for (fd, file) in std::mem::take(&mut state.deferred_child_closes) {
-            drop(file);
-            state.owned_registration_generations.remove(&fd);
-            assert!(
-                state.fork_child_close_fds.remove(&fd),
-                "deferred descriptor was not registered"
-            );
-        }
-        state.fork_quiesced = false;
+        debug_assert!(state.stranded_fork_custody.is_none());
+        reopen_fork_window_locked(&mut state);
         barrier.changed.notify_all();
+    }
+}
+
+/// Settle every close deferred during the protected window, then reopen it.
+/// The caller owns the closed window (a live guard or a settled strand).
+fn reopen_fork_window_locked(state: &mut DescriptorForkBarrierState) {
+    settle_deferred_closes_locked(state);
+    state.fork_quiesced = false;
+}
+
+/// Whether the window is closed only by a strand whose creator can no longer
+/// fork with its close snapshot.
+///
+/// Destructors may then close and deregister registered descriptors at once
+/// instead of deferring them. Deferral exists for a live creator: its child,
+/// forked later, closes every snapshot number in its own table, and if the
+/// parent had meanwhile closed one of those numbers and reused it for a
+/// descriptor the creator itself needs, the child would close that instead.
+/// A settled creator forks nothing more, so no snapshot can be consumed late.
+///
+/// This is not physical-release evidence, and is not presented as such: a
+/// stranded child may still hold copies of what the parent closes. No lease is
+/// granted while stranded, and the window reopens only once the creation
+/// witness proves that no such copy remains, so later lease acquisition still
+/// implies every completed close has physically settled. Without this, a
+/// witness-less strand, which never reopens, would hold these descriptors and
+/// any locks they carry for the rest of the process. Explicit selected closes
+/// report physical closure and therefore still refuse while stranded.
+fn stranded_without_live_creator(state: &DescriptorForkBarrierState) -> bool {
+    state
+        .stranded_fork_custody
+        .as_ref()
+        .is_some_and(|stranded| stranded.creator_settled)
+}
+
+/// Close and deregister every descriptor whose close was deferred while the
+/// window was closed. The window itself stays as it is.
+fn settle_deferred_closes_locked(state: &mut DescriptorForkBarrierState) {
+    for (fd, file) in std::mem::take(&mut state.deferred_child_closes) {
+        drop(file);
+        state.owned_registration_generations.remove(&fd);
+        assert!(
+            state.fork_child_close_fds.remove(&fd),
+            "deferred descriptor was not registered"
+        );
+    }
+    for (fd, file) in std::mem::take(&mut state.deferred_control_closes) {
+        // Close before deregistration, exactly as the ordinary closer does.
+        drop(file);
+        assert!(
+            state.pending_fork_control_fds.remove(&fd),
+            "deferred fork-control descriptor was not registered"
+        );
+    }
+}
+
+/// Reopen a stranded window whose witness has hung up, so that an explicit
+/// close does not refuse as busy on a window that is already settled. A
+/// window still stranded stays closed: an explicit close reports physical
+/// closure, which a stranded child's surviving copy would contradict.
+fn reopen_settled_strand_locked(
+    barrier: &DescriptorForkBarrier,
+    state: &mut DescriptorForkBarrierState,
+) {
+    if state.stranded_fork_custody.is_some() && settle_stranded_fork_custody_locked(state).is_ok() {
+        barrier.changed.notify_all();
+    }
+}
+
+/// Re-observe a stranded window's creation witness without waiting. A closed
+/// witness reopens the window; otherwise the recorded fact is the refusal.
+fn settle_stranded_fork_custody_locked(
+    state: &mut DescriptorForkBarrierState,
+) -> Result<(), String> {
+    let Some(stranded) = state.stranded_fork_custody.as_ref() else {
+        return Ok(());
+    };
+    let observed = match stranded.witness.as_ref() {
+        Some(witness) => fork_creation_witness_closed(witness, Duration::ZERO),
+        None => Ok(false),
+    };
+    match observed {
+        Ok(true) => {
+            debug_assert!(state.fork_quiesced);
+            state.stranded_fork_custody = None;
+            reopen_fork_window_locked(state);
+            Ok(())
+        }
+        Ok(false) => Err(format!("fork custody stranded: {}", stranded.fact)),
+        Err(error) => Err(format!(
+            "fork custody stranded: {}; witness observation failed: {error}",
+            stranded.fact
+        )),
+    }
+}
+
+/// How long a failed or abandoned process creation may take to show that no
+/// created process still holds its pre-exec descriptor table. Every creator
+/// has already reaped, killed, or joined its child path before this applies.
+const FORK_CREATION_WITNESS_SETTLE: Duration = Duration::from_secs(5);
+
+/// Whether every write end of a creation witness has closed, waiting at most
+/// `bound`. Nothing ever writes to a witness, so only hang-up is meaningful.
+#[cfg(unix)]
+fn fork_creation_witness_closed(witness: &std::fs::File, bound: Duration) -> std::io::Result<bool> {
+    let deadline = Instant::now() + bound;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        let mut descriptor = libc::pollfd {
+            fd: witness.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready > 0 {
+            if descriptor.revents & libc::POLLHUP != 0 {
+                return Ok(true);
+            }
+            return Err(std::io::Error::other(format!(
+                "creation witness reported unexpected poll events {:#x}",
+                descriptor.revents
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn fork_creation_witness_closed(_witness: &std::fs::File, _bound: Duration) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+impl QuiescedForkSensitiveDescriptors {
+    /// End this owner without reopening the window: the creator has no proof
+    /// that every process it may have created disposed of the inherited
+    /// descriptor table. The window stays closed and every later acquisition
+    /// refuses with `fact` instead of waiting. With no witness this is final
+    /// for the life of the process; with one, the window reopens as soon as
+    /// an acquisition observes hang-up. `creator_settled` states that the
+    /// creator forks nothing more with this window's close snapshot.
+    fn strand_with_witness(
+        mut self,
+        fact: String,
+        witness: Option<std::fs::File>,
+        creator_settled: bool,
+    ) {
+        if !self.armed
+            || self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            return;
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(state.fork_quiesced);
+        debug_assert!(state.stranded_fork_custody.is_none());
+        state.stranded_fork_custody = Some(StrandedForkCustody {
+            fact,
+            witness,
+            creator_settled,
+        });
+        if creator_settled {
+            // Closes deferred for the live creator are now safe to settle;
+            // see `stranded_without_live_creator`. The window stays closed.
+            settle_deferred_closes_locked(&mut state);
+        }
+        self.armed = false;
+        // Wake every waiter so it observes the fact instead of sleeping on it.
+        barrier.changed.notify_all();
+    }
+
+    /// Attach a creation witness before any process is created under this
+    /// window. Returns the custody and the witness write end, which the
+    /// creator must keep open until creation has happened or cannot happen,
+    /// and then drop. On error no process was created, so the window reopens.
+    ///
+    /// The calling thread is the creator: once it stops, it can fork nothing
+    /// more with this window's close snapshot, however it stops.
+    #[cfg(unix)]
+    pub(crate) fn witness_creation(
+        self,
+        context: &'static str,
+    ) -> std::io::Result<(WitnessedForkCustody, std::fs::File)> {
+        self.witness_creation_by(context, false)
+    }
+
+    /// As `witness_creation`, for a creator running on another thread. Only
+    /// `settle`, called after that thread has been joined, treats the creator
+    /// as finished; any other end assumes it may still fork.
+    #[cfg(unix)]
+    pub(crate) fn witness_detached_creation(
+        self,
+        context: &'static str,
+    ) -> std::io::Result<(WitnessedForkCustody, std::fs::File)> {
+        self.witness_creation_by(context, true)
+    }
+
+    #[cfg(unix)]
+    fn witness_creation_by(
+        self,
+        context: &'static str,
+        creator_elsewhere: bool,
+    ) -> std::io::Result<(WitnessedForkCustody, std::fs::File)> {
+        let (reader, writer) = fork_creation_witness_pipe()?;
+        Ok((
+            WitnessedForkCustody {
+                guard: Some(self),
+                witness: Some(reader),
+                context,
+                creator_elsewhere,
+            },
+            writer,
+        ))
+    }
+}
+
+/// Move a creation-witness write end to `floor` or above, for a child that
+/// replaces fixed low descriptors before its scrub. Replacing the witness
+/// there would hang it up while the child still held unscrubbed descriptors.
+#[cfg(target_os = "linux")]
+pub(crate) fn witness_writer_at_or_above(
+    writer: std::fs::File,
+    floor: i32,
+) -> std::io::Result<std::fs::File> {
+    if writer.as_raw_fd() >= floor {
+        return Ok(writer);
+    }
+    let moved = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+    if moved < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: F_DUPFD_CLOEXEC returned one new uniquely owned descriptor. The
+    // original write end closes when `writer` drops here, before any fork.
+    Ok(unsafe { std::fs::File::from_raw_fd(moved) })
+}
+
+/// Close-on-exec pipe kept off standard I/O, so that no stdio set-up in a
+/// child can replace the inherited write end before any pre-exec hook runs.
+#[cfg(unix)]
+fn fork_creation_witness_pipe() -> std::io::Result<(std::fs::File, std::fs::File)> {
+    let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
+    let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if created != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the pipe call returned two new uniquely-owned descriptors.
+    let (reader, writer) = unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    for file in [&reader, &writer] {
+        // An unguarded concurrent fork inheriting the write end before the
+        // flag is set can only delay hang-up, never produce it early.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        if flags < 0
+            || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok((
+        move_owned_descriptor_above_stdio(reader)?,
+        move_owned_descriptor_above_stdio(writer)?,
+    ))
+}
+
+/// Exclusive fork window held across process creation, with a witness that
+/// can prove when no created process still holds its pre-exec descriptors.
+///
+/// The hazard: a forked child holds a copy of every descriptor open in the
+/// parent at fork, including registered descriptors that carry advisory
+/// locks or one-shot release authority, until it runs the descriptor scrub
+/// and then execs, or exits. While such a child is alive, a parent close is
+/// not a physical release, and lease acquisition must not be granted, since a
+/// lease asserts that completed closes have physically settled.
+///
+/// The witness: the parent creates a close-on-exec pipe before creation and
+/// keeps its write end open until creation has happened or cannot happen.
+/// Every process forked meanwhile, and every process those fork before exec,
+/// inherits the write end. The kernel closes each copy at exec or exit, and a
+/// child can close it earlier only by replacing that exact number after its
+/// first descriptor scrub. Once the parent drops its own write end, hang-up
+/// on the read end therefore proves that no created process still holds an
+/// unscrubbed pre-exec descriptor table, whether creation failed, panicked,
+/// or left a child behind. That is the exact condition for reopening.
+///
+/// `release_observed` is for creators that themselves observed exec or a
+/// post-scrub readiness boundary. Any other end, including unwinding, waits
+/// a bounded time for the witness. Without hang-up the window is stranded
+/// with its witness: acquisition refuses with the fact instead of waiting,
+/// and the window reopens as soon as a later acquisition sees hang-up.
+#[cfg(unix)]
+#[must_use]
+pub(crate) struct WitnessedForkCustody {
+    guard: Option<QuiescedForkSensitiveDescriptors>,
+    witness: Option<std::fs::File>,
+    context: &'static str,
+    // The creator runs on another thread, so this owner's own end does not
+    // show that the creator has stopped forking.
+    creator_elsewhere: bool,
+}
+
+#[cfg(unix)]
+impl WitnessedForkCustody {
+    pub(crate) fn guard(&self) -> &QuiescedForkSensitiveDescriptors {
+        self.guard.as_ref().expect("witnessed fork custody holds its guard")
+    }
+
+    /// The creator observed exec, or readiness emitted after the descriptor
+    /// scrub, for every process it created. Reopen without the witness.
+    pub(crate) fn release_observed(mut self) {
+        drop(self.guard.take());
+    }
+
+    /// Reopen the window once the witness proves disposal; otherwise strand
+    /// it and return the fact. The creator must already have dropped its
+    /// witness write end and finished its own reap, kill, or join.
+    pub(crate) fn settle(mut self) -> Result<(), String> {
+        self.settle_inner(true)
+    }
+
+    /// As `settle`, when a detached creator thread could not be joined within
+    /// its bound. That thread still owns its witness write end and may still
+    /// fork, so a strand keeps every deferred close deferred until hang-up.
+    pub(crate) fn settle_with_live_creator(mut self) -> Result<(), String> {
+        self.settle_inner(false)
+    }
+
+    fn settle_inner(&mut self, creator_settled: bool) -> Result<(), String> {
+        let Some(guard) = self.guard.take() else {
+            return Ok(());
+        };
+        let witness = self.witness.take().expect("witnessed fork custody holds its witness");
+        let fact = match fork_creation_witness_closed(&witness, FORK_CREATION_WITNESS_SETTLE) {
+            Ok(true) => {
+                drop(guard);
+                return Ok(());
+            }
+            Ok(false) => format!(
+                "{}: a created process still held its pre-exec descriptor table {:?} after creation ended",
+                self.context, FORK_CREATION_WITNESS_SETTLE
+            ),
+            Err(error) => format!("{}: creation witness observation failed: {error}", self.context),
+        };
+        guard.strand_with_witness(fact.clone(), Some(witness), creator_settled);
+        Err(format!("fork custody stranded: {fact}"))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WitnessedForkCustody {
+    fn drop(&mut self) {
+        // The fact stays recorded in the barrier for every later acquisition.
+        // A creator on this thread has stopped once this owner drops; one on
+        // another thread has not been shown to have stopped.
+        let creator_settled = !self.creator_elsewhere;
+        let _ = self.settle_inner(creator_settled);
     }
 }
 
@@ -5444,6 +6059,117 @@ fn retained_descriptor_scope_diagnostic(state: &DescriptorForkBarrierState) -> S
     }
 }
 
+/// How long a forked window holder may take to exit after it was killed for
+/// overrunning its bound, before reaping passes to a detached reaper thread.
+#[cfg(target_os = "linux")]
+const FORK_HOLDER_KILL_SETTLE: Duration = Duration::from_secs(1);
+
+/// Reap one forked child of this process, waiting at most until `deadline`.
+///
+/// Returns the wait status once the child is reaped, or `Ok(None)` when it is
+/// not, or is no longer, a child of this process (already reaped elsewhere).
+/// A child still running at the deadline is killed: its PID cannot be reused
+/// while it remains an unreaped child, so the signal reaches exactly it. If it
+/// then exits within `FORK_HOLDER_KILL_SETTLE` it is reaped; otherwise a
+/// detached thread reaps it later. Either way the overrun is an error, and the
+/// caller ends its fork window through the creation witness or a strand: it
+/// never blocks on a child that does not exit.
+#[cfg(target_os = "linux")]
+pub(crate) fn reap_fork_holder_until(
+    pid: libc::pid_t,
+    deadline: Instant,
+    context: &str,
+) -> Result<Option<libc::c_int>, String> {
+    if pid <= 1 || pid == unsafe { libc::getpid() } {
+        return Err(format!("{context}: PID {pid} names no forked child"));
+    }
+    let try_reap = || -> Result<Option<Option<libc::c_int>>, String> {
+        loop {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == pid {
+                return Ok(Some(Some(status)));
+            }
+            if waited == 0 {
+                return Ok(None);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => return Ok(Some(None)),
+                _ => return Err(format!("{context}: wait for child {pid}: {error}")),
+            }
+        }
+    };
+    if let Some(reaped) = try_reap()? {
+        return Ok(reaped);
+    }
+    // Still an unreaped child: the PID names exactly it until it is reaped.
+    let pidfd = open_pidfd(pid as u32).ok();
+    let wait_exit = |until: Instant| -> Result<Option<Option<libc::c_int>>, String> {
+        loop {
+            if let Some(reaped) = try_reap()? {
+                return Ok(Some(reaped));
+            }
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match pidfd.as_ref() {
+                Some(pidfd) => {
+                    let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+                    let mut poll = libc::pollfd {
+                        fd: pidfd.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // Readiness or timeout both lead to the reap check above;
+                    // an interrupted poll simply repeats it.
+                    unsafe { libc::poll(&mut poll, 1, timeout_ms) };
+                }
+                None => thread::sleep(remaining.min(Duration::from_millis(5))),
+            }
+        }
+    };
+    if let Some(reaped) = wait_exit(deadline)? {
+        return Ok(reaped);
+    }
+    let signalled = match pidfd.as_ref() {
+        Some(pidfd) => pidfd_send_signal_io(pidfd.as_raw_fd(), libc::SIGKILL),
+        None if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 => Ok(()),
+        None => Err(std::io::Error::last_os_error()),
+    };
+    let settle = Instant::now() + FORK_HOLDER_KILL_SETTLE;
+    match wait_exit(settle)? {
+        Some(_) => Err(format!(
+            "{context}: child {pid} overran its bound and was killed"
+        )),
+        None => {
+            // Never block here. The reaper owns no descriptor and no window.
+            let _ = thread::Builder::new()
+                .name("lillux-fork-holder-reaper".to_owned())
+                .spawn(move || {
+                    let mut status = 0;
+                    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+                        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                            break;
+                        }
+                    }
+                });
+            Err(format!(
+                "{context}: child {pid} overran its bound and had not exited {:?} after kill (signal: {signalled:?})",
+                FORK_HOLDER_KILL_SETTLE
+            ))
+        }
+    }
+}
+
+/// Close the fork window for process creation.
+///
+/// Lease acquisition without a deadline waits on this window, so every
+/// holder must end it within a bounded time: wait for a created process only
+/// up to a deadline (see `reap_fork_holder_until`), and on overrun kill it and
+/// settle through the creation witness or strand, never block on it.
 pub(crate) fn quiesce_fork_sensitive_descriptors(
     deadline: Instant,
 ) -> Result<QuiescedForkSensitiveDescriptors, String> {
@@ -5463,10 +6189,24 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
         .waiting_forks
         .checked_add(1)
         .expect("fork-sensitive descriptor waiter count overflow");
-    while state.fork_quiesced
-        || state.retained_scopes != 0
-        || barrier.waiting_descriptor_closers.load(Ordering::SeqCst) != 0
-    {
+    loop {
+        if state.stranded_fork_custody.is_some() {
+            if let Err(fact) = settle_stranded_fork_custody_locked(&mut state) {
+                state.waiting_forks = state
+                    .waiting_forks
+                    .checked_sub(1)
+                    .expect("fork-sensitive descriptor waiter count underflow");
+                barrier.changed.notify_all();
+                return Err(fact);
+            }
+            barrier.changed.notify_all();
+        }
+        if !(state.fork_quiesced
+            || state.retained_scopes != 0
+            || barrier.waiting_descriptor_closers.load(Ordering::SeqCst) != 0)
+        {
+            break;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             state.waiting_forks = state
@@ -5495,12 +6235,14 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
     Ok(QuiescedForkSensitiveDescriptors {
         barrier_identity: barrier as *const DescriptorForkBarrier as usize,
         parent_pid: std::process::id(),
+        armed: true,
     })
 }
 /// Install the descriptor scrub before every other user pre-exec hook.
-/// The parent exclusion must survive process creation until successful exec.
+/// The parent exclusion must survive process creation until the child has
+/// exec'd or the creation witness proves no created process holds its table.
 #[cfg(unix)]
-fn prepare_command_fork_custody(
+pub(crate) fn prepare_command_fork_custody(
     command: &mut process::Command,
     preserved: &BTreeSet<i32>,
     deadline: Instant,
@@ -5522,22 +6264,42 @@ fn prepare_command_fork_custody(
     Ok(guard)
 }
 
-/// An error does not expose an owned child or prove descriptor disposal here.
-/// Retain exclusion on error/unwind rather than assuming libc/std reaped it.
+/// Create the process under the guard's exclusive window.
+///
+/// Success means the child crossed exec, which closed every inherited
+/// close-on-exec descriptor after the scrub hook ran, so the window reopens.
+/// An error exposes no child to this caller and is not itself proof that no
+/// child holds the pre-exec descriptor table. The creation witness supplies
+/// that proof: its write end is dropped here once `spawn` has returned or
+/// unwound, and hang-up then means every forked process has exec'd, exited,
+/// or scrubbed. A spawn that fails after fork reaps its child before
+/// returning, so hang-up is normally immediate; without it the window is
+/// stranded with a recorded fact rather than wedged without one.
 #[cfg(unix)]
-fn spawn_command_with_fork_custody(
+pub(crate) fn spawn_command_with_fork_custody(
     command: &mut process::Command,
     guard: Option<QuiescedForkSensitiveDescriptors>,
 ) -> std::io::Result<process::Child> {
-    let mut guard = guard.map(std::mem::ManuallyDrop::new);
+    let Some(guard) = guard else {
+        return command.spawn();
+    };
+    let witnessed = guard.witness_creation("process creation")?;
+    // Declared before the write end, so on unwind the write end drops first
+    // and the custody's own settlement observes the witness.
+    let custody = witnessed.0;
+    let witness_writer = witnessed.1;
     let result = command.spawn();
-    if result.is_ok() {
-        if let Some(guard) = guard.as_mut() {
-            // Successful Command::spawn has crossed exec, including its pre-exec hooks.
-            unsafe { std::mem::ManuallyDrop::drop(guard); }
+    drop(witness_writer);
+    match result {
+        Ok(child) => {
+            custody.release_observed();
+            Ok(child)
         }
+        Err(error) => match custody.settle() {
+            Ok(()) => Err(error),
+            Err(fact) => Err(std::io::Error::new(error.kind(), format!("{error}; {fact}"))),
+        },
     }
-    result
 }
 
 #[cfg(unix)]
@@ -6829,7 +7591,7 @@ mod selected_scoped_component_tests {
         }
     }
     fn pipe_cloexec() -> (std::fs::File, InheritedDescriptorAuthority) {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
         let mut fds = [-1; 2];
         assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
         let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
@@ -10206,12 +10968,15 @@ fn lib_spawn_until_with_inheritance(
     } else {
         deadline
     };
-    let _lease = retain_fork_sensitive_descriptors_until(deadline)
-        .map_err(|_| spawn_deadline_failure(start))?;
-    request.timeout = deadline.remaining().as_secs_f64();
+    // No shared descriptor lease is taken here. The calling thread would then
+    // hold one across process creation, which the fork barrier refuses
+    // outright. Barrier acquisition is instead the exclusive fork-custody
+    // quiesce inside process creation, bounded by this same deadline; it waits
+    // for every shared lease to drop and settles any stranded window first.
     if deadline.has_elapsed() {
         return Err(spawn_deadline_failure(start));
     }
+    request.timeout = deadline.remaining().as_secs_f64();
     lib_spawn_with_stdio(
         request,
         false,
@@ -10588,8 +11353,12 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         );
     }
     let timeout = request.timeout;
+    // Descriptor leases taken during setup wait no longer than setup itself.
+    let setup_lease_deadline = crate::time::MonotonicDeadline::after(
+        setup_deadline.saturating_duration_since(Instant::now()),
+    );
     let cwd_directory = match request.cwd.take() {
-        Some(path) => Some(open_attachment_cwd(&path, start)?),
+        Some(path) => Some(open_attachment_cwd(&path, start, setup_lease_deadline)?),
         None => None,
     };
     let raw_inherited = normalize_inherited_descriptors(&request.inherited_fds)
@@ -10598,6 +11367,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         &request.inherited_fd_mappings,
         &raw_inherited,
         &inherited_mapping_control_descriptors(None, request.supervised_status.as_ref()),
+        Some(setup_lease_deadline),
     )
     .map_err(|error| spawn_failure(start, error))?;
     // Keep exact request/mapping lifelines through the protected setup window.
@@ -10621,7 +11391,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         .collect();
     // No other direct child may fork while these control pipes are created.
     // Snapshot the control descriptors of already-held children so the new
-    // child can close only those known authorities at its final setup hook.
+    // child can close only those known authorities in its first pre-exec hook.
     let fork_sensitive_descriptors =
         quiesce_fork_sensitive_descriptors(setup_deadline).map_err(|error| {
             spawn_failure(
@@ -10654,12 +11424,30 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     // inherit an advisory lock and deadlock the owner's durable attach path.
     // From thread creation onward, worker failure/panic does not itself prove
     // that a partially created child disposed its inherited descriptors.
-    // Retain exclusion across every uncertain abort and unwinding boundary.
-    let mut fork_sensitive_descriptors = std::mem::ManuallyDrop::new(fork_sensitive_descriptors);
+    // Only READY, which the child emits after its scrub, releases directly.
+    // Every other end, including unwinding, settles through the creation
+    // witness: its only parent write end belongs to the worker and drops when
+    // the worker finishes, so hang-up proves the worker can no longer fork and
+    // that every child it forked has exec'd, exited, or scrubbed. Failure
+    // branches below join and abort, kill, or reap first, each within a bound,
+    // so the bounded settlement normally observes hang-up at once; a worker
+    // that cannot be joined in time is detached, and the window strands.
+    // The creator is the worker thread, not this one: only a joined worker
+    // has shown that it forks nothing more with this window's snapshot.
+    let witnessed = fork_sensitive_descriptors
+        .witness_detached_creation("awaiting attachment creation")
+        .map_err(|error| {
+            spawn_failure(
+                start,
+                format!("Failed to create awaiting attachment creation witness: {error}"),
+            )
+        })?;
+    let fork_custody = witnessed.0;
+    let fork_custody_witness = witnessed.1;
     let worker = thread::Builder::new()
         .name("lillux-attachment-spawn".to_string())
         .spawn(move || {
-            lib_spawn_with_stdio(
+            let result = lib_spawn_with_stdio(
                 request,
                 false,
                 Some(gate),
@@ -10667,12 +11455,13 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
                 None,
                 absolute_deadline,
                 false,
-            )
+            );
+            drop(fork_custody_witness);
+            result
         })
+        // A refused thread drops the closure and its witness write end, so
+        // the custody below settles at once on this early return.
         .map_err(|error| {
-            // Builder refused before running the closure: no child creation
-            // attempt occurred, so the original exclusion can be released.
-            unsafe { std::mem::ManuallyDrop::drop(&mut fork_sensitive_descriptors); }
             spawn_failure(
                 start,
                 format!("Failed to spawn awaiting attachment worker: {error}"),
@@ -10684,15 +11473,12 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
             Ok(identity) => identity,
             Err(error) => {
                 drop(release_writer);
-                let worker_detail = match worker.join() {
-                    Ok(Err(result)) if !result.stderr.is_empty() => format!("; {}", result.stderr),
-                    Ok(Ok(running)) => {
-                        running.abort();
-                        String::new()
-                    }
-                    Ok(Err(_)) => String::new(),
-                    Err(_) => "; attachment spawn worker panicked".to_string(),
-                };
+                let worker_detail = settle_failed_attachment_setup(
+                    worker,
+                    None,
+                    attachment_scope.as_ref(),
+                    fork_custody,
+                );
                 return Err(spawn_failure(
                     start,
                     format!("Failed to spawn awaiting attachment: {error}{worker_detail}"),
@@ -10701,26 +11487,30 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         };
     if let Err(error) = validate_direct_attachment_identity(identity.pid, identity.pgid) {
         drop(release_writer);
-        let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+        let cleanup = settle_failed_attachment_setup(
+            worker,
+            Some(identity.pid),
+            attachment_scope.as_ref(),
+            fork_custody,
+        );
         return Err(spawn_failure(
             start,
-            format!(
-                "Failed to spawn awaiting attachment: {error}{}",
-                cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-            ),
+            format!("Failed to spawn awaiting attachment: {error}{cleanup}"),
         ));
     }
     let observed_birth = match read_linux_process_birth(identity.pid) {
         Ok(birth) => birth,
         Err(error) => {
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
-                format!(
-                    "Failed to inspect process awaiting attachment: {error}{}",
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-                ),
+                format!("Failed to inspect process awaiting attachment: {error}{cleanup}"),
             ));
         }
     };
@@ -10728,13 +11518,15 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         Ok(pidfd) => pidfd,
         Err(error) => {
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
-                format!(
-                    "Failed to pin process awaiting attachment: {error}{}",
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-                ),
+                format!("Failed to pin process awaiting attachment: {error}{cleanup}"),
             ));
         }
     };
@@ -10746,13 +11538,15 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         pidfd.as_raw_fd(),
     ) {
         drop(release_writer);
-        let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+        let cleanup = settle_failed_attachment_setup(
+            worker,
+            Some(identity.pid),
+            attachment_scope.as_ref(),
+            fork_custody,
+        );
         return Err(spawn_failure(
             start,
-            format!(
-                "Process identity changed while awaiting attachment: {error}{}",
-                cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-            ),
+            format!("Process identity changed while awaiting attachment: {error}{cleanup}"),
         ));
     }
     let ready = match read_attachment_ready(&status_reader, setup_deadline, ATTACHMENT_READY_PHASE)
@@ -10760,7 +11554,12 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         Ok(ready) if ready.pid == identity.pid && ready.pgid == identity.pgid => ready,
         Ok(ready) => {
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
                 format!(
@@ -10769,19 +11568,24 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
                     identity.pgid,
                     ready.pid,
                     ready.pgid,
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                    cleanup
                 ),
             ));
         }
         Err(error) => {
             let _ = pidfd_send_signal(pidfd.as_raw_fd(), ATTACHMENT_ABORT_SIGNAL);
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
                 format!(
                     "Failed to reach final attachment boundary: {error}{}",
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                    cleanup
                 ),
             ));
         }
@@ -10791,9 +11595,9 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     // own pre-exec hook, without touching Rust's private exec-error channel or
     // any caller-declared inherited descriptor.
     let release_registration =
-        fork_sensitive_descriptors.register_pending_fork_control(release_writer);
+        fork_custody.guard().register_pending_fork_control(release_writer);
     // READY is emitted only after the child's known snapshot was scrubbed.
-    unsafe { std::mem::ManuallyDrop::drop(&mut fork_sensitive_descriptors); }
+    fork_custody.release_observed();
 
     verify_scoped_attachment(
         ProcessAwaitingAttachment {
@@ -10899,7 +11703,7 @@ struct PreparedInheritedMappings {
 }
 
 #[cfg(unix)]
-fn normalize_inherited_descriptors(
+pub(crate) fn normalize_inherited_descriptors(
     authorities: &[InheritedDescriptorAuthority],
 ) -> Result<Vec<i32>, String> {
     authorities
@@ -10916,6 +11720,7 @@ fn prepare_inherited_fd_mappings(
     mappings: &[InheritedDescriptorMapping],
     ordinary_inherited: &[i32],
     forbidden_targets: &BTreeSet<i32>,
+    deadline: Option<crate::time::MonotonicDeadline>,
 ) -> Result<PreparedInheritedMappings, String> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
@@ -10972,7 +11777,13 @@ fn prepare_inherited_fd_mappings(
         .checked_add(1)
         .ok_or_else(|| "mapped inherited target descriptor overflows".to_owned())?
         .max(3);
-    let lease = retain_fork_sensitive_descriptors();
+    // A caller's operation deadline also bounds the wait for this lease.
+    let lease = match deadline {
+        Some(deadline) => {
+            retain_fork_sensitive_descriptors_until(deadline).map_err(|error| error.to_string())?
+        }
+        None => try_retain_fork_sensitive_descriptors()?,
+    };
     let mut source_copies = Vec::with_capacity(normalized.len());
     for (source, _) in &normalized {
         let duplicate = unsafe { libc::fcntl(*source, libc::F_DUPFD_CLOEXEC, temporary_floor) };
@@ -11417,6 +12228,7 @@ fn lib_spawn_with_stdio_custody_into(
                 &inherited_fd_mappings,
                 &raw_inherited_fds,
                 &forbidden_mapping_targets,
+                absolute_deadline,
             )
             .map_err(|error| spawn_failure(start, format!("Failed to spawn: {error}")))?,
         }
@@ -11506,6 +12318,25 @@ fn lib_spawn_with_stdio_custody_into(
         #[cfg(not(target_os = "linux"))]
         let already_quiesced = false;
         if already_quiesced {
+            // The attachment owner already holds the window and its snapshot.
+            // Its scrub is still the first hook, ahead of process-scope
+            // placement and every credential change: a child that blocks in
+            // any later hook, such as placement into a frozen cgroup, has
+            // already closed every registered parent descriptor.
+            #[cfg(target_os = "linux")]
+            if let Some(gate) = attachment_gate.as_ref() {
+                use std::os::unix::process::CommandExt as _;
+                let close_fds = gate.inherited_child_close_fds.clone();
+                unsafe {
+                    command.pre_exec(move || {
+                        for fd in &close_fds {
+                            // Never retry close: the number may be consumed.
+                            libc::close(*fd);
+                        }
+                        Ok(())
+                    });
+                }
+            }
             None
         } else {
             let mut preserved = BTreeSet::from([0, 1, 2]);
@@ -11519,8 +12350,19 @@ fn lib_spawn_with_stdio_custody_into(
                 let observed = Instant::now();
                 deadline = deadline.min(observed.checked_add(original.remaining()).unwrap_or(observed));
             }
-            Some(prepare_command_fork_custody(&mut command, &preserved, deadline)
-                .map_err(|error| spawn_failure(start, format!("fork custody: {error}")))?)
+            Some(
+                prepare_command_fork_custody(&mut command, &preserved, deadline).map_err(
+                    |error| {
+                        let mut failure = spawn_failure(start, format!("fork custody: {error}"));
+                        // An expired caller deadline is the settled cause even
+                        // when the barrier reported a different fact; that fact
+                        // stays in the failure text.
+                        failure.timed_out =
+                            absolute_deadline.is_some_and(|original| original.has_elapsed());
+                        failure
+                    },
+                )?,
+            )
         }
     };
     // Placement must precede inherited-descriptor remapping, final attachment
@@ -11573,7 +12415,6 @@ fn lib_spawn_with_stdio_custody_into(
                         gate.child_status_reader_fd,
                         gate.child_release_writer_fd,
                         gate.cwd_directory,
-                        gate.inherited_child_close_fds.clone(),
                     )
                 });
         unsafe {
@@ -11606,7 +12447,6 @@ fn lib_spawn_with_stdio_custody_into(
                     status_reader,
                     release_writer,
                     cwd_directory,
-                    pending_control_fds,
                 )) = &attachment_setup
                 {
                     direct_attachment_identity_pre_exec(
@@ -11615,7 +12455,6 @@ fn lib_spawn_with_stdio_custody_into(
                         *status_reader,
                         *release_writer,
                         *cwd_directory,
-                        pending_control_fds,
                     )?;
                 }
                 for (source, target) in &raw_inherited_fd_mappings {
@@ -13090,6 +13929,7 @@ fn attachment_pipe(
 fn open_attachment_cwd(
     path: &str,
     start: Instant,
+    deadline: crate::time::MonotonicDeadline,
 ) -> Result<InheritedDescriptorAuthority, SubprocessResult> {
     let path = std::ffi::CString::new(path).map_err(|_| {
         spawn_failure(
@@ -13097,7 +13937,9 @@ fn open_attachment_cwd(
             "Failed to spawn awaiting attachment: cwd contains an interior NUL byte",
         )
     })?;
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = retain_fork_sensitive_descriptors_until(deadline).map_err(|refused| {
+        spawn_failure(start, format!("Failed to spawn awaiting attachment: {refused}"))
+    })?;
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
@@ -13129,14 +13971,11 @@ fn direct_attachment_identity_pre_exec(
     status_reader_fd: i32,
     release_writer_fd: i32,
     cwd_directory_fd: Option<i32>,
-    inherited_child_close_fds: &[i32],
 ) -> std::io::Result<()> {
     unsafe {
+        // The registered-descriptor scrub already ran as the first hook.
         libc::close(status_reader_fd);
         libc::close(release_writer_fd);
-        for fd in inherited_child_close_fds {
-            libc::close(*fd);
-        }
 
         validate_attachment_parent(libc::getppid(), expected_parent_pid)?;
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
@@ -13639,6 +14478,111 @@ fn reap_exact_child_pid(pid: u32) -> Result<(), String> {
     }
 }
 
+/// Join an attachment spawn worker within a bound.
+///
+/// A worker still running at the bound is blocked in `Command::spawn` on its
+/// child, which runs nothing that can block before the registered-descriptor
+/// scrub; it can block only later, such as in placement into a frozen process
+/// scope. Terminating that scope ends such a child, and the worker returns.
+/// A worker that still has not finished is detached, never waited on: its
+/// witness write end then keeps the window from reopening until it finishes.
+#[cfg(target_os = "linux")]
+fn join_attachment_worker_bounded<T>(
+    worker: thread::JoinHandle<T>,
+    scope: Option<&crate::ProcessScope>,
+) -> Result<thread::Result<T>, String> {
+    let finished_within = |worker: &thread::JoinHandle<T>, bound: Duration| {
+        let until = Instant::now() + bound;
+        while !worker.is_finished() {
+            if Instant::now() >= until {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        true
+    };
+    if finished_within(&worker, ATTACHMENT_ABORT_SETTLE_TIMEOUT) {
+        return Ok(worker.join());
+    }
+    let terminated = match scope {
+        Some(scope) => scope.terminate_and_wait(ATTACHMENT_ABORT_SETTLE_TIMEOUT),
+        None => Err("no process scope to terminate".to_owned()),
+    };
+    if finished_within(&worker, ATTACHMENT_ABORT_SETTLE_TIMEOUT) {
+        return Ok(worker.join());
+    }
+    drop(worker);
+    Err(format!(
+        "attachment spawn worker did not finish within its bound and was detached{}",
+        terminated.err().map_or_else(String::new, |error| format!("; scope termination: {error}"))
+    ))
+}
+
+/// End an attachment setup that failed before READY, within bounded time:
+/// join the worker, settle its child, and then end the fork custody. Returns
+/// the diagnostic suffix for the caller's failure, empty when all settled.
+#[cfg(target_os = "linux")]
+fn settle_failed_attachment_setup(
+    worker: thread::JoinHandle<Result<RunningProcess, SubprocessResult>>,
+    pid: Option<u32>,
+    scope: Option<&crate::ProcessScope>,
+    custody: WitnessedForkCustody,
+) -> String {
+    let mut details = Vec::new();
+    match join_attachment_worker_bounded(worker, scope) {
+        Ok(joined) => {
+            let cleanup = match (joined, pid) {
+                (Ok(Ok(running)), None) => {
+                    running.abort();
+                    Ok(())
+                }
+                (Ok(Ok(running)), Some(_)) => running.abort_and_reap_checked(),
+                (Ok(Err(result)), None) => {
+                    if !result.stderr.is_empty() {
+                        details.push(result.stderr);
+                    }
+                    Ok(())
+                }
+                (Ok(Err(_)), Some(pid)) => reap_attachment_child_bounded(pid),
+                (Err(_), None) => {
+                    details.push("attachment spawn worker panicked".to_owned());
+                    Ok(())
+                }
+                (Err(_), Some(pid)) => reap_attachment_child_bounded(pid)
+                    .map_err(|error| format!("attachment worker panicked; {error}")),
+            };
+            if let Err(error) = cleanup {
+                details.push(format!("cleanup failed: {error}"));
+            }
+            // The worker is joined: it forks nothing more.
+            if let Err(fact) = custody.settle() {
+                details.push(fact);
+            }
+        }
+        Err(detached) => {
+            details.push(format!("cleanup failed: {detached}"));
+            if let Err(fact) = custody.settle_with_live_creator() {
+                details.push(fact);
+            }
+        }
+    }
+    details.iter().map(|detail| format!("; {detail}")).collect()
+}
+
+/// Reap the exact attachment child after its worker returned without a
+/// running owner, killing it if it has not exited within the bound. A child
+/// already reaped by `Command::spawn` is settled.
+#[cfg(target_os = "linux")]
+fn reap_attachment_child_bounded(pid: u32) -> Result<(), String> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+    reap_fork_holder_until(
+        pid,
+        Instant::now() + ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+        "attachment child",
+    )
+    .map(|_| ())
+}
+
 fn settle_direct_attachment_worker(
     pid: u32,
     worker: thread::JoinHandle<Result<RunningProcess, SubprocessResult>>,
@@ -13920,6 +14864,387 @@ fn spawn_deadline_failure(start: Instant) -> SubprocessResult {
 }
 
 #[cfg(all(test, unix))]
+mod fork_creation_custody_tests {
+    use super::*;
+
+    const ISOLATED_TEST: &str = "LILLUX_TEST_FORK_CUSTODY_ISOLATED";
+
+    /// Run the named test of this module alone in a fresh copy of the test
+    /// binary, because it strands that process's fork window on purpose and
+    /// a stranded window would refuse every later test's descriptor lease.
+    /// Returns whether the caller is that fresh copy and must run the body.
+    fn run_isolated(name: &str) -> bool {
+        if std::env::var_os(ISOLATED_TEST).is_some_and(|value| value == name) {
+            return true;
+        }
+        let mut command = process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                &format!("exec::fork_creation_custody_tests::{name}"),
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(ISOLATED_TEST, name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let guard = prepare_command_fork_custody(
+            &mut command,
+            &BTreeSet::from([0, 1, 2]),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("fork window for the isolated test process");
+        let output = spawn_command_with_fork_custody(&mut command, Some(guard))
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated {name} failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    fn cloexec_pipe() -> (std::fs::File, std::fs::File) {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
+    /// A nonblocking pipe read end, to observe whether every writer closed.
+    fn nonblocking_reader() -> (std::fs::File, std::fs::File) {
+        let (reader, writer) = cloexec_pipe();
+        let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        (reader, writer)
+    }
+
+    fn writer_closed(reader: &mut std::fs::File) -> bool {
+        match reader.read(&mut [0]) {
+            Ok(0) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            other => panic!("unexpected probe read: {other:?}"),
+        }
+    }
+
+    fn lease_within(seconds: u64) -> std::io::Result<ForkSensitiveDescriptorLease> {
+        retain_fork_sensitive_descriptors_until(crate::time::MonotonicDeadline::after(
+            Duration::from_secs(seconds),
+        ))
+    }
+
+    fn guarded_spawn(program: &str) -> std::io::Result<process::Child> {
+        let mut command = process::Command::new(program);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = prepare_command_fork_custody(
+            &mut command,
+            &BTreeSet::from([0, 1, 2]),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("fork window must be available");
+        spawn_command_with_fork_custody(&mut command, Some(guard))
+    }
+
+    #[test]
+    fn failed_exec_reopens_window_for_spawn_and_descriptor_leases() {
+        let error = guarded_spawn("/nonexistent/lillux-fork-custody-missing-binary")
+            .expect_err("a missing binary cannot exec");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        drop(lease_within(5).expect("failed exec must reopen the descriptor window"));
+
+        let mut child = guarded_spawn("/bin/true").expect("later spawn must not wait on a leak");
+        assert!(child.wait().unwrap().success());
+        // Undeadlined acquisition must also return, not sleep on the window.
+        drop(try_retain_fork_sensitive_descriptors().unwrap());
+
+        // The same sequence through the public supervised spawn.
+        let request = |cmd: &str| SubprocessRequest {
+            cmd: cmd.into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        if let Ok(process) = lib_spawn(request("/nonexistent/lillux-fork-custody-missing-binary")) {
+            process.abort();
+            panic!("missing binary produced a running process");
+        }
+        let result = match lib_spawn(request("/bin/true")) {
+            Ok(process) => process.wait(),
+            Err(result) => panic!("spawn after failed exec refused: {}", result.stderr),
+        };
+        assert!(result.success, "{}", result.stderr);
+        drop(lease_within(5).expect("descriptor lease after supervised spawns"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_pre_exec_holder_strands_window_until_witness_hangs_up() {
+        use std::os::unix::process::CommandExt as _;
+
+        if !run_isolated("live_pre_exec_holder_strands_window_until_witness_hangs_up") {
+            return;
+        }
+        let pipe = cloexec_pipe;
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        let (custody, witness_writer) = guard.witness_creation("test creation").unwrap();
+        // A child created under the window that stays alive before exec.
+        let (mut forked_reader, forked_writer) = pipe();
+        let (release_reader, mut release_writer) = pipe();
+        let forked_fd = forked_writer.as_raw_fd();
+        let release_fd = release_reader.as_raw_fd();
+        let mut command = process::Command::new("/bin/true");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = [1_u8];
+                if libc::write(forked_fd, byte.as_ptr().cast(), 1) != 1
+                    || libc::read(release_fd, byte.as_mut_ptr().cast(), 1) != 1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let creator = thread::spawn(move || command.spawn());
+        let mut byte = [0_u8];
+        forked_reader.read_exact(&mut byte).unwrap();
+        drop(forked_writer);
+        drop(release_reader);
+        drop(witness_writer);
+
+        let fact = custody.settle().expect_err("a live pre-exec child must strand the window");
+        assert!(fact.contains("fork custody stranded"), "{fact}");
+        let refused = match lease_within(5) {
+            Ok(_) => panic!("lease granted while a pre-exec child holds the table"),
+            Err(error) => error.to_string(),
+        };
+        assert!(refused.contains("fork custody stranded"), "{refused}");
+        let refused = match try_retain_fork_sensitive_descriptors() {
+            Ok(_) => panic!("undeadlined lease granted while a pre-exec child holds the table"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused
+                .stranded_fact()
+                .is_some_and(|fact| fact.contains("fork custody stranded")),
+            "{refused}"
+        );
+        let refused = match quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)) {
+            Ok(_) => panic!("fork window reopened while a pre-exec child holds the table"),
+            Err(error) => error,
+        };
+        assert!(refused.contains("fork custody stranded"), "{refused}");
+
+        // Let the child exec; exec closes its witness copy.
+        release_writer.write_all(&[1]).unwrap();
+        let mut child = creator.join().unwrap().expect("held child must exec");
+        assert!(child.wait().unwrap().success());
+        drop(lease_within(5).expect("witness hang-up must reopen the stranded window"));
+        let mut later = guarded_spawn("/bin/true").expect("process creation after settlement");
+        assert!(later.wait().unwrap().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_holder_reap_returns_status_and_kills_an_overrunning_child() {
+        let exiting = unsafe { libc::fork() };
+        assert!(exiting >= 0);
+        if exiting == 0 {
+            unsafe { libc::_exit(7) };
+        }
+        let status = reap_fork_holder_until(exiting, Instant::now() + Duration::from_secs(5), "test")
+            .unwrap()
+            .expect("an exited child is reaped");
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
+
+        let paused = unsafe { libc::fork() };
+        assert!(paused >= 0);
+        if paused == 0 {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        let started = Instant::now();
+        let error = reap_fork_holder_until(paused, Instant::now() + Duration::from_millis(50), "test")
+            .expect_err("a child that never exits overruns its bound");
+        assert!(error.contains("overran its bound and was killed"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        // Killed and reaped: the PID is no longer a child of this process.
+        assert_eq!(unsafe { libc::waitpid(paused, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overrunning_holder_is_killed_and_strands_until_its_descendant_exits() {
+        if !run_isolated("overrunning_holder_is_killed_and_strands_until_its_descendant_exits") {
+            return;
+        }
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        let witnessed = guard.witness_creation("test holder creation").unwrap();
+        let custody = witnessed.0;
+        let witness_writer = witnessed.1;
+        let (mut report_reader, report_writer) = cloexec_pipe();
+        let holder = unsafe { libc::fork() };
+        assert!(holder >= 0);
+        if holder == 0 {
+            // A holder that never finishes, whose descendant keeps its copy
+            // of the witness after the holder itself is killed.
+            let descendant = unsafe { libc::fork() };
+            if descendant == 0 {
+                loop {
+                    unsafe { libc::pause() };
+                }
+            }
+            let bytes = descendant.to_ne_bytes();
+            unsafe { libc::write(report_writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        drop(report_writer);
+        drop(witness_writer);
+        let mut bytes = [0_u8; 4];
+        report_reader.read_exact(&mut bytes).unwrap();
+        let descendant = libc::pid_t::from_ne_bytes(bytes);
+
+        let started = Instant::now();
+        let error = reap_fork_holder_until(holder, Instant::now() + Duration::from_millis(100), "test holder")
+            .expect_err("the holder overruns its bound");
+        assert!(error.contains("overran its bound and was killed"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let fact = custody.settle().expect_err("a live descendant keeps the witness open");
+        assert!(fact.contains("fork custody stranded"), "{fact}");
+        let refused = match try_retain_fork_sensitive_descriptors() {
+            Ok(_) => panic!("lease granted while a created process holds the witness"),
+            Err(refused) => refused,
+        };
+        assert!(refused.stranded_fact().is_some(), "{refused}");
+
+        // Once the last created process exits, the next acquisition reopens.
+        assert_eq!(unsafe { libc::kill(descendant, libc::SIGKILL) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match try_retain_fork_sensitive_descriptors() {
+                Ok(lease) => {
+                    drop(lease);
+                    break;
+                }
+                Err(refused) if Instant::now() < deadline => {
+                    assert!(refused.stranded_fact().is_some(), "{refused}");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(refused) => panic!("window stayed stranded after the last exit: {refused}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn settled_strand_closes_registered_descriptors_without_deferral() {
+        if !run_isolated("settled_strand_closes_registered_descriptors_without_deferral") {
+            return;
+        }
+        let (mut early_reader, early_writer) = nonblocking_reader();
+        let (mut late_reader, late_writer) = nonblocking_reader();
+        let (mut control_reader, control_writer) = nonblocking_reader();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        let early = InheritedDescriptorAuthority::from_owned_file(early_writer, &lease).unwrap();
+        let late = InheritedDescriptorAuthority::from_owned_file(late_writer, &lease).unwrap();
+        drop(lease);
+        let control = register_pending_fork_control_file(control_writer);
+        let control_fd = control.fd;
+        let late_fd = late.handle.fd;
+
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        // A live creator's snapshot defers the close.
+        drop(early);
+        assert!(!writer_closed(&mut early_reader));
+        // A witness-less strand never reopens. Its creator is settled, so the
+        // deferred close settles now and later closes happen at once.
+        guard.strand_with_witness("test creator ended without disposal proof".to_owned(), None, true);
+        assert!(writer_closed(&mut early_reader));
+        drop(late);
+        assert!(writer_closed(&mut late_reader));
+        drop(control);
+        assert!(writer_closed(&mut control_reader));
+        {
+            let state = direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(state.fork_quiesced);
+            assert!(!state.fork_child_close_fds.contains(&late_fd));
+            assert!(!state.pending_fork_control_fds.contains(&control_fd));
+            assert!(state.deferred_child_closes.is_empty());
+            assert!(state.deferred_control_closes.is_empty());
+        }
+        // Closing is not settlement evidence: the window still refuses.
+        let refused = match try_retain_fork_sensitive_descriptors() {
+            Ok(_) => panic!("witness-less strand granted a lease"),
+            Err(refused) => refused,
+        };
+        assert!(refused.stranded_fact().is_some(), "{refused}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_creator_strand_keeps_registered_closes_deferred_until_hang_up() {
+        if !run_isolated("live_creator_strand_keeps_registered_closes_deferred_until_hang_up") {
+            return;
+        }
+        let (mut reader, writer) = nonblocking_reader();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        let registered = InheritedDescriptorAuthority::from_owned_file(writer, &lease).unwrap();
+        drop(lease);
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        let witnessed = guard.witness_detached_creation("test detached creation").unwrap();
+        let custody = witnessed.0;
+        // The detached creator still owns its write end and may still fork.
+        let creator_witness = witnessed.1;
+        let fact = custody
+            .settle_with_live_creator()
+            .expect_err("an open creator write end strands the window");
+        assert!(fact.contains("fork custody stranded"), "{fact}");
+        drop(registered);
+        assert!(!writer_closed(&mut reader), "a live creator's snapshot must defer the close");
+        // The creator finishes: hang-up reopens and settles the deferred close.
+        drop(creator_witness);
+        drop(lease_within(5).expect("hang-up reopens the window"));
+        assert!(writer_closed(&mut reader));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod absolute_spawn_deadline_tests {
     use super::*;
 
@@ -13953,6 +15278,19 @@ mod absolute_spawn_deadline_tests {
         };
         assert!(error.timed_out);
         assert_eq!(error.pid, 0);
+    }
+
+    #[test]
+    fn current_thread_lease_observation_tracks_only_the_holding_thread() {
+        assert!(!current_thread_retains_fork_sensitive_descriptors());
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        assert!(current_thread_retains_fork_sensitive_descriptors());
+        let observed_elsewhere = thread::spawn(current_thread_retains_fork_sensitive_descriptors)
+            .join()
+            .unwrap();
+        assert!(!observed_elsewhere);
+        drop(lease);
+        assert!(!current_thread_retains_fork_sensitive_descriptors());
     }
 
     #[test]

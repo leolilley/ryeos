@@ -451,26 +451,13 @@ impl MeasuredLauncherExecutable {
                     == self.digest,
             "launcher executable differs from exact measured artifact"
         );
-        let source = self
-            .authority
-            .inherited_descriptor()
-            .map_err(anyhow::Error::msg)?;
-        let mappings = request
-            .inherited_fd_mappings
-            .iter()
-            .filter(|mapping| mapping.target_descriptor() == LAUNCHER_EXECUTABLE_FD)
-            .collect::<Vec<_>>();
-        ensure!(
-            mappings.len() == 1
-                && mappings[0]
-                    .source_descriptor()
-                    .map_err(anyhow::Error::msg)?
-                    == source
-                && std::path::Path::new(&request.cmd)
-                    == lillux::inherited_executable_path(LAUNCHER_EXECUTABLE_FD)
-                        .map_err(anyhow::Error::msg)?,
-            "launcher request lost its exact measured executable descriptor"
-        );
+        self.authority
+            .require_bound_as_subprocess_executable(request, LAUNCHER_EXECUTABLE_FD)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "launcher request lost its exact measured executable descriptor: {error}"
+                )
+            })?;
         Ok(())
     }
 }

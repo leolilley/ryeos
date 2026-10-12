@@ -8109,7 +8109,7 @@ impl StateStore {
     pub fn verify_projection_generation(
         &self,
     ) -> Result<ryeos_state::rebuild::ProjectionVerificationReport> {
-        let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let _fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let _cas_guard = self
             .state_authority
             .acquire_exclusive_guard(!self.read_only)?;
@@ -8133,7 +8133,7 @@ impl StateStore {
                 "projection rebuild is available only in the authored offline rebuild bootstrap mode"
             );
         }
-        let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let _fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_exclusive_guard(true)?;
         let _write_permit = self
             .write_barrier
@@ -9284,7 +9284,7 @@ impl StateStore {
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = lillux::time::MonotonicTimer::start();
         let caller = std::panic::Location::caller();
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let inner = cooperate_while_blocking(|| {
             self.inner
                 .lock()
@@ -9463,7 +9463,7 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
@@ -9484,7 +9484,7 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
@@ -9505,7 +9505,7 @@ impl StateStore {
         if self.read_only && !self.allow_projection_rebuild {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier

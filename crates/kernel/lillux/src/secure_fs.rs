@@ -14,6 +14,14 @@ use anyhow::{Context, Result, ensure};
 
 mod descriptor_observation;
 pub use descriptor_observation::RetainedFileDescriptorObservation;
+#[cfg(target_os = "linux")]
+mod prefix_walk;
+#[cfg(target_os = "linux")]
+pub use prefix_walk::{
+    MAX_PREFIX_WALK_DEPTH, MAX_PREFIX_WALK_WORK, PrefixDirectoryCoverage, PrefixWalk,
+    PrefixWalkBudget, PrefixWalkDecision, PrefixWalkDirectory, PrefixWalkEntry,
+    PrefixWalkExhaustion,
+};
 
 /// The platform's pathname bound in bytes, the terminating NUL included.
 #[cfg(unix)]
@@ -580,6 +588,19 @@ pub struct PinnedRegularFileIdentity {
     inode: u64,
 }
 
+impl PinnedRegularFileIdentity {
+    /// The identity of a regular file whose `(st_dev, st_ino)` pair another
+    /// owner already observed from its open descriptor, such as a native
+    /// keeper reporting the main file it holds. The caller vouches that the
+    /// pair names a regular file.
+    pub const fn from_device_inode(containing_device: u64, inode: u64) -> Self {
+        Self {
+            containing_device,
+            inode,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -973,6 +994,21 @@ pub enum PinnedEntryType {
     Other,
 }
 
+/// Classify the file-type bits of a no-follow inspection.
+#[cfg(unix)]
+fn entry_type_from_mode(mode: libc::mode_t) -> PinnedEntryType {
+    match mode & libc::S_IFMT {
+        libc::S_IFDIR => PinnedEntryType::Directory,
+        libc::S_IFREG => PinnedEntryType::Regular,
+        libc::S_IFLNK => PinnedEntryType::Symlink,
+        libc::S_IFCHR => PinnedEntryType::CharacterDevice,
+        libc::S_IFBLK => PinnedEntryType::BlockDevice,
+        libc::S_IFIFO => PinnedEntryType::Fifo,
+        libc::S_IFSOCK => PinnedEntryType::Socket,
+        _ => PinnedEntryType::Other,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinnedDirectoryEntryMetadata {
     pub name: OsString,
@@ -1229,6 +1265,32 @@ fn directory_names_bounded_with_deadline(
     deadline: Option<crate::time::MonotonicDeadline>,
 ) -> Result<Vec<std::ffi::OsString>> {
     check_original_traversal_deadline(deadline)?;
+    let (mut names, _reached_end) = read_directory_names(directory, max_entries, false, || {
+        check_original_traversal_deadline(deadline)
+    })?;
+    check_original_traversal_deadline(deadline)?;
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    check_original_traversal_deadline(deadline)?;
+    Ok(names)
+}
+
+/// Read child names, excluding `.` and `..`, from an independent stream over
+/// the retained directory inode, in stream order.
+///
+/// `checkpoint` runs before every stream read and its error ends the read.
+/// With `limit`, reading stops once that many names are held. When
+/// `look_past_limit` is false it stops without another read and the returned
+/// flag is false. When true it reads on until it meets either one more name
+/// (flag false; that name is discarded) or the end of the stream (flag true),
+/// so a directory holding exactly `limit` names is known to be complete.
+/// Without `limit` the flag is always true.
+#[cfg(target_os = "linux")]
+fn read_directory_names(
+    directory: &File,
+    limit: Option<usize>,
+    look_past_limit: bool,
+    mut checkpoint: impl FnMut() -> Result<()>,
+) -> Result<(Vec<std::ffi::OsString>, bool)> {
     use std::os::unix::ffi::OsStringExt as _;
 
     struct DirectoryStream(*mut libc::DIR);
@@ -1272,9 +1334,10 @@ fn directory_names_bounded_with_deadline(
     let stream = DirectoryStream(stream);
     let mut names = Vec::new();
     loop {
-        check_original_traversal_deadline(deadline)?;
-        if max_entries.is_some_and(|maximum| names.len() >= maximum) {
-            break;
+        checkpoint()?;
+        let at_limit = limit.is_some_and(|maximum| names.len() >= maximum);
+        if at_limit && !look_past_limit {
+            return Ok((names, false));
         }
         // POSIX distinguishes end-of-directory from failure only through
         // errno when readdir returns null.
@@ -1289,19 +1352,18 @@ fn directory_names_bounded_with_deadline(
             if error.raw_os_error().unwrap_or(0) != 0 {
                 return Err(error).context("enumerate exact pinned directory");
             }
-            break;
+            return Ok((names, true));
         }
         // SAFETY: readdir returned a live dirent whose d_name is NUL-terminated.
         let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if matches!(name, b"." | b"..") {
             continue;
         }
+        if at_limit {
+            return Ok((names, false));
+        }
         names.push(std::ffi::OsString::from_vec(name.to_vec()));
     }
-    check_original_traversal_deadline(deadline)?;
-    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    check_original_traversal_deadline(deadline)?;
-    Ok(names)
 }
 
 #[cfg(target_os = "linux")]
@@ -2178,6 +2240,29 @@ impl PinnedRegularFile {
             .with_context(|| format!("read pinned regular file {}", self.path.display()))
     }
 
+    /// Read at most `max_bytes` from the start of this exact regular file,
+    /// whatever its length: a bounded preview, not whole-file evidence.
+    /// Memory grows only with the bytes actually read, and positional reads
+    /// leave the shared descriptor cursor untouched.
+    pub fn read_prefix(&self, max_bytes: usize) -> Result<Vec<u8>> {
+        const CHUNK: usize = 64 * 1024;
+        let mut bytes = Vec::new();
+        while bytes.len() < max_bytes {
+            let filled = bytes.len();
+            let want = (max_bytes - filled).min(CHUNK);
+            bytes.resize(filled + want, 0);
+            let count = read_regular_file_at(&self.file, &mut bytes[filled..], filled as u64)
+                .with_context(|| {
+                    format!("read pinned regular file prefix {}", self.path.display())
+                })?;
+            bytes.truncate(filled + count);
+            if count == 0 {
+                break;
+            }
+        }
+        Ok(bytes)
+    }
+
     /// Observe the exact descriptor for a later stable conditional read.
     pub fn observation(&self) -> Result<OpenRegularFileObservation> {
         observe_open_regular_file(&self.file)
@@ -2373,7 +2458,7 @@ impl PinnedRegularFile {
         anyhow::bail!("inherited descriptor authority is unavailable on this platform");
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let file = self.file.try_clone()?;
             crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
                 .map_err(anyhow::Error::msg)
@@ -2668,7 +2753,7 @@ impl PinnedDirectoryLock {
         }
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let inherited = crate::exec::InheritedDescriptorAuthority::from_owned_file(
                 self.inner.file.try_clone()?,
                 &lease,
@@ -3752,16 +3837,7 @@ impl PinnedDirectory {
                 });
             }
             check_original_traversal_deadline(deadline)?;
-            let entry_type = match stat.st_mode & libc::S_IFMT {
-                libc::S_IFDIR => PinnedEntryType::Directory,
-                libc::S_IFREG => PinnedEntryType::Regular,
-                libc::S_IFLNK => PinnedEntryType::Symlink,
-                libc::S_IFCHR => PinnedEntryType::CharacterDevice,
-                libc::S_IFBLK => PinnedEntryType::BlockDevice,
-                libc::S_IFIFO => PinnedEntryType::Fifo,
-                libc::S_IFSOCK => PinnedEntryType::Socket,
-                _ => PinnedEntryType::Other,
-            };
+            let entry_type = entry_type_from_mode(stat.st_mode);
             entries.push(PinnedDirectoryEntryMetadata {
                 name,
                 entry_type,
@@ -3803,16 +3879,7 @@ impl PinnedDirectory {
                 )
             });
         }
-        let entry_type = match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => PinnedEntryType::Directory,
-            libc::S_IFREG => PinnedEntryType::Regular,
-            libc::S_IFLNK => PinnedEntryType::Symlink,
-            libc::S_IFCHR => PinnedEntryType::CharacterDevice,
-            libc::S_IFBLK => PinnedEntryType::BlockDevice,
-            libc::S_IFIFO => PinnedEntryType::Fifo,
-            libc::S_IFSOCK => PinnedEntryType::Socket,
-            _ => PinnedEntryType::Other,
-        };
+        let entry_type = entry_type_from_mode(stat.st_mode);
         Ok(Some(PinnedDirectoryEntryMetadata {
             name: name.to_os_string(),
             entry_type,
@@ -5181,7 +5248,7 @@ impl PinnedDirectory {
         anyhow::bail!("inherited descriptor authority is unavailable on this platform");
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let file = self.directory.try_clone()?;
             crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
                 .map_err(anyhow::Error::msg)
@@ -5201,7 +5268,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             self.open_mount_entry(name)?
                 .map(|file| {
                     crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
@@ -5223,7 +5290,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             self.open_regular(name, writable)?
                 .map(|file| {
                     crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
@@ -7960,16 +8027,7 @@ pub fn inspect_optional_entry_no_follow(path: &Path) -> Result<Option<PinnedEntr
             }
             return Err(error).with_context(|| format!("inspect secure entry {}", path.display()));
         }
-        let entry_type = match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => PinnedEntryType::Directory,
-            libc::S_IFREG => PinnedEntryType::Regular,
-            libc::S_IFLNK => PinnedEntryType::Symlink,
-            libc::S_IFCHR => PinnedEntryType::CharacterDevice,
-            libc::S_IFBLK => PinnedEntryType::BlockDevice,
-            libc::S_IFIFO => PinnedEntryType::Fifo,
-            libc::S_IFSOCK => PinnedEntryType::Socket,
-            _ => PinnedEntryType::Other,
-        };
+        let entry_type = entry_type_from_mode(stat.st_mode);
         Ok(Some(entry_type))
     }
 }
@@ -8069,7 +8127,7 @@ pub fn pin_canonical_mount_source(
         }
         let encoded = CString::new(path.as_os_str().as_bytes())
             .context("mount source contains an interior NUL")?;
-        let lease = crate::exec::retain_fork_sensitive_descriptors();
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
         let mut descriptor = unsafe {
             libc::open(
                 encoded.as_ptr(),

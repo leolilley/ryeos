@@ -3171,7 +3171,7 @@ pub(crate) fn prepare_retained_session_process_environment(
     if !runtime_views.is_empty() {
         // Borrow the exact workspace incarnation, never its diagnostic host
         // pathname. Only the existing projectless scratch owner has no view.
-        let _lease = lillux::retain_fork_sensitive_descriptors();
+        let _lease = lillux::try_retain_fork_sensitive_descriptors()?;
         let (workspace_is_retained_view, workspace) = match (workspace_view, workspace_authority) {
             (
                 Some(view),
@@ -5827,7 +5827,7 @@ mod tests {
         let workspace = root.path().join("project");
         std::fs::create_dir(&workspace).unwrap();
         let view = {
-            let _lease = lillux::retain_fork_sensitive_descriptors();
+            let _lease = lillux::try_retain_fork_sensitive_descriptors().unwrap();
             lillux::PinnedDirectory::open(&workspace)
                 .unwrap()
                 .unwrap()

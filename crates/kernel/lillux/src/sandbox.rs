@@ -900,6 +900,86 @@ impl LinuxSandboxPipes {
     }
 }
 
+/// Remaining owned output ends after protocol input reached EOF. Keeps the
+/// original deadline so later borrowing never renews the caller's budget.
+pub struct LinuxSandboxOutputPipes {
+    pub stdout: std::fs::File,
+    pub stderr: std::fs::File,
+    deadline: crate::time::MonotonicDeadline,
+}
+
+/// Exclusively borrowed output ends under the original absolute deadline.
+pub struct LinuxSandboxOutputStreams<'a> {
+    pub output: crate::exec::DeadlinePipeStream<'a>,
+    pub diagnostics: crate::exec::DeadlinePipeStream<'a>,
+}
+
+impl LinuxSandboxPipes {
+    /// Write the complete input under one absolute deadline, then close the
+    /// input end so the target observes EOF. A refused write returns these
+    /// pipes unchanged with the error, so the caller keeps every end.
+    pub fn finish_input_into_output_pipes_until(
+        self,
+        input: &[u8],
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<LinuxSandboxOutputPipes, (Self, std::io::Error)> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write as _;
+            use std::os::fd::AsFd as _;
+            let written = crate::exec::DeadlinePipeStream::new(self.stdin.as_fd(), deadline)
+                .and_then(|mut stream| stream.write_all(input));
+            if let Err(error) = written {
+                return Err((self, error));
+            }
+            let LinuxSandboxPipes {
+                stdin,
+                stdout,
+                stderr,
+            } = self;
+            drop(stdin);
+            Ok(LinuxSandboxOutputPipes {
+                stdout,
+                stderr,
+                deadline,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (input, deadline);
+            let error = std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sandbox protocol pipes require Linux",
+            );
+            Err((self, error))
+        }
+    }
+}
+
+impl LinuxSandboxOutputPipes {
+    /// Borrow the owned nonblocking output ends for bounded multiplexed reads.
+    pub fn output_streams(&mut self) -> std::io::Result<LinuxSandboxOutputStreams<'_>> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd as _;
+            Ok(LinuxSandboxOutputStreams {
+                output: crate::exec::DeadlinePipeStream::new(self.stdout.as_fd(), self.deadline)?,
+                diagnostics: crate::exec::DeadlinePipeStream::new(
+                    self.stderr.as_fd(),
+                    self.deadline,
+                )?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sandbox protocol pipes require Linux",
+            ))
+        }
+    }
+}
+
 // Piped launches exclusively own stdin/stdout/stderr. The common native
 // validator still enforces sorted unique channels and all source-role aliases.
 fn require_piped_target_channels(request: &LinuxSandboxRequest) -> Result<(), String> {
@@ -1766,17 +1846,15 @@ impl LinuxSandboxProcess {
 impl Drop for LinuxSandboxProcess {
     fn drop(&mut self) {
         if self.pid > 0 {
-            unsafe {
-                libc::kill(self.pid, libc::SIGKILL);
-                loop {
-                    let result = libc::waitpid(self.pid, std::ptr::null_mut(), 0);
-                    if result >= 0
-                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-                    {
-                        break;
-                    }
-                }
-            }
+            unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            // A killed process normally exits at once. This drop may run while
+            // a creator holds the fork window, so one that does not exit is
+            // passed to a detached reaper instead of being waited on here.
+            let _ = crate::exec::reap_fork_holder_until(
+                self.pid,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                "dropped sandbox process",
+            );
             self.pid = 0;
         }
     }
@@ -2157,6 +2235,9 @@ mod imp {
         create_overlay_template, take_overlay_template, validate_overlay_template,
     };
 
+    /// How long the native inspection probe may hold the fork window,
+    /// including its report and its exit. A liveness cap only.
+    const SANDBOX_INSPECTION_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
     const ROOT: &str = "/tmp";
     const OLD_ROOT: &str = "/tmp/.lillux-old-root";
     const CHILD_READY: u8 = 0;
@@ -2223,6 +2304,16 @@ mod imp {
                 .into_iter().collect();
             let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
             let child_barrier = fork_guard.prepare_child_descriptor_barrier(&preserved)?;
+            // The parent write end stays open until the fork has happened or
+            // failed. The probe never execs, so its copy, and the copies of
+            // any probe process it forks, close only when those exit.
+            let witnessed = fork_guard
+                .witness_creation("native sandbox inspection creation")
+                .map_err(|error| format!("create sandbox inspection creation witness: {error}"))?;
+            // Declared before the write end, so that on any early return the
+            // write end drops first and the custody's settlement observes it.
+            let fork_custody = witnessed.0;
+            let fork_custody_witness = witnessed.1;
             let mut report = [0; 2];
             syscall_zero(
                 unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -2274,21 +2365,33 @@ mod imp {
                 }
                 unsafe { libc::_exit(if result.is_ok() { 0 } else { 125 }) };
             }
+            drop(fork_custody_witness);
             close_fd(report[1]);
-            let outcome = read_child_ready(report[0]);
+            // The probe holds the fork window, so both its report and its
+            // exit are awaited only within one bound; a probe that overruns
+            // it is killed rather than waited on.
+            let hold = crate::time::MonotonicDeadline::after(SANDBOX_INSPECTION_BOUND);
+            let outcome = read_child_ready_until(report[0], hold);
             close_fd(report[0]);
-            let mut status = 0;
-            loop {
-                let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-                if waited == pid { break; }
-                let error = std::io::Error::last_os_error();
-                if waited < 0 && error.raw_os_error() == Some(libc::EINTR) { continue; }
-                // No disposal/death proof for this exact child: retain shared
-                // exclusion rather than mint parent lease-close completion.
-                std::mem::forget(fork_guard);
-                return Err(format!("wait for native sandbox inspection (fork exclusion retained): {error}"));
-            }
-            drop(fork_guard);
+            let reaped = std::time::Instant::now()
+                .checked_add(hold.remaining())
+                .ok_or_else(|| "sandbox inspection bound overflow".to_owned())
+                .and_then(|bound| {
+                    crate::exec::reap_fork_holder_until(pid, bound, "native sandbox inspection")
+                });
+            // A reaped probe has closed its own witness copy. Without that
+            // proof the window strands with its fact rather than let a parent
+            // lease close claim inherited descriptors settled.
+            let custody = fork_custody.settle();
+            let status = match (reaped, custody) {
+                (Ok(Some(status)), Ok(())) => status,
+                (Ok(None), Ok(())) => {
+                    return Err("native sandbox inspection was reaped by another owner".to_owned());
+                }
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(_), Err(fact)) => return Err(fact),
+                (Err(error), Err(fact)) => return Err(format!("{error}; {fact}")),
+            };
             if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
                 if nested {
                     available.nested_sandbox = false;
@@ -3454,7 +3557,7 @@ mod imp {
     ) -> Result<crate::InheritedDescriptorAuthority, String> {
         use std::os::unix::fs::FileExt as _;
 
-        let lease = crate::retain_fork_sensitive_descriptors();
+        let lease = crate::try_retain_fork_sensitive_descriptors()?;
         if !mount_source_is_sealed(fd)? {
             return Err("private byte materialization requires a sealed source".to_string());
         }
@@ -4699,6 +4802,16 @@ mod imp {
         let mut child_preserved = preserved.clone();
         if let Some(fd) = terminal_scrub_descriptor { child_preserved.remove(&fd); }
         let child_barrier = fork_guard.prepare_child_descriptor_barrier(&child_preserved)?;
+        // The parent write end stays open until the fork has happened or
+        // failed. Every later end except observed readiness settles through
+        // this witness, after the process owner below has killed and reaped.
+        let witnessed = fork_guard
+            .witness_creation("sandbox target creation")
+            .map_err(|error| format!("create sandbox target creation witness: {error}"))?;
+        // Declared before the write end, so that on any early return the
+        // write end drops first and the custody's own settlement observes it.
+        let fork_custody = witnessed.0;
+        let fork_custody_witness = witnessed.1;
         let mut ready = [0; 2];
         syscall_zero(
             unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -4833,9 +4946,10 @@ mod imp {
             }
             unsafe { libc::_exit(125) };
         }
-        // Every subsequent early error retains exclusion. Readiness, not a
-        // dropped process owner or signal request, proves inherited FD disposal.
-        let mut fork_guard = std::mem::ManuallyDrop::new(fork_guard);
+        // Readiness, not a dropped process owner or signal request, is the
+        // direct disposal proof. Every other end settles through the witness
+        // once `process` (declared later, dropped first) has killed and reaped.
+        drop(fork_custody_witness);
         close_fd(ready[1]);
         close_fd(launch_failure[1]);
         close_fd(applied_launch[1]);
@@ -4882,7 +4996,7 @@ mod imp {
         };
         // The child emitted readiness after the explicit close snapshot and
         // its final setup checks. Only this observed boundary releases exclusion.
-        unsafe { std::mem::ManuallyDrop::drop(&mut fork_guard) };
+        fork_custody.release_observed();
         mount_preparation.owned_child_pid = pid as u32;
         process.mount_preparation = Some(mount_preparation);
         if let Some(watchdog) = occupancy.as_ref() {
@@ -6315,6 +6429,19 @@ mod imp {
         match kind[0] {
             CHILD_READY => Ok(()),
             CHILD_ERROR => Err(read_child_error(fd)?),
+            _ => Err("sandbox child emitted an invalid readiness record".to_string()),
+        }
+    }
+
+    fn read_child_ready_until(
+        fd: RawFd,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let mut kind = [0_u8; 1];
+        read_exact_fd_until(fd, &mut kind, deadline)?;
+        match kind[0] {
+            CHILD_READY => Ok(()),
+            CHILD_ERROR => Err(read_child_error_until(fd, deadline)?),
             _ => Err("sandbox child emitted an invalid readiness record".to_string()),
         }
     }

@@ -19,10 +19,11 @@ pub(crate) fn take_overlay_template(fd: u32) -> Result<LinuxOverlayTemplate, Str
         return Err("overlay template descriptor overlaps stdio".to_string());
     }
     let descriptor = raw_fd(fd)?;
-    let lease = crate::retain_fork_sensitive_descriptors();
     // SAFETY: the outer public adoption contract transfers unique inherited
-    // ownership. Registration/type refusal retains or closes it on every path.
+    // ownership. Registration/type refusal retains or closes it on every path,
+    // so adoption precedes the lease: a refused lease closes the owner too.
     let file = unsafe { File::from_raw_fd(descriptor) };
+    let lease = crate::try_retain_fork_sensitive_descriptors()?;
     LinuxOverlayTemplate::from_transferred_authority(
         crate::InheritedDescriptorAuthority::from_owned_file(file, &lease)?,
     )
@@ -38,7 +39,7 @@ pub(crate) fn create_overlay_template(
     // Cover every temporary pin/duplicate until the returned template has
     // joined the existing registered inheritance owner. Registering only the
     // final mount cannot retroactively protect earlier descriptor creation.
-    let _creation_lease = crate::retain_fork_sensitive_descriptors();
+    let _creation_lease = crate::try_retain_fork_sensitive_descriptors()?;
     // Hold the original objects throughout the namespace transition and
     // identity comparison. A path is only a locator for those exact objects.
     let original_lower = inherited_directory(project_fd, "overlay template lower")?;
@@ -82,7 +83,7 @@ fn create_from_layers(
     // Registration must cover creation, not just eventual transport. The
     // existing inheritance owner prevents unrelated held children retaining
     // this mount after its legitimate workspace owner drops the last handle.
-    let lease = crate::retain_fork_sensitive_descriptors();
+    let lease = crate::try_retain_fork_sensitive_descriptors()?;
     let context_fd =
         unsafe { libc::syscall(libc::SYS_fsopen, c"overlay".as_ptr(), FSOPEN_CLOEXEC) } as RawFd;
     if context_fd < 0 {

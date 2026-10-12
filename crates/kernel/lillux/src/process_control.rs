@@ -21,6 +21,7 @@ pub const CONTROLLER_MEMLOCK_CEILING_BYTES: u64 = 256 * 1024 * 1024;
 /// Descriptor soft ceiling for a node controller; the inherited hard limit
 /// still bounds it, and no host-wide maximum is raised.
 pub const CONTROLLER_NOFILE_SOFT_CEILING: u64 = 65_536;
+mod host_capability;
 mod oci_lifecycle;
 // This is the diagnostic witness that a namespace can outlive a process
 // group. It is not a second production lifecycle backend: membership scans
@@ -30,6 +31,13 @@ mod pid_namespace;
 mod scope;
 #[cfg(target_os = "linux")]
 pub(crate) use scope::SelectedScopePreparation;
+pub use host_capability::{
+    CapabilityEvidence, CgroupFacts, CgroupLimit, HOST_FACTS_VERSION, HostCapabilities, HostFacts,
+    MemlockFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT,
+    ResidencyProof, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT,
+    TRUSTED_GRADE_CAPABILITIES, admit_enclosure_inits, current_host_generation,
+    satisfies_local_requirement,
+};
 pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress};
 pub use scope::{
     ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,

@@ -50,7 +50,10 @@ pub use exec::{
     inherited_executable_path, take_inherited_descriptor_authority,
     take_inherited_descriptor_authority_from_env,
 };
-pub use exec::{retain_fork_sensitive_descriptors, retain_fork_sensitive_descriptors_until};
+pub use exec::{
+    ForkSensitiveDescriptorLeaseRefused, current_thread_retains_fork_sensitive_descriptors,
+    retain_fork_sensitive_descriptors_until, try_retain_fork_sensitive_descriptors,
+};
 pub use sandbox::{
     HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
 };
@@ -110,6 +113,12 @@ pub use exec::{
 };
 #[cfg(unix)]
 pub use secure_fs::PATH_MAX_BYTES;
+#[cfg(target_os = "linux")]
+pub use secure_fs::{
+    MAX_PREFIX_WALK_DEPTH, MAX_PREFIX_WALK_WORK, PrefixDirectoryCoverage, PrefixWalk,
+    PrefixWalkBudget, PrefixWalkDecision, PrefixWalkDirectory, PrefixWalkEntry,
+    PrefixWalkExhaustion,
+};
 pub use secure_fs::{
     SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
     parse_secure_temp_name,

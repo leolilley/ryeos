@@ -1,5 +1,7 @@
 mod retained_occupancy;
-pub use retained_occupancy::{RetainedClockCloseFailure, RetainedOccupancyClock, RetiredOccupancyClock};
+pub use retained_occupancy::{
+    OccupancyServiceEdge, RetainedClockCloseFailure, RetainedOccupancyClock, RetiredOccupancyClock,
+};
 
 use std::thread;
 pub use std::time::Duration;

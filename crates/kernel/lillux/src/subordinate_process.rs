@@ -192,6 +192,41 @@ impl Drop for SubordinateDiagnosticDrain {
     }
 }
 
+/// How long a subordinate launch may wait for the process-creation window.
+#[cfg(unix)]
+const SUBORDINATE_FORK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(unix)]
+type SubordinateForkCustody = crate::exec::QuiescedForkSensitiveDescriptors;
+#[cfg(not(unix))]
+type SubordinateForkCustody = ();
+
+/// Hold the process-creation window for this launch and install the
+/// registered-descriptor scrub as the command's first pre-exec hook, so the
+/// child closes every registered parent descriptor except its own inherited
+/// authorities before anything else can run or block in it. Call this before
+/// any other pre-exec hook is configured.
+fn prepare_subordinate_fork_custody(
+    command: &mut Command,
+    inherited_fds: &[InheritedDescriptorAuthority],
+) -> Result<SubordinateForkCustody, String> {
+    #[cfg(unix)]
+    {
+        let mut preserved = std::collections::BTreeSet::from([0, 1, 2]);
+        preserved.extend(crate::exec::normalize_inherited_descriptors(inherited_fds)?);
+        let deadline = std::time::Instant::now()
+            .checked_add(SUBORDINATE_FORK_WAIT)
+            .ok_or("subordinate process fork wait bound overflow")?;
+        crate::exec::prepare_command_fork_custody(command, &preserved, deadline)
+            .map_err(|error| format!("subordinate process fork custody: {error}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command, inherited_fds);
+        Ok(())
+    }
+}
+
 impl SubordinateProcess {
     pub fn spawn(request: SubordinateProcessRequest) -> Result<Self, String> {
         if request.cmd.is_empty() || request.cwd.is_empty() {
@@ -199,8 +234,10 @@ impl SubordinateProcess {
         }
         let mut command = Command::new(&request.cmd);
         command.current_dir(&request.cwd);
+        let custody = prepare_subordinate_fork_custody(&mut command, &request.inherited_fds)?;
         Self::spawn_configured(
             command,
+            custody,
             request.argv0,
             request.args,
             request.envs,
@@ -223,13 +260,16 @@ impl SubordinateProcess {
             .into_inherited_descriptor_path()
             .map_err(|error| error.to_string())?;
         let mut command = Command::new(executable.path());
+        request.inherited_fds.push(executable);
+        // The scrub hook precedes the descriptor-selected cwd hook.
+        let custody = prepare_subordinate_fork_custody(&mut command, &request.inherited_fds)?;
         request
             .cwd
             .configure_command_cwd(&mut command)
             .map_err(|error| error.to_string())?;
-        request.inherited_fds.push(executable);
         Self::spawn_configured(
             command,
+            custody,
             request.argv0,
             request.args,
             request.envs,
@@ -240,6 +280,7 @@ impl SubordinateProcess {
 
     fn spawn_configured(
         mut command: Command,
+        custody: SubordinateForkCustody,
         argv0: Option<String>,
         args: Vec<String>,
         envs: Vec<(String, String)>,
@@ -258,9 +299,16 @@ impl SubordinateProcess {
         configure_inherited_descriptor_authorities(&mut command, &inherited_fds)?;
         configure_subprocess_limits(&mut command, limits.as_ref())?;
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("spawn subordinate process: {error}"))?;
+        // The window reopens once the child has exec'd, or once the creation
+        // witness proves no created process still holds its pre-exec table.
+        #[cfg(unix)]
+        let spawned = crate::exec::spawn_command_with_fork_custody(&mut command, Some(custody));
+        #[cfg(not(unix))]
+        let spawned = {
+            let () = custody;
+            command.spawn()
+        };
+        let mut child = spawned.map_err(|error| format!("spawn subordinate process: {error}"))?;
         // After a successful spawn, return the owner without another fallible
         // host operation. Stream acquisition/configuration errors must leave
         // this exact child with its caller, not kill/wait inside an error path.
@@ -438,6 +486,49 @@ mod terminal_failure_tests {
             inherited_fds: Vec::new(),
         })
         .expect("spawn test child")
+    }
+
+    #[test]
+    fn spawn_is_created_only_under_the_fork_window() {
+        // An unguarded spawn ignores descriptor leases; this one refuses a
+        // caller that holds one, and waits for one held elsewhere.
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors().unwrap();
+        match SubordinateProcess::spawn(SubordinateProcessRequest {
+            cmd: "/bin/true".to_owned(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: "/".to_owned(),
+            envs: Vec::new(),
+            limits: None,
+            inherited_fds: Vec::new(),
+        }) {
+            Ok(_) => panic!("spawned while this thread held a descriptor lease"),
+            Err(error) => {
+                assert!(error.contains("retains fork-sensitive descriptor authority"), "{error}");
+            }
+        }
+        drop(lease);
+        let hold = std::time::Duration::from_millis(300);
+        let (held, observed) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(lease);
+        });
+        observed.recv().unwrap();
+        let started = std::time::Instant::now();
+        let mut process = child_with_pipes();
+        let waited = started.elapsed();
+        holder.join().unwrap();
+        assert!(waited >= hold - std::time::Duration::from_millis(50), "{waited:?}");
+        let exit = process
+            .wait_exact_child_until(MonotonicDeadline::after(std::time::Duration::from_secs(5)))
+            .unwrap()
+            .expect("test child exits");
+        assert!(exit.success);
+        // The window reopened once the child exec'd.
+        drop(crate::exec::try_retain_fork_sensitive_descriptors().unwrap());
     }
 
     #[test]

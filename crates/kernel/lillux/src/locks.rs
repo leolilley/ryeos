@@ -321,7 +321,7 @@ impl ExactExclusiveFileLock {
             // until its long-lived child-close registration is visible. A
             // direct-attachment fork can therefore never inherit the lock in
             // the gap between those operations.
-            let fork_sensitive_descriptors = crate::exec::retain_fork_sensitive_descriptors();
+            let fork_sensitive_descriptors = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
             let parent = open_directory_no_follow(parent_path, create_missing)?;
             let target_name = target

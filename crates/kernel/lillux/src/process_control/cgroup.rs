@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::{PinnedDirectory, PinnedDirectoryIdentity};
 
-const CGROUP2_SUPER_MAGIC: libc::c_long = 0x6367_7270;
+pub(super) const CGROUP2_SUPER_MAGIC: libc::c_long = 0x6367_7270;
 const HOST_SERVICE_DELEGATIONS: &str = "lillux-host-services";
 // Bounded kernel interface records, not workload output or acquisition policy.
 const MAX_CONTROL_RECORD_BYTES: usize = 4096;
@@ -28,7 +28,7 @@ const OCI_CONTROLLER_ROOT: &str = "ryeos-controller-root";
 const CONTROLLER_LEAF: &str = "controller";
 const OCI_INIT_LEAF: &str = "ryeos-init";
 const OCI_INIT_SUBJECT: &str = "OCI init";
-const CURRENT_PROCESS_SUBJECT: &str = "current process";
+pub(super) const CURRENT_PROCESS_SUBJECT: &str = "current process";
 const MAX_OCI_RETIREMENT_ENTRIES: usize = 16_384;
 const MAX_OCI_RETIREMENT_DEPTH: usize = 64;
 
@@ -538,6 +538,10 @@ fn retire_empty_oci_directory(
 /// exact init mount namespace; the host adapter never changes its own mount
 /// namespace. R was created directly below pinned C above, so this exposes no
 /// sibling or lifecycle-parent control to the container.
+/// How long the OCI mount installer may hold the fork window. It performs one
+/// namespace join and one mount move, so this is a liveness cap only.
+const OCI_MOUNT_INSTALL_BOUND: Duration = Duration::from_secs(10);
+
 pub(crate) fn install_oci_controller_mount(
     prepared: &PreparedOciCgroup,
     process_root: &super::ExactProcessRoot,
@@ -584,6 +588,15 @@ pub(crate) fn install_oci_controller_mount(
     let preserved = [namespace.as_raw_fd(), membership.as_raw_fd(), target.as_raw_fd(),
         mount_tree.as_raw_fd()].into_iter().collect();
     let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
+    // The parent write end stays open until the fork has happened or failed.
+    // The installer never execs, so its copy closes only when it exits.
+    let witnessed = fork_guard
+        .witness_creation("OCI mount installer creation")
+        .map_err(|error| format!("create OCI mount installer creation witness: {error}"))?;
+    // Declared before the write end, so that on any early return the write
+    // end drops first and the custody's own settlement observes the witness.
+    let fork_custody = witnessed.0;
+    let fork_custody_witness = witnessed.1;
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
@@ -618,24 +631,28 @@ pub(crate) fn install_oci_controller_mount(
         })();
         unsafe { libc::_exit(if result.is_ok() { 0 } else { 125 }) };
     }
-    let mut status = 0;
-    loop {
-        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
-        if waited == child {
-            break;
+    drop(fork_custody_witness);
+    // The fork window is held while the installer runs, so wait for it only
+    // within a fixed bound; an installer that does not finish is killed.
+    let reaped = Instant::now()
+        .checked_add(OCI_MOUNT_INSTALL_BOUND)
+        .ok_or_else(|| "OCI mount installer bound overflow".to_owned())
+        .and_then(|bound| {
+            crate::exec::reap_fork_holder_until(child, bound, "OCI mount installer")
+        });
+    // A reaped installer has closed its witness copy, so this reopens at
+    // once. Without that proof the window strands with its fact instead of
+    // letting an original lease close claim inherited locks settled.
+    let custody = fork_custody.settle();
+    let status = match (reaped, custody) {
+        (Ok(Some(status)), Ok(())) => status,
+        (Ok(None), Ok(())) => {
+            return Err("OCI mount installer was reaped by another owner".to_owned());
         }
-        if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        // No child death/disposal proof: keep fork exclusion rather than
-        // permit an original lease close to claim inherited locks settled.
-        std::mem::forget(fork_guard);
-        return Err(format!(
-            "wait for OCI mount installer (fork exclusion retained): {}",
-            io::Error::last_os_error()
-        ));
-    }
-    drop(fork_guard);
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(fact)) => return Err(fact),
+        (Err(error), Err(fact)) => return Err(format!("{error}; {fact}")),
+    };
     if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
         return Err("install writable OCI controller-root mount failed".to_owned());
     }
@@ -653,7 +670,7 @@ fn unified_process_cgroup(pid: u32) -> Result<std::path::PathBuf, String> {
 }
 
 /// `subject` names the observed process in every refusal, e.g. "OCI init".
-fn unified_cgroup_from_file(
+pub(super) fn unified_cgroup_from_file(
     membership: &File,
     subject: &str,
 ) -> Result<std::path::PathBuf, String> {
@@ -807,11 +824,14 @@ pub(crate) fn require_current_process_in_controller(
     let membership = File::open("/proc/self/cgroup")
         .map_err(|error| format!("open current process cgroup membership: {error}"))?;
     require_controller_membership_file(&membership, delegation)?;
-    // Administrator ownership below proves host placement only when uid 0 is
-    // the host's uid 0, i.e. in the initial user namespace.
+    // The placement anchor is the checks after this one: at the delegation
+    // path the host bound, `cgroup.freeze`, `cgroup.kill` and the controller
+    // leaf must read as owned by uid 0, which the account cannot arrange.
+    // This guard only rules out reading that ownership through a user
+    // namespace whose uid 0 the account itself could map.
     let uid_map = File::open("/proc/self/uid_map")
         .map_err(|error| format!("open current process uid map: {error}"))?;
-    require_initial_user_namespace_file(&uid_map)?;
+    require_namespace_root_not_account(&uid_map, current_user_namespace_owner()?, uid)?;
     let directory = PinnedDirectory::open(delegation)
         .map_err(display)?
         .ok_or("host delegation is absent")?;
@@ -835,9 +855,20 @@ pub(crate) fn require_current_process_in_controller(
     Ok(())
 }
 
-/// The identity mapping of the full 32-bit uid range exists only in the
-/// initial user namespace; any nested namespace maps a narrower range.
-fn require_initial_user_namespace_file(uid_map: &File) -> Result<(), String> {
+/// Supporting guard for the ownership anchor in
+/// `require_current_process_in_controller`. Placement is proved by uid-0
+/// ownership of `cgroup.freeze`, `cgroup.kill` and the controller leaf at the
+/// delegation path bound by the host; those files were made by whoever
+/// provisioned the delegation, and the account can neither create nor chown
+/// them. Ownership is read through this process's user namespace, so the
+/// anchor needs uid 0 to be mapped here and needs the namespace not to be one
+/// the account created, since a namespace's creator writes its uid map. The
+/// initial namespace and a namespace made by a container runtime both pass.
+fn require_namespace_root_not_account(
+    uid_map: &File,
+    namespace_owner_uid: u32,
+    account_uid: u32,
+) -> Result<(), String> {
     let mut bytes = vec![0_u8; MAX_CONTROL_RECORD_BYTES + 1];
     let mut offset = 0;
     while offset < bytes.len() {
@@ -854,19 +885,62 @@ fn require_initial_user_namespace_file(uid_map: &File) -> Result<(), String> {
     }
     let raw = std::str::from_utf8(&bytes[..offset])
         .map_err(|_| "current process uid map is not UTF-8")?;
-    let mut lines = raw.lines();
-    let initial = matches!(
-        (lines.next(), lines.next()),
-        (Some(line), None) if line.split_whitespace().eq(["0", "0", "4294967295"])
-    );
-    if !initial {
+    let mut ranges = Vec::new();
+    for line in raw.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let parsed = match fields.as_slice() {
+            [inside, outside, count] => inside
+                .parse::<u64>()
+                .ok()
+                .zip(outside.parse::<u64>().ok())
+                .zip(count.parse::<u64>().ok())
+                .map(|((inside, outside), count)| (inside, outside, count)),
+            _ => None,
+        };
+        let Some(range) = parsed.filter(|(_, _, count)| *count > 0) else {
+            return Err(format!(
+                "supervised launch refused: current process uid map {:?} is malformed",
+                raw.trim_end()
+            ));
+        };
+        ranges.push(range);
+    }
+    if ranges.is_empty() {
+        return Err("supervised launch refused: current process uid map is empty".to_owned());
+    }
+    if !ranges.iter().any(|(inside, _, _)| *inside == 0) {
         return Err(format!(
-            "supervised launch refused: this process is not in the initial user namespace \
-             (uid map {:?}); host placement cannot be proved from a nested namespace",
+            "supervised launch refused: uid 0 is not mapped in this process's user namespace \
+             (uid map {:?}), so administrator ownership of the controller leaf cannot be observed",
+            raw.trim_end()
+        ));
+    }
+    if namespace_owner_uid == account_uid {
+        return Err(format!(
+            "supervised launch refused: this process's user namespace (uid map {:?}) was created \
+             by the controller account itself, which controls its uid map; host placement \
+             cannot be proved from a namespace the account made",
             raw.trim_end()
         ));
     }
     Ok(())
+}
+
+/// Owner of the current user namespace as seen from inside it. A creator
+/// whose identity is not mapped here reads as the kernel overflow uid.
+fn current_user_namespace_owner() -> Result<u32, String> {
+    // NS_GET_OWNER_UID from <linux/nsfs.h>: _IO(0xb7, 0x4).
+    const NS_GET_OWNER_UID: u32 = 0xb704;
+    let namespace = File::open("/proc/self/ns/user")
+        .map_err(|error| format!("open current user namespace: {error}"))?;
+    let mut owner: libc::uid_t = 0;
+    if unsafe { libc::ioctl(namespace.as_raw_fd(), NS_GET_OWNER_UID as _, &mut owner as *mut libc::uid_t) } != 0 {
+        return Err(format!(
+            "read current user namespace owner: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(owner)
 }
 
 fn require_controller_membership_file(membership: &File, delegation: &Path) -> Result<(), String> {
@@ -1943,6 +2017,15 @@ impl ProcessCgroup {
         // the bounded probe's report endpoints inside this exclusive window.
         let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(deadline)?;
         let child_close_fds = fork_guard.fork_child_close_fds(&Default::default())?;
+        // The parent write end stays open until the clone has happened or
+        // failed; any end without the pinned exit proof settles through it.
+        let witnessed = fork_guard
+            .witness_creation("process scope probe creation")
+            .map_err(|error| format!("create scope probe creation witness: {error}"))?;
+        // Declared before the write end, so that on any early return the
+        // write end drops first and the custody's own settlement observes it.
+        let fork_custody = witnessed.0;
+        let fork_custody_witness = witnessed.1;
         let mut report = [-1; 2];
         if unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
             return Err(format!(
@@ -2016,8 +2099,9 @@ impl ProcessCgroup {
             }
         }
         // Successful clone may have a live child before its close snapshot.
-        // Any unresolved early return/unwind must retain fork exclusion.
-        let mut fork_guard = std::mem::ManuallyDrop::new(fork_guard);
+        // Any end without the observed proof below settles through the
+        // witness, which hangs up only once this probe has exited.
+        drop(fork_custody_witness);
         let mut child_disposal_proved = false;
         let child_pidfd = unsafe { File::from_raw_fd(child_pidfd) };
         drop(writer);
@@ -2068,18 +2152,26 @@ impl ProcessCgroup {
             }
             self.wait_empty(deadline.saturating_duration_since(Instant::now()))
         })();
-        if child_disposal_proved {
-            unsafe { std::mem::ManuallyDrop::drop(&mut fork_guard) };
-        }
-        // Otherwise the original exclusive guard remains deliberately retained;
-        // a cleanup error is never evidence that inherited locks were released.
-        match (outcome, cleanup) {
+        let custody = if child_disposal_proved {
+            fork_custody.release_observed();
+            Ok(())
+        } else {
+            // A cleanup error is never evidence that inherited locks were
+            // released; only the witness may reopen the window, else strand.
+            fork_custody.settle()
+        };
+        let result = match (outcome, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),
             (Ok(()), Err(error)) => Err(format!("scope probe cleanup remains unproved: {error}")),
             (Err(error), Err(cleanup)) => Err(format!(
                 "{error}; scope probe cleanup remains unproved: {cleanup}"
             )),
+        };
+        match (result, custody) {
+            (result, Ok(())) => result,
+            (Ok(()), Err(fact)) => Err(fact),
+            (Err(error), Err(fact)) => Err(format!("{error}; {fact}")),
         }
     }
 
@@ -2428,7 +2520,7 @@ fn parse_events(raw: &str) -> Result<CgroupEvents, String> {
     })
 }
 
-fn require_cgroup2(file: &File) -> Result<(), String> {
+pub(super) fn require_cgroup2(file: &File) -> Result<(), String> {
     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } != 0 {
         return Err(display(io::Error::last_os_error()));
@@ -2690,22 +2782,27 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn supervised_claim_requires_the_initial_user_namespace() {
-        for (uid_map, expected) in [
-            ("         0          0 4294967295\n", true),
-            ("0 0 4294967295", true),
-            ("         0       1000          1\n", false),
-            ("         0     100000      65536\n", false),
-            ("         0          0 4294967294\n", false),
-            ("         0          0 4294967295\n      1000       1000          1\n", false),
-            ("", false),
+    fn supervised_claim_requires_a_namespace_the_account_did_not_make() {
+        const ACCOUNT: u32 = 1000;
+        const RUNTIME: u32 = 0;
+        const OVERFLOW: u32 = 65534;
+        for (uid_map, owner, expected, reason) in [
+            ("         0          0 4294967295\n", RUNTIME, true, ""),
+            ("0 0 4294967295", RUNTIME, true, ""),
+            ("         0     100000      65536\n", OVERFLOW, true, ""),
+            ("         0       1000          1\n      1000     100000      65536\n", RUNTIME, true, ""),
+            ("      1000       1000          1\n", ACCOUNT, false, "uid 0 is not mapped"),
+            ("         0     100000      65536\n", ACCOUNT, false, "created by the controller account"),
+            ("         0          0 4294967295\n", ACCOUNT, false, "created by the controller account"),
+            ("", RUNTIME, false, "empty"),
+            ("0 0", RUNTIME, false, "malformed"),
         ] {
             let mut fixture = tempfile::NamedTempFile::new().unwrap();
             std::io::Write::write_all(fixture.as_file_mut(), uid_map.as_bytes()).unwrap();
-            let result = require_initial_user_namespace_file(fixture.as_file());
+            let result = require_namespace_root_not_account(fixture.as_file(), owner, ACCOUNT);
             assert_eq!(result.is_ok(), expected, "{uid_map:?}: {result:?}");
             if let Err(error) = result {
-                assert!(error.contains("initial user namespace"), "{error}");
+                assert!(error.contains(reason), "{error}");
             }
         }
     }
@@ -3412,7 +3509,7 @@ pub(super) mod tests {
             .unwrap();
         // A probe must obey the existing daemon fork/descriptor authority,
         // even though it never runs a workload or executes an image.
-        let lease = crate::retain_fork_sensitive_descriptors();
+        let lease = crate::try_retain_fork_sensitive_descriptors().unwrap();
         let refused = sibling.probe_lifecycle(Duration::from_secs(1)).unwrap_err();
         assert!(
             refused.contains("calling thread retains fork-sensitive descriptor authority"),

@@ -1927,7 +1927,7 @@ impl CasMutationGuard {
     pub(crate) fn acquire_existing_shared_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
         if exclusive_depth != 0 {
             let file = current_guard_file_for_pinned_runtime(runtime)?;
@@ -2083,7 +2083,7 @@ impl CasMutationGuard {
         runtime: &lillux::PinnedDirectory,
         create: bool,
     ) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         if EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
             || SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0
         {
@@ -2251,7 +2251,7 @@ impl CasMutationGuard {
 
     #[track_caller]
     fn acquire(runtime_state_dir: &Path, exclusive: bool, create_if_missing: bool) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         if exclusive {
             let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
             if exclusive_depth != 0 {

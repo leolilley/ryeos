@@ -11,8 +11,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const SCOPE_CONFIGURATION_VERSION: u32 = 3;
-const SCOPE_RECOVERY_VERSION: u32 = 4;
-const SCOPE_ALLOCATION_VERSION: u32 = 2;
+const SCOPE_RECOVERY_VERSION: u32 = 5;
+const SCOPE_ALLOCATION_VERSION: u32 = 3;
+const HOST_LIFETIME_VERSION: u32 = 2;
 /// Root owns native supervisor control directories. The selected controller's
 /// primary group gets traversal only, so it can reach its exact `0600` FIFO
 /// without listing or changing the supervisor namespace.
@@ -418,7 +419,18 @@ pub fn require_administrator() -> anyhow::Result<()> {
 /// Coarse host-lifetime witness, never process-control or launch authority.
 /// A durable owner can retain this independently of its execution-row schema
 /// to prove that even an unobserved pre-attachment process cannot still exist.
-/// Same-boot process absence is deliberately NOT claimed by this witness.
+///
+/// A lifetime is one kernel boot, and, when the node is the whole of a
+/// container, that container's enclosure cgroup. The enclosure is recorded
+/// only when the node runs alone in a private cgroup namespace rooted at its
+/// own cgroup and a private pid namespace, and its exit is proven to end
+/// that namespace: the node is pid 1, or its parent is a pid 1 that node
+/// policy trusts to exit with its only child. Otherwise only the boot is
+/// recorded and the enclosure generation stays undecided. Callers decide
+/// lifetimes only while holding the node's state lock, which proves the
+/// recording node has exited; with both, a different enclosure on the same
+/// boot is a container that has ended. Absence of a process within the same
+/// boot and enclosure is deliberately NOT claimed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessHostLifetime {
@@ -429,18 +441,113 @@ pub struct ProcessHostLifetime {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "implementation", rename_all = "snake_case", deny_unknown_fields)]
 enum HostLifetimeBackend {
-    LinuxBoot { boot_id: String },
+    LinuxBoot { boot_id: String, cgroup_enclosure: Option<u64> },
+}
+
+/// Current boot and, when the node is the whole of a container whose
+/// enclosure ends with it, the inode of that enclosure cgroup. `None` means
+/// the boot is the only generation the recording node can vouch for.
+#[cfg(target_os = "linux")]
+fn capture_host_generation() -> Result<(String, Option<u64>), String> {
+    let boot_id = current_boot_id()?;
+    Ok((boot_id, super::host_capability::read_witnessed_enclosure()?))
+}
+
+#[cfg(target_os = "linux")]
+fn current_boot_id() -> Result<String, String> {
+    let boot_id = super::linux::read_boot_id()?;
+    if !valid_boot_id(&boot_id) {
+        return Err("current host lifetime is unavailable".to_owned());
+    }
+    Ok(boot_id)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostGenerationChange {
+    Same,
+    BootEnded,
+    EnclosureChanged,
+}
+
+/// Compare a recorded boot and enclosure with the current ones. The
+/// recorder vouched that its exit ends the recorded enclosure, so the current
+/// side needs only the enclosure it can see. A recording without an
+/// enclosure is decided by boot alone: on the same boot it is never taken as
+/// ended. If a recorded enclosure is no longer visible within one boot, the
+/// generation cannot be decided and the caller must not settle anything
+/// from it.
+#[cfg(target_os = "linux")]
+fn host_generation_change(
+    boot_id: &str,
+    cgroup_enclosure: Option<u64>,
+) -> Result<HostGenerationChange, String> {
+    let current_boot = current_boot_id()?;
+    if current_boot != boot_id {
+        return Ok(HostGenerationChange::BootEnded);
+    }
+    let Some(recorded) = cgroup_enclosure else {
+        return Ok(HostGenerationChange::Same);
+    };
+    compare_enclosure(recorded, super::host_capability::read_cgroup_enclosure()?)
+}
+
+#[cfg(target_os = "linux")]
+fn compare_enclosure(recorded: u64, current: Option<u64>) -> Result<HostGenerationChange, String> {
+    match current {
+        Some(current) if current != recorded => Ok(HostGenerationChange::EnclosureChanged),
+        Some(_) => Ok(HostGenerationChange::Same),
+        None => Err(
+            "the recorded cgroup enclosure is no longer visible within one boot; the host \
+             generation cannot be decided"
+                .to_owned(),
+        ),
+    }
+}
+
+/// Lifetime-witness decision: a different boot, or a different container
+/// enclosure under the conditions documented on `ProcessHostLifetime`.
+#[cfg(target_os = "linux")]
+fn host_generation_ended(boot_id: &str, cgroup_enclosure: Option<u64>) -> Result<bool, String> {
+    Ok(host_generation_change(boot_id, cgroup_enclosure)? != HostGenerationChange::Same)
+}
+
+/// Scope decision. A different enclosure alone never ends a scope: if the
+/// provider still reopens the exact recorded parent, the scope is observed
+/// directly; only a parent replaced under the same path proves the old
+/// enclosure, and every scope beneath it, is gone. An unreopenable parent
+/// leaves the generation undecided.
+#[cfg(target_os = "linux")]
+fn scope_generation_ended(
+    boot_id: &str,
+    cgroup_enclosure: Option<u64>,
+    configuration: &ProcessScopeConfiguration,
+    recorded_parent: &crate::PinnedDirectoryIdentity,
+) -> Result<bool, String> {
+    match host_generation_change(boot_id, cgroup_enclosure)? {
+        HostGenerationChange::Same => Ok(false),
+        HostGenerationChange::BootEnded => Ok(true),
+        HostGenerationChange::EnclosureChanged => {
+            let provider = ProcessScopeProvider::open(configuration).map_err(|error| {
+                format!(
+                    "same boot with a different enclosure, and the recorded scope parent cannot \
+                     be reopened ({error}); the scope generation cannot be decided"
+                )
+            })?;
+            let ProviderBackend::LinuxCgroupV2(parent) = &provider.backend;
+            Ok(parent.identity()? != *recorded_parent)
+        }
+    }
 }
 
 impl ProcessHostLifetime {
     pub fn capture_current() -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
+            let (boot_id, cgroup_enclosure) = capture_host_generation()?;
             let value = Self {
-                version: 1,
-                backend: HostLifetimeBackend::LinuxBoot {
-                    boot_id: super::linux::read_boot_id()?,
-                },
+                version: HOST_LIFETIME_VERSION,
+                backend: HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure },
             };
             value.validate()?;
             Ok(value)
@@ -450,11 +557,11 @@ impl ProcessHostLifetime {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if self.version != HOST_LIFETIME_VERSION {
             return Err("process host-lifetime witness contract is not current".to_owned());
         }
         match &self.backend {
-            HostLifetimeBackend::LinuxBoot { boot_id } if valid_boot_id(boot_id) => Ok(()),
+            HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure: _ } if valid_boot_id(boot_id) => Ok(()),
             _ => Err("process host-lifetime witness is invalid".to_owned()),
         }
     }
@@ -463,12 +570,8 @@ impl ProcessHostLifetime {
         self.validate()?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            HostLifetimeBackend::LinuxBoot { boot_id } => {
-                let current = super::linux::read_boot_id()?;
-                if !valid_boot_id(&current) {
-                    return Err("current host lifetime is unavailable".to_owned());
-                }
-                Ok(current != *boot_id)
+            HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure } => {
+                host_generation_ended(boot_id, *cgroup_enclosure)
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("host lifetime observation is unavailable on this OS".to_owned()),
@@ -481,7 +584,9 @@ impl ProcessHostLifetime {
         self.validate()?;
         process.validate()?;
         match &self.backend {
-            HostLifetimeBackend::LinuxBoot { boot_id } => Ok(process.boot_id == *boot_id),
+            // Birth identity carries the boot only; a process of an ended
+            // enclosure on this boot is excluded by has_ended, not here.
+            HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure: _ } => Ok(process.boot_id == *boot_id),
         }
     }
 }
@@ -496,6 +601,23 @@ pub enum ProcessScopeCapability {
     Quiescence,
     Termination,
     Recovery,
+}
+
+impl ProcessScopeCapability {
+    pub const ALL: [Self; 3] = [Self::Quiescence, Self::Termination, Self::Recovery];
+
+    /// Open capability name this per-scope guarantee is published under.
+    pub const fn capability_name(self) -> &'static str {
+        match self {
+            Self::Quiescence => "quiescence:scope",
+            Self::Termination => "termination:scope",
+            Self::Recovery => "recovery:scope",
+        }
+    }
+
+    pub fn from_capability_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|capability| capability.capability_name() == name)
+    }
 }
 
 /// Kernel-enforced ceilings for every task in one exact execution scope.
@@ -552,6 +674,7 @@ pub struct ProcessScopeAllocation {
 enum BackendAllocation {
     LinuxCgroupV2 {
         boot_id: String,
+        cgroup_enclosure: Option<u64>,
         parent: crate::PinnedDirectoryIdentity,
         name: String,
     },
@@ -582,6 +705,7 @@ enum BackendRecovery {
     // on every OS so a foreign record can be retained without granting control.
     LinuxCgroupV2 {
         boot_id: String,
+        cgroup_enclosure: Option<u64>,
         parent: crate::PinnedDirectoryIdentity,
         directory: crate::PinnedDirectoryIdentity,
         name: String,
@@ -671,7 +795,7 @@ impl SelectedScopePreparation {
             return Err("selected allocation provider or host generation changed".into());
         }
         let ProviderBackend::LinuxCgroupV2(parent) = &self.provider.backend;
-        let BackendAllocation::LinuxCgroupV2 { boot_id, parent: expected_parent, name } = &self.allocation.backend;
+        let BackendAllocation::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent: expected_parent, name } = &self.allocation.backend;
         if parent.identity()? != *expected_parent {
             return Err("selected allocation parent incarnation changed".into());
         }
@@ -702,6 +826,7 @@ impl SelectedScopePreparation {
             control_timeout: self.allocation.control_timeout,
             backend: BackendRecovery::LinuxCgroupV2 {
                 boot_id: boot_id.clone(),
+                cgroup_enclosure: *cgroup_enclosure,
                 parent: identity.parent,
                 directory: identity.directory,
                 name: identity.name.clone(),
@@ -1289,16 +1414,20 @@ impl ProcessScopeProvider {
         validate_allocation_name(allocation)?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            ProviderBackend::LinuxCgroupV2(parent) => Ok(ProcessScopeAllocation {
-                version: SCOPE_ALLOCATION_VERSION,
-                configuration: self.configuration.clone(),
-                control_timeout: timeout,
-                backend: BackendAllocation::LinuxCgroupV2 {
-                    boot_id: super::linux::read_boot_id()?,
-                    parent: parent.identity()?,
-                    name: allocation.to_owned(),
-                },
-            }),
+            ProviderBackend::LinuxCgroupV2(parent) => {
+                let (boot_id, cgroup_enclosure) = capture_host_generation()?;
+                Ok(ProcessScopeAllocation {
+                    version: SCOPE_ALLOCATION_VERSION,
+                    configuration: self.configuration.clone(),
+                    control_timeout: timeout,
+                    backend: BackendAllocation::LinuxCgroupV2 {
+                        boot_id,
+                        cgroup_enclosure,
+                        parent: parent.identity()?,
+                        name: allocation.to_owned(),
+                    },
+                })
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scopes are unavailable on this OS".to_owned()),
         }
@@ -1317,6 +1446,7 @@ impl ProcessScopeProvider {
             ProviderBackend::LinuxCgroupV2(parent) => {
                 let BackendAllocation::LinuxCgroupV2 {
                     boot_id,
+                    cgroup_enclosure,
                     parent: expected_parent,
                     name,
                 } = &allocation.backend;
@@ -1332,6 +1462,7 @@ impl ProcessScopeProvider {
                         control_timeout: allocation.control_timeout,
                         backend: BackendRecovery::LinuxCgroupV2 {
                             boot_id: boot_id.clone(),
+                            cgroup_enclosure: *cgroup_enclosure,
                             parent: identity.parent,
                             directory: identity.directory,
                             name: identity.name.clone(),
@@ -1393,12 +1524,15 @@ impl ProcessScopeProvider {
                 ProviderBackend::LinuxCgroupV2(parent),
                 BackendRecovery::LinuxCgroupV2 {
                     boot_id,
+                    cgroup_enclosure,
                     parent: owner,
                     directory,
                     name,
                 },
             ) => {
-                if super::linux::read_boot_id()? != *boot_id {
+                // validate_recovery above already proved this provider holds
+                // the exact recorded parent, so only a different boot ends it.
+                if host_generation_change(boot_id, *cgroup_enclosure)? == HostGenerationChange::BootEnded {
                     return Err("process scope recovery belongs to another boot".to_owned());
                 }
                 let scope = parent.reopen(
@@ -1478,10 +1612,11 @@ impl ProcessScopeAllocation {
     pub fn host_lifetime(&self) -> Result<ProcessHostLifetime, String> {
         self.validate()?;
         match &self.backend {
-            BackendAllocation::LinuxCgroupV2 { boot_id, .. } => Ok(ProcessHostLifetime {
-                version: 1,
+            BackendAllocation::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent: _, name: _ } => Ok(ProcessHostLifetime {
+                version: HOST_LIFETIME_VERSION,
                 backend: HostLifetimeBackend::LinuxBoot {
                     boot_id: boot_id.clone(),
+                    cgroup_enclosure: *cgroup_enclosure,
                 },
             }),
         }
@@ -1535,12 +1670,8 @@ impl ProcessScopeAllocation {
         self.validate()?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            BackendAllocation::LinuxCgroupV2 { boot_id, .. } => {
-                let current = super::linux::read_boot_id()?;
-                if !valid_boot_id(&current) {
-                    return Err("current host lifetime is unavailable".to_owned());
-                }
-                Ok(current != *boot_id)
+            BackendAllocation::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent, name: _ } => {
+                scope_generation_ended(boot_id, *cgroup_enclosure, &self.configuration, parent)
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope lifetime observation is unavailable on this OS".to_owned()),
@@ -1563,16 +1694,23 @@ impl ProcessScopeRecovery {
             (
                 BackendRecovery::LinuxCgroupV2 {
                     boot_id,
+                    cgroup_enclosure,
                     parent,
                     name,
-                    ..
+                    directory: _,
                 },
                 BackendAllocation::LinuxCgroupV2 {
                     boot_id: expected_boot,
+                    cgroup_enclosure: expected_enclosure,
                     parent: expected_parent,
                     name: expected_name,
                 },
-            ) => boot_id == expected_boot && parent == expected_parent && name == expected_name,
+            ) => {
+                boot_id == expected_boot
+                    && cgroup_enclosure == expected_enclosure
+                    && parent == expected_parent
+                    && name == expected_name
+            }
         }
     }
     /// Original admitted per-operation ceiling; not the worker lifetime or a
@@ -1711,12 +1849,8 @@ impl ProcessScopeRecovery {
         self.validate()?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            BackendRecovery::LinuxCgroupV2 { boot_id, .. } => {
-                let current = super::linux::read_boot_id()?;
-                if !valid_boot_id(&current) {
-                    return Err("kernel boot identity is unavailable or malformed".to_owned());
-                }
-                Ok(current != *boot_id)
+            BackendRecovery::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent, directory: _, name: _ } => {
+                scope_generation_ended(boot_id, *cgroup_enclosure, &self.configuration, parent)
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope lifetime observation is unavailable on this OS".to_owned()),
@@ -2146,6 +2280,17 @@ impl QuiescedProcessScope {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recorded_enclosure_is_compared_only_with_a_visible_one() {
+        assert_eq!(compare_enclosure(4, Some(4)).unwrap(), HostGenerationChange::Same);
+        assert_eq!(compare_enclosure(4, Some(5)).unwrap(), HostGenerationChange::EnclosureChanged);
+        assert!(compare_enclosure(4, None).unwrap_err().contains("cannot be decided"));
+        // A boot-only recording on this boot is never taken as ended.
+        let boot = current_boot_id().unwrap();
+        assert_eq!(host_generation_change(&boot, None).unwrap(), HostGenerationChange::Same);
+    }
+
     #[test]
     fn scope_resource_limits_reject_unbounded_dimensions() {
         let valid = ProcessScopeResourceLimits {
@@ -2412,7 +2557,7 @@ mod tests {
         let value = serde_json::json!({"version": SCOPE_RECOVERY_VERSION, "configuration": configuration(),
             "control_timeout": {"secs": 1, "nanos": 0}, "backend": {
             "implementation": "linux_cgroup_v2", "boot_id": "00000000-0000-4000-8000-000000000000",
-            "parent": {"containing_device": 1, "inode": 2},
+            "cgroup_enclosure": 7, "parent": {"containing_device": 1, "inode": 2},
             "directory": {"containing_device": 1, "inode": 3}, "name": "existing-allocation"
         }});
         let recovery: ProcessScopeRecovery = serde_json::from_value(value.clone()).unwrap();
@@ -2427,14 +2572,13 @@ mod tests {
         let allocation: ProcessScopeAllocation = serde_json::from_value(planned.clone()).unwrap();
         allocation.validate().unwrap();
         assert!(recovery.matches_allocation(&allocation));
-        for field in ["name", "boot_id"] {
+        for (field, replacement) in [
+            ("name", serde_json::json!("different-slot")),
+            ("boot_id", serde_json::json!("00000000-0000-4000-8000-000000000001")),
+            ("cgroup_enclosure", serde_json::json!(8)),
+        ] {
             let mut changed = planned.clone();
-            changed["backend"][field] = if field == "name" {
-                "different-slot"
-            } else {
-                "00000000-0000-4000-8000-000000000001"
-            }
-            .into();
+            changed["backend"][field] = replacement;
             assert!(!recovery.matches_allocation(&serde_json::from_value(changed).unwrap()));
         }
         let mut changed = planned.clone();
@@ -2801,13 +2945,32 @@ fn host_lifetime_witness_is_strict_and_does_not_claim_same_boot_cleanup() {
     wrong["proof"] = "daemon_exited".into();
     assert!(serde_json::from_value::<ProcessHostLifetime>(wrong).is_err());
     let ended = ProcessHostLifetime {
-        version: 1,
+        version: HOST_LIFETIME_VERSION,
         backend: HostLifetimeBackend::LinuxBoot {
             boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+            cgroup_enclosure: None,
         },
     };
     assert_ne!(ended, current);
     assert!(ended.has_ended().unwrap());
+    // Same boot, different enclosure: a restarted container is a new
+    // generation even though the kernel boot did not change.
+    let HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure } = &current.backend;
+    if let Some(inode) = cgroup_enclosure {
+        let restarted = ProcessHostLifetime {
+            version: HOST_LIFETIME_VERSION,
+            backend: HostLifetimeBackend::LinuxBoot {
+                boot_id: boot_id.clone(),
+                cgroup_enclosure: Some(inode.wrapping_add(1)),
+            },
+        };
+        assert!(restarted.has_ended().unwrap());
+        let unobserved = ProcessHostLifetime {
+            version: HOST_LIFETIME_VERSION,
+            backend: HostLifetimeBackend::LinuxBoot { boot_id: boot_id.clone(), cgroup_enclosure: None },
+        };
+        assert!(unobserved.has_ended().is_err());
+    }
 }
 
 #[cfg(target_os = "linux")]

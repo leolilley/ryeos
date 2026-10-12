@@ -1,7 +1,10 @@
 //! The retained clock's terminal two-descriptor operation. This is crate-private
 //! host machinery, not a general grant or an ordinary inherited-handle close.
 
-use super::{Arc, ForkChildCloseFile, InheritedDescriptorAuthority, direct_attachment_fork_barrier};
+use super::{
+    Arc, ForkChildCloseFile, InheritedDescriptorAuthority, direct_attachment_fork_barrier,
+    reopen_settled_strand_locked,
+};
 use crate::time::MonotonicDeadline;
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +42,7 @@ pub(crate) fn close_pair(
         Err(std::sync::TryLockError::WouldBlock) => return Err("clock close barrier busy"),
         Err(std::sync::TryLockError::Poisoned(_)) => return Err("clock close barrier poisoned"),
     };
+    reopen_settled_strand_locked(barrier, &mut state);
     if state.fork_quiesced || original.has_elapsed() {
         return Err("clock close barrier unavailable within original interval");
     }
@@ -66,7 +70,7 @@ mod controls {
     use std::time::Duration;
 
     fn pair() -> (InheritedDescriptorAuthority, InheritedDescriptorAuthority) {
-        let lease = crate::exec::retain_fork_sensitive_descriptors();
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors().unwrap();
         let first = InheritedDescriptorAuthority::from_owned_file(tempfile::tempfile().unwrap(), &lease).unwrap();
         let second = InheritedDescriptorAuthority::from_owned_file(tempfile::tempfile().unwrap(), &lease).unwrap();
         (first, second)

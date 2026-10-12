@@ -129,6 +129,18 @@ impl PendingNamespaceWatchdog {
         let fork_deadline = before_clock.checked_add(original_deadline.remaining())
             .ok_or("original namespace fork deadline overflow")?;
         let fork_guard = quiesce_fork_sensitive_descriptors(fork_deadline)?;
+        // The parent write end stays open until the fork has happened or
+        // failed. Any end without READY settles through the witness. The
+        // child fixes descriptors 3..=7 before its scrub, so keep the witness
+        // above them: replacing it there would hang it up too early.
+        let witnessed = fork_guard
+            .witness_creation("namespace watchdog creation")
+            .map_err(|error| format!("create namespace watchdog creation witness: {error}"))?;
+        // Declared before the write end, so that on any early return the
+        // write end drops first and the custody observes the witness.
+        let fork_custody = witnessed.0;
+        let fork_custody_witness = witness_writer_at_or_above(witnessed.1, 8)
+            .map_err(|error| format!("place namespace watchdog creation witness: {error}"))?;
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err(format!(
@@ -139,6 +151,7 @@ impl PendingNamespaceWatchdog {
         if pid == 0 {
             unsafe { child_main(raw_inputs, tag) }
         }
+        drop(fork_custody_witness);
         drop(inputs);
         drop(child_control);
         drop(cancel_reader);
@@ -159,17 +172,31 @@ impl PendingNamespaceWatchdog {
         let expected = packet(READY, tag, pid as u32, 0, 0, 0);
         if let Err(error) = pending.read_ack(&expected) {
             // No native fork can have occurred before this constructor returns.
-            // Cancellation here is the distinct, proved prebirth failure.
-            if let Err(cleanup) = pending.cancel_proven_prebirth() {
-                // No readiness or death proof: keep inherited-lock exclusion
-                // even if the surrounding error owner is subsequently lost.
-                std::mem::forget(fork_guard);
-                return Err(format!("{error}; namespace watchdog disposal unproved: {cleanup}"));
-            }
-            return Err(error);
+            // Cancellation here is the distinct, proved prebirth failure. It is
+            // bounded: a watchdog that does not end is killed, not waited on.
+            let cleanup = match pending.watchdog.take() {
+                Some(mut watchdog) => watchdog.cancel_and_reap_bounded(
+                    ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+                    "unacknowledged namespace watchdog",
+                ),
+                None => Ok(()),
+            };
+            // Without READY only the witness may reopen the window, else it
+            // strands with its fact for every later acquisition.
+            let custody = fork_custody.settle();
+            return Err(match (cleanup, custody) {
+                (Ok(()), Ok(())) => error,
+                (Err(cleanup), Ok(())) => {
+                    format!("{error}; namespace watchdog disposal unproved: {cleanup}")
+                }
+                (Ok(()), Err(fact)) => format!("{error}; {fact}"),
+                (Err(cleanup), Err(fact)) => format!(
+                    "{error}; namespace watchdog disposal unproved: {cleanup}; {fact}"
+                ),
+            });
         }
         // READY follows the child dup2/close_range/stdio disposal boundary.
-        drop(fork_guard);
+        fork_custody.release_observed();
         Ok(pending)
     }
 
