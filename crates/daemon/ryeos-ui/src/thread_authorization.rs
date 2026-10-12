@@ -36,8 +36,8 @@ impl ExactThreadCaller {
                 .map_err(|_| HandlerError::NotFound)?,
                 principal_id: Some(attachment.compiled_binding.binding.principal_id.clone()),
             },
-            SeatCaller::Operator { fingerprint } => Self::Operator {
-                principal_id: fingerprint.clone(),
+            SeatCaller::Operator { principal_id } => Self::Operator {
+                principal_id: principal_id.clone(),
             },
         })
     }

@@ -1004,6 +1004,32 @@ fn launch_config_snapshot_cache() -> &'static crate::resolved_config_cache::Snap
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
 }
 
+/// Load launch configuration whose project-space inputs are read through an
+/// exact live project-content authority rather than by walking
+/// `project_root`.
+pub(crate) fn load_launch_config_set_under_project_content(
+    declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
+    roots: &ResolutionRoots,
+    parsers: &ParserDispatcher,
+    engine: &ryeos_engine::engine::Engine,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    project_root: &std::path::Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+) -> Result<ryeos_engine::launch_config::LaunchConfigSnapshotSet, DispatchError> {
+    ryeos_engine::launch_config::load_launch_config_snapshots_with_proof_under_project_authority(
+        declarations,
+        roots,
+        parsers,
+        &engine.parser_dispatcher,
+        &engine.kinds,
+        trust_store,
+        &engine.node_trust_store,
+        project_root,
+        project_content,
+    )
+    .map_err(map_launch_config_error)
+}
+
 pub(crate) fn load_launch_config_set_under_current_authority(
     declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
     roots: &ResolutionRoots,

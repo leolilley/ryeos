@@ -92,7 +92,7 @@ fn attachment_coordinate(
 #[test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 fn dispatch_transport_is_unrecorded() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-ui-dispatch".into(),
@@ -120,7 +120,7 @@ fn dispatch_transport_is_unrecorded() {
 
 #[tokio::test]
 async fn arbitrary_event_targets_are_rejected() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let (session_id, token) = mint_launch(&state, test_context());
     assert_eq!(
         get_ui_state(&state)
@@ -156,7 +156,7 @@ async fn arbitrary_event_targets_are_rejected() {
 
 #[tokio::test]
 async fn legacy_client_authority_flags_are_rejected() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let (session_id, token) = mint_launch(&state, observation_context());
     assert_eq!(
         get_ui_state(&state)
@@ -197,7 +197,7 @@ async fn legacy_client_authority_flags_are_rejected() {
 
 #[tokio::test]
 async fn session_cookie_required() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let ctx = HandlerContext::anonymous();
 
@@ -225,7 +225,7 @@ async fn session_cookie_required() {
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn session_local_invocation_publishes_to_session_bus() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (session_id, ctx, session) = mint_live_session(&state).await;
     let coordinate = attachment_coordinate(&session);
 
@@ -273,7 +273,7 @@ async fn session_local_invocation_publishes_to_session_bus() {
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn read_only_thread_sources_replay_without_recording_service_threads() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (_session_id, ctx, session) = mint_live_session(&state).await;
     let coordinate = attachment_coordinate(&session);
     let state = Arc::new(state);

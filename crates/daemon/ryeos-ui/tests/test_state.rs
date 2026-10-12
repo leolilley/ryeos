@@ -5,10 +5,16 @@
 //!   resolution;
 //! - `build_test_state_with_live_bundles()`: full engine with signed workspace
 //!   bundles for paths that resolve or execute canonical item refs.
+//!
+//! Both return the Store owner between the directory and the application,
+//! so `let (dir, _store_owner, state) = ...` drops the application, and every
+//! Store `Arc` it holds, before the owner closes the Store and before the
+//! directory is removed. The owner stays on the thread that built it.
 
 use std::sync::Arc;
 
 use ryeos_app::state::AppState;
+use ryeos_app::test_support::TestStateStore;
 use ryeos_engine::kind_registry::KindRegistry;
 
 #[allow(dead_code)]
@@ -94,10 +100,9 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
 /// Build a minimal AppState with an empty engine.
 /// Suitable only for paths that reject before canonical item resolution.
 #[allow(dead_code)]
-pub fn build_test_state() -> (tempfile::TempDir, AppState) {
+pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+    let runtime_db_path = TestStateStore::runtime_state_dir(tmpdir.path()).join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
     let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -119,17 +124,14 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let state_store = Arc::new(
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            tmpdir.path().to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier.clone(),
-            Arc::new(head_trust),
-        )
-        .unwrap(),
-    );
+    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        tmpdir.path(),
+        signer,
+        write_barrier.clone(),
+        Arc::new(head_trust),
+    )
+    .unwrap();
+    let state_store = std::sync::Arc::clone(store_owner.store());
     let engine = Arc::new(ryeos_engine::engine::Engine::new(
         ryeos_engine::kind_registry::KindRegistry::empty(),
         ryeos_engine::parsers::ParserDispatcher::new(
@@ -162,6 +164,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
 
     build_app_state(
         tmpdir,
+        store_owner,
         config,
         identity,
         state_store,
@@ -178,10 +181,9 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
 /// Suitable for happy-path topology/session tests that need real kind schemas,
 /// verified item resolution, and effective-item composition.
 #[allow(dead_code)]
-pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
+pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStore, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+    let runtime_db_path = TestStateStore::runtime_state_dir(tmpdir.path()).join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
     let config = ryeos_node_runtime::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -203,17 +205,14 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let state_store = Arc::new(
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            tmpdir.path().to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier.clone(),
-            Arc::new(head_trust),
-        )
-        .unwrap(),
-    );
+    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        tmpdir.path(),
+        signer,
+        write_barrier.clone(),
+        Arc::new(head_trust),
+    )
+    .unwrap();
+    let state_store = std::sync::Arc::clone(store_owner.store());
     let engine = Arc::new(build_live_bundle_engine());
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
@@ -241,6 +240,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
 
     build_app_state(
         tmpdir,
+        store_owner,
         config,
         identity,
         state_store,
@@ -258,8 +258,9 @@ pub fn local_operator_context(
     state: &AppState,
     scopes: Vec<String>,
 ) -> ryeos_app::handler_context::HandlerContext {
-    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-        .expect("load fixture operator");
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+            .expect("load fixture operator");
     ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
         scopes,
@@ -305,6 +306,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
 #[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
+    store_owner: TestStateStore,
     config: ryeos_node_runtime::config::Config,
     identity: ryeos_node_runtime::identity::NodeIdentity,
     state_store: Arc<ryeos_app::state_store::StateStore>,
@@ -314,7 +316,7 @@ fn build_app_state(
     commands: Arc<ryeos_app::command_service::CommandService>,
     write_barrier: ryeos_app::write_barrier::WriteBarrier,
     event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
-) -> (tempfile::TempDir, AppState) {
+) -> (tempfile::TempDir, TestStateStore, AppState) {
     let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         external_execution: Vec::new(),
@@ -329,8 +331,7 @@ fn build_app_state(
         Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
-    let controller_lifetime =
-        ryeos_node_runtime::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+    let controller_lifetime = store_owner.controller_lifetime();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),
@@ -389,9 +390,6 @@ fn build_app_state(
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: test_command_registry,
         authorizer: test_auth,
-        scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
-        scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-        scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
             ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                 patterns: Vec::new(),
@@ -409,7 +407,7 @@ fn build_app_state(
         qualification_workspace_custody: Arc::new(Default::default()),
     };
 
-    (tmpdir, state)
+    (tmpdir, store_owner, state)
 }
 
 fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {

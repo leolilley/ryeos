@@ -137,7 +137,7 @@ fn append_request(
 
 #[tokio::test]
 async fn ui_seat_open_reattaches_running_session_seat() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (session_id, token) =
         test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
     assert_eq!(
@@ -184,7 +184,7 @@ async fn ui_seat_open_reattaches_running_session_seat() {
 
 #[tokio::test]
 async fn ui_seat_open_rejects_stale_attachment_policy_generation() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let stale_digest = "99".repeat(32);
     let mut context = session_context(None);
     Arc::make_mut(&mut context.compiled_binding)
@@ -216,7 +216,7 @@ async fn ui_seat_open_rejects_stale_attachment_policy_generation() {
 
 #[tokio::test]
 async fn same_principal_sessions_cannot_reattach_each_others_seats() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (first_id, first_token) =
         test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
     let (second_id, second_token) =
@@ -254,7 +254,7 @@ async fn same_principal_sessions_cannot_reattach_each_others_seats() {
 
 #[tokio::test]
 async fn ui_seat_append_replay_and_close_round_trip() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (session_id, token) = test_state::mint_launch(&state, session_context(None));
     assert_eq!(
         get_ui_state(&state)
@@ -347,7 +347,7 @@ async fn ui_seat_append_replay_and_close_round_trip() {
 
 #[tokio::test]
 async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gaps() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (session_id, token) = test_state::mint_launch(&state, session_context(None));
     assert_eq!(
         get_ui_state(&state)
@@ -519,7 +519,7 @@ async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gap
 
 #[tokio::test]
 async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let (owner_id, owner_token) = test_state::mint_launch(&state, session_context(None));
     let (foreign_id, foreign_token) = test_state::mint_launch(&state, session_context(None));
     let sessions = &get_ui_state(&state).unwrap().browser_sessions;

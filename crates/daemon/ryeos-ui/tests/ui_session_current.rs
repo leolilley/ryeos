@@ -18,7 +18,7 @@ fn test_context() -> ryeos_ui::browser_session::LaunchContext {
 
 #[tokio::test]
 async fn session_current_returns_session_fields() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let (session_id, token) = mint_launch(&state, test_context());
     assert_eq!(
@@ -61,7 +61,7 @@ async fn session_current_returns_session_fields() {
 
 #[tokio::test]
 async fn session_current_without_session_rejected() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     // Anonymous context — no session.
     let ctx = HandlerContext::anonymous();
@@ -89,7 +89,7 @@ async fn session_current_with_expired_session_rejected() {
 
     std::thread::sleep(std::time::Duration::from_millis(5));
 
-    let (_tmp, _state) = build_test_state();
+    let (_tmp, _state_owner, _state) = build_test_state();
     // Manually inject the expired session into the test state's store.
     // (The short_store is separate from state's store, so we test the
     // store directly.)
@@ -101,7 +101,7 @@ async fn session_current_with_expired_session_rejected() {
 
 #[tokio::test]
 async fn session_current_reports_observation_only_posture() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let ctx = launch_context(
         "surface:ryeos/test/ro",
@@ -140,7 +140,7 @@ async fn session_current_reports_observation_only_posture() {
 
 #[tokio::test]
 async fn session_current_returns_durable_user_principal_when_present() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let user_principal_id = format!("fp:{}", "cd".repeat(32));
     let ctx = launch_context(
         "surface:ryeos/ui/base",

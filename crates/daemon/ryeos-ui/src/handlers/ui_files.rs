@@ -10,8 +10,11 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
-use lillux::{PinnedDirectory, PinnedEntryType};
+use anyhow::{Context as _, Result};
+use lillux::{
+    PinnedDirectory, PinnedEntryType, PrefixDirectoryCoverage, PrefixWalkBudget,
+    PrefixWalkDecision, PrefixWalkDirectory, PrefixWalkExhaustion,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,8 +28,13 @@ use ryeos_executor::executor::ServiceAvailability;
 const MAX_READ_BYTES: usize = 256 * 1024;
 /// Maximum directory entries returned from a single files.list call.
 const MAX_LIST_ENTRIES: usize = 2_000;
+/// Kernel work available to one files.list call: directory opens, names read
+/// and entries inspected.
+const MAX_LIST_WORK: usize = 65_536;
 /// Maximum file-space atlas entries returned from a recursive tree call.
 const MAX_TREE_ENTRIES: usize = 3_000;
+/// Kernel work available to one files.tree call, counted as for files.list.
+const MAX_TREE_WORK: usize = 131_072;
 /// Maximum recursive depth for file-space tree snapshots.
 const MAX_TREE_DEPTH: usize = 12;
 
@@ -56,8 +64,16 @@ fn resolve_allowed_root(
     }
 }
 
-fn open_relative_directory(root: &PinnedDirectory, relative: &str) -> Result<PinnedDirectory> {
+/// Open `relative` below `root` one normal component at a time. The returned
+/// path is rebuilt from exactly the components opened, so callers report and
+/// match policy against the directory actually reached rather than the raw
+/// request text.
+fn open_relative_directory(
+    root: &PinnedDirectory,
+    relative: &str,
+) -> Result<(PinnedDirectory, PathBuf)> {
     let mut directory = root.try_clone()?;
+    let mut opened = PathBuf::new();
     for component in Path::new(relative).components() {
         let Component::Normal(name) = component else {
             anyhow::bail!("directory path is not a normalized relative path");
@@ -65,8 +81,9 @@ fn open_relative_directory(root: &PinnedDirectory, relative: &str) -> Result<Pin
         directory = directory
             .open_child_directory(name)?
             .ok_or_else(|| anyhow::anyhow!("directory path does not exist"))?;
+        opened.push(name);
     }
-    Ok(directory)
+    Ok((directory, opened))
 }
 
 // ── files.list ────────────────────────────────────────────────────
@@ -99,27 +116,61 @@ pub async fn handle_files_list(
 
     let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-    let directory = open_relative_directory(&allowed_root, &req.path)
+    let (directory, _) = open_relative_directory(&allowed_root, &req.path)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
-    let mut entries: Vec<Value> = Vec::new();
-    let observed = directory.entries_no_follow_bounded(MAX_LIST_ENTRIES + 1)?;
-    let truncated = observed.len() > MAX_LIST_ENTRIES;
-    for entry in observed.into_iter().take(MAX_LIST_ENTRIES) {
-        let name = entry.name.to_string_lossy().into_owned();
-        let is_dir = entry.entry_type == PinnedEntryType::Directory;
+    let listing = tokio::task::spawn_blocking(move || {
+        list_directory(&directory, MAX_LIST_ENTRIES, MAX_LIST_WORK)
+    })
+    .await
+    .context("files.list directory worker stopped")??;
 
-        let mut entry_val = serde_json::json!({
-            "name": name,
-            "is_dir": is_dir,
-        });
-        if entry.entry_type == PinnedEntryType::Regular
-            && let Some(file) = directory.open_pinned_regular(&entry.name, false)?
-        {
-            entry_val["size"] = serde_json::json!(file.size()?);
-        }
-        entries.push(entry_val);
-    }
+    Ok(serde_json::json!({
+        "root": req.root,
+        "path": req.path,
+        "truncated": listing.truncated,
+        "coverage": listing.coverage,
+        "entries": listing.entries,
+    }))
+}
+
+struct DirectoryListing {
+    entries: Vec<Value>,
+    /// True unless every immediate entry was reported from an unchanged
+    /// directory.
+    truncated: bool,
+    coverage: Value,
+}
+
+/// List the immediate entries of one pinned directory as a bounded prefix.
+/// Child directories are reported but never opened.
+fn list_directory(
+    directory: &PinnedDirectory,
+    max_entries: usize,
+    max_work: usize,
+) -> Result<DirectoryListing> {
+    let walk = directory.walk_prefix_no_follow(
+        PrefixWalkBudget {
+            max_depth: 1,
+            max_entries,
+            max_work,
+        },
+        |_, _| PrefixWalkDecision::Include,
+    )?;
+    let mut entries: Vec<Value> = walk
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut value = serde_json::json!({
+                "name": entry.metadata.name.to_string_lossy(),
+                "is_dir": entry.metadata.entry_type == PinnedEntryType::Directory,
+            });
+            if let Some(size) = entry.size {
+                value["size"] = serde_json::json!(size);
+            }
+            value
+        })
+        .collect();
 
     entries.sort_by(|a, b| {
         // Directories first, then alphabetical
@@ -135,12 +186,53 @@ pub async fn handle_files_list(
         a["name"].as_str().cmp(&b["name"].as_str())
     });
 
-    Ok(serde_json::json!({
-        "root": req.root,
-        "path": req.path,
-        "truncated": truncated,
-        "entries": entries,
-    }))
+    let root = walk.root();
+    Ok(DirectoryListing {
+        entries,
+        truncated: walk.exhausted.is_some() || !root.is_complete(),
+        coverage: serde_json::json!({
+            "exhausted": exhaustion_label(walk.exhausted),
+            "work_used": walk.work_used,
+            "max_work": max_work,
+            "directory": directory_coverage(root),
+        }),
+    })
+}
+
+fn coverage_label(coverage: PrefixDirectoryCoverage) -> &'static str {
+    match coverage {
+        PrefixDirectoryCoverage::Complete => "complete",
+        PrefixDirectoryCoverage::NamePrefix => "name_prefix",
+        PrefixDirectoryCoverage::StreamPrefix => "stream_prefix",
+        PrefixDirectoryCoverage::DepthLimit => "depth_limit",
+        PrefixDirectoryCoverage::NotVisited => "not_visited",
+        PrefixDirectoryCoverage::Replaced => "replaced",
+        PrefixDirectoryCoverage::Failed => "failed",
+    }
+}
+
+fn exhaustion_label(exhausted: Option<PrefixWalkExhaustion>) -> Option<&'static str> {
+    exhausted.map(|exhausted| match exhausted {
+        PrefixWalkExhaustion::Entries => "entries",
+        PrefixWalkExhaustion::Work => "work",
+    })
+}
+
+fn directory_coverage(directory: &PrefixWalkDirectory) -> Value {
+    serde_json::json!({
+        "coverage": coverage_label(directory.coverage),
+        "names_read": directory.names_read,
+        "reported": directory.reported,
+        "excluded": directory.excluded,
+        "vanished": directory.vanished,
+        "failed_entries": directory.failed_entries,
+        "changed": directory.changed,
+        "failure": directory.failure,
+    })
+}
+
+fn slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 // ── files.tree ────────────────────────────────────────────────────
@@ -186,34 +278,35 @@ pub async fn handle_files_tree(
 
     let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-    let directory = open_relative_directory(&allowed_root, &req.path)
+    let (directory, relative_directory) = open_relative_directory(&allowed_root, &req.path)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
     let max_depth = req.max_depth.clamp(1, MAX_TREE_DEPTH);
     let max_entries = req.max_entries.clamp(1, MAX_TREE_ENTRIES);
-    let ignore = &state
+    let ignore = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
-        .matcher;
-    let mut entries = Vec::new();
-    let mut truncated = false;
+        .matcher
+        .clone();
     let policy_relative = match req.root.as_str() {
-        "project" => PathBuf::from(&req.path),
-        "project_ai" => Path::new(".ai").join(&req.path),
+        "project" => relative_directory.clone(),
+        "project_ai" => Path::new(".ai").join(&relative_directory),
         _ => unreachable!("root type was validated above"),
     };
-    collect_tree_entries(
-        &directory,
-        Path::new(&req.path),
-        &policy_relative,
-        0,
-        max_depth,
-        max_entries,
-        ignore,
-        &mut entries,
-        &mut truncated,
-    )?;
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut tree = tokio::task::spawn_blocking(move || {
+        collect_tree_entries(
+            &directory,
+            &relative_directory,
+            &policy_relative,
+            max_depth,
+            max_entries,
+            MAX_TREE_WORK,
+            &ignore,
+        )
+    })
+    .await
+    .context("files.tree directory worker stopped")??;
+    tree.entries.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(serde_json::json!({
         "schema_version": "ryeos.ui.file_space.v1",
@@ -221,83 +314,91 @@ pub async fn handle_files_tree(
         "path": req.path,
         "max_depth": max_depth,
         "max_entries": max_entries,
-        "truncated": truncated,
+        "truncated": tree.truncated,
+        "coverage": tree.coverage,
         "watchable": false,
         "supports_expand": true,
         "ignore_mode": "node_policy",
-        "entries": entries,
+        "entries": tree.entries,
     }))
 }
 
+struct FileTree {
+    entries: Vec<FileSpaceEntry>,
+    /// True unless every included entry at every depth was reported from
+    /// unchanged directories. Directories left unopened at the depth limit
+    /// make a tree truncated.
+    truncated: bool,
+    coverage: Value,
+}
+
+/// Collect a bounded, ignore-filtered prefix of the tree below `directory`.
+/// Every directory that is not completely covered is listed in the coverage
+/// with the reason, so callers can expand or retry exactly those paths.
 fn collect_tree_entries(
     directory: &PinnedDirectory,
     relative_directory: &Path,
     policy_relative_directory: &Path,
-    depth: usize,
     max_depth: usize,
     max_entries: usize,
+    max_work: usize,
     ignore: &ryeos_app::ignore::IgnoreMatcher,
-    out: &mut Vec<FileSpaceEntry>,
-    truncated: &mut bool,
-) -> Result<()> {
-    if *truncated || depth >= max_depth {
-        return Ok(());
-    }
-
-    let remaining = max_entries.saturating_sub(out.len());
-    let entries = directory.entries_no_follow_bounded(remaining.saturating_add(1))?;
-    if entries.len() > remaining {
-        *truncated = true;
-    }
-    for entry in entries.into_iter().take(remaining) {
-        if out.len() >= max_entries {
-            *truncated = true;
-            break;
-        }
-        let name = entry.name.to_string_lossy().into_owned();
-        let relative = relative_directory.join(&entry.name);
-        let policy_relative = policy_relative_directory.join(&entry.name);
-        let relative_text = relative.to_string_lossy().replace('\\', "/");
-        if ignore.is_ignored(&policy_relative.to_string_lossy().replace('\\', "/")) {
-            continue;
-        }
-        let is_dir = entry.entry_type == PinnedEntryType::Directory;
-        let size = if entry.entry_type == PinnedEntryType::Regular {
-            directory
-                .open_pinned_regular(&entry.name, false)?
-                .map(|file| file.size())
-                .transpose()?
+) -> Result<FileTree> {
+    let walk = directory.walk_prefix_no_follow(
+        PrefixWalkBudget {
+            max_depth,
+            max_entries,
+            max_work,
+        },
+        |relative, _| {
+            if ignore.is_ignored(&slash_path(&policy_relative_directory.join(relative))) {
+                PrefixWalkDecision::Exclude
+            } else {
+                PrefixWalkDecision::Include
+            }
+        },
+    )?;
+    let below = |relative: &Path| {
+        if relative.as_os_str().is_empty() {
+            relative_directory.to_path_buf()
         } else {
-            None
-        };
-        out.push(FileSpaceEntry {
-            path: relative_text,
-            name,
-            is_dir,
-            size,
+            relative_directory.join(relative)
+        }
+    };
+    let entries = walk
+        .entries
+        .iter()
+        .map(|entry| FileSpaceEntry {
+            path: slash_path(&below(entry.relative_path.as_path())),
+            name: entry.metadata.name.to_string_lossy().into_owned(),
+            is_dir: entry.metadata.entry_type == PinnedEntryType::Directory,
+            size: entry.size,
             modified: None,
-        });
-        if is_dir {
-            let child = directory
-                .open_child_directory(&entry.name)?
-                .ok_or_else(|| anyhow::anyhow!("directory changed during file-tree traversal"))?;
-            collect_tree_entries(
-                &child,
-                &relative,
-                &policy_relative,
-                depth + 1,
-                max_depth,
-                max_entries,
-                ignore,
-                out,
-                truncated,
-            )?;
-        }
-        if *truncated {
-            break;
-        }
-    }
-    Ok(())
+        })
+        .collect();
+    let incomplete_directories: Vec<Value> = walk
+        .directories
+        .iter()
+        .filter(|directory| !directory.is_complete())
+        .map(|directory| {
+            let mut value = directory_coverage(directory);
+            let path = slash_path(&below(directory.relative_path.as_path()));
+            value["path"] = serde_json::json!(path);
+            value
+        })
+        .collect();
+    let complete = walk.is_complete();
+    Ok(FileTree {
+        entries,
+        truncated: !complete,
+        coverage: serde_json::json!({
+            "complete": complete,
+            "exhausted": exhaustion_label(walk.exhausted),
+            "work_used": walk.work_used,
+            "max_work": max_work,
+            "incomplete_directories": incomplete_directories,
+        }),
+    })
 }
 
 fn default_tree_depth() -> usize {
@@ -342,8 +443,7 @@ pub async fn handle_files_read(
         .ok_or_else(|| HandlerError::BadRequest("path is not a regular file".into()))?;
     let size = file.size()?;
     let truncated = size > MAX_READ_BYTES as u64;
-    let mut buf = file.read_bounded(MAX_READ_BYTES as u64 + 1)?;
-    buf.truncate(MAX_READ_BYTES);
+    let buf = file.read_prefix(MAX_READ_BYTES)?;
     let content = String::from_utf8_lossy(&buf).into_owned();
 
     Ok(serde_json::json!({
@@ -451,5 +551,226 @@ mod tests {
             b"original"
         );
         assert!(open_relative_directory(&pinned, "../project/proof.txt").is_err());
+    }
+
+    fn ignore_matcher(patterns: &[&str]) -> ryeos_app::ignore::IgnoreMatcher {
+        ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
+            patterns: patterns.iter().map(|pattern| pattern.to_string()).collect(),
+        })
+        .expect("compile ignore patterns")
+    }
+
+    fn pinned(path: &Path) -> PinnedDirectory {
+        PinnedDirectory::open(path)
+            .expect("pin directory")
+            .expect("directory exists")
+    }
+
+    fn tree_paths(tree: &FileTree) -> Vec<String> {
+        tree.entries.iter().map(|entry| entry.path.clone()).collect()
+    }
+
+    #[test]
+    fn tree_fills_its_entry_budget_from_an_oversized_directory() {
+        // Ten names against a budget of three: the tree reports three entries
+        // instead of refusing the directory or stopping after the first one.
+        let temporary = tempfile::tempdir().expect("temporary root");
+        for index in 0..10 {
+            std::fs::write(temporary.path().join(format!("f{index}")), b"").expect("write");
+        }
+
+        let tree = collect_tree_entries(
+            &pinned(temporary.path()),
+            Path::new(""),
+            Path::new(""),
+            4,
+            3,
+            1_000,
+            &ignore_matcher(&[]),
+        )
+        .expect("tree");
+
+        assert_eq!(tree_paths(&tree), ["f0", "f1", "f2"]);
+        assert!(tree.truncated);
+        assert_eq!(tree.coverage["exhausted"], "entries");
+        assert_eq!(
+            tree.coverage["incomplete_directories"][0]["coverage"],
+            "name_prefix"
+        );
+    }
+
+    #[test]
+    fn tree_descends_and_continues_after_a_nested_directory() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir_all(temporary.path().join("a/b")).expect("create tree");
+        std::fs::write(temporary.path().join("a/b/leaf"), b"leaf").expect("write leaf");
+        std::fs::write(temporary.path().join("a/x"), b"").expect("write x");
+        std::fs::write(temporary.path().join("z"), b"").expect("write z");
+
+        let tree = collect_tree_entries(
+            &pinned(temporary.path()),
+            Path::new("sub"),
+            Path::new("sub"),
+            4,
+            100,
+            1_000,
+            &ignore_matcher(&[]),
+        )
+        .expect("tree");
+
+        assert_eq!(
+            tree_paths(&tree),
+            ["sub/a", "sub/a/b", "sub/a/b/leaf", "sub/a/x", "sub/z"]
+        );
+        assert_eq!(tree.entries[2].size, Some(4));
+        assert!(!tree.truncated);
+        assert_eq!(tree.coverage["complete"], true);
+        assert_eq!(tree.coverage["exhausted"], Value::Null);
+    }
+
+    #[test]
+    fn tree_marks_directories_left_at_the_depth_limit() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir_all(temporary.path().join("d/e")).expect("create tree");
+        std::fs::write(temporary.path().join("d/e/deep"), b"").expect("write deep");
+
+        let tree = collect_tree_entries(
+            &pinned(temporary.path()),
+            Path::new(""),
+            Path::new(""),
+            2,
+            100,
+            1_000,
+            &ignore_matcher(&[]),
+        )
+        .expect("tree");
+
+        assert_eq!(tree_paths(&tree), ["d", "d/e"]);
+        assert!(tree.truncated);
+        assert_eq!(tree.coverage["exhausted"], Value::Null);
+        let incomplete = tree.coverage["incomplete_directories"]
+            .as_array()
+            .expect("incomplete directories");
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0]["path"], "d/e");
+        assert_eq!(incomplete[0]["coverage"], "depth_limit");
+    }
+
+    #[test]
+    fn tree_applies_ignore_policy_on_the_policy_relative_path() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir_all(temporary.path().join("target/debug")).expect("create target");
+        std::fs::create_dir(temporary.path().join("remotes")).expect("create remotes");
+        std::fs::write(temporary.path().join("kept"), b"").expect("write kept");
+
+        // The walk root is the project's `.ai/config` directory.
+        let tree = collect_tree_entries(
+            &pinned(temporary.path()),
+            Path::new("config"),
+            Path::new(".ai/config"),
+            4,
+            1,
+            1_000,
+            &ignore_matcher(&["target/", "/.ai/config/remotes/"]),
+        )
+        .expect("tree");
+
+        assert_eq!(tree_paths(&tree), ["config/kept"]);
+        assert!(!tree.truncated);
+    }
+
+    #[test]
+    fn tree_reports_work_exhaustion_honestly() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir(temporary.path().join("d")).expect("create d");
+        std::fs::write(temporary.path().join("d/inner"), b"").expect("write inner");
+
+        // One open, one name and one inspection leave nothing to open `d`.
+        let tree = collect_tree_entries(
+            &pinned(temporary.path()),
+            Path::new(""),
+            Path::new(""),
+            4,
+            100,
+            3,
+            &ignore_matcher(&[]),
+        )
+        .expect("tree");
+
+        assert_eq!(tree_paths(&tree), ["d"]);
+        assert!(tree.truncated);
+        assert_eq!(tree.coverage["exhausted"], "work");
+        assert_eq!(
+            tree.coverage["incomplete_directories"][0]["coverage"],
+            "not_visited"
+        );
+    }
+
+    #[test]
+    fn list_reports_a_bounded_prefix_of_an_oversized_directory() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        for index in 0..5 {
+            std::fs::write(temporary.path().join(format!("f{index}")), b"").expect("write");
+        }
+
+        let listing =
+            list_directory(&pinned(temporary.path()), 3, 1_000).expect("bounded listing");
+
+        assert_eq!(listing.entries.len(), 3);
+        assert!(listing.truncated);
+        assert_eq!(listing.coverage["exhausted"], "entries");
+        assert_eq!(listing.coverage["directory"]["coverage"], "name_prefix");
+        assert_eq!(listing.coverage["directory"]["names_read"], 5);
+    }
+
+    #[test]
+    fn list_of_a_directory_with_subdirectories_is_complete() {
+        // Child directories are reported, not opened, and do not make a
+        // one-level listing incomplete.
+        let temporary = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir(temporary.path().join("b-dir")).expect("create directory");
+        std::fs::write(temporary.path().join("b-dir/inner"), b"").expect("write inner");
+        std::fs::write(temporary.path().join("a-file"), b"abc").expect("write file");
+
+        let listing = list_directory(&pinned(temporary.path()), 3, 1_000).expect("listing");
+
+        assert!(!listing.truncated);
+        assert_eq!(listing.entries[0]["name"], "b-dir");
+        assert_eq!(listing.entries[0]["is_dir"], true);
+        assert_eq!(listing.entries[1]["name"], "a-file");
+        assert_eq!(listing.entries[1]["size"], 3);
+        assert_eq!(listing.coverage["directory"]["coverage"], "complete");
+    }
+
+    #[test]
+    fn relative_directory_path_is_rebuilt_from_the_components_opened() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir_all(temporary.path().join("config/x")).expect("create tree");
+        let root = pinned(temporary.path());
+
+        let (_, current) =
+            open_relative_directory(&root, "config/.").expect("open with trailing dot");
+        assert_eq!(current, Path::new("config"));
+
+        let (directory, doubled) =
+            open_relative_directory(&root, "config//x").expect("open with doubled separator");
+        assert_eq!(doubled, Path::new("config/x"));
+
+        std::fs::write(temporary.path().join("config/x/leaf"), b"").expect("write leaf");
+        let tree = collect_tree_entries(
+            &directory,
+            &doubled,
+            &Path::new(".ai").join(&doubled),
+            4,
+            100,
+            1_000,
+            &ignore_matcher(&["/.ai/config/x/leaf/"]),
+        )
+        .expect("tree");
+        assert!(tree.entries.is_empty());
+        assert_eq!(tree.coverage["complete"], true);
+
+        assert!(open_relative_directory(&root, "./config").is_err());
+        assert!(open_relative_directory(&root, "config/../config").is_err());
     }
 }

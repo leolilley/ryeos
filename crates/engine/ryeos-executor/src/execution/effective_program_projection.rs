@@ -14,6 +14,7 @@ use ryeos_engine::hooks::EffectiveHookPlan;
 #[cfg(test)]
 use ryeos_engine::hooks::HookLayer;
 use ryeos_engine::launch_config::{LaunchConfigProofStatus, LaunchConfigSnapshotSet};
+use ryeos_engine::project_content::AuthoritativeProjectContent;
 use ryeos_engine::resolution::{EffectiveDefinitionDigest, ResolutionOutput};
 
 use crate::dispatch_error::DispatchError;
@@ -43,36 +44,92 @@ pub struct EffectiveProgramProjectionSession<'a> {
     engine: &'a ryeos_engine::engine::Engine,
     plan_context: PlanContext,
     project_root: Option<PathBuf>,
+    /// Exact live project-content authority. When present, every project
+    /// read of this session goes through it and `project_root` is only the
+    /// resolution coordinate it answers for.
+    project_content: Option<&'a dyn AuthoritativeProjectContent>,
     roots: ryeos_engine::item_resolution::ResolutionRoots,
     request_snapshot: ryeos_engine::engine::EffectiveRequestSnapshot,
     hook_snapshots: LaunchConfigSnapshotSet,
 }
 
 impl<'a> EffectiveProgramProjectionSession<'a> {
+    /// Project by walking `project_root` as an ordinary pathname. A caller
+    /// holding a retained project directory uses
+    /// [`Self::new_under_project_authority`] instead.
     pub fn new(
         engine: &'a ryeos_engine::engine::Engine,
         plan_context: &PlanContext,
         project_root: Option<&Path>,
     ) -> Result<Self, DispatchError> {
+        Self::build(engine, plan_context, project_root, None)
+    }
+
+    /// Project a live project through its exact project-content authority.
+    /// `project_root` is the resolution coordinate `project_content` answers
+    /// for and is never reopened as a pathname.
+    pub fn new_under_project_authority(
+        engine: &'a ryeos_engine::engine::Engine,
+        plan_context: &PlanContext,
+        project_root: &Path,
+        project_content: &'a dyn AuthoritativeProjectContent,
+    ) -> Result<Self, DispatchError> {
+        Self::build(
+            engine,
+            plan_context,
+            Some(project_root),
+            Some(project_content),
+        )
+    }
+
+    fn build(
+        engine: &'a ryeos_engine::engine::Engine,
+        plan_context: &PlanContext,
+        project_root: Option<&Path>,
+        project_content: Option<&'a dyn AuthoritativeProjectContent>,
+    ) -> Result<Self, DispatchError> {
         validate_projection_authority(plan_context, project_root)?;
         let roots = engine.resolution_roots(project_root.map(PathBuf::from));
-        let request_snapshot = engine
-            .effective_request_snapshot(project_root, &plan_context.subject_resolution_authority)
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let request_snapshot = match (project_root, project_content) {
+            (Some(root), Some(content)) => engine
+                .effective_request_snapshot_under_project_authority(
+                    root,
+                    content,
+                    &plan_context.subject_resolution_authority,
+                ),
+            (_, None) => engine.effective_request_snapshot(
+                project_root,
+                &plan_context.subject_resolution_authority,
+            ),
+            (None, Some(_)) => {
+                return Err(DispatchError::Internal(anyhow::anyhow!(
+                    "projection project-content authority has no project root"
+                )));
+            }
+        }
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let project = project_root.zip(project_content);
         let hook_snapshots = load_current_hook_snapshots(
             engine,
             &roots,
             &request_snapshot.parser_dispatcher,
             &request_snapshot.trust_store,
+            project,
         )?;
         Ok(Self {
             engine,
             plan_context: plan_context.clone(),
             project_root: project_root.map(PathBuf::from),
+            project_content,
             roots,
             request_snapshot,
             hook_snapshots,
         })
+    }
+
+    /// The live project-content authority with the root it answers for.
+    fn project(&self) -> Option<(&Path, &dyn AuthoritativeProjectContent)> {
+        self.project_root.as_deref().zip(self.project_content)
     }
 
     pub fn prepare(
@@ -90,14 +147,14 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
                 return Ok(projection);
             }
 
-            match capture_and_finalize_with_hook_snapshots(
+            match capture_and_finalize_with_project_authority(
                 self.engine,
                 &prepared.kind,
                 prepared.resolution,
                 &prepared.effective_caps,
                 &self.roots,
                 &self.request_snapshot.trust_store,
-                None,
+                self.project(),
                 &self.hook_snapshots,
                 None,
             ) {
@@ -112,6 +169,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
                         &self.roots,
                         &self.request_snapshot.parser_dispatcher,
                         &self.request_snapshot.trust_store,
+                        self.project(),
                     )?;
                     tracing::warn!(
                         attempt = mutable_authority_races,
@@ -146,8 +204,10 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
         match self
             .hook_snapshots
             .dependency_proof
-            .revalidate_under_authority_status(&self.engine.launch_config_roots(&self.roots), None)
-        {
+            .revalidate_under_authority_status(
+                &self.engine.launch_config_roots(&self.roots),
+                self.project(),
+            ) {
             LaunchConfigProofStatus::Current => Ok(()),
             LaunchConfigProofStatus::MutableAuthorityChanged => {
                 self.hook_snapshots = load_current_hook_snapshots(
@@ -155,6 +215,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
                     &self.roots,
                     &self.request_snapshot.parser_dispatcher,
                     &self.request_snapshot.trust_store,
+                    self.project(),
                 )?;
                 Ok(())
             }
@@ -168,25 +229,52 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
         &self,
         canonical_ref: &CanonicalRef,
     ) -> Result<PreparedProjectionInput, DispatchError> {
-        let resolved = self
-            .engine
-            .resolve(&self.plan_context, canonical_ref)
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let (resolved, closure) = match self.project() {
+            Some((project_root, project_content)) => {
+                let attestation = self
+                    .engine
+                    .resolve_attested_under_project_authority(
+                        &self.plan_context,
+                        canonical_ref,
+                        project_root,
+                        project_content,
+                    )
+                    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+                let resolved = attestation.verified_subject().resolved.clone();
+                let closure = self
+                    .engine
+                    .resolve_verified_resolution_closure_under_project_authority(
+                        &self.plan_context,
+                        &attestation,
+                        project_root,
+                        project_content,
+                    )
+                    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+                (resolved, closure)
+            }
+            None => {
+                let resolved = self
+                    .engine
+                    .resolve(&self.plan_context, canonical_ref)
+                    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+                let attestation = self
+                    .engine
+                    .verify_attested(&self.plan_context, resolved.clone())
+                    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+                let closure = self
+                    .engine
+                    .resolve_verified_resolution_closure(
+                        &self.plan_context,
+                        &attestation,
+                        self.project_root.clone(),
+                    )
+                    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+                (resolved, closure)
+            }
+        };
         let root_source_content_digest = resolved.content_hash.clone();
         let root_raw_content_digest = resolved.raw_content_digest.clone();
         let kind = resolved.kind.clone();
-        let attestation = self
-            .engine
-            .verify_attested(&self.plan_context, resolved.clone())
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-        let closure = self
-            .engine
-            .resolve_verified_resolution_closure(
-                &self.plan_context,
-                &attestation,
-                self.project_root.clone(),
-            )
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
         let (resolution, _, _) = closure.into_parts();
 
         super::launch::enforce_effective_trust(
@@ -301,16 +389,31 @@ fn load_current_hook_snapshots(
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
+    project: Option<(&Path, &dyn AuthoritativeProjectContent)>,
 ) -> Result<LaunchConfigSnapshotSet, DispatchError> {
     let config_roots = engine.launch_config_roots(roots);
-    super::launch_preparation::load_launch_config_set_under_current_authority(
-        &ryeos_engine::hooks::hook_source_declarations(),
-        &config_roots,
-        parsers,
-        engine,
-        trust_store,
-        None,
-    )
+    let declarations = ryeos_engine::hooks::hook_source_declarations();
+    match project {
+        Some((project_root, project_content)) => {
+            super::launch_preparation::load_launch_config_set_under_project_content(
+                &declarations,
+                &config_roots,
+                parsers,
+                engine,
+                trust_store,
+                project_root,
+                project_content,
+            )
+        }
+        None => super::launch_preparation::load_launch_config_set_under_current_authority(
+            &declarations,
+            &config_roots,
+            parsers,
+            engine,
+            trust_store,
+            None,
+        ),
+    }
 }
 
 fn projection_cache_key(
@@ -645,11 +748,46 @@ fn invalid_external_content(error: anyhow::Error) -> DispatchError {
 fn capture_and_finalize_with_hook_snapshots(
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
-    mut resolution: ResolutionOutput,
+    resolution: ResolutionOutput,
     effective_caps: &[String],
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+    snapshots: &LaunchConfigSnapshotSet,
+    external_realization: Option<
+        &ryeos_app::external_content_admission::AdmittedExternalRealizations,
+    >,
+) -> Result<FinalizedEffectiveProgram, DispatchError> {
+    let project = materialization
+        .map(|binding| binding.authoritative_project_content())
+        .transpose()
+        .map_err(DispatchError::Internal)?
+        .flatten()
+        .map(|(root, content)| (root, content as &dyn AuthoritativeProjectContent));
+    capture_and_finalize_with_project_authority(
+        engine,
+        kind,
+        resolution,
+        effective_caps,
+        roots,
+        trust_store,
+        project,
+        snapshots,
+        external_realization,
+    )
+}
+
+/// Capture, validate and finalize under `project`, the authority whose
+/// project-space launch-config dependencies the finalization proof checks.
+/// `None` checks them by pathname.
+fn capture_and_finalize_with_project_authority(
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    mut resolution: ResolutionOutput,
+    effective_caps: &[String],
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    project: Option<(&Path, &dyn AuthoritativeProjectContent)>,
     snapshots: &LaunchConfigSnapshotSet,
     external_realization: Option<
         &ryeos_app::external_content_admission::AdmittedExternalRealizations,
@@ -685,17 +823,6 @@ fn capture_and_finalize_with_hook_snapshots(
     }
     .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
     let config_roots = engine.launch_config_roots(roots);
-    let project = materialization
-        .map(|binding| binding.authoritative_project_content())
-        .transpose()
-        .map_err(DispatchError::Internal)?
-        .flatten()
-        .map(|(root, content)| {
-            (
-                root,
-                content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
-            )
-        });
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
         &candidate,
         engine

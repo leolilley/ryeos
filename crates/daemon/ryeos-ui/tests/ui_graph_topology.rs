@@ -15,9 +15,27 @@ fn workspace_root() -> String {
         .to_string()
 }
 
+/// The session's launch attachment: the compiled authority a dispatched UI
+/// service runs under. A bare `session:` context reaches no data on its own.
+fn surface_attachment(
+    state: &ryeos_app::state::AppState,
+    session_id: &str,
+) -> Arc<ryeos_ui::browser_session::AdmittedBindingAttachment> {
+    let session = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(session_id)
+        .expect("live browser session");
+    session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("launch attachment")
+        .clone()
+}
+
 #[tokio::test]
 async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let project_root = workspace_root();
     let launch_context = launch_context(
         "surface:ryeos/ui/atlas",
@@ -40,10 +58,14 @@ async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
         false,
     );
 
-    let result = (ryeos_ui::handlers::ui_graph_topology::DESCRIPTOR.handler)(
-        serde_json::json!(null),
-        ctx,
-        Arc::new(state),
+    let attachment = surface_attachment(&state, &session_id);
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_graph_topology::DESCRIPTOR.handler)(
+            serde_json::json!(null),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await
     .expect("topology handler should succeed");

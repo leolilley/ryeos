@@ -21,7 +21,7 @@ fn test_context() -> ryeos_ui::browser_session::LaunchContext {
 
 #[tokio::test]
 async fn invalid_token_rejected() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let result = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": "nonexistent-token" }),
@@ -40,7 +40,7 @@ async fn invalid_token_rejected() {
 
 #[tokio::test]
 async fn valid_token_consumed_and_session_returned() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let (session_id, token) = mint_launch(&state, test_context());
 
@@ -59,7 +59,7 @@ async fn valid_token_consumed_and_session_returned() {
 
 #[tokio::test]
 async fn committed_activation_replays_the_same_session() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let (session_id, token) = mint_launch(&state, test_context());
 

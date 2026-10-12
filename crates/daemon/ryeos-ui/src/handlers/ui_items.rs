@@ -8,7 +8,6 @@
 //! `item.inspect` — resolve one canonical item and return raw + effective.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,7 +21,6 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
-use ryeos_engine::item_resolution::{enumerate_kind_refs, resolve_item_full};
 use ryeos_executor::executor::ServiceAvailability;
 
 use super::ui_graph_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
@@ -189,7 +187,12 @@ pub async fn handle_items_list(
             .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?
     };
 
-    let response = build_items_list(&state, project_path.as_ref(), &request);
+    let response = build_items_list(
+        &state,
+        project_path.as_ref(),
+        project_access.as_ref(),
+        &request,
+    );
 
     serde_json::to_value(response).map_err(Into::into)
 }
@@ -197,6 +200,7 @@ pub async fn handle_items_list(
 fn build_items_list(
     state: &AppState,
     project_path: Option<&PathBuf>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemsListRequest,
 ) -> ItemsListResponse {
     let roots = state.engine.resolution_roots(project_path.cloned());
@@ -222,13 +226,23 @@ fn build_items_list(
             continue;
         };
 
-        let kind_refs = enumerate_kind_refs(&roots, schema, kind_name);
+        let kind_refs = crate::seat_auth::enumerate_kind_refs_for_access(
+            &roots,
+            schema,
+            kind_name,
+            project_access,
+        );
         let executable = schema.is_executable();
 
         for item_ref in &kind_refs {
             let canonical = item_ref.to_string();
 
-            let resolution = match resolve_item_full(&roots, schema, item_ref) {
+            let resolution = match crate::seat_auth::resolve_item_for_access(
+                &roots,
+                schema,
+                item_ref,
+                project_access,
+            ) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -258,6 +272,7 @@ fn build_items_list(
             // Trust classification
             let trust = classify_trust(
                 &resolution.winner_path,
+                project_access,
                 schema
                     .spec_for(&resolution.matched_ext)
                     .map(|spec| &spec.signature),
@@ -341,7 +356,8 @@ pub async fn handle_item_inspect(
     let req: ItemInspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let response = build_item_inspect(&state, project_path.as_ref(), &req)?;
+    let response =
+        build_item_inspect(&state, project_path.as_ref(), project_access.as_ref(), &req)?;
 
     serde_json::to_value(response).map_err(Into::into)
 }
@@ -349,6 +365,7 @@ pub async fn handle_item_inspect(
 fn build_item_inspect(
     state: &AppState,
     project_path: Option<&PathBuf>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemInspectRequest,
 ) -> Result<ItemInspectResponse> {
     let item_ref = CanonicalRef::parse(&req.canonical_ref).map_err(|e| {
@@ -365,7 +382,8 @@ fn build_item_inspect(
     };
 
     let resolution =
-        resolve_item_full(&roots, schema, &item_ref).map_err(|_| HandlerError::NotFound)?;
+        crate::seat_auth::resolve_item_for_access(&roots, schema, &item_ref, project_access)
+            .map_err(|_| HandlerError::NotFound)?;
 
     let space_str = resolution.winner_space.as_str().to_string();
     let executable = schema.is_executable();
@@ -373,6 +391,7 @@ fn build_item_inspect(
     // Trust classification
     let trust = classify_trust(
         &resolution.winner_path,
+        project_access,
         schema
             .spec_for(&resolution.matched_ext)
             .map(|spec| &spec.signature),
@@ -392,7 +411,7 @@ fn build_item_inspect(
 
     // Raw content
     let raw = if req.include_raw {
-        read_raw_content(&resolution.winner_path)
+        read_raw_content(&resolution.winner_path, project_access)
     } else {
         None
     };
@@ -408,11 +427,19 @@ fn build_item_inspect(
                     project_path.map(std::path::PathBuf::as_path),
                 ),
         };
-        state
-            .engine
-            .effective_item(effective_req)
-            .ok()
-            .and_then(|eff| serde_json::to_value(eff).ok())
+        // A retained project is composed through its directory owner; its
+        // descriptor pathname is never walked.
+        match project_access {
+            Some(access) => state.engine.with_checked_bundle_generation(|generation| {
+                generation.effective_item_under_project_authority(
+                    effective_req,
+                    access.content_authority(),
+                )
+            }),
+            None => state.engine.effective_item(effective_req),
+        }
+        .ok()
+        .and_then(|eff| serde_json::to_value(eff).ok())
     } else {
         None
     };
@@ -434,20 +461,18 @@ fn build_item_inspect(
     })
 }
 
-fn read_raw_content(path: &std::path::Path) -> Option<RawContent> {
-    let actual_bytes = std::fs::metadata(path).ok().map(|m| m.len() as usize);
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::with_capacity(MAX_RAW_BYTES.saturating_add(1));
-    file.take(MAX_RAW_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-
+fn read_raw_content(
+    path: &std::path::Path,
+    access: Option<&crate::seat_auth::RetainedProjectAccess>,
+) -> Option<RawContent> {
+    let (mut bytes, size) =
+        crate::seat_auth::read_item_source(path, access, MAX_RAW_BYTES.saturating_add(1))?;
     let observed_bytes = bytes.len();
-    let total_bytes = actual_bytes.unwrap_or(observed_bytes);
-    let truncated = total_bytes > MAX_RAW_BYTES || observed_bytes > MAX_RAW_BYTES;
-    if bytes.len() > MAX_RAW_BYTES {
-        bytes.truncate(MAX_RAW_BYTES);
-    }
+    let total_bytes = usize::try_from(size)
+        .unwrap_or(usize::MAX)
+        .max(observed_bytes);
+    let truncated = total_bytes > MAX_RAW_BYTES;
+    bytes.truncate(MAX_RAW_BYTES);
 
     Some(RawContent {
         content: String::from_utf8_lossy(&bytes).into_owned(),
