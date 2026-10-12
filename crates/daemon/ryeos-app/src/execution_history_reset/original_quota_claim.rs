@@ -336,6 +336,18 @@ impl Drop for FixtureLiveClaim {
 /// SQL ceiling, so the signed native step budget must cover the whole
 /// ceiling, plus the host's minimum allocation funding margin (a heuristic
 /// floor, not a bound) and its exact cleanup quote.
+/// Lock taken by a native service boundary check. A lock momentarily held by
+/// another thread refuses only this call and does not latch service refusal;
+/// a poisoned lock leaves its state indeterminate and is a fact refusal.
+fn boundary_lock<'a, T>(lock: &'a Mutex<T>, what: &'static str) -> Result<std::sync::MutexGuard<'a, T>> {
+    lock.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock => {
+            anyhow::Error::new(lillux_sqlite::NativeCheckContended).context(what)
+        }
+        std::sync::TryLockError::Poisoned(_) => anyhow::anyhow!("{what} poisoned"),
+    })
+}
+
 fn require_native_step_budget(quota: &OfflineResetQuota) -> Result<()> {
     ryeos_node_runtime::node_policy::sections::maintenance::validate_offline_reset_quota(quota)
 }
@@ -1970,11 +1982,8 @@ impl ResetNativeAuthority {
             "native host authority lacks actual original publication ACK"
         );
         self.claim.ledger.ensure_path_binding()?;
-        let publication = self
-            .claim
-            .reservation_publication
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("native original publication busy or poisoned"))?
+        let publication = boundary_lock(&self.claim.reservation_publication,
+                "native original publication busy")?
             .clone()
             .context("native original publication descriptor missing")?;
         let name = format!("{PREFIX}{}", self.claim.record.operation_id);
@@ -2072,11 +2081,7 @@ impl OfflineNativeAuthority for ResetNativeAuthority {
             self.claim.require_service_window()?;
             // Service work, including every new native ticket, ends when the
             // claim's producers drain or seal; only cleanup continues.
-            let state = self
-                .claim
-                .production
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original native service gate busy or poisoned"))?;
+            let state = boundary_lock(&self.claim.production, "original native service gate busy")?;
             ensure!(
                 state.phase == OriginalProductionPhase::Producing,
                 "original producers draining or sealed; native service refused"
@@ -2459,6 +2464,119 @@ impl OriginalQuotaClaim {
                 None,
             )
         }
+    }
+}
+
+// Scheduler schema-reference destination: the same original funding,
+// scheduler source selection and runtime namespace exclusion as the scheduler
+// inspection it serves. It holds no copy, SQL or copy-work owner.
+struct OriginalSchedulerReferenceAuthority {
+    claim: Arc<OriginalQuotaClaim>,
+    factory: std::sync::Weak<lillux_sqlite::OriginalNativeFactory>,
+    root: Arc<lillux::PinnedDirectory>,
+    namespace: lillux::PinnedDirectoryLock,
+}
+impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalSchedulerReferenceAuthority {
+    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        _prepay: &dyn Fn(u64, u64) -> Result<()>)
+        -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        // The refusal keeps this authority, with its root and namespace.
+        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
+    }
+
+    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
+        let original = self
+            .factory
+            .upgrade()
+            .context("original scheduler reference factory absent")?;
+        ensure!(
+            original.same_original(factory),
+            "scheduler schema reference selects a foreign factory"
+        );
+        let issued = self.claim.issued_native_factory()?;
+        ensure!(
+            issued.same_original(factory),
+            "scheduler schema reference factory differs from genuine claim issuer"
+        );
+        factory.require_runtime_binding(&self.claim.runtime)?;
+        self.namespace.ensure_protects(&self.root)?;
+        self.root.ensure_path_binding()?;
+        self.claim.require_scheduler_inspection_source(&self.root)
+    }
+}
+
+/// The scheduler inspection copy's own owners, as the preview created them:
+/// the copy root and its held namespace, the copy lease, and the SQL and
+/// copy work issued for it.
+pub(super) struct SchedulerInspectionCopyOwners {
+    pub(super) root: Arc<lillux::PinnedDirectory>,
+    pub(super) namespace: lillux::PinnedDirectoryLock,
+    pub(super) copy: Arc<crate::runtime_db::SqliteInspectionCopyLease>,
+    pub(super) sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
+    pub(super) work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+}
+
+/// Readonly destination of the scheduler inspection copy. Beside the same
+/// original funding, scheduler source selection and runtime namespace
+/// exclusion as the scheduler schema reference, it retains the actual copy
+/// root and its namespace and the copy, SQL and copy-work owners its native
+/// ticket produces under. Like every reset destination it has no outside
+/// receiver: it ends with the host census.
+struct OriginalSchedulerInspectionAuthority {
+    claim: Arc<OriginalQuotaClaim>,
+    factory: std::sync::Weak<lillux_sqlite::OriginalNativeFactory>,
+    source: Arc<lillux::PinnedDirectory>,
+    source_namespace: lillux::PinnedDirectoryLock,
+    root: Arc<lillux::PinnedDirectory>,
+    namespace: lillux::PinnedDirectoryLock,
+    copy: Arc<crate::runtime_db::SqliteInspectionCopyLease>,
+    sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
+    work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+}
+impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalSchedulerInspectionAuthority {
+    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        _prepay: &dyn Fn(u64, u64) -> Result<()>)
+        -> std::result::Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+        // The refusal keeps this authority with every copy, SQL and root owner.
+        let error = self.claim.destination_outside_transfer_refusal(factory, aggregate);
+        Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(factory.clone(), self, error))
+    }
+
+    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
+        let original = self
+            .factory
+            .upgrade()
+            .context("original scheduler inspection factory absent")?;
+        ensure!(
+            original.same_original(factory),
+            "scheduler inspection selects a foreign factory"
+        );
+        let issued = self.claim.issued_native_factory()?;
+        ensure!(
+            issued.same_original(factory),
+            "scheduler inspection factory differs from genuine claim issuer"
+        );
+        factory.require_runtime_binding(&self.claim.runtime)?;
+        self.work.require_original_native_factory(factory)?;
+        self.sql.require_copy_work(&self.work)?;
+        self.source_namespace.ensure_protects(&self.source)?;
+        self.source.ensure_path_binding()?;
+        self.claim.require_scheduler_inspection_source(&self.source)?;
+        self.root.ensure_path_binding()?;
+        self.namespace.ensure_protects(&self.root)?;
+        ensure!(
+            self.root.is_same_directory(self.copy.directory()?)?,
+            "foreign scheduler inspection copy root"
+        );
+        // The SQL owner's own checkpoint requires the native producer
+        // interval, which only the native open begins and its terminal ends;
+        // this authority is checked before and after that interval as well.
+        self.work.checkpoint()
     }
 }
 
@@ -3068,6 +3186,97 @@ impl OriginalQuotaClaim {
         }
     }
 
+    /// One paid ticket of this claim's own issued host for the current
+    /// scheduler schema reference a scheduler inspection matches its copied
+    /// database against. The returned factory is the host's, for the
+    /// reference's construction and census; the reference grants no copy,
+    /// SQL or scheduler row authority.
+    pub(super) fn issue_scheduler_reference_inputs(
+        self: &Arc<Self>,
+        source: &lillux::PinnedDirectory,
+        namespace: &lillux::PinnedDirectoryLock,
+    ) -> Result<(
+        Arc<lillux_sqlite::OriginalNativeFactory>,
+        lillux_sqlite::OriginalNativeTransientInputs,
+    )> {
+        self.require_scheduler_inspection_source(source)?;
+        namespace.ensure_protects(source)?;
+        let factory = self.issued_native_factory()?;
+        let authority = Arc::new(OriginalSchedulerReferenceAuthority {
+            claim: self.clone(),
+            factory: Arc::downgrade(&factory),
+            root: Arc::new(source.try_clone()?),
+            namespace: namespace.clone(),
+        });
+        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(
+            authority.as_ref(),
+            &factory,
+        )?;
+        // SAFETY: the claim's own issued host factory, its published funding,
+        // the original scheduler source selection and the held runtime
+        // namespace exclusion are all retained by this authority; the fixed
+        // reference purpose builds only the declared scheduler schema.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference,
+                authority,
+            )
+        }?;
+        Ok((factory, inputs))
+    }
+
+    /// Readonly inspection inputs for the scheduler copy, on this claim's own
+    /// issued host. The returned factory is the host's, the one the copy
+    /// opens on and its terminal is checked against. The inputs grant no
+    /// write, no source access and no scheduler row authority beyond reading
+    /// the copy under the claim's SQL work.
+    pub(super) fn issue_scheduler_inspection_inputs(
+        self: &Arc<Self>,
+        source: &lillux::PinnedDirectory,
+        source_namespace: &lillux::PinnedDirectoryLock,
+        owners: SchedulerInspectionCopyOwners,
+    ) -> Result<(
+        Arc<lillux_sqlite::OriginalNativeFactory>,
+        lillux_sqlite::OriginalNativeBoundInputs,
+    )> {
+        let SchedulerInspectionCopyOwners { root, namespace, copy, sql, work } = owners;
+        self.require_scheduler_inspection_source(source)?;
+        source_namespace.ensure_protects(source)?;
+        let factory = self.issued_native_factory()?;
+        let lease: lillux_sqlite::SqliteCopyLease = copy.clone();
+        let authority = Arc::new(OriginalSchedulerInspectionAuthority {
+            claim: self.clone(),
+            factory: Arc::downgrade(&factory),
+            source: Arc::new(source.try_clone()?),
+            source_namespace: source_namespace.clone(),
+            root: Arc::clone(&root),
+            namespace,
+            copy,
+            sql: Arc::clone(&sql),
+            work,
+        });
+        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(
+            authority.as_ref(),
+            &factory,
+        )?;
+        // SAFETY: the claim's own issued host factory, its published funding,
+        // the original scheduler source selection, the held runtime and copy
+        // namespaces, and the actual copy lease, SQL work and copy work are
+        // all retained by this authority; the fixed readonly inspection
+        // purpose opens only the existing copy.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                root,
+                OsStr::new("scheduler.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::ReadonlyInspection,
+                lillux_sqlite::OriginalNativeDomain::SchedulerInspection,
+                authority,
+                Some((lease, sql)),
+            )
+        }?;
+        Ok((factory, inputs))
+    }
+
     /// Source selection check only, not a work or native allocation permit.
     pub(super) fn require_runtime_inspection_target(&self, target: &std::path::Path) -> Result<()> {
         self.require_service_window()?;
@@ -3573,6 +3782,41 @@ impl OriginalSqlWork {
             _ => anyhow::bail!("original SQL root transferred; service re-entry refused"),
         }
     }
+    /// The destination, custody and clock checks every SQL service step
+    /// makes, without the producer interval: the native interval begins only
+    /// after these pass, so its own start cannot already require it.
+    fn require_service_destination(&self, destination: &lillux::PinnedDirectory) -> Result<()> {
+        lillux_sqlite::SqliteInspectionCopyWork::checkpoint(self.copy.as_ref())?;
+        let root = self.service_root()?;
+        root.ensure_path_binding()?;
+        destination.ensure_path_binding()?;
+        ensure!(
+            root.is_same_directory(destination)?,
+            "SQL open selects foreign original destination"
+        );
+        self.require_service_window()
+    }
+    /// No filesystem/signature/CAS work under the counter mutex. This
+    /// immutable clock was authenticated once; never resample its start.
+    fn require_service_window(&self) -> Result<()> {
+        ensure!(
+            matches!(
+                self.copy
+                    .claim
+                    .clock
+                    .window(
+                        &self.copy.claim.record.occupancy,
+                        std::time::Duration::from_millis(
+                            self.copy.claim.record.reserved.max_cleanup_millis
+                        )
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                lillux::time::OccupancyWindowState::Service { .. }
+            ),
+            "original SQL service window expired; charge retained"
+        );
+        Ok(())
+    }
 }
 impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
     unsafe fn register_original_outside_roots(&self,
@@ -3616,7 +3860,7 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
         root: &lillux::PinnedDirectory,
         name: &OsStr,
     ) -> Result<lillux_sqlite::SqliteInspectionProductionPermit> {
-        self.require_destination(root)?;
+        self.require_service_destination(root)?;
         ensure!(
             name == OsStr::new(&self.copy.claim.record.sources[self.store].database_name),
             "native producer changes original basename"
@@ -3649,17 +3893,11 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
     fn checkpoint(&self) -> Result<()> {
         lillux_sqlite::SqliteInspectionCopyWork::checkpoint(self.copy.as_ref())?;
         self.service_root()?.ensure_path_binding()?;
-        Ok(())
-    }
-    fn debit_vm_steps(&self, steps: u64) -> Result<()> {
-        ensure!(steps > 0, "SQL work debit is empty");
+        // Producer interval and the full clock window are boundary checks;
+        // the per-step debit below reads only in-memory facts.
         {
-            let producer = self
-                .copy
-                .claim
-                .production
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("original native interval busy or poisoned"))?;
+            let producer = boundary_lock(&self.copy.claim.production,
+                "original native interval busy")?;
             ensure!(
                 producer
                     .active
@@ -3668,24 +3906,10 @@ impl lillux_sqlite::SqliteInspectionSqlWork for OriginalSqlWork {
                 "SQL work lacks active original native interval"
             );
         }
-        // No filesystem/signature/CAS work under the counter mutex. This
-        // immutable clock was authenticated once; never resample its start.
-        ensure!(
-            matches!(
-                self.copy
-                    .claim
-                    .clock
-                    .window(
-                        &self.copy.claim.record.occupancy,
-                        std::time::Duration::from_millis(
-                            self.copy.claim.record.reserved.max_cleanup_millis
-                        )
-                    )
-                    .map_err(anyhow::Error::msg)?,
-                lillux::time::OccupancyWindowState::Service { .. }
-            ),
-            "original SQL service window expired; charge retained"
-        );
+        self.require_service_window()
+    }
+    fn debit_vm_steps(&self, steps: u64) -> Result<()> {
+        // Per VM step: in-memory service deadline and the shared ceiling.
         self.copy.claim.sql_steps.charge(steps)
     }
 }
@@ -4717,68 +4941,6 @@ mod clock_controls {
         }
     }
 
-    // Genuine signed issuer controls. Authored source only; execution UNRUN.
-    #[test]
-    fn genuine_native_interval_blocks_seal_until_original_closed_ack() {
-        let tmp = tempfile::tempdir().unwrap();
-        let name = OsStr::new("runtime.sqlite3");
-        let database = rusqlite::Connection::open(tmp.path().join(name)).unwrap();
-        database
-            .execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(19)")
-            .unwrap();
-        database.close().unwrap();
-        let source = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        let namespace = source.lock_exclusive().unwrap();
-        let (_lock, claim, work) = crate::execution_history_reset::fixture_inspection_claim(
-            &source,
-            &namespace,
-            &tmp.path().join(name),
-        );
-        let (copy, lease) = crate::runtime_db::create_sqlite_inspection_copy(
-            &source,
-            name,
-            &namespace,
-            work.clone(),
-        )
-        .unwrap();
-        let sql = work.clone().issue_sql_work(&copy).unwrap();
-        let root = Arc::new(copy);
-        let native_lease: lillux_sqlite::SqliteCopyLease = lease;
-        let owner = lillux_sqlite::ReadonlySqliteCopy::open(
-            root.clone(),
-            name,
-            native_lease.clone(),
-            sql.clone(),
-        )
-        .unwrap();
-        assert!(claim.seal_production(&work).is_err());
-        assert_eq!(
-            owner
-                .connection()
-                .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            19
-        );
-        let closed = owner.close().unwrap();
-        assert!(
-            claim.seal_production(&work).is_err(),
-            "close alone does not acknowledge original producer handoff"
-        );
-        closed
-            .require_original(&root, name, &native_lease, &sql)
-            .unwrap();
-        closed.acknowledge_producer_terminal().unwrap();
-        let seal = claim.seal_production(&work).unwrap();
-        assert!(!seal.slot(0).unwrap().never_started);
-        assert!(seal.slot(1).unwrap().never_started);
-        assert!(sql.begin_native_production(&root, name).is_err());
-        assert!(
-            claim.begin_inspection_settlement(seal, Vec::new()).is_err(),
-            "attempted store cannot be replaced by an empty disposal aggregate"
-        );
-        assert!(root.entry_no_follow(name).unwrap().is_some());
-    }
-
     #[test]
     fn genuine_copy_interval_drains_without_renewal_and_missing_aggregate_refuses() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4829,68 +4991,6 @@ mod clock_controls {
         assert_eq!(
             std::fs::read(tmp.path().join(name)).unwrap(),
             b"original bytes"
-        );
-    }
-
-    #[test]
-    fn genuine_never_started_seal_rejects_foreign_issuer_and_retains_charge() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let a = PinnedDirectory::open(first.path()).unwrap().unwrap();
-        let b = PinnedDirectory::open(second.path()).unwrap().unwrap();
-        let al = a.lock_exclusive().unwrap();
-        let bl = b.lock_exclusive().unwrap();
-        let (_state_a, claim, work) = crate::execution_history_reset::fixture_inspection_claim(
-            &a,
-            &al,
-            &first.path().join("runtime.sqlite3"),
-        );
-        let (_state_b, other, foreign) = crate::execution_history_reset::fixture_inspection_claim(
-            &b,
-            &bl,
-            &second.path().join("runtime.sqlite3"),
-        );
-        assert!(claim.seal_production(&foreign).is_err());
-        let seal = claim.seal_production(&work).unwrap();
-        assert!(seal.slot(0).unwrap().never_started && seal.slot(1).unwrap().never_started);
-        let mut config =
-            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-                app_root: Some(first.path().to_path_buf()),
-                ..Default::default()
-            })
-            .unwrap();
-        config.db_path = first.path().join("runtime.sqlite3");
-        let identity = NodeIdentity::load(&config.node_signing_key_path).unwrap();
-        let policy = OfflineResetPolicyOwner::load(&config, &identity, &_state_a, &a, &al).unwrap();
-        assert!(
-            claim.issue_copy_work(&policy, &identity).is_err(),
-            "sealed original issuer cannot be reissued"
-        );
-        drop(policy);
-        assert!(
-            other
-                .begin_inspection_settlement(seal.clone(), Vec::new())
-                .is_err()
-        );
-        let settlement = claim.begin_inspection_settlement(seal, Vec::new()).unwrap();
-        settlement.disposition_record().unwrap();
-        settlement.dispose_witnesses().unwrap();
-        settlement.seal_disposition().unwrap();
-        // A retry of the same sealed step is idempotent.
-        settlement.seal_disposition().unwrap();
-        let error = settlement.require_completed().unwrap_err();
-        assert!(format!("{error:#}").contains("not captured"), "{error:#}");
-        assert!(
-            first
-                .path()
-                .join(".ai/node/offline-reset-quota")
-                .join(format!("reserved.{}", claim.operation_id()))
-                .exists()
-        );
-        assert!(
-            work.clone()
-                .create_destination(&a, OsStr::new("runtime.sqlite3"))
-                .is_err()
         );
     }
 

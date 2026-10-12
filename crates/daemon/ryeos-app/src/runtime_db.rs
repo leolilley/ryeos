@@ -1,12 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,10 +15,14 @@ mod original_deadline;
 mod original_native;
 pub(crate) use original_native::{OriginalRuntimeAcquisitionFailure, OriginalRuntimeAcquisitionReleased};
 pub(crate) use original_inspection::RuntimeInspectionReferenceRelease;
+pub(crate) use original_inspection::retain_copy_inspection_terminal;
 mod live_native;
+pub(crate) use live_native::offline_live_execution_chains;
 mod original_inspection;
-#[cfg(test)]
-pub(crate) mod test_native;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
+#[cfg(all(test, target_os = "linux"))]
+mod original_mutation_reset_tests;
 #[doc(hidden)]
 pub use original_inspection::{
     quote_inspection_outside_continuation,
@@ -146,11 +147,6 @@ pub struct RuntimeInfo {
     /// another service response. Internal owners use `get_launch_metadata`.
     #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
-    /// Outer-only classification of an authority contract that is not the
-    /// exact current wire schema. The predecessor payload remains opaque in
-    /// SQLite and is never deserialized into current authority.
-    #[serde(skip_serializing)]
-    pub incompatible_launch_metadata: Option<IncompatibleLaunchMetadata>,
     pub recovery_wait: Option<RecoveryWaitDisposition>,
 }
 
@@ -857,12 +853,6 @@ impl ProcessReleaseFenceState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IncompatibleLaunchMetadata {
-    pub schema_version: u64,
-    pub admitted_launch_capsule_schema: Option<u64>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InProcessHandlerReservationPhase {
     Pending,
@@ -1182,7 +1172,6 @@ pub struct RuntimeActionIntent {
     pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
     pub admitted_launch_capsule_hash: Option<String>,
     pub launch_metadata: Option<crate::launch_metadata::RuntimeLaunchMetadata>,
-    pub incompatible_launch_metadata: Option<IncompatibleLaunchMetadata>,
     pub initial_events: Option<Vec<crate::state_store::NewEventRecord>>,
     /// Optional generic shared-workspace authority for this exact action.
     /// RuntimeActionIntent is the sole durable owner: do not add a parallel
@@ -1357,14 +1346,8 @@ fn decode_runtime_action_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run
         admitted_launch_capsule_hash: row.get(7)?,
         launch_metadata: row
             .get::<_, Option<String>>(8)?
-            .map(|raw| decode_stored_launch_metadata_column(8, &raw))
-            .transpose()?
-            .and_then(StoredLaunchMetadata::current),
-        incompatible_launch_metadata: row
-            .get::<_, Option<String>>(8)?
-            .map(|raw| decode_stored_launch_metadata_column(8, &raw))
-            .transpose()?
-            .and_then(StoredLaunchMetadata::incompatible),
+            .map(|raw| decode_current_launch_metadata_column(8, &raw))
+            .transpose()?,
         initial_events: row
             .get::<_, Option<String>>(9)?
             .map(|raw| serde_json::from_str(&raw))
@@ -2566,10 +2549,6 @@ CREATE INDEX IF NOT EXISTS idx_credential_profile_reservation_project_fence
 
 use ryeos_state::sqlite_schema;
 
-/// The existing pre-epoch runtime application ID. It is recognized only as
-/// owned predecessor authority for an explicitly confirmed clean cutover.
-const PREDECESSOR_RUNTIME_APP_ID: i32 = 0x5259_4541;
-
 /// Monotonic operator-owned runtime store contract. The low 8 bits of the
 /// SQLite application ID carry this epoch; the high 24 bits reserve a
 /// runtime-only family that cannot overlap RyeOS's other `RY..` database IDs.
@@ -2578,217 +2557,9 @@ const PREDECESSOR_RUNTIME_APP_ID: i32 = 0x5259_4541;
 const RUNTIME_OPERATOR_APP_ID_PREFIX: u32 = 0x5259_0000;
 const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
-// Epoch 3 is the clean effective-program/hook-dispatch activation barrier. An
-// older store may contain resumable occurrences under superseded identity and
-// is deliberately refused by ordinary open; the explicit runtime-history
-// reset is permitted only after admission has stopped and resumable work has
-// been drained/terminalized.
-// Epoch 5 stores only the daemon-projected action result in follow waiter
-// terminal envelopes. Predecessor rows retained complete runtime results and
-// cannot be reinterpreted as the compact parent-resume contract.
-// Epoch 6 atomically introduces durable exclusive-process ownership, its
-// dedicated session command/approval ledgers, and opaque credential-profile
-// metadata. It deliberately has no open-time migration.
-// Epoch 7 adds the durable pre-contact boundary for worker-pushed observation
-// batches. It deliberately has no open-time migration.
-// Epoch 8 retains every worker boot as immutable process-history evidence and
-// uniquely identifies an epoch within its session. Predecessor epoch 7's
-// single-row-per-session constraint cannot represent a recovered worker.
-// Epoch 9 embeds the exact retained-current-HEAD destination in every durable
-// execution-project authority envelope. A predecessor row cannot authorize
-// publication under this contract.
-// Epoch 10 retains the exact canonical observation batch before root-chain
-// contact, so startup can complete an accepted append without worker replay.
-// Epoch 11 replaces the overlay-shaped execution-workspace authority with a
-// canonical RyeOS-owned project root plus, only under enforced isolation, one
-// opaque backend-state root. Predecessor journals cannot prove either the new
-// root identity set or the v3 signed-adapter lifecycle contract.
-// Epoch 12 makes credential_profile an explicitly revisioned live projection
-// of stable operational authority. The revision permits deterministic repair
-// while this exact runtime schema is open. An explicit predecessor-schema
-// cutover preserves only OperationalDb authority and never decodes this table.
-// Epoch 13 separates stable worker chain addressing from exact placement and
-// boot-epoch fences throughout the hosted-worker projection.
-// Epoch 14 admits only the portable outer exact-program/capsule contract and
-// launch-metadata epoch that seal resolved ref-binding identities.
-// Epoch 15 retains cross-site credential-generation reservations until the
-// exact successor dedicated session atomically consumes them. A predecessor
-// lock_owner alone cannot distinguish a crashed handoff reservation from an
-// abandoned pre-attachment worker start.
-// Epoch 16 admits launch-metadata epoch 20, including the exact durable
-// runtime-state bootstrap for every machine continuation.
-// Epoch 17 clean-cuts retained managed launches at persistent-session capsule
-// schema 5 and the runtime launch contract that requires an explicit signed
-// content-dependency policy. Predecessor descriptors omit that authority and
-// must not be reinterpreted as the current empty policy during recovery.
-// Epoch 18 replaces the detached-only action reservation with one chain-bound
-// runtime-action intent shared by inline and detached callbacks. Epoch 17 rows
-// cannot prove the new action mode or authoritative chain scope.
-// Epoch 19 admits launch-metadata epoch 21 and sealed-request schema 11, which
-// retain optional ingress-authenticated handler authority without reconstructing
-// it from a principal string during callbacks or recovery.
-// Epoch 20 admits sealed-request schema 12, thread-snapshot schema 11,
-// admitted-launch-capsule schema 17, and launch-metadata epoch 22. Their
-// captured node-history policy provenance is the flat exact policy-item
-// identity; predecessor tagged signed_config/missing_config wrappers are not
-// decoded as current authority.
-// Epoch 21 admits sealed-request schema 13, admitted-launch-capsule schema 18,
-// and launch-metadata epoch 23. It also makes each handoff credential
-// reservation the durable owner of the exact target project-HEAD fence until
-// authoritative adoption. Predecessor reservations cannot prove that fence.
-// Epoch 22 extends the existing RuntimeActionIntent authority with the generic
-// shared-workspace access class, exact worker boot/grant/project coordinates,
-// phase barrier, and immutable input generation. Predecessor action rows
-// cannot authorize or recover these operations.
-// Epoch 25 combines that workspace-operation authority with bounded worker
-// outcomes/original completion epochs, independent candidate evaluation, and
-// journaled qualification/disposition. It also admits launch-metadata 27,
-// sealed-request 16, launch capsule 23 and persistent-session capsule 8.
-// Neither the source-local epoch 22 nor the
-// separately checkpointed campaign epochs 22–24 can authorize this combined
-// execution contract; there is no open-time migration.
-// Epoch 26 admits fixed-parent live authority in project envelope 4, sealed
-// request 17, thread snapshot 12, launch metadata 28 and launch capsule 24.
-// Previous live-path-mask authority is never reinterpreted on open.
-// Epoch 27 requires retained prepared-content target contracts in request 18,
-// capsule 25, and launch metadata 29. Epoch 26 is already allocated to the
-// coordinating fixed-parent confinement cut. No ambient-kind recovery substitution.
-// Epoch 28 records exact per-launch shared-view membership and creator
-// attachment. No predecessor row can imply borrower absence or mount ownership.
-// Epoch 30 retains pre-contact scope authority in the existing session owner,
-// explicit attached scope presence/absence and the stable offline lifetime fence.
-// Epoch 31 retains exact workload ingress/callback identity in the existing
-// action intent. Never infer that testimony for a predecessor workspace row.
-// Epoch 32 requires exact product receipt authority and semantic definition v3.
-// Epoch 33 combines product/capture authority with exact workload invocation
-// and retained process-scope authority. Neither branch epoch grants this union.
-// Epoch 35 makes a followed child's exact product-selection batch part of its
-// durable specification and recovery resume authority. Epoch 34 rows cannot
-// prove that newly required child authority and are never reinterpreted.
-// Epoch 37 introduces the sole durable allocation index shared by ordinary,
-// pooled-session and dedicated-worker process owners. Epoch 36 stores those
-// owners in disjoint lifecycle tables and cannot prove cross-path exclusivity.
-// Epoch 38 gives every resource owner in that shared index one exact durable
-// release fence. An issued financial operation is historical evidence, never
-// live permission to release a held process after shutdown or retirement wins.
-// Epoch 39 moves exclusive admission before kernel contact: every
-// resource-bearing launch retains an exact Lillux scope allocation and the
-// selected resource set, then atomically converts that reservation into the
-// durable process owner on attachment.
-// Epoch 40 retains subordinate external allocation obligations and their
-// stable predecode reset guard. Controller death cannot settle these owners.
-// Epoch 41 moves the authenticated channel journal into its shared owner and
-// refuses channels/frames that are inserted directly in advanced state.
-// Epoch 42 retains exact signed placement-binding generations before any
-// allocation contact so restart cleanup never depends on the current config.
-// Epoch 43 cuts retained placement binding documents to the complete backend,
-// lifecycle and byte-budget contract; epoch-42 rows must not be decoded under
-// that stronger authority shape.
-// Epoch 44 adds immutable no-occurrence, termination-intent and independently
-// verified terminal evidence. Epoch 43 cannot decode contacted settlement.
-// Epoch 45 cuts allocation reservations to schema 2, retaining the exact
-// controller channel-key generation and bootstrap-capability identity before
-// provider contact. Epoch-44 rows cannot authorize occurrence attachment.
-// Epoch 46 cuts channel acknowledgement payloads to exact peer digest plus
-// retained/claimed/applied/revoked application evidence. Epoch-45 unit
-// acknowledgements cannot authorize replay or application reconciliation.
-// Epoch 47 retains the exact signed controller HTTPS origin, route contract,
-// TLS-root bundle identity and response bounds in every placement generation.
-// Epoch-46 bindings did not authorize a controller transport.
-// Epoch 48 retains the admitted TLS-root bytes and separates provider
-// allocation from an immutable, independently reconcilable supervisor-start
-// mutation. Epoch-47 rows cannot construct that protected bootstrap.
-// Epoch 54 cuts retained external placement bindings to schema 6.  Schema-5
-// generations do not authorize the exact controller-side connector protocol,
-// artifact bytes, or connector-only provider route and must not be decoded as
-// current execution authority.
-// Epoch 55 retains the one-use local connector capability generation, exact
-// channel/artifact authority, authenticated peer incarnation and terminal
-// disconnect state. Epoch-54 stores cannot prove whether protocol bytes crossed
-// a predecessor connector and are never decoded as reconnect authority.
-// Epoch 57 cuts external channel bindings to schema 4. The execution mode is
-// mandatory authority: a session channel cannot become a direct command by
-// interpreting an absent field or accepting new terminal payloads implicitly.
-// Preserve predecessor stores as evidence; do not rewrite their channels.
-// Epoch 58 requires typed external allocation ownership. A direct immutable
-// thread must never decode predecessor session/workspace fields as authority.
-// Epoch 59 requires the closed session/direct placement binding (schema 9)
-// and explicit direct-plan endpoint authority. Do not reinterpret retained
-// predecessor reservations/capsules as the new execution contract.
-// Epoch 60 retains bounded compiler-authenticated direct programs inline in
-// allocation schema 5. Predecessor reservations are not rewritten on recovery.
-// Epoch 61 restricts executable-input revocation to owner-directed Release and
-// protocol bytes. Predecessor journals may falsely mark supervisor output as
-// never applied; do not reinterpret those rows or their immutable triggers.
-// Epoch 62 retains the exact last process-settlement attempt until terminal
-// signing can bind it; a fresh attachment invalidates the prior slot.
-// Epoch 63 retains a one-shot, owner-fenced scoped child attempt. A durable
-// release-permitted cut is contact-uncertain and never reopens into launch.
-// Epoch 64 retains a separate device-free, thread-owned root scope intent.
-// Epoch 65 persists Lillux scoped-child recovery death proof before removing
-// its exact bound scope, so restart after kernel retirement cannot re-run an
-// active-control operation against an intentionally absent resource.
-// Epoch 67 retains ordered scoped-child input reservations so uncertain local
-// delivery cannot be replayed as a fresh write or bypassed by a later close.
-// Epoch 69 refuses predecessor retained placement bindings: schema 10 adds
-// separately signed guest-package byte authorities that schema 9 lacked.
-// Epoch 70 binds the exact prepared guest-package delivery to the same
-// immutable supervisor activation row and one-shot contact claim.
-// Scoped mount evidence now retains exact prepared-directory source identities.
-// An epoch-70 row cannot be decoded under the new no-backcompat contract.
-// Epoch 75 retains the controller-observed contact deadline on each bound
-// restored-Sandbox occurrence. Older rows cannot distinguish a late create
-// from timely qualification evidence.
-// Epoch 77 retains a complete verifier stream observation separately from its
-// one-shot contact claim. A late observation remains visible but cannot
-// silently qualify a runtime.
-// Epoch 99 requires closed tagged verifier observations and purpose-bound
-// consumer-use retention. Untagged predecessor measurements are not decoded
-// as current consumer verification authority.
-// Epoch 100 retains the exact admitted consumer selection in the existing
-// immutable verifier-attempt row. Absent predecessor selection cannot be
-// reconstructed from mutable installed configuration during recovery.
-// Epoch 102 requires protected consumer archive budgets in the immutable
-// verifier selection. Predecessor rows cannot acquire limits from live policy.
-// Epoch 103 binds consumer attempts to the retained installed guest runtime
-// manifest. Predecessor purposes cannot acquire an account/profile identity
-// from an uploaded archive or mutable settings during recovery.
-// Epoch 104 retains the exact canonical consumer input before the contact
-// claim. Earlier consumer attempts had no durable input-byte commitment.
-// Epoch 105 retains one Q local Worker process before release and requires
-// exact process death proof before its allocation can settle.
-// Epoch 106 retains one Q framed request, its possible-contact boundary,
-// request-correlated Final and separately observed completed turn.
-// Epoch 107 retains one Q-local workspace Create and process-scope attempt,
-// including exact held creator, view, recovery, and Worker attachment joins.
-// Epoch 108 retains the bounded canonical Q Worker Final and the selected
-// signed wire maximum for restartable semantic verification.
-// Epoch 109 retains one possible borrow of the original Q workspace view
-// before its descriptor can be cloned for the held Worker.
-// Epoch 110 retains exact no-contact Q local cleanup, physical view close,
-// backend Destroy, original pinned-root removal, and scope retirement.
-// Epoch 111 retains bounded, request-bound Q Worker pushed batches in their
-// exact local sequence chain. This local transport receipt is not a portable
-// signed qualification fact or a semantic success permit.
-// Epoch 112 retains the exact request-correlated Delta and a one-way send
-// settlement marker, separately from observation-driven turn completion.
-// Epoch 114 retained a one-use Q guest-input scratch intent before Create.
-// Epoch 115 adds exact original-descriptor physical removal and Closed evidence.
-// Epoch 116 retains one-use Render Q relay transfer intents and exact file bytes.
-// Epoch 117 binds the original sealed relay bootstrap to its activation.
-// Epoch 118 retains one semantic application attempt and its exact signed
-// response before any controller-to-guest relay file can be uploaded.
-// Epoch 119 retains the original private Q project directory and its one-use
-// descriptor borrow, without backend workspace or process-scope authority.
-// Epoch 120 retains distinct one-use Q setup and turn contact/settlement.
-// Epoch 121 retains Q credential profile custody through exact local retirement.
-// Epoch 124 retains current-only transcript manifest4/streamv3 native capture
-// semantics. Actual owned DDL remains unchanged; predecessor manifests refuse.
-// Epoch 125 retains original Q canary intent, binding and terminal observation.
-// Epoch 126 is the combined owner contract: preserve all epoch 125 Q/callback
-// journals while requiring process identity v6, tagged resource launch authority,
-// runtime custody v2 and the process_resource_owner.runtime_custody column.
-// Neither predecessor history gains authority through defaults or migration.
+// The current operator schema epoch. Any other epoch is refused by ordinary
+// open and reset by the explicit execution-history reset; no stored row of an
+// earlier epoch gains authority through defaults or migration.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 126;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
@@ -6860,6 +6631,17 @@ fn decode_current_launch_metadata_after_header(
             schema_version < u64::from(LAUNCH_METADATA_SCHEMA_VERSION),
         ));
     }
+    let current_capsule_schema =
+        u64::from(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
+    if header.sealed && header.admitted_launch_capsule_schema != Some(current_capsule_schema) {
+        let stored = header.admitted_launch_capsule_schema;
+        return Err(incompatible_runtime_execution_schema(
+            format!(
+                "stored launch metadata seals admitted launch capsule schema {stored:?}, current schema is {current_capsule_schema}"
+            ),
+            stored.is_some_and(|stored| stored < current_capsule_schema),
+        ));
+    }
     // Launch authority legitimately contains nested, producer-authored JSON.
     // Grow the parser stack on demand rather than making every Tokio worker
     // stack larger or allowing a malformed record to abort the daemon.
@@ -6880,61 +6662,11 @@ fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
     decode_current_launch_metadata_after_header(raw, header)
 }
 
-// The Current variant carries the full launch metadata by design; the
-// incompatible arm is a rejection record, so the size skew is inherent.
-#[allow(clippy::large_enum_variant)]
-enum StoredLaunchMetadata {
-    Current(Box<RuntimeLaunchMetadata>),
-    Incompatible(IncompatibleLaunchMetadata),
-}
-
-impl StoredLaunchMetadata {
-    fn current(self) -> Option<RuntimeLaunchMetadata> {
-        match self {
-            Self::Current(metadata) => Some(*metadata),
-            Self::Incompatible(_) => None,
-        }
-    }
-
-    fn incompatible(self) -> Option<IncompatibleLaunchMetadata> {
-        match self {
-            Self::Current(_) => None,
-            Self::Incompatible(metadata) => Some(metadata),
-        }
-    }
-}
-
-/// Classify predecessor launch authority from outer wire fields only. An
-/// unsupported payload is deliberately not deserialized as the current Rust
-/// type; it remains opaque history until retention or explicit discard removes
-/// it.
-fn decode_stored_launch_metadata(raw: &str) -> Result<StoredLaunchMetadata> {
-    let header = decode_launch_metadata_header(raw)?;
-    let schema_version = header.schema_version;
-    let capsule_schema = header.admitted_launch_capsule_schema;
-    let sealed = header.sealed;
-    let current_capsule_schema =
-        u64::from(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
-    if schema_version != u64::from(LAUNCH_METADATA_SCHEMA_VERSION)
-        || (sealed && capsule_schema != Some(current_capsule_schema))
-    {
-        return Ok(StoredLaunchMetadata::Incompatible(
-            IncompatibleLaunchMetadata {
-                schema_version,
-                admitted_launch_capsule_schema: capsule_schema,
-            },
-        ));
-    }
-    decode_current_launch_metadata_after_header(raw, header)
-        .map(Box::new)
-        .map(StoredLaunchMetadata::Current)
-}
-
-fn decode_stored_launch_metadata_column(
+fn decode_current_launch_metadata_column(
     column: usize,
     raw: &str,
-) -> rusqlite::Result<StoredLaunchMetadata> {
-    decode_stored_launch_metadata(raw).map_err(|error| {
+) -> rusqlite::Result<RuntimeLaunchMetadata> {
+    decode_current_launch_metadata(raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
             rusqlite::types::Type::Text,
@@ -6952,7 +6684,44 @@ fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<St
     lillux::canonical_json(&value).context("canonicalize current launch metadata")
 }
 
-fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::ProcessHostLifetime>> {
+/// The execution-history reset flag that discards an unreadable scope
+/// lifetime fence after an attested host reboot.
+pub const DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG: &str = "--discard-unreadable-lifetime-fence-after-reboot";
+
+/// What an execution-history reset does with a scope lifetime fence this
+/// binary cannot read as a current witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnreadableLifetimeFence {
+    /// Refuse, naming [`DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG`].
+    Refuse,
+    /// The operator attests the host has rebooted since the fence was
+    /// written. The fence is discarded; where its boot id is still readable
+    /// it must differ from the current boot.
+    DiscardAfterAttestedReboot,
+}
+
+/// A discarded unreadable scope lifetime fence, recorded in the reset report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LifetimeFenceDiscard {
+    /// Why the stored fence is not a current witness.
+    pub reason: String,
+    /// The boot id the stored fence names, when it is still readable.
+    pub stored_boot_id: Option<String>,
+    /// True when the stored boot id was read and differs from the current
+    /// boot; false when the discard rests on the operator's attestation alone.
+    pub boot_id_verified: bool,
+}
+
+enum ScopeLifetimeFenceReading {
+    Current(Option<lillux::ProcessHostLifetime>),
+    Unreadable { reason: String, stored_boot_id: Option<String> },
+}
+
+/// Read the singleton fence. The table and row shape are the stable
+/// contract and refuse outright; a witness this binary cannot decode or
+/// validate is reported as unreadable, with the boot id it names when that
+/// one field is still present. Nothing else of the old witness is read.
+fn classify_scope_lifetime_fence(conn: &Connection) -> Result<ScopeLifetimeFenceReading> {
     let schema: Option<String> = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_lifetime_fence'",
@@ -6985,18 +6754,95 @@ fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::Process
         [],
         |row| row.get(0),
     )?;
-    raw.map(|raw| {
+    let Some(raw) = raw else {
+        return Ok(ScopeLifetimeFenceReading::Current(None));
+    };
+    let decoded = (|| -> Result<lillux::ProcessHostLifetime> {
         let lifetime: lillux::ProcessHostLifetime = serde_json::from_str(&raw)?;
         lifetime.validate().map_err(anyhow::Error::msg)?;
         if lillux::canonical_json(&serde_json::to_value(&lifetime)?)? != raw {
             bail!("runtime scope lifetime witness is not canonical");
         }
         Ok(lifetime)
-    })
-    .transpose()
+    })();
+    match decoded {
+        Ok(lifetime) => Ok(ScopeLifetimeFenceReading::Current(Some(lifetime))),
+        Err(error) => Ok(ScopeLifetimeFenceReading::Unreadable {
+            reason: format!("{error:#}"),
+            stored_boot_id: lifetime_boot_id(&raw),
+        }),
+    }
+}
+
+/// The boot id a lifetime witness names, if its encoding still carries one
+/// as a plain string. Used only to check an attested reboot.
+fn lifetime_boot_id(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let boot_id = value.pointer("/backend/boot_id")?.as_str()?;
+    (!boot_id.is_empty() && boot_id.len() <= 64).then(|| boot_id.to_owned())
+}
+
+fn unreadable_lifetime_fence_refusal(reason: &str) -> anyhow::Error {
+    anyhow!(
+        "runtime scope lifetime fence is not a current witness ({reason}); this binary cannot tell whether its process scopes ended. \
+         If the host has rebooted since the fence was written, rerun the execution-history reset with {DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG}: \
+         it discards the fence after checking that its boot id, where still readable, differs from the current boot"
+    )
+}
+
+fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::ProcessHostLifetime>> {
+    match classify_scope_lifetime_fence(conn)? {
+        ScopeLifetimeFenceReading::Current(lifetime) => Ok(lifetime),
+        ScopeLifetimeFenceReading::Unreadable { reason, .. } => Err(unreadable_lifetime_fence_refusal(&reason)),
+    }
+}
+
+/// Decide an unreadable fence under `policy`: `None` for a current or empty
+/// fence, the discard record when the attested reboot admits it, otherwise a
+/// refusal naming the flag.
+fn decide_unreadable_lifetime_fence(
+    conn: &Connection,
+    policy: UnreadableLifetimeFence,
+) -> Result<Option<LifetimeFenceDiscard>> {
+    let (reason, stored_boot_id) = match classify_scope_lifetime_fence(conn)? {
+        ScopeLifetimeFenceReading::Current(_) => return Ok(None),
+        ScopeLifetimeFenceReading::Unreadable { reason, stored_boot_id } => (reason, stored_boot_id),
+    };
+    if policy == UnreadableLifetimeFence::Refuse {
+        return Err(unreadable_lifetime_fence_refusal(&reason));
+    }
+    let boot_id_verified = match &stored_boot_id {
+        Some(stored) => {
+            let current = lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?;
+            let current = serde_json::to_value(&current)?;
+            let current = current
+                .pointer("/backend/boot_id")
+                .and_then(serde_json::Value::as_str)
+                .context("current host lifetime names no boot id")?;
+            ensure!(
+                current != stored,
+                "{DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG} refused: the unreadable fence names the current boot {current}; \
+                 the host has not rebooted since it was written, so its process scopes may still be live"
+            );
+            true
+        }
+        None => false,
+    };
+    Ok(Some(LifetimeFenceDiscard { reason, stored_boot_id, boot_id_verified }))
 }
 
 fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Result<()> {
+    ensure_scope_lifetime_resettable_with(conn, stored_epoch, UnreadableLifetimeFence::Refuse).map(drop)
+}
+
+/// [`ensure_scope_lifetime_resettable`] with the reset's decision for an
+/// unreadable fence. An attested discard counts as an ended lifetime and is
+/// returned for the report; the fence itself is cleared by the mutating owner.
+fn ensure_scope_lifetime_resettable_with(
+    conn: &Connection,
+    stored_epoch: u32,
+    fence: UnreadableLifetimeFence,
+) -> Result<Option<LifetimeFenceDiscard>> {
     // Independent of host lifetime: remote execution can survive its owner.
     external_execution::ensure_resettable(conn, stored_epoch)?;
     // A Q workspace can exist before any process scope is allocated. The
@@ -7065,7 +6911,10 @@ fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Res
     // execution rows. Every epoch from this cut onward requires the witness,
     // even when its execution tables are no longer understood by this binary.
     if stored_epoch < SCOPE_LIFETIME_FENCE_FIRST_EPOCH {
-        return Ok(());
+        return Ok(None);
+    }
+    if let Some(discard) = decide_unreadable_lifetime_fence(conn, fence)? {
+        return Ok(Some(discard));
     }
     if let Some(lifetime) = read_scope_lifetime_fence(conn)? {
         if !lifetime.has_ended().map_err(anyhow::Error::msg)? {
@@ -7074,10 +6923,10 @@ fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Res
             );
         }
     }
-    Ok(())
+    Ok(None)
 }
 
-fn initialize_current_runtime_schema(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> Result<()> {
+fn initialize_current_runtime_schema(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .context("begin atomic runtime schema initialization")?;
     sqlite_schema::init_owned(&tx, &runtime_schema_spec(), &runtime_schema_sql(), path)?;
@@ -7086,7 +6935,18 @@ fn initialize_current_runtime_schema(conn: &Connection, path: &Path, reference: 
         .context("commit atomic runtime schema initialization")
 }
 
-fn validate_current_runtime_store(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> Result<()> {
+fn validate_current_runtime_store(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
+    validate_current_runtime_store_with(conn, path, reference, UnreadableLifetimeFence::Refuse)
+}
+
+/// [`validate_current_runtime_store`] under an execution-history reset's
+/// decision for an unreadable scope lifetime fence.
+fn validate_current_runtime_store_with(
+    conn: &Connection,
+    path: &Path,
+    reference: &sqlite_schema::SchemaSqlDefinition,
+    fence: UnreadableLifetimeFence,
+) -> Result<()> {
     let tx = conn
         .unchecked_transaction()
         .context("begin atomic runtime schema/data validation")?;
@@ -7104,7 +6964,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path, reference: Opt
     restored_verifier_attempt::validate_current(&tx)?;
     runtime_snapshot_qualification_termination::validate_current(&tx)?;
     scoped_child_attempt::validate_current(&tx)?;
-    read_scope_lifetime_fence(&tx)?;
+    decide_unreadable_lifetime_fence(&tx, fence)?;
     let rows = {
         let mut statement = tx.prepare(
             "SELECT 'thread_runtime', thread_id, launch_metadata
@@ -7127,7 +6987,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path, reference: Opt
         rows
     };
     for (owner, owner_id, raw) in rows {
-        decode_stored_launch_metadata(&raw)
+        decode_current_launch_metadata(&raw)
             .with_context(|| format!("validate launch metadata for {owner} row `{owner_id}`"))?;
     }
     let reservation_count: i64 = tx.query_row(
@@ -7272,7 +7132,7 @@ fn discard_predecessor_runtime_schema(tx: &Transaction<'_>) -> Result<()> {
 fn reset_owned_runtime_schema(
     conn: &Connection,
     path: &Path,
-    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+    reference: &sqlite_schema::SchemaSqlDefinition,
 ) -> Result<()> {
     let operator_epoch = runtime_operator_schema_epoch(conn, path)?;
     ensure_scope_lifetime_resettable(conn, operator_epoch)?;
@@ -7330,8 +7190,6 @@ struct PrivateRuntimeDbIncarnation;
 pub(crate) struct RuntimeDbIncarnation(std::sync::Arc<PrivateRuntimeDbIncarnation>);
 
 enum RuntimeConnection {
-    Plain(Connection),
-    Inspection(lillux_sqlite::ReadonlySqliteCopy),
     OriginalMutation {
         owner: lillux_sqlite::OriginalNativeConnection,
         schema_reference: sqlite_schema::ClosedNativeSchemaSqlReference,
@@ -7344,32 +7202,27 @@ enum RuntimeConnection {
     },
 }
 impl RuntimeConnection {
-    // Query and transaction borrows stay inside this callback. The original
-    // admitted connection variant uses the same entry when the native factory
-    // is joined; inspection remains owned by its actual retained copy.
+    // Query and transaction borrows stay inside this callback; every owner
+    // runs it inside its own native SQL scope.
     fn with_sql<T>(
         &self,
         operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>,
     ) -> Result<T> {
         match self {
-            Self::Plain(connection) => operation(connection),
-            Self::Inspection(owner) => operation(owner.connection()),
             Self::OriginalMutation { owner, schema_reference: _ }
             | Self::OriginalInspection { owner, factory: _, schema_reference: _ } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
         }
     }
 
-    /// Every native owner retains the closed native reference it was matched
-    /// against. Only the non-native plain and copy owners use the stock build.
-    fn schema_reference(&self) -> Option<&sqlite_schema::SchemaSqlDefinition> {
+    /// Every owner retains the closed native reference it was matched against.
+    fn schema_reference(&self) -> &sqlite_schema::SchemaSqlDefinition {
         match self {
-            Self::Live(owner) => Some(owner.schema_reference()),
+            Self::Live(owner) => owner.schema_reference(),
             Self::OriginalMutation { owner: _, schema_reference }
             | Self::OriginalInspection { owner: _, factory: _, schema_reference } => {
-                Some(schema_reference.definition())
+                schema_reference.definition()
             }
-            Self::Plain(_) | Self::Inspection(_) => None,
         }
     }
 
@@ -7378,10 +7231,11 @@ impl RuntimeConnection {
         operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>,
     ) -> Result<T> {
         match self {
-            Self::Plain(connection) => operation(connection),
             Self::OriginalMutation { owner, schema_reference: _ } => owner.with_sql(operation),
             Self::Live(owner) => owner.with_sql(operation),
-            Self::Inspection(_) | Self::OriginalInspection { .. } => Err(rusqlite::Error::InvalidQuery.into()),
+            Self::OriginalInspection { owner: _, factory: _, schema_reference: _ } => {
+                Err(rusqlite::Error::InvalidQuery.into())
+            }
         }
     }
 
@@ -7397,9 +7251,6 @@ pub struct RuntimeDb {
     open_mode: RuntimeDbOpenMode,
     _directory: Option<lillux::PinnedDirectory>,
     _directory_lock: Option<lillux::secure_fs::PinnedDirectoryLock>,
-    _database_file: Option<File>,
-    _wal_file: Option<File>,
-    _shm_file: Option<File>,
     _inspection_copy: Option<std::sync::Arc<SqliteInspectionCopyLease>>,
     _inspection_sql: Option<std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
 }
@@ -7873,16 +7724,11 @@ impl std::error::Error for IncompatibleRuntimeOperatorSchema {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeDbOpenMode {
     Current,
-    ExistingCurrent,
     ExplicitHistoryReset,
     ExplicitHistoryResetInspection,
 }
 
 impl RuntimeDbOpenMode {
-    fn allow_create(self) -> bool {
-        matches!(self, Self::Current | Self::ExplicitHistoryReset)
-    }
-
     fn explicit_history_reset(self) -> bool {
         matches!(
             self,
@@ -7895,9 +7741,6 @@ fn runtime_operator_schema_epoch(conn: &Connection, path: &Path) -> Result<u32> 
     let application_id: i32 = conn
         .query_row("PRAGMA application_id", [], |row| row.get(0))
         .context("read runtime database application_id")?;
-    if application_id == PREDECESSOR_RUNTIME_APP_ID {
-        return Ok(0);
-    }
     let encoded = u32::try_from(application_id).map_err(|_| {
         anyhow!(
             "runtime database application_id is {application_id}; refusing to classify or reset unowned store {}",
@@ -7928,40 +7771,22 @@ fn incompatible_runtime_operator_schema(stored: u32) -> anyhow::Error {
     .into()
 }
 
-fn assert_current_runtime_schema(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> Result<()> {
+fn assert_current_runtime_schema(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
     let stored_epoch = runtime_operator_schema_epoch(conn, path)?;
     if stored_epoch != RUNTIME_OPERATOR_SCHEMA_EPOCH {
         return Err(incompatible_runtime_operator_schema(stored_epoch));
     }
     sqlite_schema::assert_owned(conn, &runtime_schema_spec(), path)
         .context("runtime database is not the exact current owned schema")?;
-    match reference {
-        Some(reference) => reference.require_matches(conn, path),
-        None => sqlite_schema::assert_complete_schema_sql(conn, &runtime_schema_sql(), path),
-    }.context("runtime database SQL does not match the exact current format")
+    reference
+        .require_matches(conn, path)
+        .context("runtime database SQL does not match the exact current format")
 }
 
 fn runtime_sidecar_name(database_name: &OsStr, suffix: &str) -> OsString {
     let mut name = database_name.to_os_string();
     name.push(suffix);
     name
-}
-
-fn inspect_runtime_sidecars(
-    directory: &lillux::PinnedDirectory,
-    database_name: &OsStr,
-) -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let name = runtime_sidecar_name(database_name, suffix);
-        if let Some(entry) = directory.entry_no_follow(&name)? {
-            ensure!(
-                entry.entry_type == lillux::PinnedEntryType::Regular,
-                "runtime database sidecar must be regular and non-symlink: {}",
-                directory.path().join(&name).display()
-            );
-        }
-    }
-    Ok(())
 }
 
 pub(crate) struct SqliteInspectionCopyLease {
@@ -8066,23 +7891,6 @@ impl std::fmt::Debug for SqliteInspectionClosed {
     }
 }
 impl SqliteInspectionClosed {
-    pub(crate) fn retain(
-        proof: lillux_sqlite::ClosedSqliteInspection,
-        lease: std::sync::Arc<SqliteInspectionCopyLease>,
-        sql: std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
-        database_name: OsString,
-        namespace: Option<lillux::PinnedDirectoryLock>,
-    ) -> Self {
-        Self {
-            process: std::process::id(),
-            proof: std::sync::Arc::new(proof),
-            native: std::sync::Mutex::new(None),
-            lease,
-            sql,
-            database_name,
-            _namespace: namespace,
-        }
-    }
     pub(crate) fn original_native_terminal(&self) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         original_inspection::terminal_snapshot(self.process, &self.native)
     }
@@ -8175,24 +7983,6 @@ impl std::fmt::Debug for SqliteInspectionAcquisitionReleased {
     }
 }
 impl SqliteInspectionAcquisitionReleased {
-    pub(crate) fn retain(
-        proof: lillux_sqlite::ReleasedSqliteInspection,
-        lease: std::sync::Arc<SqliteInspectionCopyLease>,
-        sql: std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
-        database_name: OsString,
-        namespace: Option<lillux::PinnedDirectoryLock>,
-    ) -> Self {
-        Self {
-            process: std::process::id(),
-            proof: std::sync::Arc::new(proof),
-            native: std::sync::Mutex::new(None),
-            lease,
-            sql,
-            database_name,
-            _namespace: namespace,
-        }
-    }
-
     pub(crate) fn original_native_terminal(&self) -> Result<Option<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         original_inspection::terminal_snapshot(self.process, &self.native)
     }
@@ -8224,11 +8014,6 @@ pub(crate) enum RuntimeInspectionRelease {
 
 enum RuntimeInspectionNativeCustody {
     Original(original_inspection::OriginalInspectionCustody),
-    Open(lillux_sqlite::ReadonlySqliteOpenFailure),
-    Validation(lillux_sqlite::ReadonlySqliteCopy),
-    Close(lillux_sqlite::ReadonlySqliteCloseFailure),
-    Closed(lillux_sqlite::ClosedSqliteInspection),
-    Released(lillux_sqlite::ReleasedSqliteInspection),
 }
 pub(crate) struct RuntimeInspectionNativeFailure {
     error: anyhow::Error,
@@ -8277,33 +8062,6 @@ impl RuntimeInspectionNativeFailure {
                     }
                 }
             }
-            Some(RuntimeInspectionNativeCustody::Closed(proof)) => {
-                Ok((Some(RuntimeInspectionRelease::Closed(std::sync::Arc::new(
-                    SqliteInspectionClosed::retain(
-                        proof,
-                        self._copy.clone(),
-                        self._sql.clone(),
-                        self.database_name.clone(),
-                        Some(self._namespace.clone()),
-                    ),
-                ))), None))
-            }
-            Some(RuntimeInspectionNativeCustody::Released(proof)) => Ok((
-                Some(RuntimeInspectionRelease::Acquisition(SqliteInspectionAcquisitionReleased {
-                    process: std::process::id(),
-                    proof: std::sync::Arc::new(proof),
-                    native: std::sync::Mutex::new(None),
-                    lease: self._copy.clone(),
-                    sql: self._sql.clone(),
-                    database_name: self.database_name.clone(),
-                    _namespace: Some(self._namespace.clone()),
-                })),
-                None,
-            )),
-            Some(pending) => {
-                *retained = Some(pending);
-                anyhow::bail!("runtime native release still has original pending owner")
-            }
             None => anyhow::bail!("runtime native release already transferred"),
         }
     }
@@ -8319,25 +8077,6 @@ impl RuntimeInspectionNativeFailure {
             Some(RuntimeInspectionNativeCustody::Original(owner)) => owner.retry_close()
                 .map(RuntimeInspectionNativeCustody::Original)
                 .map_err(RuntimeInspectionNativeCustody::Original),
-            Some(RuntimeInspectionNativeCustody::Open(failure)) => failure
-                .retry_close()
-                .map(RuntimeInspectionNativeCustody::Released)
-                .map_err(RuntimeInspectionNativeCustody::Open),
-            Some(RuntimeInspectionNativeCustody::Validation(owner)) => owner
-                .close()
-                .map(RuntimeInspectionNativeCustody::Closed)
-                .map_err(RuntimeInspectionNativeCustody::Close),
-            Some(RuntimeInspectionNativeCustody::Close(failure)) => failure
-                .retry_close()
-                .map(RuntimeInspectionNativeCustody::Closed)
-                .map_err(RuntimeInspectionNativeCustody::Close),
-            Some(
-                terminal @ (RuntimeInspectionNativeCustody::Closed(_)
-                | RuntimeInspectionNativeCustody::Released(_)),
-            ) => {
-                *self.custody.lock().unwrap_or_else(|p| p.into_inner()) = Some(terminal);
-                return Ok(());
-            }
             None => anyhow::bail!("runtime native closure disposition was already transferred"),
         };
         let mut retained = self.custody.lock().unwrap_or_else(|p| p.into_inner());
@@ -8527,112 +8266,6 @@ fn ensure_runtime_directory_binding(directory: &lillux::PinnedDirectory) -> Resu
     Ok(())
 }
 
-fn runtime_files_are_same(left: &File, right: &File) -> Result<bool> {
-    #[cfg(not(unix))]
-    {
-        let _ = (left, right);
-        bail!("runtime database file identity is unavailable on this platform");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let left = left.metadata()?;
-        let right = right.metadata()?;
-        Ok(left.dev() == right.dev() && left.ino() == right.ino())
-    }
-}
-
-fn ensure_runtime_file_binding(
-    directory: &lillux::PinnedDirectory,
-    name: &OsStr,
-    expected: &File,
-    label: &str,
-) -> Result<()> {
-    let current = directory.open_regular(name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "{label} disappeared while in use: {}",
-            directory.path().join(name).display()
-        )
-    })?;
-    if !runtime_files_are_same(expected, &current)? {
-        bail!(
-            "{label} changed while in use: {}",
-            directory.path().join(name).display()
-        );
-    }
-    Ok(())
-}
-
-fn ensure_same_runtime_file(
-    expected: &File,
-    current: &File,
-    label: &str,
-    database_path: &Path,
-) -> Result<()> {
-    if !runtime_files_are_same(expected, current)? {
-        bail!(
-            "{label} changed while runtime database was opening: {}",
-            database_path.display()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn matching_open_descriptors(file: &File) -> Result<BTreeSet<i32>> {
-    use std::os::unix::fs::MetadataExt;
-
-    let expected = file.metadata()?;
-    let mut descriptors = BTreeSet::new();
-    for entry in fs::read_dir("/proc/self/fd").context("enumerate process descriptors")? {
-        let entry = entry.context("read process descriptor entry")?;
-        let Some(descriptor) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let metadata = match fs::metadata(entry.path()) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspect process descriptor {}", entry.path().display())
-                });
-            }
-        };
-        if metadata.dev() == expected.dev() && metadata.ino() == expected.ino() {
-            descriptors.insert(descriptor);
-        }
-    }
-    Ok(descriptors)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn matching_open_descriptors(_file: &File) -> Result<BTreeSet<i32>> {
-    Ok(BTreeSet::new())
-}
-
-fn ensure_sqlite_connection_uses_expected_file(
-    file: &File,
-    descriptors_before: &BTreeSet<i32>,
-    label: &str,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let mut descriptors_after = matching_open_descriptors(file)?;
-        descriptors_after.remove(&file.as_raw_fd());
-        if descriptors_after.is_subset(descriptors_before) {
-            bail!("SQLite did not retain a descriptor for the pinned {label} inode");
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (file, descriptors_before, label);
-    Ok(())
-}
-
 impl ryeos_state::RuntimeLivenessInspector for RuntimeDb {
     fn chain_has_live_recovery_state(&self, chain_root_id: &str) -> Result<bool> {
         self.chain_has_live_state(chain_root_id)
@@ -8714,7 +8347,6 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
         && (intent.child_project_authority.is_some()
             || intent.admitted_launch_capsule_hash.is_some()
             || intent.launch_metadata.is_some()
-            || intent.incompatible_launch_metadata.is_some()
             || intent.initial_events.is_some())
     {
         bail!(
@@ -8741,31 +8373,17 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
             bail!("runtime action occurrence contradicts retained workload invocation authority");
         }
     }
-    if intent.launch_metadata.is_some() && intent.incompatible_launch_metadata.is_some() {
-        bail!(
-            "root-carrying operation `{}` has both current and incompatible launch authority",
-            intent.operation_id
-        );
-    }
     let current_sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
         && intent.launch_metadata.is_some()
-        && intent.incompatible_launch_metadata.is_none()
-        && intent.initial_events.is_some()
-        && intent.child_project_authority.is_some();
-    let incompatible_sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
-        && intent.launch_metadata.is_none()
-        && intent.incompatible_launch_metadata.is_some()
         && intent.initial_events.is_some()
         && intent.child_project_authority.is_some();
     let unsealed_fields_empty = intent.admitted_launch_capsule_hash.is_none()
         && intent.launch_metadata.is_none()
-        && intent.incompatible_launch_metadata.is_none()
         && intent.initial_events.is_none();
     if matches!(
         intent.mode,
         RuntimeActionMode::Detached | RuntimeActionMode::AwaitedRoot
     ) && !current_sealed_fields_complete
-        && !incompatible_sealed_fields_complete
         && !unsealed_fields_empty
     {
         bail!(
@@ -9116,6 +8734,19 @@ fn require_bounded_route_idle(
 }
 
 impl RuntimeDb {
+    /// Raw SQL on this exact live connection, inside its native SQL scope.
+    /// Tests use it to forge crash-window rows that no public transition can
+    /// produce; a separate connection to the same file is refused.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_sql_for_test<T>(
+        &self,
+        operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.conn.with_sql(operation)
+    }
+}
+
+impl RuntimeDb {
     #[cfg(test)]
     pub(crate) fn fixture_launch_epoch(&self, thread_id: &str) -> Result<Option<i64>> {
         self.conn.with_sql(|conn| {
@@ -9134,8 +8765,7 @@ impl RuntimeDb {
             || self.reset_target.as_deref() != Some(path)
             || self._directory.is_none()
             || self._directory_lock.is_none()
-            || (self._database_file.is_none()
-                && !matches!(&self.conn, RuntimeConnection::OriginalMutation { owner: _, schema_reference: _ }))
+            || !matches!(&self.conn, RuntimeConnection::OriginalMutation { owner: _, schema_reference: _ })
         {
             bail!("offline reset requires the exact pinned reset database owner");
         }
@@ -9161,51 +8791,19 @@ impl RuntimeDb {
             ._directory_lock
             .as_ref()
             .context("offline database namespace lock absent")?;
-        if let RuntimeConnection::OriginalMutation { owner, schema_reference: _ } = &self.conn {
-            namespace.ensure_protects(directory)?;
-            ensure_runtime_directory_binding(directory)?;
-            let name = path.file_name().context("offline database target has no file name")?;
-            let expected = owner.bound_main_identity()?;
-            let observed = directory.entry_no_follow(name)?
-                .context("original Runtime target absent")?;
-            ensure!(observed.entry_type == lillux::secure_fs::PinnedEntryType::Regular
-                && expected == (observed.containing_device, observed.inode),
-                "original Runtime target changed from its retained Bound keeper");
-            return Ok(());
-        }
-        let database = self
-            ._database_file
-            .as_ref()
-            .context("offline pinned database file absent")?;
+        let RuntimeConnection::OriginalMutation { owner, schema_reference: _ } = &self.conn else {
+            bail!("offline reset requires the original Runtime mutation owner");
+        };
         namespace.ensure_protects(directory)?;
         ensure_runtime_directory_binding(directory)?;
-        let name = path
-            .file_name()
-            .context("offline database target has no file name")?;
-        ensure_runtime_file_binding(directory, name, database, "runtime database")?;
+        let name = path.file_name().context("offline database target has no file name")?;
+        let expected = owner.bound_main_identity()?;
+        let observed = directory.entry_no_follow(name)?
+            .context("original Runtime target absent")?;
+        ensure!(observed.entry_type == lillux::secure_fs::PinnedEntryType::Regular
+            && expected == (observed.containing_device, observed.inode),
+            "original Runtime target changed from its retained Bound keeper");
         Ok(())
-    }
-
-    pub fn new_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")
-            .context("enable in-memory runtime database foreign keys")?;
-        initialize_current_runtime_schema(&conn, Path::new(":memory:"), None)?;
-        Ok(Self {
-            conn: RuntimeConnection::Plain(conn),
-            incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
-            reset_target: None,
-            original_deadline_active: std::cell::Cell::new(false),
-            reset_required: false,
-            open_mode: RuntimeDbOpenMode::Current,
-            _directory: None,
-            _directory_lock: None,
-            _database_file: None,
-            _wal_file: None,
-            _shm_file: None,
-            _inspection_copy: None,
-            _inspection_sql: None,
-        })
     }
 
     pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
@@ -15886,6 +15484,41 @@ impl RuntimeDb {
         self.discard_all_thread_history_unchecked(true)
     }
 
+    /// The reset's decision for this store's scope lifetime fence, read
+    /// without mutation (a preview reads its inspection copy).
+    pub(crate) fn unreadable_lifetime_fence_decision(
+        &self,
+        fence: UnreadableLifetimeFence,
+    ) -> Result<Option<LifetimeFenceDiscard>> {
+        self.conn.with_sql(|connection| decide_unreadable_lifetime_fence(connection, fence))
+    }
+
+    /// Clear an unreadable scope lifetime fence under the operator's attested
+    /// reboot, before the reset's other mutations. Returns the discard for
+    /// the report; a current or empty fence is left alone.
+    pub(crate) fn discard_unreadable_lifetime_fence(
+        &self,
+        authority: &crate::execution_history_reset::OfflineResetAuthority<'_>,
+        fence: UnreadableLifetimeFence,
+    ) -> Result<Option<LifetimeFenceDiscard>> {
+        // Reading the fence needs no mutation authority; only a discard does.
+        if self.unreadable_lifetime_fence_decision(fence)?.is_none() {
+            return Ok(None);
+        }
+        authority.authorize_mutation(self)?;
+        self.conn.with_sql(|connection| {
+            let Some(discard) = decide_unreadable_lifetime_fence(connection, fence)? else {
+                return Ok(None);
+            };
+            let cleared = connection.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
+                [],
+            )?;
+            ensure!(cleared == 1, "scope lifetime fence row disappeared during its attested discard");
+            Ok(Some(discard))
+        })
+    }
+
     pub(crate) fn discard_all_thread_history(
         &self,
         authority: &crate::execution_history_reset::OfflineResetAuthority<'_>,
@@ -17051,178 +16684,15 @@ impl RuntimeDb {
         })
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
-        Self::open_bound(path, RuntimeDbOpenMode::Current)
-    }
-
-    /// Explicit destructive-reset counterpart for an offline caller that owns
-    /// the database parent namespace but cannot share its pinned authority.
-    pub(crate) fn open_for_explicit_history_reset(path: &Path) -> Result<Self> {
-        Self::open_bound(path, RuntimeDbOpenMode::ExplicitHistoryReset)
-    }
-
-    /// Open the persisted runtime database for offline projection recovery
-    /// without creating or migrating anything. Pending head transitions use
-    /// this as fail-closed liveness authority, so an absent or stale database
-    /// must never be replaced by a fresh empty one.
-    pub fn open_existing_current(path: &Path) -> Result<Self> {
-        Self::open_bound(path, RuntimeDbOpenMode::ExistingCurrent)
-    }
-
-    /// Open the live runtime store beneath the daemon's already pinned and
-    /// exclusively locked runtime-state namespace.
-    pub(crate) fn open_with_namespace_authority(
-        path: &Path,
-        directory: lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-    ) -> Result<Self> {
-        Self::open_bound_in_directory(path, RuntimeDbOpenMode::Current, directory, directory_lock)
-    }
-
-    /// Open beneath an already pinned offline namespace, destructively
-    /// resetting an incompatible owned runtime schema only when the operator
-    /// has explicitly confirmed retirement of all thread history.
-    pub(crate) fn open_for_explicit_history_reset_with_namespace_authority(
-        path: &Path,
-        directory: lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-    ) -> Result<Self> {
-        Self::open_bound_in_directory(
-            path,
-            RuntimeDbOpenMode::ExplicitHistoryReset,
-            directory,
-            directory_lock,
-        )
-    }
-
-    /// Non-creating inspection through an already-issued original copy owner.
-    /// There is no generic open mode that can bypass copy admission.
-    #[cfg(test)]
-    pub(crate) fn open_owned_history_reset_inspection(
-        path: &Path,
-        directory: lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-        work: std::sync::Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
-    ) -> Result<Self> {
-        ensure!(
-            path.parent() == Some(directory.path()),
-            "inspection namespace path mismatch"
-        );
-        directory.ensure_path_binding()?;
-        directory_lock.ensure_protects(&directory)?;
-        work.checkpoint()?;
-        let name = path
-            .file_name()
-            .context("inspection database has no basename")?;
-        let (inspection_directory, inspection_lease) =
-            create_sqlite_inspection_copy(&directory, name, &directory_lock, work.clone())?;
-        let opened = (|| -> Result<Self> {
-            work.checkpoint()?;
-            let inspection_path = inspection_directory.path().join(name);
-            let inspection_lock = inspection_directory
-                .lock_exclusive_with_timeout(work.remaining_service_window()?)
-                .context("lock runtime inspection copy")?;
-            let retained_directory = inspection_directory.try_clone()?;
-            let sql_work = work.clone().issue_sql_work(&inspection_directory)?;
-            let opaque_lease: lillux_sqlite::SqliteCopyLease = inspection_lease.clone();
-            let owner = match lillux_sqlite::ReadonlySqliteCopy::open(
-                std::sync::Arc::new(inspection_directory),
-                name,
-                opaque_lease,
-                sql_work.clone(),
-            ) {
-                Ok(owner) => owner,
-                Err(failure) => {
-                    return Err(anyhow::Error::new(RuntimeInspectionNativeFailure {
-                        error: anyhow::anyhow!(
-                            "runtime native inspection open: {}",
-                            failure.error()
-                        ),
-                        custody: std::sync::Mutex::new(Some(RuntimeInspectionNativeCustody::Open(
-                            failure,
-                        ))),
-                        _copy: inspection_lease.clone(),
-                        _sql: sql_work,
-                        _namespace: inspection_lock,
-                        database_name: name.to_os_string(),
-                    }));
-                }
-            };
-            // Read-only validation: no CREATE, WAL mutation, BEGIN IMMEDIATE,
-            // schema migration or eager sidecar establishment on the copy.
-            let validation = (|| -> Result<bool> {
-                sql_work.checkpoint()?;
-                let conn = owner.connection();
-                let stored_epoch = runtime_operator_schema_epoch(conn, &inspection_path)?;
-                ensure!(
-                    stored_epoch <= RUNTIME_OPERATOR_SCHEMA_EPOCH,
-                    "runtime inspection belongs to a newer operator epoch"
-                );
-                ensure_scope_lifetime_resettable(conn, stored_epoch)?;
-                let reset_required = stored_epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH;
-                if !reset_required {
-                    validate_current_runtime_store(conn, &inspection_path, None)?;
-                }
-                let integrity: String =
-                    conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-                ensure!(
-                    integrity == "ok",
-                    "runtime inspection integrity failed: {integrity}"
-                );
-                if !reset_required {
-                    let journal_mode: String =
-                        conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-                    ensure!(
-                        journal_mode == "wal",
-                        "runtime inspection journal mode is not WAL"
-                    );
-                }
-                sql_work.checkpoint()?;
-                Ok(reset_required)
-            })();
-            let reset_required = match validation {
-                Ok(value) => value,
-                Err(error) => {
-                    return Err(anyhow::Error::new(RuntimeInspectionNativeFailure {
-                        error,
-                        custody: std::sync::Mutex::new(Some(
-                            RuntimeInspectionNativeCustody::Validation(owner),
-                        )),
-                        _copy: inspection_lease.clone(),
-                        _sql: sql_work,
-                        _namespace: inspection_lock,
-                        database_name: name.to_os_string(),
-                    }));
-                }
-            };
-            Ok(Self {
-                conn: RuntimeConnection::Inspection(owner),
-                incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
-                reset_target: Some(inspection_path),
-                original_deadline_active: std::cell::Cell::new(false),
-                reset_required,
-                open_mode: RuntimeDbOpenMode::ExplicitHistoryResetInspection,
-                _directory: Some(retained_directory),
-                _directory_lock: Some(inspection_lock),
-                // Native Binding owns the main/WAL/SHM keeper descriptors.
-                _database_file: None,
-                _wal_file: None,
-                _shm_file: None,
-                _inspection_copy: Some(inspection_lease.clone()),
-                _inspection_sql: Some(sql_work),
-            })
-        })();
-        opened.map_err(|error| SqliteInspectionCopyCustodyError::retain(error, inspection_lease))
-    }
-
     /// Successful close proves native SQL/keeper retirement, not file disposal
     /// or quota settlement. Failure retains the same native owner and copy.
-    /// A native inspection also returns its closed schema reference.
+    /// The closed schema reference the inspection was matched against is
+    /// returned with it.
     pub(crate) fn close_owned_inspection(
         self,
     ) -> Result<(
         std::sync::Arc<SqliteInspectionClosed>,
-        Option<sqlite_schema::ClosedNativeSchemaSqlReference>,
+        sqlite_schema::ClosedNativeSchemaSqlReference,
     )> {
         // This private API is for the constructor's mandatory native variant.
         let copy = self
@@ -17243,284 +16713,12 @@ impl RuntimeDb {
             .and_then(|path| path.file_name())
             .context("runtime inspection lost original basename")?
             .to_os_string();
-        let connection = match self.conn {
-            RuntimeConnection::OriginalInspection { owner, factory, schema_reference } => {
-                return original_inspection::close_inspection(
-                    owner, factory, schema_reference, copy, sql, namespace, database_name,
-                )
-                .map(|(closed, reference)| (closed, Some(reference)));
-            }
-            connection => connection,
+        let RuntimeConnection::OriginalInspection { owner, factory, schema_reference } = self.conn else {
+            anyhow::bail!("runtime inspection closes only its native inspection owner");
         };
-        let RuntimeConnection::Inspection(owner) = connection else {
-            anyhow::bail!("runtime inspection cannot close a plain connection as native evidence");
-        };
-        match owner.close() {
-            Ok(proof) => {
-                let closed = std::sync::Arc::new(SqliteInspectionClosed::retain(
-                    proof,
-                    copy,
-                    sql,
-                    database_name,
-                    Some(namespace),
-                ));
-                closed
-                    .require_original()
-                    .map_err(|error| closed.retain_failure(error))?;
-                Ok((closed, None))
-            }
-            Err(failure) => Err(anyhow::Error::new(RuntimeInspectionNativeFailure {
-                error: anyhow::anyhow!("runtime native inspection close: {:?}", failure.error()),
-                custody: std::sync::Mutex::new(Some(RuntimeInspectionNativeCustody::Close(
-                    failure,
-                ))),
-                _copy: copy,
-                _sql: sql,
-                _namespace: namespace,
-                database_name,
-            })),
-        }
-    }
-
-    fn open_bound(path: &Path, mode: RuntimeDbOpenMode) -> Result<Self> {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let directory = if mode.allow_create() {
-            lillux::PinnedDirectory::open_or_create(parent)
-                .with_context(|| format!("pin runtime database parent {}", parent.display()))?
-        } else {
-            lillux::PinnedDirectory::open(parent)
-                .with_context(|| format!("pin runtime database parent {}", parent.display()))?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("runtime database parent is absent: {}", parent.display())
-                })?
-        };
-        ensure_runtime_directory_binding(&directory)?;
-        let directory_lock = directory
-            .lock_exclusive()
-            .context("lock runtime database parent")?;
-        Self::open_bound_in_directory(path, mode, directory, directory_lock)
-    }
-
-    fn open_bound_in_directory(
-        path: &Path,
-        mode: RuntimeDbOpenMode,
-        directory: lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-    ) -> Result<Self> {
-        ensure!(
-            mode != RuntimeDbOpenMode::ExplicitHistoryResetInspection,
-            "runtime inspection requires its native readonly owner constructor"
-        );
-        let name = path
-            .file_name()
-            .ok_or_else(|| {
-                anyhow::anyhow!("runtime database path has no filename: {}", path.display())
-            })?
-            .to_os_string();
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        if directory.path() != parent {
-            bail!(
-                "runtime database namespace authority path mismatch: selected={}, requested={}",
-                directory.path().display(),
-                parent.display()
-            );
-        }
-        ensure_runtime_directory_binding(&directory)?;
-        directory_lock
-            .ensure_protects(&directory)
-            .context("verify runtime database namespace lock")?;
-        inspect_runtime_sidecars(&directory, &name)?;
-
-        let existing = directory.open_regular(&name, true).with_context(|| {
-            format!(
-                "runtime database must be a regular non-symlink file: {}",
-                path.display()
-            )
-        })?;
-        let (database_file, created) = match existing {
-            Some(file) => (file, false),
-            None if mode.allow_create() => {
-                let file = directory
-                    .open_regular_create(&name, true, true, 0o600)
-                    .with_context(|| format!("create runtime database {}", path.display()))?;
-                directory.sync().context("sync runtime database creation")?;
-                (file, true)
-            }
-            None => bail!("runtime database is absent: {}", path.display()),
-        };
-        let descriptors_before = matching_open_descriptors(&database_file)?;
-        let wal_name = runtime_sidecar_name(&name, "-wal");
-        let shm_name = runtime_sidecar_name(&name, "-shm");
-        let wal_before = directory.open_regular(&wal_name, false)?;
-        let shm_before = directory.open_regular(&shm_name, false)?;
-        let wal_descriptors_before = wal_before
-            .as_ref()
-            .map(matching_open_descriptors)
-            .transpose()?
-            .unwrap_or_default();
-        let shm_descriptors_before = shm_before
-            .as_ref()
-            .map(matching_open_descriptors)
-            .transpose()?
-            .unwrap_or_default();
-        ensure_runtime_file_binding(&directory, &name, &database_file, "runtime database")?;
-
-        let descriptor_path = directory.descriptor_child_path(&name)?;
-        let conn = Connection::open_with_flags(&descriptor_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .with_context(|| format!("open runtime database {}", path.display()))?;
-        ensure_runtime_directory_binding(&directory)?;
-        ensure_runtime_file_binding(&directory, &name, &database_file, "runtime database")?;
-        ensure_sqlite_connection_uses_expected_file(
-            &database_file,
-            &descriptors_before,
-            "runtime database",
-        )?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")
-            .context("enable runtime database foreign keys")?;
-        if created {
-            conn.execute_batch("PRAGMA journal_mode=WAL;")
-                .context("establish WAL for the current runtime store")?;
-        }
-
-        let mut reset_required = false;
-        if created {
-            initialize_current_runtime_schema(&conn, path, None)?;
-        } else {
-            let stored_epoch = runtime_operator_schema_epoch(&conn, path)?;
-            if stored_epoch > RUNTIME_OPERATOR_SCHEMA_EPOCH {
-                let error = incompatible_runtime_operator_schema(stored_epoch);
-                if mode.explicit_history_reset() {
-                    return Err(error).context(
-                        "runtime database belongs to a newer RyeOS runtime epoch; refusing destructive reset",
-                    );
-                }
-                return Err(error);
-            }
-            if mode.explicit_history_reset() {
-                ensure_scope_lifetime_resettable(&conn, stored_epoch)?;
-            }
-            if stored_epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH {
-                let error = incompatible_runtime_operator_schema(stored_epoch);
-                if !mode.explicit_history_reset() {
-                    return Err(error).context(format!(
-                        "runtime database contains predecessor execution authority and requires the explicit no-backcompat reset ({})",
-                        path.display()
-                    ));
-                }
-                // Do not inspect or mutate the predecessor schema. Offline
-                // reset first publishes the authoritative cross-store discard
-                // intent, then replaces this pinned store wholesale.
-                reset_required = true;
-            } else {
-                validate_current_runtime_store(&conn, path, None)?;
-            }
-        }
-        if reset_required {
-            let integrity: String = conn
-                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-                .context("verify incompatible runtime database integrity before reset")?;
-            if integrity != "ok" {
-                bail!(
-                    "runtime database integrity check failed for {}: {integrity}",
-                    path.display()
-                );
-            }
-            return Ok(Self {
-                conn: RuntimeConnection::Plain(conn),
-                incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
-                reset_target: Some(path.to_path_buf()),
-                original_deadline_active: std::cell::Cell::new(false),
-                reset_required: true,
-                open_mode: mode,
-                _directory: Some(directory),
-                _directory_lock: Some(directory_lock),
-                _database_file: Some(database_file),
-                _wal_file: wal_before,
-                _shm_file: shm_before,
-                _inspection_copy: None,
-                _inspection_sql: None,
-            });
-        }
-        validate_current_runtime_store(&conn, path, None)?;
-        let integrity_started = std::time::Instant::now();
-        let database_bytes = database_file.metadata()?.len();
-        tracing::info!(
-            database_bytes,
-            "verifying retained runtime database integrity"
-        );
-        let integrity: String = conn
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .context("verify runtime database integrity")?;
-        if integrity != "ok" {
-            bail!(
-                "runtime database integrity check failed for {}: {integrity}",
-                path.display()
-            );
-        }
-        tracing::info!(
-            database_bytes,
-            duration_ms = integrity_started.elapsed().as_millis(),
-            "retained runtime database integrity verified"
-        );
-        let journal_mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .context("read runtime database journal mode")?;
-        if journal_mode != "wal" {
-            bail!(
-                "runtime database journal mode mismatch in {}: stored={journal_mode}, expected=wal",
-                path.display()
-            );
-        }
-        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
-            .context("eagerly establish runtime database WAL handles")?;
-        let wal_file = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "SQLite did not establish runtime WAL: {}",
-                directory.path().join(&wal_name).display()
-            )
-        })?;
-        let shm_file = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "SQLite did not establish runtime shared memory: {}",
-                directory.path().join(&shm_name).display()
-            )
-        })?;
-        if let Some(expected) = wal_before.as_ref() {
-            ensure_same_runtime_file(expected, &wal_file, "runtime WAL", path)?;
-        }
-        if let Some(expected) = shm_before.as_ref() {
-            ensure_same_runtime_file(expected, &shm_file, "runtime shared memory", path)?;
-        }
-        ensure_sqlite_connection_uses_expected_file(
-            &wal_file,
-            &wal_descriptors_before,
-            "runtime WAL",
-        )?;
-        ensure_sqlite_connection_uses_expected_file(
-            &shm_file,
-            &shm_descriptors_before,
-            "runtime shared memory",
-        )?;
-        ensure_runtime_directory_binding(&directory)?;
-        ensure_runtime_file_binding(&directory, &name, &database_file, "runtime database")?;
-        ensure_runtime_file_binding(&directory, &wal_name, &wal_file, "runtime WAL")?;
-        ensure_runtime_file_binding(&directory, &shm_name, &shm_file, "runtime shared memory")?;
-
-        Ok(Self {
-            conn: RuntimeConnection::Plain(conn),
-            incarnation: RuntimeDbIncarnation(std::sync::Arc::new(PrivateRuntimeDbIncarnation)),
-            reset_target: Some(path.to_path_buf()),
-            original_deadline_active: std::cell::Cell::new(false),
-            reset_required: false,
-            open_mode: mode,
-            _directory: Some(directory),
-            _directory_lock: Some(directory_lock),
-            _database_file: Some(database_file),
-            _wal_file: Some(wal_file),
-            _shm_file: Some(shm_file),
-            _inspection_copy: None,
-            _inspection_sql: None,
-        })
+        original_inspection::close_inspection(
+            owner, factory, schema_reference, copy, sql, namespace, database_name,
+        )
     }
 
     pub fn requires_explicit_history_reset(&self) -> bool {
@@ -20234,9 +19432,9 @@ impl RuntimeDb {
             else {
                 return Ok(None);
             };
-            let stored_launch_metadata = lm_text
+            let launch_metadata = lm_text
                 .as_deref()
-                .map(decode_stored_launch_metadata)
+                .map(decode_current_launch_metadata)
                 .transpose()
                 .with_context(|| {
                     format!(
@@ -20244,11 +19442,6 @@ impl RuntimeDb {
                         lm_text.as_deref().map_or(0, str::len)
                     )
                 })?;
-            let (launch_metadata, incompatible_launch_metadata) = match stored_launch_metadata {
-                Some(StoredLaunchMetadata::Current(metadata)) => (Some(*metadata), None),
-                Some(StoredLaunchMetadata::Incompatible(metadata)) => (None, Some(metadata)),
-                None => (None, None),
-            };
             let process_identity = match identity_text.as_deref() {
                 None => None,
                 Some(value) => {
@@ -20310,7 +19503,6 @@ impl RuntimeDb {
                 stop_requested_at_ms,
                 stop_intent,
                 launch_metadata,
-                incompatible_launch_metadata,
                 recovery_wait,
             }))
         })
@@ -23426,7 +22618,7 @@ mod tests {
         let signed = fs::read_to_string(&record).unwrap();
         let body = lillux::signature::strip_signature_lines(&signed);
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(value["schema"], 5);
+        assert_eq!(value["schema"], 10);
         let name = value["destinations"][1]["directory_name"].as_str().unwrap();
         let expected = tmp
             .path()
@@ -23532,62 +22724,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn owned_runtime_inspection_is_native_readonly_and_explicitly_closes() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.sqlite3");
-        let original = crate::runtime_db::test_native::TestRuntime::open(&path);
-        drop(original);
-        let original_bytes = fs::read(&path).unwrap();
-        let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, work) = crate::execution_history_reset::fixture_inspection_copy_work(
-            &source, &namespace, &path,
-        );
-        let inspected = RuntimeDb::open_owned_history_reset_inspection(
-            &path,
-            source.try_clone().unwrap(),
-            namespace.clone(),
-            work,
-        )
-        .unwrap();
-        assert!(matches!(&inspected.conn, RuntimeConnection::Inspection(_)));
-        assert_eq!(
-            inspected.operator_schema_epoch().unwrap(),
-            RuntimeDb::current_operator_schema_epoch()
-        );
-        let lease = inspected._inspection_copy.as_ref().unwrap().clone();
-        let copied_path = lease.directory().unwrap().path().join("runtime.sqlite3");
-        assert!(
-            inspected
-                .conn.with_sql(|connection| Ok(connection.execute_batch("CREATE TABLE forbidden_mutation(x)")?))
-                .is_err()
-        );
-        // Never open/drop another alias of a live SQLite inode just to check
-        // bytes: that can release POSIX locks. Query the SAME native owner.
-        let forbidden: i64 = inspected
-            .conn.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE name='forbidden_mutation'",
-                [],
-                |row| row.get(0),
-            )?))
-            .unwrap();
-        assert_eq!(forbidden, 0);
-        let (closed, reference) = inspected.close_owned_inspection().unwrap();
-        assert!(reference.is_none(), "a stock inspection carries no native reference");
-        assert!(std::sync::Arc::ptr_eq(closed.lease(), &lease));
-        closed.require_original().unwrap();
-        drop(closed);
-        drop(lease);
-        assert!(
-            copied_path.exists(),
-            "native close is not physical disposal or settlement"
-        );
-        assert_eq!(fs::read(&copied_path).unwrap(), original_bytes);
-        assert_eq!(fs::read(&path).unwrap(), original_bytes);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn inspection_copy_refuses_original_role_aliases() {
         let tmp = TempDir::new().unwrap();
         let main = tmp.path().join("scheduler.sqlite3");
@@ -23632,8 +22768,8 @@ mod tests {
 
     #[test]
     fn runtime_db_incarnation_is_unique_and_in_memory_never_mints_offline_capture() {
-        let first = RuntimeDb::new_in_memory().unwrap();
-        let second = RuntimeDb::new_in_memory().unwrap();
+        let first = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let second = crate::runtime_db::test_native::TestRuntime::open_temporary();
         assert!(!std::sync::Arc::ptr_eq(
             &first.incarnation.0,
             &second.incarnation.0
@@ -23652,6 +22788,8 @@ mod tests {
 
     use super::*;
     use crate::launch_metadata::RuntimeLaunchMetadata;
+    use rusqlite::OpenFlags;
+    use std::fs;
     use ryeos_engine::contracts::CancellationMode;
     use tempfile::TempDir;
 
@@ -23666,57 +22804,59 @@ mod tests {
     fn scope_lifetime_reset_gate_never_decodes_execution_rows() {
         // Deliberately not the current runtime schema. Only the independent
         // coarse fence is understood; arbitrary execution rows stay opaque.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCOPE_LIFETIME_FENCE_SQL).unwrap();
-        conn.execute_batch(
-            "INSERT INTO execution_lifetime_fence VALUES(1,1,NULL);
-            CREATE TABLE unknown_execution_authority (opaque BLOB);
-            INSERT INTO unknown_execution_authority VALUES(X'FF00');",
-        )
-        .unwrap();
-        ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
-        let current = lillux::ProcessHostLifetime::capture_current().unwrap();
-        let raw = lillux::canonical_json(&serde_json::to_value(&current).unwrap()).unwrap();
-        conn.execute(
-            "UPDATE execution_lifetime_fence SET host_lifetime=?1",
-            [&raw],
-        )
-        .unwrap();
-        assert!(
-            ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH)
-                .unwrap_err()
-                .to_string()
-                .contains("restarting only the daemon")
-        );
-        assert_eq!(read_scope_lifetime_fence(&conn).unwrap(), Some(current));
-        let before: Vec<u8> = conn
-            .query_row(
-                "SELECT opaque FROM unknown_execution_authority",
-                [],
-                |row| row.get(0),
+        crate::runtime_db::test_native::with_transient(|conn| {
+            conn.execute_batch(SCOPE_LIFETIME_FENCE_SQL).unwrap();
+            conn.execute_batch(
+                "INSERT INTO execution_lifetime_fence VALUES(1,1,NULL);
+                CREATE TABLE unknown_execution_authority (opaque BLOB);
+                INSERT INTO unknown_execution_authority VALUES(X'FF00');",
             )
             .unwrap();
-        assert_eq!(before, [255, 0]);
+            ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
+            let current = lillux::ProcessHostLifetime::capture_current().unwrap();
+            let raw = lillux::canonical_json(&serde_json::to_value(&current).unwrap()).unwrap();
+            conn.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1",
+                [&raw],
+            )
+            .unwrap();
+            assert!(
+                ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("restarting only the daemon")
+            );
+            assert_eq!(read_scope_lifetime_fence(&conn).unwrap(), Some(current));
+            let before: Vec<u8> = conn
+                .query_row(
+                    "SELECT opaque FROM unknown_execution_authority",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(before, [255, 0]);
 
-        let mut ended: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        ended["backend"]["boot_id"] = "00000000-0000-4000-8000-000000000000".into();
-        let ended = lillux::canonical_json(&ended).unwrap();
-        conn.execute(
-            "UPDATE execution_lifetime_fence SET host_lifetime=?1",
-            [&ended],
-        )
-        .unwrap();
-        ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
+            let mut ended: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            ended["backend"]["boot_id"] = "00000000-0000-4000-8000-000000000000".into();
+            let ended = lillux::canonical_json(&ended).unwrap();
+            conn.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1",
+                [&ended],
+            )
+            .unwrap();
+            ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).unwrap();
 
-        conn.execute("UPDATE execution_lifetime_fence SET host_lifetime='{}'", [])
-            .unwrap();
-        assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
-        conn.execute("DELETE FROM execution_lifetime_fence", [])
-            .unwrap();
-        assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
-        conn.execute("DROP TABLE execution_lifetime_fence", [])
-            .unwrap();
-        assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            conn.execute("UPDATE execution_lifetime_fence SET host_lifetime='{}'", [])
+                .unwrap();
+            assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            conn.execute("DELETE FROM execution_lifetime_fence", [])
+                .unwrap();
+            assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            conn.execute("DROP TABLE execution_lifetime_fence", [])
+                .unwrap();
+            assert!(ensure_scope_lifetime_resettable(&conn, SCOPE_LIFETIME_FENCE_FIRST_EPOCH).is_err());
+            Ok(())
+        });
     }
 
     fn in_process_launch_metadata() -> RuntimeLaunchMetadata {
@@ -24490,6 +23630,51 @@ mod tests {
         check_dedicated_worker_attachment(true, false, false, true);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_lifetime_fence_is_discarded_only_under_an_attested_reboot() {
+        use crate::runtime_db::{UnreadableLifetimeFence, DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG};
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let current = serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let current_boot = current.pointer("/backend/boot_id").unwrap().as_str().unwrap().to_owned();
+        let store = |raw: String| {
+            db.conn.with_sql(|connection| Ok(connection.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1", [raw])?))
+                .unwrap();
+        };
+        let predecessor = |boot: &str| format!(
+            "{{\"backend\":{{\"boot_id\":\"{boot}\",\"cgroup_enclosure\":null,\"implementation\":\"linux_boot\"}},\"version\":1}}"
+        );
+
+        store(predecessor("00000000-0000-4000-8000-000000000000"));
+        let refusal = format!("{:#}", db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse).unwrap_err());
+        assert!(refusal.contains(DISCARD_UNREADABLE_LIFETIME_FENCE_FLAG), "{refusal}");
+        let discard = db
+            .unreadable_lifetime_fence_decision(UnreadableLifetimeFence::DiscardAfterAttestedReboot)
+            .unwrap()
+            .expect("an attested reboot discards the unreadable fence");
+        assert!(discard.boot_id_verified);
+        assert_eq!(discard.stored_boot_id.as_deref(), Some("00000000-0000-4000-8000-000000000000"));
+
+        store(predecessor(&current_boot));
+        let same_boot = format!("{:#}", db
+            .unreadable_lifetime_fence_decision(UnreadableLifetimeFence::DiscardAfterAttestedReboot)
+            .unwrap_err());
+        assert!(same_boot.contains("has not rebooted"), "{same_boot}");
+
+        store("{\"opaque\":true}".to_owned());
+        let attested = db
+            .unreadable_lifetime_fence_decision(UnreadableLifetimeFence::DiscardAfterAttestedReboot)
+            .unwrap()
+            .expect("an unreadable boot id rests on the attestation");
+        assert!(!attested.boot_id_verified && attested.stored_boot_id.is_none());
+
+        db.conn.with_sql(|connection| Ok(connection.execute(
+            "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1", [])?))
+            .unwrap();
+        assert!(db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse).unwrap().is_none());
+    }
+
     #[test]
     fn scope_lifetime_fence_survives_retirement_of_only_one_owner() {
         let (_tmp, db) = fresh_db();
@@ -24525,7 +23710,7 @@ mod tests {
             // Inert journal fixture: no kernel resource or process is created.
             let allocation: lillux::ProcessScopeAllocation =
                 serde_json::from_value(serde_json::json!({
-                    "version": 2, "control_timeout": {"secs": 1, "nanos": 0},
+                    "version": 3, "control_timeout": {"secs": 1, "nanos": 0},
                     "configuration": {"version": 3, "backend": {
                         "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
                     }},
@@ -24621,7 +23806,7 @@ mod tests {
             // grant a live control handle or contact the host backend.
             let boot = "00000000-0000-4000-8000-000000000000";
             let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-                "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
+                "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
                 "configuration": {"version": 3, "backend": {
                     "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
                 }},
@@ -24635,7 +23820,7 @@ mod tests {
             record.daemon_generation_id = daemon_generation_id().to_owned();
             record.process_identity.process_scope = Some(scope.clone());
             let mut planned = serde_json::to_value(&scope).unwrap();
-            planned["version"] = 2.into();
+            planned["version"] = 3.into();
             planned["backend"]
                 .as_object_mut()
                 .unwrap()
@@ -27815,16 +27000,14 @@ mod tests {
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
-        let read_only =
-            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let table_count: i64 = read_only
-            .query_row(
+        let table_count: i64 = crate::runtime_db::test_native::read_existing(&path, |read_only| {
+            Ok(read_only.query_row(
                 "SELECT COUNT(*) FROM sqlite_master
                   WHERE type = 'table' AND name = 'in_process_handler_reservation'",
                 [],
                 |row| row.get(0),
-            )
-            .unwrap();
+            )?)
+        });
         assert_eq!(table_count, 0, "ordinary open must not migrate the store");
     }
 
@@ -27917,16 +27100,15 @@ mod tests {
     }
 
     #[test]
-    fn newer_runtime_operator_epoch_refuses_open_and_explicit_reset() {
+    fn newer_runtime_operator_epoch_refuses_live_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        drop(RuntimeDb::open(&path).unwrap());
-        let conn = Connection::open(&path).unwrap();
+        drop(crate::runtime_db::test_native::TestRuntime::open(&path));
         let newer_application_id =
             RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH + 1);
-        conn.pragma_update(None, "application_id", newer_application_id)
-            .unwrap();
-        drop(conn);
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.pragma_update(None, "application_id", newer_application_id)?)
+        });
 
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
@@ -27937,54 +27119,21 @@ mod tests {
         assert!(
             !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
-
-        let reset_error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("explicit reset must not erase a newer runtime store");
-        assert!(format!("{reset_error:#}").contains("refusing destructive reset"));
         assert_eq!(
-            Connection::open(&path)
-                .unwrap()
-                .query_row("PRAGMA application_id", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
+            crate::runtime_db::test_native::read_existing(&path, |conn| {
+                Ok(conn.query_row("PRAGMA application_id", [], |row| row.get::<_, u32>(0))?)
+            }),
             newer_application_id
         );
-    }
-
-    #[test]
-    fn v1_hook_dispatch_epoch_refuses_ordinary_open_and_requires_explicit_reset() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        drop(RuntimeDb::open(&path).unwrap());
-        let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "application_id", RUNTIME_OPERATOR_APP_ID_PREFIX | 1)
-            .unwrap();
-        drop(conn);
-
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("v1 hook dispatch authority must not open under v2");
-        let message = format!("{error:#}");
-        assert!(message.contains("stored schema_epoch=1"));
-        assert!(requires_execution_schema_cutover(&error), "{message}");
-        assert!(
-            message.contains("explicit no-backcompat reset"),
-            "{message}"
-        );
-
-        let inspection = RuntimeDb::open_for_explicit_history_reset(&path)
-            .expect("a proven predecessor is reset-eligible, never migrated");
-        assert!(inspection.requires_explicit_history_reset());
     }
 
     #[test]
     fn unowned_database_is_never_classified_as_a_predecessor() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE foreign_state(value TEXT);")
-            .unwrap();
-        drop(conn);
+        crate::runtime_db::test_native::with_created(&path, |conn| {
+            Ok(conn.execute_batch("CREATE TABLE foreign_state(value TEXT);")?)
+        });
 
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
@@ -27992,210 +27141,17 @@ mod tests {
         assert!(
             !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
-
-        let reset_error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("explicit reset must not erase an unowned database");
-        assert!(format!("{reset_error:#}").contains("unowned store"));
         assert_eq!(
-            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap()
-                .query_row(
+            crate::runtime_db::test_native::read_existing(&path, |conn| {
+                Ok(conn.query_row(
                     "SELECT COUNT(*) FROM sqlite_master
                       WHERE type='table' AND name='foreign_state'",
                     [],
                     |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
+                )?)
+            }),
             1
         );
-    }
-
-    #[test]
-    fn other_ryeos_database_ids_are_outside_the_runtime_operator_family() {
-        let tmp = TempDir::new().unwrap();
-        for (label, application_id) in [
-            ("scheduler", 0x5259_5343),
-            ("operational", 0x5259_4f50),
-            ("projection", 0x5259_504a),
-            ("accounting", 0x5259_4143),
-        ] {
-            let path = tmp.path().join(format!("{label}.sqlite3"));
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("CREATE TABLE foreign_state(value TEXT);")
-                .unwrap();
-            conn.pragma_update(None, "application_id", application_id)
-                .unwrap();
-            drop(conn);
-
-            let error = RuntimeDb::open_for_explicit_history_reset(&path)
-                .err()
-                .expect("another RyeOS database must remain unowned runtime state");
-            assert!(format!("{error:#}").contains("unowned store"));
-            assert_eq!(
-                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .unwrap()
-                    .query_row(
-                        "SELECT COUNT(*) FROM sqlite_master
-                          WHERE type='table' AND name='foreign_state'",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap(),
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn predecessor_reset_never_decodes_embedded_authority_rows() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO runtime_action_intent(
-                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
-                     child_project_authority, created_at_ms
-                 ) VALUES (
-                     'opaque-row', 'T-chain', 'T-parent', 'detached',
-                     'request', 'T-child', 'not-json-and-never-decoded', 1
-                 )",
-                [],
-            )?))
-            .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)?))
-            .expect("mark the store as an owned predecessor");
-        drop(db);
-
-        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
-        assert!(reset.requires_explicit_history_reset());
-        reset.fixture_apply_explicit_history_reset(&path).unwrap();
-        assert_eq!(
-            reset
-                .fixture_discard_all_thread_history(true)
-                .unwrap()
-                .total_rows(),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn explicit_history_reset_refuses_newer_project_authority() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        let newer = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH + 1,
-            "authority": {"deliberately": "newer"}
-        }))
-        .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO runtime_action_intent(
-                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
-                     child_project_authority, created_at_ms
-                 ) VALUES (
-                     'op-newer', 'T-chain', 'T-parent', 'detached',
-                     'request', 'T-child', ?1, 1
-                 )",
-                params![newer],
-            )?))
-            .unwrap();
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("an older daemon must not erase newer runtime authority");
-        let message = format!("{error:#}");
-        assert!(message.contains(&format!(
-            "stored schema_epoch={}",
-            PROJECT_AUTHORITY_SCHEMA_EPOCH + 1
-        )));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
-
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: String = conn
-            .query_row(
-                "SELECT child_project_authority
-                   FROM runtime_action_intent
-                  WHERE operation_id='op-newer'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, newer);
-    }
-
-    #[test]
-    fn existing_reset_inspection_classifies_predecessor_without_mutation() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO runtime_action_intent(
-                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
-                     child_project_authority, created_at_ms
-                 ) VALUES (
-                     'op-predecessor', 'T-chain', 'T-parent', 'detached',
-                     'request', 'T-child', ?1, 1
-                 )",
-                params![predecessor],
-            )?))
-            .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )?))
-            .unwrap();
-        drop(db);
-
-        let source_entries = || {
-            std::fs::read_dir(tmp.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name())
-                .collect::<BTreeSet<_>>()
-        };
-        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        let namespace = directory.lock_exclusive().unwrap();
-        let (_state_lock, copy_work) = crate::execution_history_reset::fixture_inspection_copy_work(
-            &directory, &namespace, &path,
-        );
-        let before_entries = source_entries();
-        let mut inspection =
-            RuntimeDb::open_owned_history_reset_inspection(&path, directory, namespace, copy_work)
-                .expect("admitted dry-run inspection must classify the predecessor store");
-        assert!(inspection.requires_explicit_history_reset());
-        assert!(
-            inspection
-                .fixture_apply_explicit_history_reset(&path)
-                .unwrap_err()
-                .to_string()
-                .contains("inspection authority")
-        );
-        assert_eq!(source_entries(), before_entries);
-        drop(inspection);
-        assert_eq!(source_entries(), before_entries);
-
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: String = conn
-            .query_row(
-                "SELECT child_project_authority
-                   FROM runtime_action_intent
-                  WHERE operation_id='op-predecessor'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, predecessor);
     }
 
     #[test]
@@ -28335,6 +27291,10 @@ mod tests {
         );
     }
 
+    /// The application ID of the first operator schema epoch: an owned
+    /// predecessor store the explicit history reset recognizes.
+    const FIRST_RUNTIME_EPOCH_APP_ID: i32 = (RUNTIME_OPERATOR_APP_ID_PREFIX | 1) as i32;
+
     fn rewrite_as_recognized_runtime_predecessor(
         db: &RuntimeDb,
         phase: &str,
@@ -28342,7 +27302,7 @@ mod tests {
     ) {
         db.conn.with_sql(|connection| Ok(connection.execute_batch(
                 &format!(
-                    "PRAGMA application_id = {PREDECESSOR_RUNTIME_APP_ID};
+                    "PRAGMA application_id = {FIRST_RUNTIME_EPOCH_APP_ID};
                  DROP INDEX idx_hook_dispatch_ledger_chain_root;
                  DROP TABLE hook_dispatch_ledger;
                  DROP INDEX idx_follow_waiter_successor;
@@ -28505,7 +27465,7 @@ mod tests {
 
     #[test]
     fn runtime_action_intent_reuses_one_child_and_rejects_caller_or_request_drift() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let operation_id = "d".repeat(64);
         let request_hash = "e".repeat(64);
         assert_eq!(
@@ -28795,7 +27755,7 @@ mod tests {
     fn runtime_workspace_reservation_rejects_every_authority_coordinate_drift() {
         use ryeos_engine::kind_registry::WorkspaceAccess;
 
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let seed = runtime_workspace_seed(WorkspaceAccess::ImmutableCurrentGeneration);
         reserve_test_workspace_operation(&db, &seed, "T-child").unwrap();
         for coordinate in 0..8 {
@@ -28841,7 +27801,7 @@ mod tests {
     #[test]
     fn workload_child_dispatches_project_only_workload_rows_for_their_caller() {
         use ryeos_runtime::workload_client::WorkloadInvocationSource;
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let mut seed = runtime_workspace_seed(
             ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
         );
@@ -29837,19 +28797,20 @@ mod tests {
         }
         let name = format!("test-{}", identity.target_pid);
         let planned = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
+                "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
                 "parent": {"containing_device": 1, "inode": 2}, "name": name}
         });
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
-        bound["version"] = 4.into();
+        bound["version"] = 5.into();
         bound["backend"]["directory"] =
             serde_json::json!({"containing_device": 1, "inode": identity.target_pid});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
@@ -30022,13 +28983,14 @@ mod tests {
             operation.owner_incarnation = owner_incarnation.clone();
         }
         let planned = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
+                "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
                 "parent": {"containing_device": 1, "inode": 2},
                 "name": "test-101"}
         });
@@ -30059,7 +29021,7 @@ mod tests {
         );
 
         let mut bound = planned;
-        bound["version"] = 4.into();
+        bound["version"] = 5.into();
         bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         db.bind_process_resource_scope("thread", "t1", &recovery)
@@ -30110,13 +29072,14 @@ mod tests {
         let host =
             serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
         let planned = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
+                "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
                 "parent": {"containing_device": 1, "inode": 2},
                 "name": "scope-only-test"}
         });
@@ -30132,7 +29095,7 @@ mod tests {
         db.reserve_thread_process_scope(&reservation).unwrap();
         assert!(db.reserve_thread_process_scope(&reservation).is_err());
         let mut bound = planned;
-        bound["version"] = 4.into();
+        bound["version"] = 5.into();
         bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         assert!(
@@ -30227,13 +29190,14 @@ mod tests {
             serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(serde_json::json!({
-                "version": 2,
+                "version": 3,
                 "control_timeout": {"secs": 1, "nanos": 0},
                 "configuration": {"version": 3, "backend": {
                     "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
                 }},
                 "backend": {"implementation": "linux_cgroup_v2",
                     "boot_id": host["backend"]["boot_id"],
+                    "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
                     "parent": {"containing_device": 1, "inode": 2},
                     "name": "scope-recovery-test"}
             }))
@@ -30919,8 +29883,8 @@ mod tests {
         let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
         drop(db);
-        drop(RuntimeDb::open(&path).unwrap());
-        drop(RuntimeDb::open(&path).unwrap());
+        drop(crate::runtime_db::test_native::TestRuntime::open(&path));
+        drop(crate::runtime_db::test_native::TestRuntime::open(&path));
     }
 
     #[test]
@@ -31138,8 +30102,8 @@ mod tests {
         );
     }
 
-    /// Unknown owned state must fail without mutation. Normal open never
-    /// performs a predecessor migration.
+    /// Unknown owned state must fail without mutation; open only refuses an
+    /// earlier schema.
     #[test]
     fn open_rejects_unrecognized_owned_db_without_mutating_it() {
         let tmp = TempDir::new().unwrap();
@@ -31148,47 +30112,49 @@ mod tests {
         // Build an OLD owned schema: thread_runtime + thread_commands and
         // their index, stamped with our app_id, but NO thread_launch_claim.
         {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                r#"
-                CREATE TABLE thread_runtime (
-                    thread_id TEXT PRIMARY KEY,
-                    chain_root_id TEXT NOT NULL,
-                    pid INTEGER,
-                    pgid INTEGER,
-                    metadata BLOB,
-                    launch_metadata TEXT,
-                    resume_attempts INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX idx_thread_runtime_chain_root
-                    ON thread_runtime(chain_root_id);
-                CREATE TABLE thread_commands (
-                    command_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    thread_id TEXT NOT NULL,
-                    command_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    requested_by TEXT,
-                    params BLOB,
-                    result BLOB,
-                    created_at TEXT NOT NULL,
-                    claimed_at TEXT,
-                    completed_at TEXT
-                );
-                CREATE INDEX idx_thread_commands_thread_status
-                    ON thread_commands(thread_id, status);
-                "#,
-            )
-            .unwrap();
-            conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
+            crate::runtime_db::test_native::with_created(&path, |conn| {
+                conn.execute_batch(
+                    r#"
+                    CREATE TABLE thread_runtime (
+                        thread_id TEXT PRIMARY KEY,
+                        chain_root_id TEXT NOT NULL,
+                        pid INTEGER,
+                        pgid INTEGER,
+                        metadata BLOB,
+                        launch_metadata TEXT,
+                        resume_attempts INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE INDEX idx_thread_runtime_chain_root
+                        ON thread_runtime(chain_root_id);
+                    CREATE TABLE thread_commands (
+                        command_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        command_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        requested_by TEXT,
+                        params BLOB,
+                        result BLOB,
+                        created_at TEXT NOT NULL,
+                        claimed_at TEXT,
+                        completed_at TEXT
+                    );
+                    CREATE INDEX idx_thread_commands_thread_status
+                        ON thread_commands(thread_id, status);
+                    "#,
+                )
                 .unwrap();
-            // Seed a runtime row so rejection cannot be confused with an empty
-            // file taking the first-initialization branch.
-            conn.execute(
-                "INSERT INTO thread_runtime (thread_id, chain_root_id, pid, pgid)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params!["t-old", "c-old", 101_i64, 101_i64],
-            )
-            .unwrap();
+                conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
+                    .unwrap();
+                // Seed a runtime row so rejection cannot be confused with an empty
+                // file taking the first-initialization branch.
+                conn.execute(
+                    "INSERT INTO thread_runtime (thread_id, chain_root_id, pid, pgid)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params!["t-old", "c-old", 101_i64, 101_i64],
+                )
+                .unwrap();
+                Ok(())
+            });
         }
 
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
@@ -31196,15 +30162,17 @@ mod tests {
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let added: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thread_launch_claim'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(added, 0);
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            let added: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thread_launch_claim'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(added, 0);
+            Ok(())
+        });
     }
 
     #[test]
@@ -31220,33 +30188,35 @@ mod tests {
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let child_links: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM thread_child_link WHERE child_thread_id='T-legacy-child'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(child_links, 1);
-        let incomplete_follows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(incomplete_follows, 1);
-        let incomplete_windows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM launch_window", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(incomplete_windows, 1);
-        let hook_table: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type='table' AND name='hook_dispatch_ledger'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(hook_table, 0, "failed migration must roll back its DDL");
-        assert!(path.is_file(), "failed migration must retain the database");
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            let child_links: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM thread_child_link WHERE child_thread_id='T-legacy-child'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(child_links, 1);
+            let incomplete_follows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(incomplete_follows, 1);
+            let incomplete_windows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM launch_window", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(incomplete_windows, 1);
+            let hook_table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type='table' AND name='hook_dispatch_ledger'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hook_table, 0, "a refused open must create no tables");
+            assert!(path.is_file(), "a refused open must leave the database in place");
+            Ok(())
+        });
     }
 
     #[test]
@@ -31287,15 +30257,17 @@ mod tests {
         )));
         assert!(!message.contains("stored project authority"));
 
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: String = conn
-            .query_row(
-                "SELECT child_project_authority FROM runtime_action_intent WHERE operation_id='op-former'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, predecessor);
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            let retained: String = conn
+                .query_row(
+                    "SELECT child_project_authority FROM runtime_action_intent WHERE operation_id='op-former'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(retained, predecessor);
+            Ok(())
+        });
     }
 
     #[test]
@@ -31335,15 +30307,17 @@ mod tests {
         )));
         assert!(!message.contains("stored project authority"));
 
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: String = conn
-            .query_row(
-                "SELECT child_project_authority FROM follow_waiter WHERE follow_key='follow-former'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, predecessor);
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            let retained: String = conn
+                .query_row(
+                    "SELECT child_project_authority FROM follow_waiter WHERE follow_key='follow-former'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(retained, predecessor);
+            Ok(())
+        });
     }
 
     #[test]
@@ -31384,7 +30358,6 @@ mod tests {
             .get_runtime_info("T-historical-adapter")
             .unwrap()
             .unwrap();
-        assert!(runtime.incompatible_launch_metadata.is_none());
         assert_eq!(
             encode_current_launch_metadata(&runtime.launch_metadata.unwrap()).unwrap(),
             raw
@@ -31400,7 +30373,7 @@ mod tests {
     }
 
     #[test]
-    fn open_preserves_former_launch_authority_as_opaque_thread_scoped_history() {
+    fn open_refuses_former_launch_authority_with_the_schema_cutover() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = crate::runtime_db::test_native::TestRuntime::open(&path);
@@ -31431,35 +30404,13 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let reopened =
-            RuntimeDb::open(&path).expect("old launch authority must not block node open");
-        let runtime = reopened
-            .get_runtime_info("T-pre-isolation")
-            .unwrap()
-            .unwrap();
-        assert!(runtime.launch_metadata.is_none());
-        assert_eq!(
-            runtime.incompatible_launch_metadata,
-            Some(IncompatibleLaunchMetadata {
-                schema_version: u64::from(LAUNCH_METADATA_SCHEMA_VERSION - 1),
-                admitted_launch_capsule_schema: None,
-            })
-        );
-        drop(reopened);
-
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: String = conn
-            .query_row(
-                "SELECT launch_metadata FROM thread_runtime WHERE thread_id='T-pre-isolation'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, predecessor);
+        let refusal = crate::runtime_db::test_native::live_open_refusal(&path);
+        assert!(refusal.contains("stored launch metadata is not the exact current contract"), "{refusal}");
+        assert!(refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND), "{refusal}");
     }
 
     #[test]
-    fn predecessor_capsule_schema_is_classified_before_nested_authority_decode() {
+    fn predecessor_capsule_schema_is_refused_before_nested_authority_decode() {
         let raw = lillux::canonical_json(&serde_json::json!({
             "schema_version": LAUNCH_METADATA_SCHEMA_VERSION,
             "admitted_launch_capsule_schema":
@@ -31467,21 +30418,13 @@ mod tests {
             "sealed_root_request": {"deliberately": "not-current-authority"}
         }))
         .unwrap();
-        let StoredLaunchMetadata::Incompatible(incompatible) =
-            decode_stored_launch_metadata(&raw).unwrap()
-        else {
-            panic!("predecessor capsule must remain opaque")
-        };
-        assert_eq!(
-            incompatible.admitted_launch_capsule_schema,
-            Some(u64::from(
-                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1
-            ))
-        );
+        let refusal = format!("{:#}", decode_current_launch_metadata(&raw).unwrap_err());
+        assert!(refusal.contains("seals admitted launch capsule schema"), "{refusal}");
+        assert!(refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND), "{refusal}");
     }
 
     #[test]
-    fn predecessor_launch_epoch_is_classified_before_nested_policy_decode() {
+    fn predecessor_launch_epoch_is_refused_before_nested_policy_decode() {
         let raw = lillux::canonical_json(&serde_json::json!({
             "schema_version": LAUNCH_METADATA_SCHEMA_VERSION - 1,
             "admitted_launch_capsule_schema":
@@ -31502,15 +30445,9 @@ mod tests {
             }
         }))
         .unwrap();
-        let StoredLaunchMetadata::Incompatible(incompatible) =
-            decode_stored_launch_metadata(&raw).unwrap()
-        else {
-            panic!("predecessor nested policy shape must remain opaque")
-        };
-        assert_eq!(
-            incompatible.schema_version,
-            u64::from(LAUNCH_METADATA_SCHEMA_VERSION - 1)
-        );
+        let refusal = format!("{:#}", decode_current_launch_metadata(&raw).unwrap_err());
+        assert!(refusal.contains("not the exact current contract"), "{refusal}");
+        assert!(refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND), "{refusal}");
     }
 
     #[test]
@@ -31526,148 +30463,22 @@ mod tests {
             !format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let follows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(follows, 1);
-        let hook_table: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type='table' AND name='hook_dispatch_ledger'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(hook_table, 0);
-    }
-
-    #[test]
-    fn explicit_history_reset_replaces_any_owned_predecessor_schema_without_interpretation() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn.with_sql(|connection| Ok(connection.execute_batch(
-                "CREATE TABLE \"retired parent\" (id INTEGER PRIMARY KEY);
-                 CREATE TABLE \"retired \"\"runtime\"\" table\" (
-                     parent_id INTEGER NOT NULL REFERENCES \"retired parent\"(id),
-                     value TEXT NOT NULL
-                 );
-                 CREATE INDEX \"retired index\"
-                     ON \"retired \"\"runtime\"\" table\"(value);
-                 CREATE VIEW \"retired view\" AS
-                     SELECT value FROM \"retired \"\"runtime\"\" table\";
-                 CREATE TRIGGER \"retired trigger\"
-                     AFTER INSERT ON \"retired \"\"runtime\"\" table\"
-                     BEGIN
-                         UPDATE \"retired \"\"runtime\"\" table\"
-                            SET value = NEW.value
-                          WHERE rowid = NEW.rowid;
-                     END;
-                 INSERT INTO \"retired parent\"(id) VALUES (1);
-                 INSERT INTO \"retired \"\"runtime\"\" table\"(parent_id, value)
-                     VALUES (1, 'opaque predecessor state');",
-            )?))
-            .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )?))
-            .unwrap();
-        drop(db);
-
-        let directory = lillux::PinnedDirectory::open(tmp.path())
-            .unwrap()
-            .expect("temporary directory exists");
-        let lock = directory.lock_exclusive().unwrap();
-        let mut reset = RuntimeDb::open_for_explicit_history_reset_with_namespace_authority(
-            &path, directory, lock,
-        )
-        .unwrap();
-
-        assert!(reset.requires_explicit_history_reset());
-        reset.fixture_apply_explicit_history_reset(&path).unwrap();
-        assert!(!reset.requires_explicit_history_reset());
-        reset.conn.with_sql(|connection| Ok(assert_current_runtime_schema(connection, &path, None)?)).unwrap();
-        assert_eq!(
-            reset
-                .fixture_discard_all_thread_history(true)
-                .unwrap()
-                .total_rows(),
-            Some(0)
-        );
-        assert!(reset.open_workspaces().unwrap().is_empty());
-        drop(reset);
-        drop(RuntimeDb::open(&path).unwrap());
-        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
-        assert_eq!(
-            reopened
-                .fixture_discard_all_thread_history(true)
-                .unwrap()
-                .total_rows(),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn explicit_history_reset_rebuilds_credentials_only_from_stable_authority() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
-        db.conn.with_sql(|connection| Ok(connection.execute_batch(
-                "DROP INDEX idx_credential_profile_owner_state;
-                 DROP TABLE credential_profile;
-                 CREATE TABLE credential_profile (
-                     deliberately_unknown_predecessor_shape BLOB NOT NULL
-                 );
-                 INSERT INTO credential_profile VALUES (x'00');",
-            )?))
-            .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                None,
-                "application_id",
-                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-            )?))
-            .unwrap();
-        drop(db);
-
-        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
-        let stable = ryeos_state::OperationalCredentialProfileRecord {
-            profile_id: "profile-stable".to_owned(),
-            owner_principal: "fp:operator".to_owned(),
-            home_id: "credential-stable".to_owned(),
-            authority_revision: 7,
-            credential_generation: 4,
-            state: "active".to_owned(),
-            active_login_id: None,
-            login_epoch: 3,
-            login_expires_at_ms: None,
-            sanitized_account: Some(serde_json::json!({"account_id":"account-stable"})),
-            created_at_ms: 1,
-            updated_at_ms: 2,
-        };
-        reset.fixture_apply_explicit_history_reset(&path).unwrap();
-        assert!(reset.credential_profile_projections().unwrap().is_empty());
-        reset
-            .reconcile_credential_profile_projection(&stable)
-            .unwrap();
-        let restored = reset.credential_profile("profile-stable").unwrap().unwrap();
-        assert_eq!(restored.state, "active");
-        assert_eq!(restored.credential_generation, 4);
-        assert_eq!(restored.authority_revision, 7);
-    }
-
-    #[test]
-    fn projection_rebuild_runtime_open_requires_existing_current_schema() {
-        let tmp = TempDir::new().unwrap();
-        let missing = tmp.path().join("missing-runtime.db");
-        assert!(RuntimeDb::open_existing_current(&missing).is_err());
-        assert!(!missing.exists());
-
-        let current = tmp.path().join("current-runtime.db");
-        drop(RuntimeDb::open(&current).unwrap());
-        drop(RuntimeDb::open_existing_current(&current).unwrap());
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            let follows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(follows, 1);
+            let hook_table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type='table' AND name='hook_dispatch_ledger'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hook_table, 0);
+            Ok(())
+        });
     }
 
     #[test]
@@ -31755,7 +30566,7 @@ mod tests {
         drop(db);
 
         let path = tmp.path().join("runtime.db");
-        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         let command_id = reopened
             .conn.with_sql(|connection| Ok(connection.query_row(
                 "INSERT INTO thread_commands
@@ -31776,33 +30587,36 @@ mod tests {
     fn projection_rebuild_runtime_open_never_migrates_owned_stale_schema() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE thread_runtime (
-                thread_id TEXT PRIMARY KEY,
-                chain_root_id TEXT NOT NULL,
-                pid INTEGER,
-                pgid INTEGER,
-                metadata BLOB,
-                launch_metadata TEXT,
-                resume_attempts INTEGER NOT NULL DEFAULT 0
-             );",
-        )
-        .unwrap();
-        conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
-            .unwrap();
-        drop(conn);
-
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let migrated: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thread_launch_claim'",
-                [],
-                |row| row.get(0),
+        crate::runtime_db::test_native::with_created(&path, |conn| {
+            conn.execute_batch(
+                "CREATE TABLE thread_runtime (
+                    thread_id TEXT PRIMARY KEY,
+                    chain_root_id TEXT NOT NULL,
+                    pid INTEGER,
+                    pgid INTEGER,
+                    metadata BLOB,
+                    launch_metadata TEXT,
+                    resume_attempts INTEGER NOT NULL DEFAULT 0
+                 );",
             )
             .unwrap();
-        assert_eq!(migrated, 0);
+            conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
+                .unwrap();
+            Ok(())
+        });
+
+        crate::runtime_db::test_native::live_open_refusal(&path);
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            let migrated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thread_launch_claim'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(migrated, 0);
+            Ok(())
+        });
     }
 
     #[test]
@@ -32034,9 +30848,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_mismatch_is_explicit_incompatible_authority() {
-        // An unsupported authority contract is not current metadata and is not
-        // silently lost: reconciliation receives its explicit outer marker.
+    fn schema_version_mismatch_is_refused_not_classified() {
+        // An unsupported authority contract is not current metadata; reading
+        // it refuses instead of handing reconciliation an opaque marker.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
         let mut payload = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
@@ -32048,15 +30862,8 @@ mod tests {
                 params!["t1", payload],
             )?))
             .unwrap();
-        let runtime = db.get_runtime_info("t1").unwrap().unwrap();
-        assert!(runtime.launch_metadata.is_none());
-        assert_eq!(
-            runtime.incompatible_launch_metadata,
-            Some(IncompatibleLaunchMetadata {
-                schema_version: 999,
-                admitted_launch_capsule_schema: None,
-            })
-        );
+        let refusal = format!("{:#}", db.get_runtime_info("t1").unwrap_err());
+        assert!(refusal.contains("not the exact current contract"), "{refusal}");
     }
 
     #[test]
@@ -32891,7 +31698,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_product_authority_cut_refuses_then_explicitly_resets_predecessor_epoch() {
+    fn follow_product_authority_cut_refuses_predecessor_epoch() {
         let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
         db.conn.with_sql(|connection| Ok(connection.pragma_update(
@@ -32904,11 +31711,6 @@ mod tests {
 
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(format!("{error:#}").contains("explicit no-backcompat reset"));
-
-        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
-        assert!(reset.requires_explicit_history_reset());
-        reset.fixture_apply_explicit_history_reset(&path).unwrap();
-        assert!(!reset.requires_explicit_history_reset());
     }
 
     #[test]

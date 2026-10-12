@@ -6,22 +6,19 @@ use lillux_sqlite::{
     OriginalNativeConnectionTerminal, OriginalNativeFactory, OriginalNativeOpenFailure,
     OriginalNativeTransientInputs,
 };
-use rusqlite::Connection;
-
 use super::ProjectionDb;
 
-pub(super) enum ProjectionConnection {
-    Standard(Connection),
-    Original {
-        connection: OriginalNativeConnection,
-        factory: Arc<OriginalNativeFactory>,
-    },
+/// The native connection of a projection and the original factory that
+/// issued its ticket.
+pub(super) struct ProjectionConnection {
+    pub(super) connection: OriginalNativeConnection,
+    pub(super) factory: Arc<OriginalNativeFactory>,
 }
 
 struct OriginalProjectionFilesystem {
     directory: lillux::PinnedDirectory,
     name: std::ffi::OsString,
-    lease: super::ProjectionInstanceLease,
+    lease: Arc<super::OriginalGenerationLease>,
 }
 
 /// Actual filesystem holders moved out of a terminal projection. No native
@@ -41,7 +38,7 @@ impl OutsideOriginalProjectionCustody {
         Self { _filesystem: None, _setup_directory: Some(directory) }
     }
     /// Transfer actual filesystem holders without closing or duplicating them.
-    /// A host lease is not an original native generation owner and is refused.
+    /// Custody holding both a generation and a setup directory is refused.
     pub(crate) fn try_into_original_filesystem(
         self,
     ) -> std::result::Result<
@@ -53,19 +50,9 @@ impl OutsideOriginalProjectionCustody {
             (None, Some(directory)) => Ok(Some((directory, None))),
             (Some(OriginalProjectionFilesystem {
                 directory,
-                name,
+                name: _,
                 lease,
-            }), None) => match lease {
-                super::ProjectionInstanceLease::Original(owner) => Ok(Some((directory, Some(owner)))),
-                lease => Err(Self {
-                    _filesystem: Some(OriginalProjectionFilesystem {
-                        directory,
-                        name,
-                        lease,
-                    }),
-                    _setup_directory: None,
-                }),
-            },
+            }), None) => Ok(Some((directory, Some(lease)))),
             (filesystem, setup) => Err(Self { _filesystem: filesystem, _setup_directory: setup }),
         }
     }
@@ -136,17 +123,14 @@ enum FailureCustody {
 /// owner. Cleanup of this owner never changes the original operation to success.
 pub struct OriginalProjectionFailure {
     error: anyhow::Error,
-    factory: Option<Arc<OriginalNativeFactory>>,
+    factory: Arc<OriginalNativeFactory>,
     custody: Mutex<FailureCustody>,
     filesystem: Option<OriginalProjectionFilesystem>,
 }
 
 impl OriginalProjectionFailure {
     pub(super) fn retain_projection(db: ProjectionDb, error: anyhow::Error) -> Self {
-        let factory = match &db.conn {
-            ProjectionConnection::Original { factory, .. } => Some(Arc::clone(factory)),
-            ProjectionConnection::Standard(_) => None,
-        };
+        let factory = Arc::clone(&db.conn.factory);
         Self {
             error,
             factory,
@@ -164,11 +148,7 @@ impl OriginalProjectionFailure {
         if factory.require_original_process().is_err() {
             return Err(self);
         }
-        if !self
-            .factory
-            .as_ref()
-            .is_some_and(|owner| owner.same_original(factory))
-            || self.filesystem.is_none()
+        if !self.factory.same_original(factory) || self.filesystem.is_none()
         {
             return Err(self);
         }
@@ -213,11 +193,7 @@ impl OriginalProjectionFailure {
         if factory.require_original_process().is_err() {
             return Err(self);
         }
-        if !self
-            .factory
-            .as_ref()
-            .is_some_and(|original| original.same_original(factory))
-        {
+        if !self.factory.same_original(factory) {
             return Err(self);
         }
         let Self {
@@ -248,9 +224,6 @@ impl OriginalProjectionFailure {
                 if db._instance_directory.is_some()
                     && db._instance_name.is_some()
                     && db._instance_lease.is_some()
-                    && db._instance_file.is_none()
-                    && db._wal_file.is_none()
-                    && db._shm_file.is_none()
                 {
                     filesystem = Some(OriginalProjectionFilesystem {
                         directory: db
@@ -357,21 +330,14 @@ impl ReleasedOriginalProjectionAcquisition {
 }
 
 impl ProjectionDb {
-    pub(crate) fn original_factory(&self) -> Option<Arc<OriginalNativeFactory>> {
-        match &self.conn {
-            ProjectionConnection::Original { factory, .. } => Some(Arc::clone(factory)),
-            ProjectionConnection::Standard(_) => None,
-        }
+    pub(crate) fn original_factory(&self) -> Arc<OriginalNativeFactory> {
+        Arc::clone(&self.conn.factory)
     }
 
     /// Transfer the actual original connection on a caller refusal. The
     /// original error remains visible; no close, terminal or refund is implied.
     pub(crate) fn retain_operation_failure(self, error: anyhow::Error) -> anyhow::Error {
-        if self.original_factory().is_some() {
-            anyhow::Error::new(OriginalProjectionFailure::retain_projection(self, error))
-        } else {
-            error
-        }
+        anyhow::Error::new(OriginalProjectionFailure::retain_projection(self, error))
     }
 
     pub(crate) fn open_original_transient(
@@ -381,22 +347,19 @@ impl ProjectionDb {
         let connection = factory.open_transient(inputs).map_err(|failure| {
             anyhow::Error::new(OriginalProjectionFailure {
                 error: anyhow::anyhow!("open original projection: {failure}"),
-                factory: Some(Arc::clone(&factory)),
+                factory: Arc::clone(&factory),
                 custody: Mutex::new(FailureCustody::Open(failure)),
                 filesystem: None,
             })
         })?;
         let db = Self {
-            conn: ProjectionConnection::Original {
+            conn: ProjectionConnection {
                 connection,
                 factory,
             },
             path: ":memory:".into(),
             _instance_directory: None,
             _instance_name: None,
-            _instance_file: None,
-            _wal_file: None,
-            _shm_file: None,
             _instance_lease: None,
         };
         let initialized = db.with_sql(|connection| {
@@ -422,7 +385,7 @@ impl ProjectionDb {
         inputs: lillux_sqlite::OriginalNativeBoundInputs,
         directory: lillux::PinnedDirectory,
         name: std::ffi::OsString,
-        lease: super::ProjectionInstanceLease,
+        lease: Arc<super::OriginalGenerationLease>,
         create: bool,
         expected_identity: Option<(u64, u64)>,
         schema_reference: &crate::sqlite_schema::SchemaSqlDefinition,
@@ -440,14 +403,14 @@ impl ProjectionDb {
             Err(failure) => {
                 return Err(anyhow::Error::new(OriginalProjectionFailure {
                     error: anyhow::anyhow!("open original generated projection: {failure}"),
-                    factory: Some(factory),
+                    factory,
                     custody: Mutex::new(FailureCustody::Open(failure)),
                     filesystem: Some(filesystem),
                 }));
             }
         };
         let db = Self {
-            conn: ProjectionConnection::Original {
+            conn: ProjectionConnection {
                 connection,
                 factory,
             },
@@ -455,15 +418,9 @@ impl ProjectionDb {
             _instance_directory: Some(filesystem.directory),
             _instance_name: Some(filesystem.name),
             _instance_lease: Some(filesystem.lease),
-            _instance_file: None,
-            _wal_file: None,
-            _shm_file: None,
         };
         let initialized = (|| -> anyhow::Result<()> {
-            let ProjectionConnection::Original { connection, .. } = &db.conn else {
-                unreachable!("private original generated constructor")
-            };
-            let identity = connection.bound_main_identity()?;
+            let identity = db.conn.connection.bound_main_identity()?;
             if let Some(expected) = expected_identity {
                 anyhow::ensure!(
                     identity == expected,
@@ -490,10 +447,10 @@ impl ProjectionDb {
                         connection,
                         &super::projection_schema_spec(),
                         db.path(),
-                        Some(schema_reference),
+                        schema_reference,
                     )
                 } else {
-                    super::validate_selected_current(connection, db.path(), Some(schema_reference))
+                    super::validate_selected_current(connection, db.path(), schema_reference)
                 }
             })
         })();
@@ -509,8 +466,7 @@ impl ProjectionDb {
     ) -> anyhow::Result<Arc<DurableOriginalProjection>> {
         let checked = (|| -> anyhow::Result<()> {
             anyhow::ensure!(
-                self.original_factory()
-                    .is_some_and(|owner| owner.same_original(factory)),
+                self.conn.factory.same_original(factory),
                 "generated projection has foreign original factory"
             );
             anyhow::ensure!(
@@ -556,7 +512,7 @@ impl ProjectionDb {
                     error: anyhow::anyhow!(
                         "original generated projection durability pending: {failure}"
                     ),
-                    factory: Some(Arc::clone(factory)),
+                    factory: Arc::clone(factory),
                     custody: Mutex::new(FailureCustody::Durability(failure)),
                     filesystem: Some(filesystem),
                 }));
@@ -571,19 +527,11 @@ impl ProjectionDb {
         self,
         factory: &Arc<OriginalNativeFactory>,
     ) -> Result<ClosedOriginalProjection, OriginalProjectionFailure> {
-        let selected = match &self.conn {
-            ProjectionConnection::Original {
-                factory: original, ..
-            } => original.same_original(factory),
-            ProjectionConnection::Standard(_) => false,
-        };
+        let selected = self.conn.factory.same_original(factory);
         // Original persistent projections let the native Bound owner retain
         // data/WAL/SHM descriptors. Only the namespace and generation lease
         // are owned here; never drop that lease on a pending native close.
         if !selected
-            || self._instance_file.is_some()
-            || self._wal_file.is_some()
-            || self._shm_file.is_some()
             || (self._instance_directory.is_some() != self._instance_name.is_some())
             || (self._instance_directory.is_some() != self._instance_lease.is_some())
         {
@@ -596,10 +544,10 @@ impl ProjectionDb {
         }
         let Self {
             conn,
+            path: _,
             _instance_directory: directory,
             _instance_name: name,
             _instance_lease: lease,
-            ..
         } = self;
         let filesystem = match (directory, name, lease) {
             (Some(directory), Some(name), Some(lease)) => Some(OriginalProjectionFilesystem {
@@ -610,37 +558,15 @@ impl ProjectionDb {
             (None, None, None) => None,
             _ => unreachable!("checked original projection filesystem custody"),
         };
-        match conn {
-            ProjectionConnection::Original {
-                connection,
+        let ProjectionConnection { connection, factory: original } = conn;
+        match connection.close() {
+            Ok(proof) => Ok(ClosedOriginalProjection { proof, filesystem }),
+            Err(failure) => Err(OriginalProjectionFailure {
+                error: anyhow::anyhow!("original projection native close pending: {failure}"),
                 factory: original,
-            } => match connection.close() {
-                Ok(proof) => Ok(ClosedOriginalProjection { proof, filesystem }),
-                Err(failure) => Err(OriginalProjectionFailure {
-                    error: anyhow::anyhow!("original projection native close pending: {failure}"),
-                    factory: Some(original),
-                    custody: Mutex::new(FailureCustody::Close(failure)),
-                    filesystem,
-                }),
-            },
-            ProjectionConnection::Standard(connection) => {
-                // Defensive owner retention, even if the selected check above
-                // is changed in a future caller migration.
-                let db = Self {
-                    conn: ProjectionConnection::Standard(connection),
-                    path: ":memory:".into(),
-                    _instance_directory: None,
-                    _instance_name: None,
-                    _instance_file: None,
-                    _wal_file: None,
-                    _shm_file: None,
-                    _instance_lease: None,
-                };
-                Err(OriginalProjectionFailure::retain_projection(
-                    db,
-                    anyhow::anyhow!("ordinary projection cannot issue an original native terminal"),
-                ))
-            }
+                custody: Mutex::new(FailureCustody::Close(failure)),
+                filesystem,
+            }),
         }
     }
 }
@@ -713,11 +639,12 @@ impl DurableOriginalProjection {
             proof,
         )
     }
-    pub(crate) fn clone_lease(&self) -> anyhow::Result<super::ProjectionInstanceLease> {
-        self.filesystem
-            .lease
-            .share_original()
-            .context("retain same original generation lease")
+    pub(crate) fn clone_lease(&self) -> anyhow::Result<Arc<super::OriginalGenerationLease>> {
+        let lease = &self.filesystem.lease;
+        lease
+            .require_active(&lease.factory()?)
+            .context("retain same original generation lease")?;
+        Ok(Arc::clone(lease))
     }
 }
 
@@ -745,7 +672,7 @@ mod native_host_tests {
     use lillux_sqlite::test_host::TestNativeHost;
     use lillux_sqlite::{OriginalNativeConnectionTerminal, OriginalNativeDomain, OriginalNativeTransientInputs};
 
-    /// The transient skips the stock reference build; its schema must still
+    /// The transient skips the reference comparison; its schema must still
     /// equal a reference prepared natively from the same DDL.
     #[test]
     fn fresh_transient_schema_equals_native_projection_reference() {

@@ -230,6 +230,11 @@ impl OfflineNativeSession {
         self.authority.checkpoint(false)
     }
 
+    /// The end of this session's signed operation window.
+    pub fn operation_deadline(&self) -> lillux::time::MonotonicDeadline {
+        self.authority.operation
+    }
+
     pub fn factory(&self) -> Result<&Arc<OriginalNativeFactory>> {
         self.host.factory()
     }
@@ -297,6 +302,7 @@ pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<R
     let activated = (|| -> Result<ryeos_state::operational::ReplayIndexResetReport> {
         let verify = || session.verify();
         let retain = |terminal| session.retain_terminal(terminal);
+        require_no_live_execution(config, &runtime, &namespace, &session, &verify, &retain)?;
         // SAFETY: the caller holds the node StateLock and this frame holds the
         // runtime namespace lock for the whole call; the session host was
         // funded under both and `verify` revalidates them with its window.
@@ -325,6 +331,74 @@ pub fn reset_replay_indexes(config: &Config, state_lock: &StateLock) -> Result<R
             Err(retained_session(session, error).context(original))
         }
     }
+}
+
+/// Refuse replay-index activation while execution is in flight. Activation
+/// discards every replay row, provider-call idempotence keys included, so a
+/// Runtime chain that still pins live execution, or an issued provider attempt
+/// the accounting ledger has not settled, could repeat a provider call it
+/// already made. Both stores are read on the session's own tickets; every
+/// terminal joins its census.
+fn require_no_live_execution(
+    config: &Config,
+    runtime: &Arc<lillux::PinnedDirectory>,
+    namespace: &lillux::PinnedDirectoryLock,
+    session: &OfflineNativeSession,
+    verify: &dyn Fn() -> Result<()>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> Result<()> {
+    verify()?;
+    let db_path = &config.db_path;
+    let parent_path = db_path.parent().context("Runtime database path has no parent")?;
+    let parent = Arc::new(
+        lillux::PinnedDirectory::open(parent_path)?
+            .with_context(|| format!("Runtime database parent is absent: {}", parent_path.display()))?,
+    );
+    let parent_namespace = if runtime.is_same_directory(&parent)? {
+        namespace.clone()
+    } else {
+        parent
+            .lock_exclusive()
+            .context("lock Runtime database namespace for live-work inspection")?
+    };
+    // SAFETY: the caller holds the node StateLock and the runtime namespace
+    // lock for the whole call, the parent namespace is held above, and the
+    // session host was funded under that exclusion.
+    let live_chains = unsafe {
+        crate::runtime_db::offline_live_execution_chains(
+            db_path,
+            parent,
+            parent_namespace,
+            session.factory()?,
+            session.destination()?,
+            session.operation_deadline(),
+            retain,
+        )
+    }
+    .context("inspect the Runtime store for live execution before replay-index activation")?;
+    verify()?;
+    // SAFETY: as above; the ledger is read on this session's tickets and
+    // every terminal reaches `retain`.
+    let unsettled_provider_attempts = unsafe {
+        crate::accounting_db::offline_unsettled_provider_attempt_count(
+            Arc::clone(runtime),
+            namespace.clone(),
+            session.factory()?,
+            session.destination()?,
+            verify,
+            retain,
+        )
+    }
+    .context("inspect the accounting ledger for unsettled provider attempts before replay-index activation")?;
+    ensure!(
+        live_chains.is_empty() && unsettled_provider_attempts == 0,
+        "replay-index activation refused: {} chain(s) still pin live execution and {} issued provider attempt(s) are unsettled; \
+         discarding provider-call idempotence keys now could repeat a provider call. Stop the daemon and run `{}` instead",
+        live_chains.len(),
+        unsettled_provider_attempts,
+        crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+    );
+    Ok(())
 }
 
 /// Completed external-content binding cutover (or its preview) and the
@@ -392,8 +466,8 @@ pub fn reset_external_content_bindings(
             let guard = authority.acquire_exclusive_guard(!dry_run)?;
             state.discard_external_content_binding_heads(&guard, dry_run)
         })();
-        let terminal = match state.close_offline_native(session.factory()?) {
-            Ok(terminal) => terminal,
+        let census = match state.close_offline_native(session.factory()?) {
+            Ok(census) => census,
             Err((state, error)) => {
                 let error = match discarded {
                     Ok(bindings) => error.context(format!(
@@ -408,19 +482,35 @@ pub fn reset_external_content_bindings(
                 });
             }
         };
-        match session.retain_terminal(terminal) {
-            Ok(()) => discarded,
-            Err((terminal, refusal)) => {
-                let error = match discarded {
-                    Ok(bindings) => refusal.context(format!(
-                        "external-content binding reset {} {bindings} head(s); projection terminal not retained",
-                        if dry_run { "counted" } else { "retired" }
-                    )),
-                    Err(original) => refusal.context(original),
-                };
-                Err(CarriedOwners::carry(error, terminal))
+        // This store opened only a transient projection: its census has
+        // terminals and no generation lease or prior refusal.
+        let ryeos_state::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+        let mut refused = Vec::new();
+        let mut reasons = Vec::new();
+        for terminal in terminals {
+            if let Err((terminal, refusal)) = session.retain_terminal(terminal) {
+                refused.push(terminal);
+                reasons.push(format!("{refusal:#}"));
             }
         }
+        if refused.is_empty() && leases.is_empty() && prior_refusal.is_none() {
+            // A transient-only store has no generation lease to retire.
+            drop(lease_retirement);
+            return discarded;
+        }
+        let refusal = if refused.is_empty() {
+            anyhow::anyhow!("offline State census carried a generation lease or a prior refusal")
+        } else {
+            anyhow::anyhow!("projection terminal not retained: {}", reasons.join("; "))
+        };
+        let error = match discarded {
+            Ok(bindings) => refusal.context(format!(
+                "external-content binding reset {} {bindings} head(s)",
+                if dry_run { "counted" } else { "retired" }
+            )),
+            Err(original) => refusal.context(original),
+        };
+        Err(CarriedOwners::carry(error, (refused, leases, lease_retirement, prior_refusal.map(|error| format!("{error:#}")))))
     })();
     match (discarded, session.finish()) {
         (Ok(bindings), Ok(facts)) => Ok(ExternalContentBindingReset { bindings, facts }),

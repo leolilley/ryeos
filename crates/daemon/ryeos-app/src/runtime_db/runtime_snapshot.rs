@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn exact_reservation_claim_and_result_never_restart_attempt() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         assert_eq!(
             db.reserve_runtime_snapshot(&intent).unwrap().phase,
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn uncertain_attempt_stays_non_replayable() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         db.reserve_runtime_snapshot(&intent).unwrap();
         let digest = intent.digest().unwrap();
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn complete_response_after_deadline_retains_locator_without_promotion() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         db.reserve_runtime_snapshot(&intent).unwrap();
         let digest = intent.digest().unwrap();
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn delayed_bind_is_late_even_if_runner_reported_timely_exit() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         db.reserve_runtime_snapshot(&intent).unwrap();
         let digest = intent.digest().unwrap();

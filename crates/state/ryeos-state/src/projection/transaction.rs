@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn commit_failure_rolls_back_and_leaves_connection_usable() {
-        let db = ProjectionDb::open_transient().unwrap();
+        let db = crate::test_support::TestProjection::open();
         db.with_sql(|connection| Ok(connection.execute_batch(
                 "PRAGMA foreign_keys = ON;
                  CREATE TABLE tx_parent (id INTEGER PRIMARY KEY);
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn operation_failure_reports_a_failed_rollback() {
-        let db = ProjectionDb::open_transient().unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         let error = db
             .immediate_transaction("rollback reporting", || -> anyhow::Result<()> {

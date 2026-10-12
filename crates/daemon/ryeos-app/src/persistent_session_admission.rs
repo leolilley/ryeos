@@ -107,34 +107,19 @@ fn verify_and_decode_retained_protocol_document(
     decode_retained_protocol_descriptor(&body)
 }
 
-/// Decode already-admitted predecessor protocol bytes without weakening
-/// current authoring. Before cleanup authority became explicit, pooled
-/// sessions had no dedicated cleanup owner and exclusive sessions always
-/// required the local Lillux process scope. The signed original bytes are
-/// verified before this narrow historical interpretation is applied.
+/// Decode verified retained protocol bytes under the exact current descriptor
+/// contract. A descriptor without an explicit session cleanup authority is
+/// refused, never given a historical default.
 fn decode_retained_protocol_descriptor(
     body: &str,
 ) -> Result<ryeos_engine::protocols::ProtocolDescriptor> {
-    let mut value: serde_json::Value = serde_yaml::from_str(body)?;
-    if let Some(session) = value
-        .get_mut("session")
-        .and_then(serde_json::Value::as_object_mut)
-        && !session.contains_key("cleanup_authority")
-    {
-        let historical = match session
-            .get("process_mode")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("pooled_requests") => "not_required",
-            Some("exclusive_session") => "local_process_scope",
-            _ => bail!("retained session protocol has no interpretable cleanup authority"),
-        };
-        session.insert(
-            "cleanup_authority".to_owned(),
-            serde_json::Value::String(historical.to_owned()),
-        );
-    }
-    serde_json::from_value(value).context("decode retained session protocol descriptor")
+    let value: serde_json::Value = serde_yaml::from_str(body)?;
+    serde_json::from_value(value).with_context(|| {
+        format!(
+            "decode retained session protocol descriptor; a descriptor admitted before the current contract cannot be reinterpreted: stop the daemon and run `{}` before restarting",
+            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+        )
+    })
 }
 
 pub fn validate_capsule_current_trust(
@@ -429,8 +414,9 @@ struct StartupSourceMember {
     sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The startup fields shared by every check, taken from the closed v2
+/// document after it decodes.
+#[derive(Debug)]
 struct StartupContract {
     schema: String,
     role: String,
@@ -442,8 +428,8 @@ struct StartupContract {
     wire: StartupWire,
 }
 
-// Separate closed raw document: no flatten/default/optional support flag on
-// the legacy schema. Original selected bytes remain in the retained owner.
+// Closed raw document: no flatten/default/optional support flag. Original
+// selected bytes remain in the retained owner.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartupContractV2 {
@@ -513,63 +499,50 @@ struct StartupManifestConsumer {
     path: String,
 }
 
-enum DecodedStartupContract {
-    Legacy(StartupContract),
-    V2 {
-        common: StartupContract,
-        delivery: StartupManifestDelivery,
-    },
+/// The one admitted startup contract schema, v2, with its manifest delivery.
+struct DecodedStartupContract {
+    common: StartupContract,
+    delivery: StartupManifestDelivery,
 }
 
 impl DecodedStartupContract {
     fn common(&self) -> &StartupContract {
-        match self {
-            Self::Legacy(common) | Self::V2 { common, .. } => common,
-        }
+        &self.common
     }
 
     fn require_closed_schema_delivery(&self) -> Result<()> {
-        let common = self.common();
-        match self {
-            Self::Legacy(_) => anyhow::ensure!(
-                common.schema == "ryeos.local_tinygrad_current_assignment_startup.v1"
-                    && common.role == "current_assignment_nvml_preflight_v1",
-                "legacy startup role/schema unsupported"
-            ),
-            Self::V2 { delivery, .. } => {
-                anyhow::ensure!(
-                    common.schema == "ryeos.local_tinygrad_current_assignment_startup.v2"
-                        && common.role == "current_assignment_nvml_preflight_v2",
-                    "v2 startup role/schema unsupported"
-                );
-                let StartupManifestDeliveryAbi::FixedNamespaceV1 = delivery.abi;
-                let StartupManifestAccess::ReadOnly = delivery.gnu.access;
-                let StartupManifestAccess::ReadOnly = delivery.driver.access;
-                anyhow::ensure!(
-                    Some(delivery.gnu.destination.as_str())
-                        == ryeos_engine::isolation::OriginalProductManifestRole::Gnu
-                            .destination()
-                            .to_str()
-                        && Some(delivery.driver.destination.as_str())
-                            == ryeos_engine::isolation::OriginalProductManifestRole::Driver
-                                .destination()
-                                .to_str(),
-                    "startup manifest role destination differs from finite ABI"
-                );
-                anyhow::ensure!(
-                    !delivery.consumer.root.is_empty()
-                        && !delivery.consumer.path.is_empty()
-                        && common
-                            .bootstrap_members
-                            .iter()
-                            .filter(|member| member.root == delivery.consumer.root
-                                && member.path == delivery.consumer.path)
-                            .count()
-                            == 1,
-                    "startup manifest consumer lacks unique original bootstrap member"
-                );
-            }
-        }
+        let Self { common, delivery } = self;
+        anyhow::ensure!(
+            common.schema == "ryeos.local_tinygrad_current_assignment_startup.v2"
+                && common.role == "current_assignment_nvml_preflight_v2",
+            "startup role/schema unsupported"
+        );
+        let StartupManifestDeliveryAbi::FixedNamespaceV1 = delivery.abi;
+        let StartupManifestAccess::ReadOnly = delivery.gnu.access;
+        let StartupManifestAccess::ReadOnly = delivery.driver.access;
+        anyhow::ensure!(
+            Some(delivery.gnu.destination.as_str())
+                == ryeos_engine::isolation::OriginalProductManifestRole::Gnu
+                    .destination()
+                    .to_str()
+                && Some(delivery.driver.destination.as_str())
+                    == ryeos_engine::isolation::OriginalProductManifestRole::Driver
+                        .destination()
+                        .to_str(),
+            "startup manifest role destination differs from finite ABI"
+        );
+        anyhow::ensure!(
+            !delivery.consumer.root.is_empty()
+                && !delivery.consumer.path.is_empty()
+                && common
+                    .bootstrap_members
+                    .iter()
+                    .filter(|member| member.root == delivery.consumer.root
+                        && member.path == delivery.consumer.path)
+                    .count()
+                    == 1,
+            "startup manifest consumer lacks unique original bootstrap member"
+        );
         Ok(())
     }
 }
@@ -579,31 +552,28 @@ fn decode_startup_contract(bytes: &[u8]) -> Result<DecodedStartupContract> {
     struct Schema {
         schema: String,
     }
-    // Probe only selects a version; the FINAL closed struct is independently
-    // decoded from the SAME original bytes, preserving all duplicate keys.
+    // The probe only checks the schema; the FINAL closed struct is
+    // independently decoded from the SAME original bytes, preserving all
+    // duplicate keys.
     let schema: Schema = serde_json::from_slice(bytes).context("decode startup schema selector")?;
-    let decoded = match schema.schema.as_str() {
-        "ryeos.local_tinygrad_current_assignment_startup.v1" => DecodedStartupContract::Legacy(
-            serde_json::from_slice(bytes).context("decode closed legacy startup")?,
-        ),
-        "ryeos.local_tinygrad_current_assignment_startup.v2" => {
-            let value: StartupContractV2 =
-                serde_json::from_slice(bytes).context("decode closed v2 startup")?;
-            DecodedStartupContract::V2 {
-                common: StartupContract {
-                    schema: value.schema,
-                    role: value.role,
-                    entry: value.entry,
-                    bootstrap_members: value.bootstrap_members,
-                    launch: value.launch,
-                    products: value.products,
-                    policy: value.policy,
-                    wire: value.wire,
-                },
-                delivery: value.manifest_delivery,
-            }
-        }
-        _ => bail!("startup schema unsupported"),
+    anyhow::ensure!(
+        schema.schema == "ryeos.local_tinygrad_current_assignment_startup.v2",
+        "startup schema unsupported"
+    );
+    let value: StartupContractV2 =
+        serde_json::from_slice(bytes).context("decode closed v2 startup")?;
+    let decoded = DecodedStartupContract {
+        common: StartupContract {
+            schema: value.schema,
+            role: value.role,
+            entry: value.entry,
+            bootstrap_members: value.bootstrap_members,
+            launch: value.launch,
+            products: value.products,
+            policy: value.policy,
+            wire: value.wire,
+        },
+        delivery: value.manifest_delivery,
     };
     decoded.require_closed_schema_delivery()?;
     Ok(decoded)
@@ -1763,17 +1733,16 @@ fn require_current_v2_startup_selector(
 ) -> Result<()> {
     selection.validate().map_err(anyhow::Error::msg)?;
     decoded.require_closed_schema_delivery()?;
-    if let DecodedStartupContract::V2 { delivery, .. } = decoded {
-        anyhow::ensure!(
-            selection.source_root == "source"
-                && selection.member == "contracts/current-assignment-startup-v2.json",
-            "current v2 startup selector differs from fixed source member"
-        );
-        anyhow::ensure!(
-            delivery.consumer.root == "source" && delivery.consumer.path == "bootstrap_support.py",
-            "current v2 startup consumer differs from fixed source member"
-        );
-    }
+    anyhow::ensure!(
+        selection.source_root == "source"
+            && selection.member == "contracts/current-assignment-startup-v2.json",
+        "current v2 startup selector differs from fixed source member"
+    );
+    let consumer = &decoded.delivery.consumer;
+    anyhow::ensure!(
+        consumer.root == "source" && consumer.path == "bootstrap_support.py",
+        "current v2 startup consumer differs from fixed source member"
+    );
     Ok(())
 }
 
@@ -2265,21 +2234,22 @@ mod tests {
     // boundary controls, NOT manufactured qualified product/original owners.
     fn manifest_data_fixture() -> (
         tempfile::TempDir,
+        crate::state_store::test_native::TestStateStore,
         crate::state::AppState,
         serde_json::Value,
         String,
     ) {
         let root = tempfile::tempdir().unwrap();
-        let state = crate::state::test_support::build(root.path()).unwrap();
+        let (store_owner, state) = crate::state::test_support::build(root.path()).unwrap();
         let value = serde_json::json!({"kind":"original_manifest_data_control","schema":1});
         let authority = state.state_store.pinned_state_authority().unwrap();
         let hash = authority.cas_store().unwrap().store_object(&value).unwrap();
-        (root, state, value, hash)
+        (root, store_owner, state, value, hash)
     }
 
     #[test]
     fn actual_manifest_cas_bytes_and_sealed_copy_preserve_original_identity() {
-        let (_root, state, value, hash) = manifest_data_fixture();
+        let (_root, _store_owner, state, value, hash) = manifest_data_fixture();
         let cas = state
             .state_store
             .pinned_state_authority()
@@ -2307,7 +2277,7 @@ mod tests {
 
     #[test]
     fn actual_manifest_missing_cas_and_cap_refuse_before_sealing() {
-        let (_root, state, _value, hash) = manifest_data_fixture();
+        let (_root, _store_owner, state, _value, hash) = manifest_data_fixture();
         let cas = state
             .state_store
             .pinned_state_authority()
@@ -2332,7 +2302,7 @@ mod tests {
 
     #[test]
     fn actual_manifest_substitution_keeps_deposited_bytes_and_refuses_seal() {
-        let (_root, state, value, hash) = manifest_data_fixture();
+        let (_root, _store_owner, state, value, hash) = manifest_data_fixture();
         let cas = state
             .state_store
             .pinned_state_authority()
@@ -2361,7 +2331,7 @@ mod tests {
 
     #[test]
     fn actual_manifest_late_validation_failure_preserves_original_sealed_owner() {
-        let (_root, state, value, hash) = manifest_data_fixture();
+        let (_root, _store_owner, state, value, hash) = manifest_data_fixture();
         let cas = state
             .state_store
             .pinned_state_authority()
@@ -2395,12 +2365,13 @@ mod tests {
     // VerifiedTrustedPooledSessionInputs. Full original export remains untested.
     fn borrowed_manifest_data_fixture() -> (
         tempfile::TempDir,
+        crate::state_store::test_native::TestStateStore,
         crate::state::AppState,
         serde_json::Value,
         String,
         OriginalManifestDocument,
     ) {
-        let (root, state, value, hash) = manifest_data_fixture();
+        let (root, store_owner, state, value, hash) = manifest_data_fixture();
         let cas = state
             .state_store
             .pinned_state_authority()
@@ -2414,13 +2385,13 @@ mod tests {
         };
         document.retain_cas_bytes(&cas, 1024).unwrap();
         document.verify_and_seal(&value, 1024).unwrap();
-        (root, state, value, hash, document)
+        (root, store_owner, state, value, hash, document)
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_actual_data_accepts_exact_cap_and_retains_sealed_identity() {
-        let (_root, _state, value, hash, document) = borrowed_manifest_data_fixture();
+        let (_root, _store_owner, _state, value, hash, document) = borrowed_manifest_data_fixture();
         let size = document.bytes.as_ref().unwrap().len() as u64;
         let original = document.sealed.as_ref().unwrap().clone();
         document
@@ -2456,7 +2427,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_independent_hash_and_typed_value_mismatch_refuse() {
-        let (_root, _state, value, hash, document) = borrowed_manifest_data_fixture();
+        let (_root, _store_owner, _state, value, hash, document) = borrowed_manifest_data_fixture();
         let error = document
             .validate_borrowed_data(&lillux::sha256_hex(b"foreign identity"), &value, 1024)
             .unwrap_err();
@@ -2482,7 +2453,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_missing_bytes_or_seal_refuse_without_replacement() {
         for missing in ["bytes", "seal"] {
-            let (_root, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
+            let (_root, _store_owner, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
             let original = document.sealed.as_ref().unwrap().clone();
             let diagnostic = if missing == "bytes" {
                 document.bytes = None;
@@ -2506,7 +2477,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_mutable_descriptor_refuses_even_with_same_raw_bytes() {
-        let (root, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
+        let (root, _store_owner, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
         let original = document.sealed.as_ref().unwrap().clone();
         std::fs::write(
             root.path().join("mutable-manifest.json"),
@@ -2538,7 +2509,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_substituted_sealed_copy_refuses_and_retains_late_failure_data() {
-        let (_root, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
+        let (_root, _store_owner, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
         let original = document.sealed.as_ref().unwrap().clone();
         let bytes = document.bytes.as_ref().unwrap().clone();
         document.sealed = Some(lillux::sealed_memfd(c"substituted-data-control", b"{}").unwrap());
@@ -2745,12 +2716,14 @@ mod tests {
         );
     }
 
-    // Closed syntax fixtures only, never admitted source/device/provider owners.
+    // Closed v2 syntax fixture only, never admitted source/device/provider
+    // owners. It does not supply signed original source, products, funding or
+    // a bootstrap behavior proof.
     fn startup_contract_syntax() -> serde_json::Value {
         let member =
             serde_json::json!({"root":"source","path":"bootstrap.py","sha256":"a".repeat(64)});
         serde_json::json!({
-            "schema":"ryeos.local_tinygrad_current_assignment_startup.v1", "role":"current_assignment_nvml_preflight_v1",
+            "schema":"ryeos.local_tinygrad_current_assignment_startup.v2", "role":"current_assignment_nvml_preflight_v2",
             "entry":member.clone(), "bootstrap_members":[member],
             "launch":{"command_sha256":"b".repeat(64),"args":[{"kind":"admitted_source_entry"}],"env":{},
                 "process_environment_sha256":"c".repeat(64),"dynamic_channels":[{"env":"RYEOS_SESSION_FD","target_fd":0},{"env":"RYEOS_RESOURCE_CLEANUP_FD","target_fd":4}]},
@@ -2758,39 +2731,25 @@ mod tests {
                 "provider_checks":"trusted-gnu-loader-provider-and-function-origin-v1","gnu_manifest_sha256":"d".repeat(64),
                 "driver_manifest_sha256":"e".repeat(64),"tinygrad_manifest_sha256":"f".repeat(64)},
             "policy":{"schema":"ryeos.local_tinygrad_nvml_assignment_policy.v1","primary_device_role":"primary","l4_query_policy":null},
-            "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096}})
-    }
-
-    // Syntax-only raw documents. These do not supply signed original source,
-    // products, funding or a bootstrap behavior proof.
-    fn startup_v2_contract_syntax() -> serde_json::Value {
-        let mut value = startup_contract_syntax();
-        value["schema"] = "ryeos.local_tinygrad_current_assignment_startup.v2".into();
-        value["role"] = "current_assignment_nvml_preflight_v2".into();
-        value["manifest_delivery"] = serde_json::json!({
-            "abi":"fixed_namespace_v1",
-            "gnu":{"destination":"/opt/ryeos-original-manifests/gnu.json","access":"read_only"},
-            "driver":{"destination":"/opt/ryeos-original-manifests/driver.json","access":"read_only"},
-            "consumer":{"root":"source","path":"bootstrap.py"}
-        });
-        value
+            "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096},
+            "manifest_delivery":{
+                "abi":"fixed_namespace_v1",
+                "gnu":{"destination":"/opt/ryeos-original-manifests/gnu.json","access":"read_only"},
+                "driver":{"destination":"/opt/ryeos-original-manifests/driver.json","access":"read_only"},
+                "consumer":{"root":"source","path":"bootstrap.py"}
+            }})
     }
 
     #[test]
-    fn startup_raw_closed_versions_preserve_legacy_and_require_v2_delivery() {
-        let legacy = startup_contract_syntax();
-        assert!(matches!(
-            decode_startup_contract(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
-            DecodedStartupContract::Legacy(_)
-        ));
-        let v2 = startup_v2_contract_syntax();
-        assert!(matches!(
-            decode_startup_contract(&serde_json::to_vec(&v2).unwrap()).unwrap(),
-            DecodedStartupContract::V2 { .. }
-        ));
-        let mut extended_legacy = legacy;
-        extended_legacy["manifest_delivery"] = v2["manifest_delivery"].clone();
-        assert!(decode_startup_contract(&serde_json::to_vec(&extended_legacy).unwrap()).is_err());
+    fn startup_raw_contract_admits_only_v2_with_its_delivery() {
+        let v2 = startup_contract_syntax();
+        decode_startup_contract(&serde_json::to_vec(&v2).unwrap()).unwrap();
+        let mut v1 = v2.clone();
+        v1["schema"] = "ryeos.local_tinygrad_current_assignment_startup.v1".into();
+        v1["role"] = "current_assignment_nvml_preflight_v1".into();
+        assert!(decode_startup_contract(&serde_json::to_vec(&v1).unwrap()).is_err());
+        v1.as_object_mut().unwrap().remove("manifest_delivery");
+        assert!(decode_startup_contract(&serde_json::to_vec(&v1).unwrap()).is_err());
         let mut missing = v2;
         missing.as_object_mut().unwrap().remove("manifest_delivery");
         assert!(decode_startup_contract(&serde_json::to_vec(&missing).unwrap()).is_err());
@@ -2798,7 +2757,7 @@ mod tests {
 
     #[test]
     fn startup_v2_raw_contract_refuses_duplicate_keys_at_every_new_boundary() {
-        let value = startup_v2_contract_syntax();
+        let value = startup_contract_syntax();
         let raw = serde_json::to_string(&value).unwrap();
         let consumer = serde_json::to_string(&value["manifest_delivery"]["consumer"]).unwrap();
         let duplicate_consumer = consumer.replacen("\"root\":", "\"root\":\"source\",\"root\":", 1);
@@ -2839,7 +2798,7 @@ mod tests {
 
     #[test]
     fn startup_v2_closed_finite_roles_refuse_unknown_missing_and_nonexact_paths() {
-        let original = startup_v2_contract_syntax();
+        let original = startup_contract_syntax();
         for pointer in [
             "",
             "/manifest_delivery",
@@ -2891,7 +2850,7 @@ mod tests {
 
     #[test]
     fn startup_v2_consumer_refuses_duplicate_member_and_preserves_existing_closed_fields() {
-        let original = startup_v2_contract_syntax();
+        let original = startup_contract_syntax();
         let mut duplicate_member = original.clone();
         duplicate_member["bootstrap_members"]
             .as_array_mut()
@@ -2912,7 +2871,7 @@ mod tests {
 
     #[test]
     fn startup_v2_abi_and_access_require_literal_strings_not_enum_map_encoding() {
-        let original = startup_v2_contract_syntax();
+        let original = startup_contract_syntax();
         for (pointer, literal) in [
             ("/manifest_delivery/abi", "fixed_namespace_v1"),
             ("/manifest_delivery/gnu/access", "read_only"),
@@ -2938,7 +2897,7 @@ mod tests {
     #[test]
     fn startup_contract_nested_objects_and_nullable_policy_are_closed() {
         let original = startup_contract_syntax();
-        let parsed: StartupContract = serde_json::from_value(original.clone()).unwrap();
+        let parsed: StartupContractV2 = serde_json::from_value(original.clone()).unwrap();
         assert!(parsed.policy.l4_query_policy.is_none());
         for path in [
             "",
@@ -2958,7 +2917,7 @@ mod tests {
                 .unwrap()
                 .insert("unknown".into(), serde_json::json!(true));
             assert!(
-                serde_json::from_value::<StartupContract>(value).is_err(),
+                serde_json::from_value::<StartupContractV2>(value).is_err(),
                 "{path}"
             );
         }
@@ -2967,7 +2926,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("l4_query_policy");
-        assert!(serde_json::from_value::<StartupContract>(value).is_err());
+        assert!(serde_json::from_value::<StartupContractV2>(value).is_err());
         for policy in [
             serde_json::json!(false),
             serde_json::json!("automatic"),
@@ -2975,7 +2934,7 @@ mod tests {
         ] {
             let mut value = original.clone();
             value["policy"]["l4_query_policy"] = policy;
-            assert!(serde_json::from_value::<StartupContract>(value).is_err());
+            assert!(serde_json::from_value::<StartupContractV2>(value).is_err());
         }
     }
 
@@ -2986,17 +2945,17 @@ mod tests {
             "\"env\":{}",
             "\"env\":{\"DEV\":\"CUDA:PTX\",\"DEV\":\"CPU\"}",
         );
-        assert!(serde_json::from_str::<StartupContract>(&duplicate).is_err());
+        assert!(serde_json::from_str::<StartupContractV2>(&duplicate).is_err());
         let mut value = startup_contract_syntax();
         value["launch"]["env"] = serde_json::json!({"DEV":true});
-        assert!(serde_json::from_value::<StartupContract>(value).is_err());
+        assert!(serde_json::from_value::<StartupContractV2>(value).is_err());
         let mut value = startup_contract_syntax();
         value["launch"]["env"] = serde_json::Value::Object(
             (0..33)
                 .map(|i| (format!("KEY{i}"), serde_json::json!("x")))
                 .collect(),
         );
-        assert!(serde_json::from_value::<StartupContract>(value).is_err());
+        assert!(serde_json::from_value::<StartupContractV2>(value).is_err());
     }
 
     #[test]
@@ -3027,7 +2986,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_predecessor_protocol_gets_only_its_historical_cleanup_meaning() {
+    fn retained_protocol_without_cleanup_authority_is_refused() {
         let exclusive = r#"
 kind: protocol
 name: structured_session
@@ -3055,34 +3014,14 @@ session:
   wire_version: 1
   max_frame_bytes: 4096
 "#;
-        let descriptor = decode_retained_protocol_descriptor(exclusive).unwrap();
-        assert_eq!(
-            descriptor.session.unwrap().cleanup_authority,
-            PersistentSessionCleanupAuthority::LocalProcessScope
-        );
-
-        let pooled = exclusive
-            .replace("exclusive_session", "pooled_requests")
-            .replace("runtime_workspace", "ephemeral_scratch")
-            .replace("node_policy", "isolated")
-            .replace(
-                "  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY\n",
-                "",
-            );
-        let descriptor = decode_retained_protocol_descriptor(&pooled).unwrap();
-        assert_eq!(
-            descriptor.session.unwrap().cleanup_authority,
-            PersistentSessionCleanupAuthority::NotRequired
-        );
-
-        // Current authoring never receives the retained-document bridge.
-        assert!(
-            serde_yaml::from_str::<ryeos_engine::protocols::ProtocolDescriptor>(exclusive).is_err()
-        );
+        let refusal = format!("{:#}", decode_retained_protocol_descriptor(exclusive).unwrap_err());
+        assert!(refusal.contains("cleanup_authority"), "{refusal}");
+        let pooled = exclusive.replace("exclusive_session", "pooled_requests");
+        assert!(decode_retained_protocol_descriptor(&pooled).is_err());
     }
 
     #[test]
-    fn retained_predecessor_protocol_is_verified_before_historical_interpretation() {
+    fn retained_protocol_is_verified_before_decoding() {
         let key = lillux::crypto::SigningKey::from_bytes(&[91u8; 32]);
         let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
         let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
@@ -3107,6 +3046,7 @@ lifecycle: { mode: managed }
 callback_channel: none
 session:
   process_mode: exclusive_session
+  cleanup_authority: local_process_scope
   workspace_authority: runtime_workspace
   network_authority: node_policy
   runtime_env_allowlist: []
@@ -3177,7 +3117,7 @@ mod original_product_bounds_controls {
     #[test]
     fn canonical_original_product_directory_at_exact_depth_boundary_refuses() {
         let temp = tempfile::tempdir().unwrap();
-        let db = ryeos_state::StateDb::open(
+        let db = ryeos_state::test_support::TestState::open(
             temp.path(),
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )

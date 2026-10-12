@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn upload_claim_is_one_shot_and_excludes_combined_attempt() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let parent = parent();
         db.reserve_runtime_snapshot(&parent).unwrap();
         let upload = upload(&parent);
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn uncertain_upload_cannot_become_accepted() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let parent = parent();
         db.reserve_runtime_snapshot(&parent).unwrap();
         let upload = upload(&parent);
@@ -1087,7 +1087,7 @@ mod tests {
 
     #[test]
     fn create_claim_requires_unique_accepted_upload_and_never_rearms() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let parent = parent();
         db.reserve_runtime_snapshot(&parent).unwrap();
         let upload = upload(&parent);
@@ -1160,7 +1160,7 @@ mod tests {
 
     #[test]
     fn timely_create_binds_stage_and_parent_atomically() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let parent = parent();
         db.reserve_runtime_snapshot(&parent).unwrap();
         let upload = upload(&parent);
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn late_create_retains_locator_without_parent_promotion() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let parent = parent();
         db.reserve_runtime_snapshot(&parent).unwrap();
         let upload = upload(&parent);
@@ -1255,7 +1255,7 @@ mod tests {
 
     #[test]
     fn parent_claim_precludes_stage_and_deadline_change_cannot_rearm_it() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let parent = parent();
         db.reserve_runtime_snapshot(&parent).unwrap();
         db.claim_runtime_snapshot_attempt(&parent.operation_id, &parent.digest().unwrap())
@@ -1266,7 +1266,7 @@ mod tests {
         );
 
         let other = parent.clone();
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         db.reserve_runtime_snapshot(&other).unwrap();
         let stage = upload(&other);
         db.reserve_runtime_snapshot_upload_stage(&stage).unwrap();
@@ -1275,7 +1275,7 @@ mod tests {
         assert_eq!(changed.derived_operation_id().unwrap(), stage.operation_id);
         assert!(db.reserve_runtime_snapshot_upload_stage(&changed).is_err());
 
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         db.reserve_runtime_snapshot(&other).unwrap();
         let mut over_parent = upload(&other);
         over_parent.attempt_deadline_ms = other.attempt_deadline_ms + 1;

@@ -112,7 +112,10 @@ impl OriginalNativeDestinationAuthority for InspectionDestination {
             self.root.is_same_directory(self.copy.directory()?)?,
             "foreign inspection copy root"
         );
-        self.sql.checkpoint()?;
+        // The SQL owner's own checkpoint requires the native producer
+        // interval, which only the native open begins and its terminal ends;
+        // this authority is checked before and after that interval as well.
+        self.sql.require_copy_work(&self.work)?;
         self.work.checkpoint()
     }
 }
@@ -440,6 +443,55 @@ impl OriginalInspectionCustody {
     }
 }
 
+/// Another store's readonly copy inspection, ended on its own native ticket:
+/// the terminal with the copy proof it carries, filed like a Runtime
+/// inspection release for the census and copy cleanup. A terminal carrying
+/// no copy proof, or failing its factory check, comes back with its factory.
+pub(crate) fn retain_copy_inspection_terminal(
+    factory: Arc<OriginalNativeFactory>,
+    terminal: OriginalNativeConnectionTerminal,
+    lease: Arc<SqliteInspectionCopyLease>,
+    sql: Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
+    namespace: lillux::PinnedDirectoryLock,
+    database_name: OsString,
+) -> std::result::Result<
+    RuntimeInspectionRelease,
+    (Arc<OriginalNativeFactory>, OriginalNativeConnectionTerminal),
+> {
+    if terminal.require_original(&factory).is_err() {
+        return Err((factory, terminal));
+    }
+    let (closed, released) = match &terminal {
+        OriginalNativeConnectionTerminal::Closed(owner) => (owner.inspection_closed(), None),
+        OriginalNativeConnectionTerminal::Released(owner) => {
+            (owner.inspection_closed(), owner.inspection_released())
+        }
+    };
+    if let Some(proof) = closed {
+        return Ok(RuntimeInspectionRelease::Closed(Arc::new(SqliteInspectionClosed {
+            process: std::process::id(),
+            proof,
+            native: std::sync::Mutex::new(Some((factory, terminal))),
+            lease,
+            sql,
+            database_name,
+            _namespace: Some(namespace),
+        })));
+    }
+    let Some(proof) = released else {
+        return Err((factory, terminal));
+    };
+    Ok(RuntimeInspectionRelease::Acquisition(SqliteInspectionAcquisitionReleased {
+        process: std::process::id(),
+        proof,
+        native: std::sync::Mutex::new(Some((factory, terminal))),
+        lease,
+        sql,
+        database_name,
+        _namespace: Some(namespace),
+    }))
+}
+
 /// The inspection phase's schema reference after its phase ended: closed,
 /// or a refused reference after its same-owner close. A released reference
 /// joins the census only if it paid a ticket.
@@ -565,6 +617,7 @@ impl RuntimeDb {
         runtime: Arc<lillux::PinnedDirectory>,
         work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
         factory: Arc<OriginalNativeFactory>,
+        fence: UnreadableLifetimeFence,
     ) -> Result<Self> {
         work.require_original_native_factory(&factory)?;
         factory.require_runtime_binding(&runtime)?;
@@ -677,13 +730,14 @@ impl RuntimeDb {
                     epoch <= RUNTIME_OPERATOR_SCHEMA_EPOCH,
                     "inspection belongs to a newer operator epoch"
                 );
-                ensure_scope_lifetime_resettable(connection, epoch)?;
+                ensure_scope_lifetime_resettable_with(connection, epoch, fence)?;
                 let reset_required = epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH;
                 if !reset_required {
-                    validate_current_runtime_store(
+                    validate_current_runtime_store_with(
                         connection,
                         &inspection_path,
-                        Some(schema_reference.definition()),
+                        schema_reference.definition(),
+                        fence,
                     )?;
                 }
                 let integrity: String =
@@ -725,9 +779,6 @@ impl RuntimeDb {
                 open_mode: RuntimeDbOpenMode::ExplicitHistoryResetInspection,
                 _directory: Some(retained_directory),
                 _directory_lock: Some(namespace),
-                _database_file: None,
-                _wal_file: None,
-                _shm_file: None,
                 _inspection_copy: Some(copy.clone()),
                 _inspection_sql: Some(sql),
             })

@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn initial_root_projection_advances_only_from_absent_and_is_idempotent() {
-        let db = ProjectionDb::open_transient().unwrap();
+        let db = crate::test_support::TestProjection::open();
         let (cache, committed_hash) =
             initial_root_cache(Some("c".repeat(64)), ThreadStatus::Created);
         let calls = Cell::new(0usize);
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn initial_root_projection_rejects_missing_genesis_or_existing_cursor() {
-        let db = ProjectionDb::open_transient().unwrap();
+        let db = crate::test_support::TestProjection::open();
         let (without_genesis, without_genesis_hash) =
             initial_root_cache(None, ThreadStatus::Created);
         let error = project_initial_root_committed_chain(
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn initial_root_projection_requires_the_exact_published_successor_status() {
-        let db = ProjectionDb::open_transient().unwrap();
+        let db = crate::test_support::TestProjection::open();
         let (cache, committed_hash) =
             initial_root_cache(Some("c".repeat(64)), ThreadStatus::Running);
 
@@ -250,7 +250,7 @@ mod tests {
         )
         .unwrap();
 
-        let other_db = ProjectionDb::open_transient().unwrap();
+        let other_db = crate::test_support::TestProjection::open();
         let error = project_initial_root_committed_chain(
             &other_db,
             &cache,

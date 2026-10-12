@@ -774,7 +774,7 @@ mod tests {
     fn connector_preparation_requires_release_and_replays_exactly() {
         let unreleased_root = tempfile::tempdir().unwrap();
         let unreleased_db =
-            RuntimeDb::open(&unreleased_root.path().join("runtime.sqlite3")).unwrap();
+            crate::runtime_db::test_native::TestRuntime::open(&unreleased_root.path().join("runtime.sqlite3"));
         let (_, _, _, binding, _, _) = super::super::channel::tests::pending_channel(
             &unreleased_db,
             "unreleased-connector",
@@ -1079,7 +1079,7 @@ mod tests {
                 .contains("capability generation")
         );
         drop(db);
-        assert!(RuntimeDb::open(&path).is_err());
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]

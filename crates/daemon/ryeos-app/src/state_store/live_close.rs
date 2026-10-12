@@ -12,7 +12,8 @@ struct StoreCloseMetadata {
     _barrier: WriteBarrier,
     _attachment_gate: AtomicBool,
     _attachment_closed: tokio::sync::Notify,
-    _attached: Mutex<BTreeSet<String>>,
+    _attached: Mutex<BTreeMap<String, super::AttachedProcess>>,
+    _live_workers: Mutex<BTreeMap<String, runtime_db::WorkerProcessRecord>>,
     _selected: Mutex<crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping>,
     _launches: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     _handlers: Mutex<HashMap<String, InProcessHandlerControl>>,
@@ -556,8 +557,8 @@ impl ClosedLiveStateStore {
         drop(physical_registry);
         drop(auxiliary_physical_sources);
         let StoreCloseMetadata { original, authority, _thread_authority, _projection_health,
-            _mode: _, _barrier, _attachment_gate: _, _attachment_closed, _attached, _selected,
-            _launches, _handlers, _signer, _active_launch_owners } = metadata;
+            _mode: _, _barrier, _attachment_gate: _, _attachment_closed, _attached, _live_workers,
+            _selected, _launches, _handlers, _signer, _active_launch_owners } = metadata;
         drop(original);
         drop(authority);
         drop(_thread_authority);
@@ -567,6 +568,7 @@ impl ClosedLiveStateStore {
         drop(_barrier);
         drop(_attachment_closed);
         drop(_attached);
+        drop(_live_workers);
         drop(_selected);
         drop(_launches);
         drop(_handlers);
@@ -1163,6 +1165,97 @@ impl ClosedLiveStateStore {
         Ok(terminals)
     }
 }
+/// Native census of a Store closed in process: what an in-process host
+/// records before it finishes its backend.
+pub struct StateStoreCensus {
+    pub terminals: Vec<OriginalNativeConnectionTerminal>,
+    pub leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
+    /// The generation lease owners behind `leases`, to retire against the
+    /// finished native backend before the host releases.
+    pub lease_retirements: Vec<ryeos_state::state_db::GenerationLeaseRetirement>,
+    /// The refusal an earlier close attempt recorded before this one completed.
+    pub prior_refusal: Option<anyhow::Error>,
+}
+
+impl ClosedLiveStateStore {
+    /// End a closed Store whose sources never left it, yielding its native
+    /// census: the Runtime terminals and the State census. The roots and
+    /// namespace end with this call. A Store that began any outside handoff
+    /// is refused whole; a refused State census retains the close progress
+    /// for [`LiveStateStoreCloseFailure::retry`].
+    pub fn into_census(mut self, factory: Arc<OriginalNativeFactory>)
+        -> std::result::Result<StateStoreCensus, LiveStateStoreCloseFailure> {
+        let checked = (|| -> Result<Vec<OriginalNativeConnectionTerminal>> {
+            factory.require_original_process()?;
+            self.progress.metadata.original()?.require_close_factory(&factory)?;
+            let p = &*self.progress;
+            anyhow::ensure!(p.store_parent.is_none() && p.store_parent_parts.is_none()
+                && p.store_parent_finalization.is_none() && p.store_destination_join.get().is_none()
+                && p.runtime_packet_parts.is_none() && p.operational_packet_parts.is_none()
+                && p.scheduler_packet_parts.is_none() && p.scheduler_unopened_database.is_none()
+                && p.scheduler_unopened_schema_reference.is_none()
+                && p.accounting_unopened_schema_reference.is_none()
+                && p.scheduler_admission_sources.is_none() && p.operational_sql_custody.is_none()
+                && p.runtime_sql_custody.is_none() && p.physical_registry.is_none()
+                && p.auxiliary_physical_sources.is_none() && p.runtime.is_none()
+                && p.runtime_failure.is_none() && p.runtime_outside.is_none() && p.state.is_none()
+                && p.state_failure.is_none() && p.state_physical.is_none() && p.state_closed.is_some(),
+                "closed Store began an outside source handoff");
+            let terminals = p.runtime_closed.as_ref().context("live Runtime terminal absent")?.native_terminals()?;
+            for terminal in &terminals { terminal.require_original(&factory)?; }
+            Ok(terminals)
+        })();
+        let runtime_terminals = match checked {
+            Ok(terminals) => terminals,
+            Err(error) => return Err(LiveStateStoreCloseFailure { error, factory,
+                custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Closed(self))) }),
+        };
+        let state_closed = self.progress.state_closed.take().expect("checked closed State present");
+        let state_census = match state_closed.into_census(Arc::clone(&factory)) {
+            Ok(census) => census,
+            Err(failure) => {
+                let error = anyhow!("in-process State census refused: {failure}");
+                self.progress.state_failure = Some(failure);
+                let Self { progress, prior_refusal } = self;
+                return Err(LiveStateStoreCloseFailure { error: prior_refusal.unwrap_or(error), factory,
+                    custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Progress(
+                        std::mem::ManuallyDrop::into_inner(progress)))) });
+            }
+        };
+        let Self { progress, prior_refusal } = self;
+        let StoreCloseProgress { store_parent, store_parent_parts, store_parent_finalization,
+            store_destination_join, runtime_packet_parts, operational_packet_parts,
+            scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
+            accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
+            physical_registry, auxiliary_physical_sources, metadata, runtime, runtime_failure,
+            runtime_closed, runtime_outside, state, state_failure, state_closed, state_physical }
+            = std::mem::ManuallyDrop::into_inner(progress);
+        // Every outside slot was checked empty above; the census holds every
+        // native owner, and the Runtime close context ends with its roots.
+        drop(std::mem::ManuallyDrop::into_inner(store_parent));
+        drop(std::mem::ManuallyDrop::into_inner(store_parent_parts));
+        drop((store_parent_finalization, store_destination_join, runtime_packet_parts,
+            operational_packet_parts, scheduler_packet_parts, scheduler_unopened_database,
+            scheduler_unopened_schema_reference, accounting_unopened_schema_reference,
+            scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
+            physical_registry, auxiliary_physical_sources));
+        drop((runtime, runtime_failure, runtime_closed, runtime_outside));
+        drop((state, state_failure, state_closed, state_physical));
+        let StoreCloseMetadata { original, authority, _thread_authority, _projection_health,
+            _mode: _, _barrier, _attachment_gate: _, _attachment_closed, _attached, _live_workers,
+            _selected, _launches, _handlers, _signer, _active_launch_owners } = metadata;
+        drop((original, authority, _thread_authority, _projection_health, _barrier,
+            _attachment_closed, _attached, _live_workers, _selected, _launches, _handlers,
+            _signer, _active_launch_owners));
+        let ryeos_state::state_db::LiveStateCensus { terminals: state_terminals, leases,
+            lease_retirement, prior_refusal: state_prior_refusal } = state_census;
+        let mut terminals = runtime_terminals;
+        terminals.extend(state_terminals);
+        Ok(StateStoreCensus { terminals, leases, lease_retirements: vec![lease_retirement],
+            prior_refusal: prior_refusal.or(state_prior_refusal) })
+    }
+}
+
 enum StoreCloseCustody { Shared(Arc<StateStore>), Store(StateStore), Progress(StoreCloseProgress), Closed(ClosedLiveStateStore) }
 pub struct LiveStateStoreCloseFailure { error: anyhow::Error, factory: Arc<OriginalNativeFactory>, custody: std::mem::ManuallyDrop<Mutex<StoreCloseCustody>> }
 impl std::fmt::Debug for LiveStateStoreCloseFailure {
@@ -1211,7 +1304,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
             let checked = (|| -> Result<()> {
                 store.live_native_open.as_ref().context("actual live Store opening owner absent")?.require_close_factory(&factory)?;
                 anyhow::ensure!(!store.process_attachment_admission_is_open(), "live Store execution admission remains open");
-                anyhow::ensure!(store.attached_thread_ids.lock().map_err(|_| anyhow!("attachment registry poisoned"))?.is_empty(), "live attachments remain");
+                anyhow::ensure!(store.attached_processes.lock().map_err(|_| anyhow!("attachment registry poisoned"))?.is_empty(), "live attachments remain");
                 anyhow::ensure!(!store.selected_invocations.lock().map_err(|_| anyhow!("selected registry poisoned"))?.has_any(), "selected invocation obligations remain");
                 anyhow::ensure!(store.launch_task_abort_handles.lock().map_err(|_| anyhow!("launch registry poisoned"))?.is_empty(), "launch task owners remain");
                 anyhow::ensure!(store.active_in_process_handlers.lock().map_err(|_| anyhow!("handler registry poisoned"))?.is_empty(), "in-process handlers remain");
@@ -1221,7 +1314,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
             if let Err(error) = checked { return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Store(store))); }
             let StateStore { live_native_open, state_authority, bundle_admission_trust, thread_runtime_authority,
                 inner, projection_health, read_only, allow_projection_rebuild, write_barrier,
-                process_attachment_admission_open, process_attachment_admission_closed, attached_thread_ids,
+                process_attachment_admission_open, process_attachment_admission_closed, attached_processes, live_workers,
                 selected_invocations, launch_task_abort_handles, active_in_process_handlers } = store;
             // Admitting trust is an immutable signer snapshot with no native
             // custody; it ends with the Store's admission surface.
@@ -1246,7 +1339,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
                     authority: Some(state_authority), _thread_authority: thread_runtime_authority,
                     _projection_health: projection_health, _mode: (read_only, allow_projection_rebuild),
                     _barrier: write_barrier, _attachment_gate: process_attachment_admission_open,
-                    _attachment_closed: process_attachment_admission_closed, _attached: attached_thread_ids,
+                    _attachment_closed: process_attachment_admission_closed, _attached: attached_processes, _live_workers: live_workers,
                     _selected: selected_invocations, _launches: launch_task_abort_handles,
                     _handlers: active_in_process_handlers, _signer: signer, _active_launch_owners: active_launch_owners },
                 runtime: Some(runtime_db), runtime_failure: None, runtime_closed: None, runtime_outside: None,

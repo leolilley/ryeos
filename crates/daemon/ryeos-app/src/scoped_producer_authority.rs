@@ -1147,7 +1147,7 @@ mod tests {
         .unwrap();
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(serde_json::json!({
-                "version": 2,
+                "version": 3,
                 "control_timeout": {"secs": 1, "nanos": 0},
                 "configuration": {"version": 3, "backend": {
                     "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"

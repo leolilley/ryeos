@@ -987,7 +987,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(node_signer.fingerprint.clone(), node_signer.verifying_key());
-        let db = ryeos_state::StateDb::open(tmp.path(), std::sync::Arc::new(trust)).unwrap();
+        let db = ryeos_state::test_support::TestState::open(tmp.path(), std::sync::Arc::new(trust)).unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -1221,7 +1221,7 @@ mod tests {
         let mut reopened_trust = ryeos_state::refs::TrustStore::new();
         reopened_trust.insert(node_signer.fingerprint.clone(), node_signer.verifying_key());
         let reopened =
-            ryeos_state::StateDb::open(tmp.path(), std::sync::Arc::new(reopened_trust)).unwrap();
+            ryeos_state::test_support::TestState::open(tmp.path(), std::sync::Arc::new(reopened_trust)).unwrap();
         let reopened_authority = reopened.pinned_authority().unwrap();
         let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
         let reopened_head = ryeos_state::immutable_testimony::read_immutable_attestation_head(

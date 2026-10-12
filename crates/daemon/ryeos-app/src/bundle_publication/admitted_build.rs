@@ -959,6 +959,8 @@ mod input_contract_tests {
         exact["payloads"][0]["binary"] = serde_json::json!("ryeos-web-tools");
         exact["payloads"][0]["cargo_package"] = serde_json::json!("ryeos-web-tools");
         exact["cargo_packages"] = serde_json::json!(["ryeos-web-tools"]);
+        exact["cargo_feature_selections"] =
+            serde_json::json!([{"cargo_package": "ryeos-web-tools", "features": []}]);
         let exact = AdmittedReleaseInput::from_value(&exact).unwrap();
         require_exact_ownership_selection(&ownership, &exact).unwrap();
     }

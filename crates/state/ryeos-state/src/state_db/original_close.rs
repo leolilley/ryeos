@@ -560,10 +560,7 @@ impl StateDb {
                 .context("original State factory context absent")?;
             anyhow::ensure!(
                 original.factory.same_original(&factory)
-                    && self
-                        .projection
-                        .original_factory()
-                        .is_some_and(|owner| owner.same_original(&factory)),
+                    && self.projection.original_factory().same_original(&factory),
                 "original State close selects another factory"
             );
             self._offline_namespace_lock

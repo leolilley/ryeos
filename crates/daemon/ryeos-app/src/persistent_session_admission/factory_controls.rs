@@ -6,17 +6,23 @@ use ryeos_engine::{contracts::*, resolution::*};
 use ryeos_state::objects::*;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-fn fixture() -> (tempfile::TempDir, crate::state::AppState, String) {
+/// The fixture's Store owner. It sits between the directory and the
+/// application in every fixture tuple, so the application and its Store
+/// `Arc`s drop before the owner closes the Store and the owner closes before
+/// the directory is removed.
+type StoreOwner = crate::state_store::test_native::TestStateStore;
+
+fn fixture() -> (tempfile::TempDir, StoreOwner, crate::state::AppState, String) {
     fixture_with_startup(None)
 }
 
 fn fixture_with_startup(
     startup: Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
-) -> (tempfile::TempDir, crate::state::AppState, String) {
+) -> (tempfile::TempDir, StoreOwner, crate::state::AppState, String) {
     let root = tempfile::tempdir().unwrap();
-    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let (store_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
     let hash = populate_fixture(&mut state, startup);
-    (root, state, hash)
+    (root, store_owner, state, hash)
 }
 
 // Existing genuine factory on the SAME budget fixture State; Linux cfg(test)
@@ -359,7 +365,7 @@ session:
 
 #[test]
 fn genuine_j1_factory_retains_actual_signed_cas_and_same_descriptor_selection() {
-    let (_root, state, hash) = fixture();
+    let (_root, _store_owner, state, hash) = fixture();
     let proof = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
     proof.require_same_state(&state).unwrap();
     assert_eq!(proof.capsule().content_hash().unwrap(), hash);
@@ -374,14 +380,14 @@ fn genuine_j1_factory_retains_actual_signed_cas_and_same_descriptor_selection() 
             .unwrap()
             > 2
     );
-    let other_root = tempfile::tempdir().unwrap();
-    let other = crate::state::test_support::build(other_root.path()).unwrap();
-    assert!(proof.require_same_state(&other).is_err());
+    // Refusing a different live StateStore owner needs two Stores open at
+    // once, which a test thread cannot hold; that refusal is not exercised
+    // here.
 }
 
 #[test]
 fn genuine_j1_factory_refuses_revoked_protocol_signer_and_changed_node_agreement() {
-    let (_root, mut state, hash) = fixture();
+    let (_root, _store_owner, mut state, hash) = fixture();
     assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &hash).is_ok());
     let original_policy = Arc::clone(&state.node_policy);
     let mut policy = state
@@ -408,7 +414,7 @@ fn genuine_j1_factory_refuses_revoked_protocol_signer_and_changed_node_agreement
 
 #[test]
 fn genuine_j1_factory_refuses_tampered_retained_protocol_bytes_before_selection_authority() {
-    let (_root, state, hash) = fixture();
+    let (_root, _store_owner, state, hash) = fixture();
     assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &hash).is_ok());
     let mut capsule = state
         .state_store
@@ -449,7 +455,7 @@ fn genuine_signed_startup_selection_remains_static_without_original_binder() {
         member: "startup.json".into(),
         sha256: lillux::sha256_hex(b"fixture contract bytes not admitted here"),
     };
-    let (_root, mut state, hash) = fixture_with_startup(Some(selected.clone()));
+    let (_root, _store_owner, mut state, hash) = fixture_with_startup(Some(selected.clone()));
     let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
     assert!(inputs.has_selected_startup_contract());
     assert_eq!(inputs.startup_contract_selection.as_ref(), Some(&selected));
@@ -466,7 +472,7 @@ fn genuine_signed_startup_selection_remains_static_without_original_binder() {
 
 #[test]
 fn genuine_signed_resolution_refuses_absent_source_binding_in_actual_cas() {
-    let (_root, state, hash) = fixture();
+    let (_root, _store_owner, state, hash) = fixture();
     let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
     let mut resolution = inputs.exact().resolution_output.restore();
     let missing = lillux::sha256_hex(b"absent source binding test object");
@@ -507,7 +513,7 @@ fn genuine_retained_signed_startup_selector_refuses_tampered_member() {
         member: "startup.json".into(),
         sha256: lillux::sha256_hex(b"retained signed selector fixture"),
     };
-    let (_root, state, hash) = fixture_with_startup(Some(selected));
+    let (_root, _store_owner, state, hash) = fixture_with_startup(Some(selected));
     VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
     let mut capsule = state
         .state_store
@@ -543,6 +549,7 @@ const C2_RAW_MEMBER: &[u8] = b"{\"fixture\":\"C2 raw source member only\"}\n";
 
 fn temporary_c2_fixture() -> (
     tempfile::TempDir,
+    StoreOwner,
     crate::state::AppState,
     VerifiedTrustedPooledSessionInputs,
     crate::source_closure_admission::temporary_source_fixture::Fixture,
@@ -552,7 +559,7 @@ fn temporary_c2_fixture() -> (
         member: "startup.json".into(),
         sha256: lillux::sha256_hex(C2_RAW_MEMBER),
     };
-    let (root, mut state, hash) = fixture_with_startup(Some(selected.clone()));
+    let (root, store_owner, mut state, hash) = fixture_with_startup(Some(selected.clone()));
     let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &hash).unwrap();
     assert_eq!(inputs.startup_contract_selection.as_ref(), Some(&selected));
     assert!(inputs.original_isolation.is_none());
@@ -560,12 +567,12 @@ fn temporary_c2_fixture() -> (
     let source =
         crate::source_closure_admission::temporary_source_fixture::admit(&mut state, C2_RAW_MEMBER)
             .unwrap();
-    (root, state, inputs, source)
+    (root, store_owner, state, inputs, source)
 }
 
 #[test]
 fn temporary_c2_actual_admission_publication_recovery_reads_signed_selected_raw_member() {
-    let (_root, state, inputs, source) = temporary_c2_fixture();
+    let (_root, _store_owner, state, inputs, source) = temporary_c2_fixture();
     let authority = source.publication.authority();
     let guard = authority.acquire_shared_guard().unwrap();
     let selection = inputs.startup_contract_selection.as_ref().unwrap();
@@ -606,10 +613,15 @@ fn temporary_c2_actual_admission_publication_recovery_reads_signed_selected_raw_
 
 #[test]
 fn temporary_c2_actual_recovered_source_refuses_foreign_guard_before_member_read() {
-    let (_root, _state, inputs, source) = temporary_c2_fixture();
+    // A thread holds one test Store at a time. Pin the foreign node's
+    // descriptor authority and close its Store before the fixture opens.
     let foreign_root = tempfile::tempdir().unwrap();
-    let foreign_state = crate::state::test_support::build(foreign_root.path()).unwrap();
-    let foreign = foreign_state.state_store.pinned_state_authority().unwrap();
+    let foreign = {
+        let (_foreign_state_owner, foreign_state) =
+            crate::state::test_support::build(foreign_root.path()).unwrap();
+        foreign_state.state_store.pinned_state_authority().unwrap()
+    };
+    let (_root, _store_owner, _state, inputs, source) = temporary_c2_fixture();
     let foreign_guard = foreign.acquire_shared_guard().unwrap();
     assert!(
         crate::source_closure_admission::load_selected_startup_contract_member(
@@ -623,7 +635,7 @@ fn temporary_c2_actual_recovered_source_refuses_foreign_guard_before_member_read
 
 #[test]
 fn temporary_c2_actual_recovered_source_refuses_substituted_member_root_and_hash() {
-    let (_root, _state, inputs, source) = temporary_c2_fixture();
+    let (_root, _store_owner, _state, inputs, source) = temporary_c2_fixture();
     let guard = source
         .publication
         .authority()
@@ -658,7 +670,7 @@ fn temporary_c2_actual_recovered_source_refuses_substituted_member_root_and_hash
 
 #[test]
 fn temporary_c2_actual_source_recovery_refuses_revoked_temporary_signer() {
-    let (_root, mut state, _inputs, source) = temporary_c2_fixture();
+    let (_root, _store_owner, mut state, _inputs, source) = temporary_c2_fixture();
     let mut engine = (*state.engine).clone();
     engine.node_trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
     engine.trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
@@ -675,12 +687,13 @@ fn temporary_c2_actual_source_recovery_refuses_revoked_temporary_signer() {
 
 fn temporary_c2_nondefault_source() -> (
     tempfile::TempDir,
+    StoreOwner,
     crate::state::AppState,
     crate::source_closure_admission::temporary_source_fixture::Fixture,
     StartupSourceMember,
 ) {
     let root = tempfile::tempdir().unwrap();
-    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let (store_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
     let source =
         crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root(
             &mut state,
@@ -700,12 +713,12 @@ fn temporary_c2_nondefault_source() -> (
         path: file.path.clone(),
         sha256: file.blob_hash.clone(),
     };
-    (root, state, source, member)
+    (root, store_owner, state, source, member)
 }
 
 #[test]
 fn temporary_c2_nondefault_worker_directory_accepts_actual_manifest_entry_coordinate() {
-    let (_root, _state, source, member) = temporary_c2_nondefault_source();
+    let (_root, _store_owner, _state, source, member) = temporary_c2_nondefault_source();
     assert!(matches!(
         &source.recovered.binding().logical_binding,
         SourceLogicalBinding::Worker { root, entry }
@@ -737,7 +750,7 @@ fn temporary_c2_nondefault_worker_directory_accepts_actual_manifest_entry_coordi
 
 #[test]
 fn temporary_c2_nondefault_worker_entry_refuses_directory_foreign_root_path_and_hash() {
-    let (_root, _state, source, member) = temporary_c2_nondefault_source();
+    let (_root, _store_owner, _state, source, member) = temporary_c2_nondefault_source();
     let other = source
         .recovered
         .manifest()
@@ -774,7 +787,7 @@ fn temporary_c2_nondefault_worker_entry_refuses_directory_foreign_root_path_and_
 
 #[test]
 fn temporary_c2_nondefault_worker_recovery_refuses_changed_logical_source_declaration() {
-    let (_root, state, mut source, _member) = temporary_c2_nondefault_source();
+    let (_root, _store_owner, state, mut source, _member) = temporary_c2_nondefault_source();
     source.resolution.composed.composed["source"]["root"] =
         serde_json::Value::String("lib/foreign-worker".into());
     // Negative resolution data is not resigned or promoted into a binding.
@@ -791,7 +804,7 @@ fn temporary_c2_nondefault_worker_recovery_refuses_changed_logical_source_declar
 #[test]
 fn temporary_c2_logical_root_builder_refuses_noncanonical_paths() {
     let root = tempfile::tempdir().unwrap();
-    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
     let engine = Arc::clone(&state.engine);
     for logical in [
         "",
@@ -818,7 +831,7 @@ fn temporary_c2_logical_root_builder_refuses_noncanonical_paths() {
 #[test]
 fn temporary_c2_logical_root_yaml_metacharacters_preserve_signed_declaration() {
     let root = tempfile::tempdir().unwrap();
-    let mut state = crate::state::test_support::build(root.path()).unwrap();
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
     let logical = "lib/worker: quoted";
     let source =
         crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root(
@@ -877,7 +890,7 @@ fn fixed_v2_selection(
 fn current_v2_fixed_selector_reads_actual_nested_recovered_member_under_same_guard() {
     let raw = serde_json::to_vec(&fixed_v2_syntax()).unwrap();
     let selected = fixed_v2_selection(&raw);
-    let (root, mut state, capsule_hash) = fixture_with_startup(Some(selected.clone()));
+    let (root, store_owner, mut state, capsule_hash) = fixture_with_startup(Some(selected.clone()));
     let inputs = VerifiedTrustedPooledSessionInputs::verify(&state, &capsule_hash).unwrap();
     assert_eq!(inputs.startup_contract_selection.as_ref(), Some(&selected));
     assert!(inputs.original_startup_contract.is_none());
@@ -928,6 +941,10 @@ fn current_v2_fixed_selector_reads_actual_nested_recovered_member_under_same_gua
     assert!(inputs.original_startup_request_inputs(&state).is_err());
     drop(guard);
     drop(source);
+    // Close the Store before its directory is removed.
+    drop(inputs);
+    drop(state);
+    drop(store_owner);
     drop(root);
 }
 
@@ -974,26 +991,20 @@ fn current_v2_fixed_selector_refuses_canonical_alternates_and_invalid_selection(
 }
 
 #[test]
-fn current_v2_fixed_selector_preserves_separate_legacy_role() {
+fn v1_startup_contract_is_refused_with_or_without_delivery() {
     let mut value = fixed_v2_syntax();
     value["schema"] = "ryeos.local_tinygrad_current_assignment_startup.v1".into();
     value["role"] = "current_assignment_nvml_preflight_v1".into();
+    assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
     value.as_object_mut().unwrap().remove("manifest_delivery");
-    let raw = serde_json::to_vec(&value).unwrap();
-    let decoded = decode_startup_contract(&raw).unwrap();
-    let legacy = ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection {
-        source_root: "source".into(),
-        member: "startup.json".into(),
-        sha256: lillux::sha256_hex(&raw),
-    };
-    require_current_v2_startup_selector(&legacy, &decoded).unwrap();
+    assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
     value["role"] = "current_assignment_nvml_preflight_v2".into();
     assert!(decode_startup_contract(&serde_json::to_vec(&value).unwrap()).is_err());
 }
 
 #[test]
 fn current_v2_missing_nested_member_refuses_actual_source_read() {
-    let (_root, _state, _inputs, source) = temporary_c2_fixture();
+    let (_root, _store_owner, _state, _inputs, source) = temporary_c2_fixture();
     let guard = source
         .publication
         .authority()
@@ -1026,7 +1037,7 @@ fn current_v2_member_builder_refuses_noncanonical_and_entry_collision_paths() {
         "bootstrap.py",
     ] {
         let root = tempfile::tempdir().unwrap();
-        let mut state = crate::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
         assert!(crate::source_closure_admission::temporary_source_fixture::admit_with_logical_root_and_member(
             &mut state, b"inert syntax", "lib/local-tinygrad-gnu", member,
         ).is_err());

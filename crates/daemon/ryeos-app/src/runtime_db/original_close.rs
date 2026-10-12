@@ -905,10 +905,6 @@ fn advance_close(
                     target.parent() == Some(directory.path()),
                     "Runtime close target namespace changed"
                 );
-                ensure!(
-                    db._database_file.is_none() && db._wal_file.is_none() && db._shm_file.is_none(),
-                    "original Runtime close has duplicate data descriptors"
-                );
                 Ok(())
             })();
             if let Err(error) = checked {
@@ -1102,11 +1098,13 @@ mod outside_quote_tests {
 
     #[test]
     fn runtime_packet_quote_covers_retained_vector_and_bounds() {
-        let quote = quote_runtime_packet_sources(1, 2).unwrap();
+        // The live packet has exactly the main and schema owner slots.
+        let quote = quote_runtime_packet_sources(1, 1).unwrap();
         assert_eq!(quote.bytes,
-            (3 * std::mem::size_of::<OriginalNativeOutsideConnectionCustody>()
+            (2 * std::mem::size_of::<OriginalNativeOutsideConnectionCustody>()
                 + std::mem::size_of::<Vec<()>>()) as u64);
-        assert_eq!(quote.steps, 32);
+        assert_eq!(quote.steps, 24);
+        assert!(quote_runtime_packet_sources(1, 2).is_err());
         assert!(quote_runtime_packet_sources(MAX_LIVE_RUNTIME_NATIVE_PACKET_SOURCES, 1).is_err());
         assert!(quote_runtime_packet_sources(usize::MAX, 1).is_err());
     }

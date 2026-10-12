@@ -331,7 +331,20 @@ fn release_reference_failure(
     failure: sqlite_schema::NativeSchemaSqlReferenceFailure,
     retain: RetainTerminal<'_>,
 ) -> anyhow::Error {
-    let original = anyhow::anyhow!("Operational schema reference refused: {failure:#}");
+    release_schema_reference_failure(factory, failure, retain, "Operational")
+}
+
+/// Release a refused schema reference of `store` on a stopped-node host:
+/// its terminal joins the census through `retain`, unused inputs are
+/// consumed, and any owner the release or the census refuses is carried in
+/// the returned error.
+pub fn release_schema_reference_failure(
+    factory: &Arc<OriginalNativeFactory>,
+    failure: sqlite_schema::NativeSchemaSqlReferenceFailure,
+    retain: RetainTerminal<'_>,
+    store: &str,
+) -> anyhow::Error {
+    let original = anyhow::anyhow!("{store} schema reference refused: {failure:#}");
     match failure.close_retained() {
         Ok(released) => {
             let terminal = released.terminal(factory).map(|terminal| terminal.cloned());
@@ -510,14 +523,14 @@ mod tests {
     }
 
     #[test]
-    fn immediate_predecessor_activation_preserves_provider_rows_through_the_gate() {
+    fn immediate_predecessor_activation_retires_every_replay_row_through_the_gate() {
         let host = TestNativeHost::acquire();
         let dir = tempfile::tempdir().unwrap();
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH - 1);
         let report = activate(&host, &root, &|| Ok(())).unwrap();
         assert_eq!((report.stored_epoch, report.current_epoch, report.scope),
-            (REPLAY_INDEX_EPOCH - 1, REPLAY_INDEX_EPOCH, ReplayIndexResetScope::DispatchEffects));
-        assert_eq!(rows_and_epoch(&host, &root), (vec!["provider.call".to_owned()], REPLAY_INDEX_EPOCH));
+            (REPLAY_INDEX_EPOCH - 1, REPLAY_INDEX_EPOCH, ReplayIndexResetScope::AllReplayRecords));
+        assert_eq!(rows_and_epoch(&host, &root), (Vec::new(), REPLAY_INDEX_EPOCH));
         assert_census_complete(&host);
     }
 
@@ -541,8 +554,8 @@ mod tests {
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH - 1);
         FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.set(true));
         let report = activate(&host, &root, &|| Ok(())).unwrap();
-        assert_eq!(report.scope, ReplayIndexResetScope::DispatchEffects, "original decision preserved");
-        assert_eq!(rows_and_epoch(&host, &root), (vec!["provider.call".to_owned()], REPLAY_INDEX_EPOCH));
+        assert_eq!(report.scope, ReplayIndexResetScope::AllReplayRecords, "original decision preserved");
+        assert_eq!(rows_and_epoch(&host, &root), (Vec::new(), REPLAY_INDEX_EPOCH));
         assert_census_complete(&host);
     }
 

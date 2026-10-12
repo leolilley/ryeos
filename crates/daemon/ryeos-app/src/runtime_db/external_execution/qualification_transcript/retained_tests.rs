@@ -543,7 +543,7 @@ fn retained_backend(
 
 #[test]
 fn retained_null_fixture_publication_requires_native_application_and_replays_exactly() {
-    let db = RuntimeDb::new_in_memory().unwrap();
+    let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
     let mut fixture = Fixture::new(&db, false);
     let placement = &fixture.binding.placement_thread_id;
     assert!(
@@ -677,7 +677,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
 
 #[test]
 fn retained_capture_publication_requires_original_verified_receiver_and_exact_content() {
-    let db = RuntimeDb::new_in_memory().unwrap();
+    let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
     let mut fixture = Fixture::new(&db, true);
     fixture.retain_terminal_testimony();
     fixture.settle_native();
@@ -701,7 +701,7 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
     );
     assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
     let root = tempfile::tempdir().unwrap();
-    let state = ryeos_state::StateDb::open(
+    let state = ryeos_state::test_support::TestState::open(
         root.path(),
         std::sync::Arc::new(ryeos_state::TrustStore::new()),
     )

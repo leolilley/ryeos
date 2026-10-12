@@ -725,13 +725,13 @@ mod tests {
     }
 
     impl MockContext {
-        fn new() -> Self {
+        fn new(db: Arc<crate::db::SchedulerDb>) -> Self {
             let app_root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("state"))
                 .unwrap();
             Self {
                 app_root,
-                db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
+                db,
                 gate: Arc::new(RwLock::new(())),
                 trust: TrustStore::empty(),
                 statuses: Mutex::new(HashMap::new()),
@@ -815,6 +815,20 @@ mod tests {
         }
     }
 
+    /// Wait until every detached fire task has finished and dropped its
+    /// context. The store's other aliases live in those contexts, so once
+    /// the test's own context drops the store settles with none outliving
+    /// the test.
+    async fn finish_detached_work(ctx: &Arc<MockContext>) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while Arc::strong_count(ctx) > 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("detached fire work must finish");
+    }
+
     fn projectless_execution() -> ryeos_scheduler_contract::ScheduleExecution {
         ryeos_scheduler_contract::ScheduleExecution {
             authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
@@ -851,10 +865,11 @@ mod tests {
 
     #[tokio::test]
     async fn selected_snapshot_stays_rooted_until_fire_binding_is_durable() {
-        let ctx = Arc::new(MockContext::new());
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
         let state_root = ctx.app_root.path().join(ryeos_engine::AI_DIR).join("state");
         let state_db =
-            ryeos_state::StateDb::open(&state_root, Arc::new(ryeos_state::TrustStore::new()))
+            ryeos_state::test_support::TestState::open(&state_root, Arc::new(ryeos_state::TrustStore::new()))
                 .unwrap();
         let state_authority = state_db.pinned_authority().unwrap();
         let selected_hash = "55".repeat(32);
@@ -963,11 +978,13 @@ mod tests {
             .active_staged_cas_root_hashes()
             .unwrap();
         assert!(active.object_hashes.is_empty());
+        finish_detached_work(&ctx).await;
     }
 
     #[tokio::test]
     async fn invalid_fire_projection_terminates_timer() {
-        let ctx = Arc::new(MockContext::new());
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
         ctx.db.begin_fire_projection_rebuild().unwrap();
         let (_reload_tx, reload_rx) = tokio::sync::mpsc::channel(1);
 
@@ -989,7 +1006,8 @@ mod tests {
     /// is still running.
     #[tokio::test]
     async fn dispatch_fire_is_detached_and_releases_gate() {
-        let ctx = Arc::new(MockContext::new());
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
         ctx.hang_dispatch
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let spec = make_spec("long-job", "skip");
@@ -1040,6 +1058,7 @@ mod tests {
             .expect("gate writer must acquire while a scheduled job is running");
 
         ctx.dispatch_release.notify_one();
+        finish_detached_work(&ctx).await;
     }
 
     /// Detached dispatch means a claimed fire's thread row may not exist
@@ -1047,7 +1066,8 @@ mod tests {
     /// treat that as still-pending, not proceed into a double-run.
     #[tokio::test]
     async fn overlap_holds_when_inflight_thread_not_yet_visible() {
-        let ctx = MockContext::new();
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = MockContext::new(store.shared());
         for policy in ["skip", "cancel_previous"] {
             let spec = make_spec(&format!("race-{policy}"), policy);
             let fire_id = types::fire_id(&spec.schedule_id, 1000);
@@ -1084,7 +1104,8 @@ mod tests {
 
     #[tokio::test]
     async fn repair_stale_completed_fire_uses_result_failed_outcome() {
-        let ctx = MockContext::new();
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = MockContext::new(store.shared());
         let thread_id = types::thread_id_from_fire("sched@1000");
         let fire = FireRecord {
             fire_id: "sched@1000".to_string(),

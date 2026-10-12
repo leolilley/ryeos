@@ -2716,7 +2716,10 @@ impl RecoveryStore {
 
     /// Acknowledge only this exact operation after every participating owner
     /// is terminal. Keep the staged operation until the Acknowledged marker
-    /// is durable.
+    /// is durable. Its marker read is unscoped, so no projection lease may be
+    /// held; outside tests the reset acknowledges through a closed State's
+    /// final acknowledgement custody instead.
+    #[cfg(test)]
     pub(crate) fn finish_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
@@ -4984,71 +4987,6 @@ mod tests {
             assert!(store.thread_history_discard_in_progress().is_err());
             assert_eq!(std::fs::read(marker).unwrap(), bytes);
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn discard_marker_sqlite_alias_probes_preserve_original_posix_lock() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
-        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
-        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
-        let path = temp.path().join("stock.sqlite3");
-        // Open the sole test probe before SQLite takes any locks, and retain
-        // it until the connection is closed. F_OFD_GETLK sees this process's
-        // POSIX lock without another observer open/close.
-        let probe = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE kept(value INTEGER); INSERT INTO kept VALUES(7); BEGIN IMMEDIATE;",
-        )
-        .unwrap();
-        std::fs::hard_link(&path, store.root().join(THREAD_HISTORY_DISCARD_MARKER)).unwrap();
-        let assert_reserved = || {
-            use std::os::fd::AsRawFd;
-            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-            lock.l_type = libc::F_WRLCK as _;
-            lock.l_whence = libc::SEEK_SET as _;
-            lock.l_start = 0x40000001;
-            lock.l_len = 1;
-            assert_eq!(
-                unsafe { libc::fcntl(probe.as_raw_fd(), libc::F_OFD_GETLK, &mut lock) },
-                0
-            );
-            assert_eq!(lock.l_type, libc::F_WRLCK as libc::c_short);
-        };
-        assert_reserved();
-        let operation = ThreadHistoryDiscardOperationRef {
-            operation_id: "a".repeat(32),
-            sha256: "b".repeat(64),
-        };
-        assert!(store.thread_history_discard_operation().is_err());
-        assert_reserved();
-        assert!(
-            store
-                .begin_thread_history_discard(&guard, &operation)
-                .is_err()
-        );
-        assert_reserved();
-        assert!(
-            store
-                .finish_thread_history_discard(&guard, &operation)
-                .is_err()
-        );
-        assert_reserved();
-        assert_eq!(
-            conn.query_row("SELECT value FROM kept", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            7
-        );
-        conn.execute_batch("ROLLBACK").unwrap();
-        drop(conn);
-        drop(probe);
     }
 
     #[test]

@@ -427,6 +427,35 @@ pub(super) fn validate_processes(conn: &Connection) -> Result<()> {
 }
 
 impl RuntimeDb {
+    /// Every `Attached` local qualification Worker row left by a daemon
+    /// generation other than `current_generation`, in placement order. Start
+    /// recovery proves each such group dead before settling its row.
+    pub(crate) fn attached_qualification_worker_processes(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<QualificationWorkerProcessRecord>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_qualification_worker_process
+                 ORDER BY placement_thread_id",
+            )?;
+            let placements = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut attached = Vec::new();
+            for placement in placements {
+                let record = read_process(conn, &placement)?
+                    .context("qualification Worker process disappeared during recovery listing")?;
+                if record.phase == QualificationWorkerProcessPhase::Attached
+                    && record.daemon_generation_id != current_generation
+                {
+                    attached.push(record);
+                }
+            }
+            Ok(attached)
+        })
+    }
+
     pub(crate) fn qualification_worker_process(
         &self,
         placement: &str,

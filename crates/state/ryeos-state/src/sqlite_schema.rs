@@ -18,8 +18,8 @@
 //!
 //! Ownership checks never rename, archive, reset, or replace an existing
 //! database. A mismatch fails before mutation. Recovery is store-specific:
-//! retained source-of-truth stores require an explicit migration or repair,
-//! while replaceable projections use their explicit rebuild path.
+//! retained source-of-truth stores are reset by their owning command, while
+//! replaceable projections use their explicit rebuild path.
 
 use std::path::Path;
 
@@ -85,7 +85,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         bail!(
             "database application_id is {app_id}, expected {}; \
              this file ({}) was not created by this daemon. Refusing to modify it; \
-             preserve the file and use the owning store's explicit migration or recovery procedure.",
+             preserve the file and run the owning store's reset.",
             spec.application_id,
             path_display,
         );
@@ -120,7 +120,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             bail!(
                 "unexpected user table '{actual}' in database ({}); \
                  this file was not created by this daemon. Refusing to modify it; \
-                 preserve the file and use the owning store's explicit migration or recovery procedure.",
+                 preserve the file and run the owning store's reset.",
                 path_display,
             );
         }
@@ -146,7 +146,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             bail!(
                 "table '{}' has {} columns, expected {}; \
                  this file ({}) was not created by this daemon. Refusing to modify it; \
-                 preserve the file and use the owning store's explicit migration or recovery procedure.",
+                 preserve the file and run the owning store's reset.",
                 table.name,
                 col_rows.len(),
                 expected_cols.len(),
@@ -162,7 +162,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 bail!(
                     "table '{}' column {}: name '{}' != expected '{}'; \
                  this file ({}) was not created by this daemon. Refusing to modify it; \
-                 preserve the file and use the owning store's explicit migration or recovery procedure.",
+                 preserve the file and run the owning store's reset.",
                     table.name,
                     i,
                     actual_name,
@@ -175,7 +175,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 bail!(
                     "table '{}' column '{}': type '{}' != expected '{}'; \
                      this file ({}) was not created by this daemon. Refusing to modify it; \
-                     preserve the file and use the owning store's explicit migration or recovery procedure.",
+                     preserve the file and run the owning store's reset.",
                     table.name,
                     actual_name,
                     actual_type,
@@ -187,7 +187,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 bail!(
                     "table '{}' column '{}': pk={} != expected={}; \
                      this file ({}) was not created by this daemon. Refusing to modify it; \
-                     preserve the file and use the owning store's explicit migration or recovery procedure.",
+                     preserve the file and run the owning store's reset.",
                     table.name,
                     actual_name,
                     *pk_flag > 0,
@@ -202,7 +202,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 bail!(
                     "table '{}' column '{}': notnull={} != expected={}; \
                      this file ({}) was not created by this daemon. Refusing to modify it; \
-                     preserve the file and use the owning store's explicit migration or recovery procedure.",
+                     preserve the file and run the owning store's reset.",
                     table.name,
                     actual_name,
                     *notnull_flag != 0,
@@ -245,7 +245,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             bail!(
                 "index '{}' is on table '{}' but expected table '{}'; \
                  this file ({}) was not created by this daemon. Refusing to modify it; \
-                 preserve the file and use the owning store's explicit migration or recovery procedure.",
+                 preserve the file and run the owning store's reset.",
                 idx.name,
                 matching.1,
                 idx.table,
@@ -279,7 +279,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                     bail!(
                         "index '{}' on table '{}': unique={} != expected={}; \
                          this file ({}) was not created by this daemon. Refusing to modify it; \
-                         preserve the file and use the owning store's explicit migration or recovery procedure.",
+                         preserve the file and run the owning store's reset.",
                         idx.name,
                         idx.table,
                         unique_flag,
@@ -303,7 +303,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             bail!(
                 "index '{}' on table '{}': expected columns {:?}, got {:?}; \
                  this file ({}) was not created by this daemon. Refusing to modify it; \
-                 preserve the file and use the owning store's explicit migration or recovery procedure.",
+                 preserve the file and run the owning store's reset.",
                 idx.name,
                 idx.table,
                 idx.columns,
@@ -316,7 +316,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 bail!(
                     "index '{}' on table '{}': column[{}] is '{}' but expected '{}'; \
                      this file ({}) was not created by this daemon. Refusing to modify it; \
-                     preserve the file and use the owning store's explicit migration or recovery procedure.",
+                     preserve the file and run the owning store's reset.",
                     idx.name,
                     idx.table,
                     i,
@@ -336,7 +336,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             bail!(
                 "unexpected user index '{actual_name}' on table '{actual_table}'; \
                  this file ({}) was not created by this daemon. Refusing to modify it; \
-                 preserve the file and use the owning store's explicit migration or recovery procedure.",
+                 preserve the file and run the owning store's reset.",
                 path_display,
             );
         }
@@ -354,6 +354,14 @@ struct SchemaSqlEntry {
 }
 
 /// Exact same-library schema observation, not execution or mutation authority.
+///
+/// Built by [`prepare_native_schema_sql_reference`] from the declared DDL on
+/// a native transient reference, it lets [`Self::require_matches`] verify the
+/// complete schema of a store. Unlike [`assert_owned`], this covers table
+/// CHECK, UNIQUE/autoindex and foreign-key clauses, index predicates, views
+/// and triggers; SQLite statistics tables are runtime artifacts and are
+/// excluded. The reference is captured before any native SQL scope of the
+/// checked store is entered, so no reference database opens inside one.
 #[derive(Clone)]
 pub struct SchemaSqlDefinition(Vec<SchemaSqlEntry>);
 impl SchemaSqlDefinition {
@@ -365,11 +373,6 @@ impl SchemaSqlDefinition {
             bail!("complete schema SQL mismatch in {}; CHECK/UNIQUE/foreign-key/index predicates must exactly match the current operational schema", path.display());
         }
         Ok(())
-    }
-    pub fn matches_table(&self, conn: &Connection, table: &str) -> Result<bool> {
-        let actual = schema_sql_entries(conn)?;
-        Ok(actual.iter().filter(|entry| entry.table_name == table)
-            .eq(self.0.iter().filter(|entry| entry.table_name == table)))
     }
 }
 
@@ -720,7 +723,9 @@ pub fn prepare_native_schema_sql_reference(
             | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference
             | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference
             | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference
-            | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference),
+            | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference
+            | lillux_sqlite::OriginalNativeDomain::ExternalSupervisorJournalSchemaReference
+            | lillux_sqlite::OriginalNativeDomain::ExternalGuestJournalSchemaReference),
             "requested purpose is not a live schema reference");
         anyhow::ensure!(inputs.as_ref().expect("retained reference inputs").domain() == expected,
             "schema reference input selects another purpose");
@@ -737,7 +742,7 @@ pub fn prepare_native_schema_sql_reference(
         };
         *custody = NativeSchemaReferenceCustody::Live(owner);
         let NativeSchemaReferenceCustody::Live(owner) = &*custody else { unreachable!() };
-        anyhow::ensure!(matches!(owner.domain(), lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference),
+        anyhow::ensure!(matches!(owner.domain(), lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference | lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference | lillux_sqlite::OriginalNativeDomain::ExternalSupervisorJournalSchemaReference | lillux_sqlite::OriginalNativeDomain::ExternalGuestJournalSchemaReference),
             "native schema reference has the wrong actual purpose");
         definition = Some(owner.with_sql(|connection| {
             connection.execute_batch(ddl).context("build admitted reference SQLite schema")?;
@@ -792,26 +797,6 @@ fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
     Ok(entries)
 }
 
-/// Verify the complete SQLite schema against a same-library reference built
-/// from the declared DDL. Unlike [`assert_owned`], this includes table CHECK,
-/// UNIQUE/autoindex and foreign-key clauses, index predicates, views, and
-/// triggers. SQLite statistics tables are runtime artifacts and are excluded.
-///
-/// This is intended for stable source-of-truth stores whose fail-closed exact
-/// schema contract must cover constraints that PRAGMA table/index metadata
-/// does not fully describe.
-///
-/// This opens a stock in-memory reference connection. It must never run
-/// while a native SQL scope is entered: the gate refuses that open with
-/// MISUSE. Native callers pass a prepared [`SchemaSqlDefinition`] instead.
-pub fn assert_complete_schema_sql(conn: &Connection, ddl: &str, path: &Path) -> Result<()> {
-    let reference = Connection::open_in_memory().context("open reference SQLite schema")?;
-    reference
-        .execute_batch(ddl)
-        .context("build reference SQLite schema")?;
-    SchemaSqlDefinition::capture_reference(&reference)?.require_matches(conn, path)
-}
-
 /// Initialize a fresh database with the given schema spec.
 ///
 /// Stamps `PRAGMA application_id` and runs the DDL. The caller MUST
@@ -831,8 +816,7 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
         bail!(
             "init_owned called on a non-empty database ({} user tables); \
              use assert_owned first if the file may already exist. Refusing to modify \
-             {path_display}; preserve it and use the owning store's explicit migration \
-             or recovery procedure.",
+             {path_display}; preserve it and run the owning store's reset.",
             table_count,
         );
     }
@@ -848,43 +832,16 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
     Ok(())
 }
 
-/// Open-time schema preparation for a daemon-owned SQLite DB whose data is
-/// retained across daemon restarts — for example `runtime.sqlite3` and stores
-/// such as `operational.sqlite3` when an explicit migration exists. Rebuildable
-/// owners such as `scheduler.sqlite3` may also use this exact-schema helper;
-/// calling it does not make their SQLite contents authoritative.
-///
-/// Strategy: *migrate-forward, then exact-assert*.
-/// - **Already ours** (`application_id` matches): run `migrate` — an
-///   idempotent, **additive** forward migration (new tables/columns via
-///   `CREATE … IF NOT EXISTS` / `ALTER TABLE ADD COLUMN`, or an explicit
-///   table rebuild) — then [`assert_owned`] verifies the result is an exact
-///   match. So a daemon upgrade that *adds* schema starts cleanly against a
-///   pre-existing file, while any **non-additive drift** the migration can't
-///   reconcile still fails loud (forcing a real migration to be written).
-/// - **Empty/unstamped**: [`init_owned`] runs `ddl` and stamps the file.
-/// - **Foreign**: fails loud.
-///
-/// Rebuildable *derived* databases (projections of CAS) must NOT use this —
-/// they evolve via a schema epoch + reset/rebuild, which is cheaper and
-/// safer than migrating data that can simply be re-derived.
-pub fn prepare_owned<F>(
-    conn: &Connection,
-    spec: &SchemaSpec,
-    ddl: &str,
-    path: &Path,
-    migrate: F,
-) -> Result<()>
-where
-    F: FnOnce(&Connection) -> Result<()>,
-{
+/// Open-time schema preparation for a daemon-owned SQLite DB. A file stamped
+/// as ours must match the current schema exactly; an empty, unstamped file is
+/// initialized with `ddl`; anything else fails loud. There is no forward
+/// migration: a store at an older schema is refused and reset by its owner.
+pub fn prepare_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) -> Result<()> {
     let app_id: i32 = conn
         .query_row("PRAGMA application_id", [], |row| row.get(0))
         .context("failed to read PRAGMA application_id")?;
 
     if app_id == spec.application_id {
-        // Ours already — forward-migrate (additive) then verify exactly.
-        migrate(conn)?;
         assert_owned(conn, spec, path)?;
         return Ok(());
     }
@@ -926,14 +883,14 @@ pub fn is_empty_or_owned(conn: &Connection, expected_app_id: i32) -> Result<bool
         }
         bail!(
             "database has no application_id stamp but contains {table_count} user tables; \
-             foreign schema detected. Refusing to modify it; preserve the file and use \
-             the owning store's explicit migration or recovery procedure."
+             foreign schema detected. Refusing to modify it; preserve the file and run \
+             the owning store's reset."
         );
     }
     bail!(
         "database application_id is {app_id}, expected {expected_app_id}; \
          this file was not created by this daemon. Refusing to modify it; preserve \
-         the file and use the owning store's explicit migration or recovery procedure."
+         the file and run the owning store's reset."
     );
 }
 
@@ -942,27 +899,44 @@ mod native_host_tests {
     use super::*;
     use lillux_sqlite::test_host::TestNativeHost;
 
-    /// The stock reference open is refused inside a native scope; callers
-    /// there must pass a prepared reference.
+    /// A closed native reference carries the complete schema SQL of its
+    /// DDL: a store built from that DDL matches it, and a store whose schema
+    /// drifted only by an index is refused.
     #[test]
-    fn complete_schema_check_without_reference_refuses_under_native_scope() {
+    fn native_reference_definition_detects_complete_schema_drift() {
+        const DDL: &str = "CREATE TABLE t(x INTEGER NOT NULL CHECK(x > 0))";
+        let domain = lillux_sqlite::OriginalNativeDomain::ExternalGuestJournalSchemaReference;
         let host = TestNativeHost::acquire();
+        let inputs = unsafe {
+            // SAFETY: test-only issuance under this host's own funded factory.
+            lillux_sqlite::OriginalNativeTransientInputs::issued(domain, host.destination())
+        }
+        .expect("test schema reference inputs");
+        let reference = match prepare_native_schema_sql_reference(
+            std::sync::Arc::clone(host.factory()),
+            inputs,
+            domain,
+            DDL,
+        ) {
+            Ok(reference) => reference,
+            Err(failure) => panic!("test schema reference refused: {failure}"),
+        };
+        reference
+            .require_original_closed(host.factory(), domain)
+            .unwrap();
+        let (definition, terminal) = reference.into_original_parts();
+        host.retain_terminal(terminal);
         let connection = host.open_transient();
-        let refused = connection
-            .with_sql(|connection| {
-                connection.execute_batch("CREATE TABLE t(x INTEGER)")?;
-                assert_complete_schema_sql(connection, "CREATE TABLE t(x INTEGER)", Path::new(":memory:"))
-            })
-            .unwrap_err();
-        let misuse = refused.chain().any(|cause| {
-            matches!(
-                cause.downcast_ref::<rusqlite::Error>(),
-                Some(rusqlite::Error::SqliteFailure(error, _))
-                    if error.code == rusqlite::ErrorCode::ApiMisuse
-            )
+        let checked = connection.with_sql(|connection| {
+            connection.execute_batch(DDL)?;
+            definition.require_matches(connection, Path::new(":memory:"))?;
+            connection.execute_batch("CREATE INDEX t_x ON t(x)")?;
+            Ok(definition
+                .require_matches(connection, Path::new(":memory:"))
+                .is_err())
         });
-        assert!(misuse, "{refused:#}");
         host.close(connection);
-        assert_eq!(host.ticket_census(), (1, 1));
+        assert!(checked.unwrap(), "a drifted schema matched the reference");
+        assert_eq!(host.ticket_census(), (2, 2));
     }
 }

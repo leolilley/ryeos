@@ -253,14 +253,16 @@ impl InspectionControllerCustody {
         let cleanup = std::mem::take(&mut *self.cleanup.lock().unwrap_or_else(|p| p.into_inner()));
         let disposals = std::mem::take(&mut *self.completed_disposals.lock().unwrap_or_else(|p| p.into_inner()));
         let closed = std::mem::take(&mut *self.closed.lock().unwrap_or_else(|p| p.into_inner()));
-        let acquired = std::mem::take(&mut *self.acquisition_released.lock().unwrap_or_else(|p| p.into_inner()));
+        let unproven = std::mem::take(
+            &mut self.scheduler_unproven.lock().unwrap_or_else(|p| p.into_inner()).terminals,
+        );
         let runtime = std::mem::take(&mut *self.runtime_released.lock().unwrap_or_else(|p| p.into_inner()));
         let failures = std::mem::take(&mut *self.cleanup_failures.lock().unwrap_or_else(|p| p.into_inner()));
         for (empty, name) in [
             (cleanup.is_empty(), "inspection cleanup owners"),
             (disposals.is_empty(), "completed copy disposals"),
             (closed.is_empty(), "closed inspections"),
-            (acquired.is_empty(), "released inspection acquisitions"),
+            (unproven.is_empty(), "unproven scheduler inspection terminals"),
             (runtime.is_empty(), "released Runtime inspections"),
             (failures.is_empty(), "retained cleanup refusals"),
         ] {
@@ -273,7 +275,7 @@ impl InspectionControllerCustody {
         drop(cleanup);
         drop(disposals);
         drop(closed);
-        drop(acquired);
+        drop(unproven);
         drop(runtime);
         drop(failures);
         let census = {

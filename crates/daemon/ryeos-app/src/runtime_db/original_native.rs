@@ -205,6 +205,7 @@ impl RuntimeDb {
         factory: Arc<OriginalNativeFactory>,
         inputs: OriginalNativeBoundInputs,
         schema_reference: sqlite_schema::ClosedNativeSchemaSqlReference,
+        fence: UnreadableLifetimeFence,
     ) -> std::result::Result<Self, OriginalRuntimeAcquisitionFailure> {
         let mut custody = AcquisitionCustody::BeforeOpen(Some(inputs));
         let opened = (|| -> Result<(lillux::PinnedDirectory, bool)> {
@@ -244,13 +245,14 @@ impl RuntimeDb {
                     epoch <= RUNTIME_OPERATOR_SCHEMA_EPOCH,
                     "original Runtime belongs to a newer operator epoch; destructive reset refused"
                 );
-                ensure_scope_lifetime_resettable(connection, epoch)?;
+                ensure_scope_lifetime_resettable_with(connection, epoch, fence)?;
                 let reset_required = epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH;
                 if !reset_required {
-                    validate_current_runtime_store(
+                    validate_current_runtime_store_with(
                         connection,
                         path,
-                        Some(schema_reference.definition()),
+                        schema_reference.definition(),
+                        fence,
                     )?;
                 }
                 let integrity: String =
@@ -290,10 +292,6 @@ impl RuntimeDb {
             open_mode: RuntimeDbOpenMode::ExplicitHistoryReset,
             _directory: Some(directory),
             _directory_lock: Some(namespace),
-            // The genuine lower Bound keeper exclusively retains these files.
-            _database_file: None,
-            _wal_file: None,
-            _shm_file: None,
             _inspection_copy: None,
             _inspection_sql: None,
         })
@@ -332,6 +330,7 @@ mod native_reference_tests {
             Arc::clone(host.factory()),
             bound(host, root, OriginalNativeBoundMode::Existing, OriginalNativeDomain::RuntimeMutation),
             runtime_reference(host),
+            UnreadableLifetimeFence::Refuse,
         ) {
             Ok(db) => db,
             Err(failure) => panic!("original Runtime mutation refused under the gate: {failure:#}"),
@@ -365,7 +364,10 @@ mod native_reference_tests {
         // stock in-memory build that the gate refuses.
         let current = open_mutation(&host, &root, &namespace, &path);
         assert!(!current.requires_explicit_history_reset());
-        assert!(current.conn.schema_reference().is_some(), "mutation carries its reference");
+        current
+            .conn
+            .with_sql(|connection| current.conn.schema_reference().require_matches(connection, &path))
+            .expect("mutation carries the reference its current schema matches");
         current
             .conn
             .with_mutable_sql(|connection| {

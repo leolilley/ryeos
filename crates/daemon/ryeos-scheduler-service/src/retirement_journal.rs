@@ -3705,15 +3705,43 @@ mod guarded_journal_read_controls {
             lillux::PinnedDirectory::open(&runtime_path)?
                 .context("test runtime directory is absent")?,
         );
-        let owner = lillux_sqlite::BoundSqliteConnection::open_or_create(
+        // The live scheduler owner is one armed bound ticket of the test
+        // host, holding its WAL sidecars open across every aliased read.
+        let host = lillux_sqlite::test_host::TestNativeHost::acquire();
+        let owner = match host.open_bound(
             runtime.clone(),
             OsStr::new("scheduler.sqlite3"),
-        )
-        .unwrap();
-        owner.connection().execute_batch(
-            "PRAGMA journal_mode=WAL; CREATE TABLE guard_probe(value INTEGER); INSERT INTO guard_probe VALUES(7);"
-        )?;
-        owner.establish_wal_binding()?;
+            lillux_sqlite::OriginalNativeBoundMode::CreateExclusive,
+            lillux_sqlite::OriginalNativeDomain::NodeScheduler,
+        ) {
+            Ok(owner) => owner,
+            Err(failure) => {
+                let error = failure.to_string();
+                host.retire_open_failure(failure);
+                panic!("test scheduler owner open refused: {error}");
+            }
+        };
+        let probed = owner.with_sql(|connection| {
+            Ok(connection.execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE guard_probe(value INTEGER); INSERT INTO guard_probe VALUES(7);",
+            )?)
+        });
+        let outcome = probed
+            .and_then(|()| owner.establish_scheduler_wal_binding())
+            .and_then(|()| refuse_live_role_aliases(&runtime_path, &runtime, &identity, &owner));
+        host.close(owner);
+        outcome
+    }
+
+    /// Alias each live role of `owner` under journal intent and phase names
+    /// and require every guarded read to refuse it while the owner's keeper
+    /// and its bytes stay intact.
+    fn refuse_live_role_aliases(
+        runtime_path: &std::path::Path,
+        runtime: &std::sync::Arc<lillux::PinnedDirectory>,
+        identity: &NodeIdentity,
+        owner: &lillux_sqlite::OriginalNativeConnection,
+    ) -> Result<()> {
         for (index, role) in [
             "scheduler.sqlite3",
             "scheduler.sqlite3-wal",
@@ -3729,20 +3757,18 @@ mod guarded_journal_read_controls {
             std::fs::hard_link(runtime_path.join(role), runtime_path.join(&phase))?;
             // Refusal must occur in the byte intake and phase-presence path,
             // before the aliased SQLite bytes reach signature decoding.
-            let error = read_signed_bytes(&runtime, &intent_name).unwrap_err();
+            let error = read_signed_bytes(runtime, &intent_name).unwrap_err();
             assert!(error
                 .to_string()
                 .contains("read guarded scheduler retirement record"));
-            assert!(load_record_chain(&runtime, &identity, &generation).is_err());
-            assert!(RetirementJournal::scan_interrupted_evidence(&runtime, &identity).is_err());
-            owner.require_binding()?;
-            let value: i64 =
-                owner
-                    .connection()
-                    .query_row("SELECT value FROM guard_probe", [], |row| row.get(0))?;
+            assert!(load_record_chain(runtime, identity, &generation).is_err());
+            assert!(RetirementJournal::scan_interrupted_evidence(runtime, identity).is_err());
+            owner.require_scheduler_runtime(runtime)?;
+            let value: i64 = owner.with_sql(|connection| {
+                Ok(connection.query_row("SELECT value FROM guard_probe", [], |row| row.get(0))?)
+            })?;
             assert_eq!(value, 7);
         }
-        owner.close().unwrap();
         Ok(())
     }
 

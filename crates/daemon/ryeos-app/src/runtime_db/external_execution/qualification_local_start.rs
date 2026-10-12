@@ -1556,8 +1556,9 @@ mod tests {
         record.validate().unwrap();
         // Even a database with no Worker table cannot turn possible held spawn
         // into evidence of no process: the durable borrow fences cleanup first.
-        let conn = Connection::open_in_memory().unwrap();
-        let error = require_local_processes_settled(&conn, &record).unwrap_err();
+        let error = crate::runtime_db::test_native::with_transient(|conn| {
+            Ok(require_local_processes_settled(conn, &record).unwrap_err())
+        });
         assert!(error.to_string().contains("unproved Worker"));
         record.phase = QualificationLocalStartPhase::CleanupIntent;
         record.cleanup = Some(QualificationLocalCleanupEvidence {
@@ -1570,8 +1571,7 @@ mod tests {
         assert!(record.validate().is_err());
     }
 
-    fn fixture_journal() -> (Connection, QualificationLocalStartRecord) {
-        let conn = Connection::open_in_memory().unwrap();
+    fn fixture_journal(conn: &Connection) -> QualificationLocalStartRecord {
         conn.execute_batch(
             "CREATE TABLE credential_profile(profile_id TEXT PRIMARY KEY,owner_principal TEXT,home_id TEXT,credential_generation INTEGER,authority_revision INTEGER,lock_owner TEXT,state TEXT);
              CREATE TABLE external_qualification_worker_process(placement_thread_id TEXT PRIMARY KEY,phase TEXT,process_identity_json TEXT);
@@ -1603,13 +1603,13 @@ mod tests {
             params![current.placement_thread_id, current.accepted_root_id, current.accepted_capsule_hash,
                 current.qualification_operation_id, current.qualification_occurrence_id,
                 current.channel_binding_digest, canonical(&current).unwrap()]).unwrap();
-        (conn, current)
+        current
     }
 
     // This fixture serves the real retained readers, unlike fixture_journal's
     // deliberately partial rows for isolated SQL trigger tests. It supplies no
     // admission token, provider contact, process, or successful held attachment.
-    fn fixture_retained_credential_journal() -> (Connection, QualificationLocalStartRecord) {
+    fn fixture_retained_credential_journal(conn: &Connection) -> QualificationLocalStartRecord {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         use ryeos_external_execution_contract::{
             restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
@@ -1759,7 +1759,6 @@ mod tests {
             current.workspace_id
         );
         current.validate().unwrap();
-        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE credential_profile(profile_id TEXT PRIMARY KEY,owner_principal TEXT,home_id TEXT,credential_generation INTEGER,authority_revision INTEGER,lock_owner TEXT,state TEXT);
              CREATE TABLE external_qualification_worker_process(placement_thread_id TEXT PRIMARY KEY,phase TEXT,process_identity_json TEXT);
@@ -1796,7 +1795,7 @@ mod tests {
             read_local_start(&conn, &current.placement_thread_id).unwrap(),
             Some(current.clone())
         );
-        (conn, current)
+        current
     }
 
     fn claim_fixture_credential(
@@ -1825,18 +1824,27 @@ mod tests {
 
     #[test]
     fn credential_custody_required_null_and_immutable_claim_are_cold_checked() {
-        let (conn, current) = fixture_journal();
-        let claimed = claim_fixture_credential(&conn, &current);
-        require_historical_credential_custody(&conn, &claimed).unwrap();
-        require_live_credential_custody(&conn, &claimed).unwrap();
-        assert!(transition(&conn, &claimed, &claimed).is_err());
-        let mut swapped = claimed.clone();
-        swapped.credential_custody.as_mut().unwrap().contract_digest = "b".repeat(64);
-        assert!(transition(&conn, &claimed, &swapped).is_err());
-        let (other_conn, other_reserved) = fixture_journal();
-        other_conn.execute("INSERT INTO credential_profile VALUES('profile','principal','private-home',1,1,?1,'active')", [&other_reserved.launch_owner]).unwrap();
-        other_conn.execute("UPDATE external_execution_allocation SET reservation_json=json_set(reservation_json,'$.owner.operator_principal','another-principal')", []).unwrap();
-        assert!(transition(&other_conn, &other_reserved, &claimed).is_err());
+        let (current, claimed) = crate::runtime_db::test_native::with_transient(|conn| {
+            let current = fixture_journal(conn);
+            let claimed = claim_fixture_credential(conn, &current);
+            require_historical_credential_custody(conn, &claimed).unwrap();
+            require_live_credential_custody(conn, &claimed).unwrap();
+            assert!(transition(conn, &claimed, &claimed).is_err());
+            let mut swapped = claimed.clone();
+            swapped.credential_custody.as_mut().unwrap().contract_digest = "b".repeat(64);
+            assert!(transition(conn, &claimed, &swapped).is_err());
+            // A cold read of lost custody cannot treat an unlocked profile as safe.
+            conn.execute_batch("DROP TRIGGER credential_profile_qualification_custody_guard; UPDATE credential_profile SET lock_owner=NULL;").unwrap();
+            assert!(require_historical_credential_custody(conn, &claimed).is_err());
+            Ok((current, claimed))
+        });
+        crate::runtime_db::test_native::with_transient(|other_conn| {
+            let other_reserved = fixture_journal(other_conn);
+            other_conn.execute("INSERT INTO credential_profile VALUES('profile','principal','private-home',1,1,?1,'active')", [&other_reserved.launch_owner]).unwrap();
+            other_conn.execute("UPDATE external_execution_allocation SET reservation_json=json_set(reservation_json,'$.owner.operator_principal','another-principal')", []).unwrap();
+            assert!(transition(other_conn, &other_reserved, &claimed).is_err());
+            Ok(())
+        });
         let mut absent = serde_json::to_value(&current).unwrap();
         absent.as_object_mut().unwrap().remove("credential_custody");
         assert!(serde_json::from_value::<QualificationLocalStartRecord>(absent).is_err());
@@ -1846,83 +1854,86 @@ mod tests {
             .unwrap()
             .remove("released_at_ms");
         assert!(serde_json::from_value::<QualificationLocalStartRecord>(absent).is_err());
-        // A cold read of lost custody cannot treat an unlocked profile as safe.
-        conn.execute_batch("DROP TRIGGER credential_profile_qualification_custody_guard; UPDATE credential_profile SET lock_owner=NULL;").unwrap();
-        assert!(require_historical_credential_custody(&conn, &claimed).is_err());
     }
 
     #[test]
     fn credential_check_borrows_outer_transaction_without_renewing_original_generation() {
-        let (conn, original) = fixture_retained_credential_journal();
-        let claimed = claim_fixture_credential(&conn, &original);
-        assert_eq!(
-            read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
-            Some(claimed.clone())
-        );
-        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
-        require_live_credential_custody(&tx, &claimed).unwrap();
-        // This fixture's original daemon is intentionally stale. The borrowed
-        // check must reach that semantic fence, rather than fail a nested BEGIN.
-        // This is a refused fresh-use check, not proof of a successful held attach.
-        assert_eq!(claimed.phase, QualificationLocalStartPhase::Reserved);
-        assert!(claimed.directory_borrow_intent.is_none());
-        assert!(claimed.worker_incarnation_digest.is_none());
-        let error =
-            require_live_credential_start_tx(&tx, &claimed.placement_thread_id).unwrap_err();
-        assert!(
-            error.to_string().contains("another daemon generation"),
-            "{error:#}"
-        );
-        assert!(!tx.is_autocommit());
-        // Revocation fences fresh use while unresolved Q custody keeps its
-        // original lock; a terminal revoked state is deliberately forbidden.
-        tx.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
-        require_historical_credential_custody(&tx, &claimed).unwrap();
-        assert!(require_live_credential_custody(&tx, &claimed).is_err());
-        tx.rollback().unwrap();
-        require_live_credential_custody(&conn, &claimed).unwrap();
-        assert_eq!(
-            read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
-            Some(claimed)
-        );
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let original = fixture_retained_credential_journal(conn);
+            let claimed = claim_fixture_credential(&conn, &original);
+            assert_eq!(
+                read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
+                Some(claimed.clone())
+            );
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            require_live_credential_custody(&tx, &claimed).unwrap();
+            // This fixture's original daemon is intentionally stale. The borrowed
+            // check must reach that semantic fence, rather than fail a nested BEGIN.
+            // This is a refused fresh-use check, not proof of a successful held attach.
+            assert_eq!(claimed.phase, QualificationLocalStartPhase::Reserved);
+            assert!(claimed.directory_borrow_intent.is_none());
+            assert!(claimed.worker_incarnation_digest.is_none());
+            let error =
+                require_live_credential_start_tx(&tx, &claimed.placement_thread_id).unwrap_err();
+            assert!(
+                error.to_string().contains("another daemon generation"),
+                "{error:#}"
+            );
+            assert!(!tx.is_autocommit());
+            // Revocation fences fresh use while unresolved Q custody keeps its
+            // original lock; a terminal revoked state is deliberately forbidden.
+            tx.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
+            require_historical_credential_custody(&tx, &claimed).unwrap();
+            assert!(require_live_credential_custody(&tx, &claimed).is_err());
+            tx.rollback().unwrap();
+            require_live_credential_custody(&conn, &claimed).unwrap();
+            assert_eq!(
+                read_local_start(&conn, &claimed.placement_thread_id).unwrap(),
+                Some(claimed)
+            );
+            Ok(())
+        });
     }
 
     #[test]
     fn revocation_fences_fresh_use_without_erasing_historical_q_custody() {
-        let (conn, current) = fixture_journal();
-        let claimed = claim_fixture_credential(&conn, &current);
-        conn.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
-        require_historical_credential_custody(&conn, &claimed).unwrap();
-        assert!(require_live_credential_custody(&conn, &claimed).is_err());
-        for sql in [
-            "UPDATE credential_profile SET lock_owner=NULL",
-            "UPDATE credential_profile SET state='revoked',lock_owner=NULL",
-            "UPDATE credential_profile SET state='deleting'",
-            "DELETE FROM credential_profile",
-        ] {
-            assert!(conn.execute(sql, []).is_err(), "{sql}");
-        }
-        require_local_processes_settled(&conn, &claimed).unwrap();
-        let mut released = claimed.clone();
-        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-        let tx = conn.unchecked_transaction().unwrap();
-        transition(&tx, &claimed, &released).unwrap();
-        tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
-            .unwrap();
-        tx.commit().unwrap();
-        require_historical_credential_custody(&conn, &released).unwrap();
-        // Historical cleanup must not clear a successor's lock or demand the
-        // original generation still be active after a completed release.
-        conn.execute("UPDATE credential_profile SET state='active',credential_generation=3,authority_revision=3,lock_owner='successor'", []).unwrap();
-        require_historical_credential_custody(&conn, &released).unwrap();
-        assert!(transition(&conn, &released, &claimed).is_err());
-        assert_eq!(
-            conn.query_row("SELECT lock_owner FROM credential_profile", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap(),
-            "successor"
-        );
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let current = fixture_journal(conn);
+            let claimed = claim_fixture_credential(&conn, &current);
+            conn.execute("UPDATE credential_profile SET state='revoking',credential_generation=2,authority_revision=2", []).unwrap();
+            require_historical_credential_custody(&conn, &claimed).unwrap();
+            assert!(require_live_credential_custody(&conn, &claimed).is_err());
+            for sql in [
+                "UPDATE credential_profile SET lock_owner=NULL",
+                "UPDATE credential_profile SET state='revoked',lock_owner=NULL",
+                "UPDATE credential_profile SET state='deleting'",
+                "DELETE FROM credential_profile",
+            ] {
+                assert!(conn.execute(sql, []).is_err(), "{sql}");
+            }
+            require_local_processes_settled(&conn, &claimed).unwrap();
+            let mut released = claimed.clone();
+            released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+            let tx = conn.unchecked_transaction().unwrap();
+            transition(&tx, &claimed, &released).unwrap();
+            tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
+                .unwrap();
+            tx.commit().unwrap();
+            require_historical_credential_custody(&conn, &released).unwrap();
+            // Historical cleanup must not clear a successor's lock or demand the
+            // original generation still be active after a completed release.
+            conn.execute("UPDATE credential_profile SET state='active',credential_generation=3,authority_revision=3,lock_owner='successor'", []).unwrap();
+            require_historical_credential_custody(&conn, &released).unwrap();
+            assert!(transition(&conn, &released, &claimed).is_err());
+            assert_eq!(
+                conn.query_row("SELECT lock_owner FROM credential_profile", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+                "successor"
+            );
+            Ok(())
+        });
     }
 
     #[test]
@@ -1933,118 +1944,127 @@ mod tests {
             QualificationLocalStartPhase::WorkspaceRemoved,
             QualificationLocalStartPhase::StateRemoved,
         ] {
-            let (conn, reserved) = fixture_journal();
-            let mut current = claim_fixture_credential(&conn, &reserved);
-            for next_phase in [
-                QualificationLocalStartPhase::CleanupIntent,
-                QualificationLocalStartPhase::WorkspaceRemoved,
-                QualificationLocalStartPhase::StateRemoved,
-                QualificationLocalStartPhase::Closed,
-            ] {
-                if current.phase == release_phase {
-                    require_local_processes_settled(&conn, &current).unwrap();
-                    let mut released = current.clone();
-                    released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-                    let tx = conn.unchecked_transaction().unwrap();
-                    transition(&tx, &current, &released).unwrap();
-                    tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
-                        .unwrap();
-                    tx.commit().unwrap();
-                    // A pre-release snapshot is stale after this CAS. Resuming
-                    // cleanup must use the newly retained canonical row.
-                    assert!(transition(&conn, &current, &released).is_err());
-                    current = released;
+            crate::runtime_db::test_native::with_transient(|conn| {
+                let reserved = fixture_journal(conn);
+                let mut current = claim_fixture_credential(&conn, &reserved);
+                for next_phase in [
+                    QualificationLocalStartPhase::CleanupIntent,
+                    QualificationLocalStartPhase::WorkspaceRemoved,
+                    QualificationLocalStartPhase::StateRemoved,
+                    QualificationLocalStartPhase::Closed,
+                ] {
+                    if current.phase == release_phase {
+                        require_local_processes_settled(&conn, &current).unwrap();
+                        let mut released = current.clone();
+                        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+                        let tx = conn.unchecked_transaction().unwrap();
+                        transition(&tx, &current, &released).unwrap();
+                        tx.execute("UPDATE credential_profile SET lock_owner=NULL", [])
+                            .unwrap();
+                        tx.commit().unwrap();
+                        // A pre-release snapshot is stale after this CAS. Resuming
+                        // cleanup must use the newly retained canonical row.
+                        assert!(transition(&conn, &current, &released).is_err());
+                        current = released;
+                    }
+                    let mut next = current.clone();
+                    next.phase = next_phase;
+                    match next_phase {
+                        QualificationLocalStartPhase::CleanupIntent => {
+                            next.cleanup = Some(QualificationLocalCleanupEvidence {
+                                prior_failure_reason: None,
+                                intent_at_ms: 1,
+                                workspace_removed_at_ms: None,
+                                state_removed_at_ms: None,
+                                closed_at_ms: None,
+                            })
+                        }
+                        QualificationLocalStartPhase::WorkspaceRemoved => {
+                            next.cleanup.as_mut().unwrap().workspace_removed_at_ms = Some(1)
+                        }
+                        QualificationLocalStartPhase::StateRemoved => {
+                            next.cleanup.as_mut().unwrap().state_removed_at_ms = Some(1)
+                        }
+                        QualificationLocalStartPhase::Closed => {
+                            next.cleanup.as_mut().unwrap().closed_at_ms = Some(1)
+                        }
+                        _ => unreachable!(),
+                    }
+                    transition(&conn, &current, &next).unwrap();
+                    current = next;
                 }
-                let mut next = current.clone();
-                next.phase = next_phase;
-                match next_phase {
-                    QualificationLocalStartPhase::CleanupIntent => {
-                        next.cleanup = Some(QualificationLocalCleanupEvidence {
-                            prior_failure_reason: None,
-                            intent_at_ms: 1,
-                            workspace_removed_at_ms: None,
-                            state_removed_at_ms: None,
-                            closed_at_ms: None,
-                        })
-                    }
-                    QualificationLocalStartPhase::WorkspaceRemoved => {
-                        next.cleanup.as_mut().unwrap().workspace_removed_at_ms = Some(1)
-                    }
-                    QualificationLocalStartPhase::StateRemoved => {
-                        next.cleanup.as_mut().unwrap().state_removed_at_ms = Some(1)
-                    }
-                    QualificationLocalStartPhase::Closed => {
-                        next.cleanup.as_mut().unwrap().closed_at_ms = Some(1)
-                    }
-                    _ => unreachable!(),
-                }
-                transition(&conn, &current, &next).unwrap();
-                current = next;
-            }
-            assert_eq!(current.phase, QualificationLocalStartPhase::Closed);
-            require_historical_credential_custody(&conn, &current).unwrap();
+                assert_eq!(current.phase, QualificationLocalStartPhase::Closed);
+                require_historical_credential_custody(&conn, &current).unwrap();
+                Ok(())
+            });
         }
     }
 
     #[test]
     fn uncertain_directory_borrow_and_live_connector_prevent_credential_release() {
-        let (conn, current) = fixture_journal();
-        let claimed = claim_fixture_credential(&conn, &current);
-        let mut released = claimed.clone();
-        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-        conn.execute(
-            "INSERT INTO external_execution_connector VALUES(?1,'connected')",
-            [&claimed.placement_thread_id],
-        )
-        .unwrap();
-        assert!(require_local_processes_settled(&conn, &claimed).is_err());
-        assert!(transition(&conn, &claimed, &released).is_err());
-        conn.execute("UPDATE external_execution_connector SET state='closed'", [])
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let current = fixture_journal(conn);
+            let claimed = claim_fixture_credential(&conn, &current);
+            let mut released = claimed.clone();
+            released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+            conn.execute(
+                "INSERT INTO external_execution_connector VALUES(?1,'connected')",
+                [&claimed.placement_thread_id],
+            )
             .unwrap();
-        let mut ready = claimed.clone();
-        ready.phase = QualificationLocalStartPhase::WorkspaceReady;
-        ready.workspace_identity = Some(directory_identity(2));
-        transition(&conn, &claimed, &ready).unwrap();
-        let mut borrowed = ready.clone();
-        borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
-            workspace_id: ready.workspace_id.clone(),
-            directory_identity: ready.workspace_identity.unwrap(),
-            reserved_at_ms: 1,
+            assert!(require_local_processes_settled(&conn, &claimed).is_err());
+            assert!(transition(&conn, &claimed, &released).is_err());
+            conn.execute("UPDATE external_execution_connector SET state='closed'", [])
+                .unwrap();
+            let mut ready = claimed.clone();
+            ready.phase = QualificationLocalStartPhase::WorkspaceReady;
+            ready.workspace_identity = Some(directory_identity(2));
+            transition(&conn, &claimed, &ready).unwrap();
+            let mut borrowed = ready.clone();
+            borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
+                workspace_id: ready.workspace_id.clone(),
+                directory_identity: ready.workspace_identity.unwrap(),
+                reserved_at_ms: 1,
+            });
+            transition(&conn, &ready, &borrowed).unwrap();
+            let mut released = borrowed.clone();
+            released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+            assert!(require_local_processes_settled(&conn, &borrowed).is_err());
+            assert!(transition(&conn, &borrowed, &released).is_err());
+            Ok(())
         });
-        transition(&conn, &ready, &borrowed).unwrap();
-        let mut released = borrowed.clone();
-        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-        assert!(require_local_processes_settled(&conn, &borrowed).is_err());
-        assert!(transition(&conn, &borrowed, &released).is_err());
     }
 
     #[test]
     fn private_directory_journal_pins_identity_and_allows_one_borrow() {
-        let (conn, mut current) = fixture_journal();
-        let mut ready = current.clone();
-        ready.phase = QualificationLocalStartPhase::WorkspaceReady;
-        ready.workspace_identity = Some(directory_identity(2));
-        transition(&conn, &current, &ready).unwrap();
-        current = ready;
-        let mut borrowed = current.clone();
-        borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
-            workspace_id: current.workspace_id.clone(),
-            directory_identity: current.workspace_identity.unwrap(),
-            reserved_at_ms: 1,
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let mut current = fixture_journal(conn);
+            let mut ready = current.clone();
+            ready.phase = QualificationLocalStartPhase::WorkspaceReady;
+            ready.workspace_identity = Some(directory_identity(2));
+            transition(&conn, &current, &ready).unwrap();
+            current = ready;
+            let mut borrowed = current.clone();
+            borrowed.directory_borrow_intent = Some(QualificationWorkspaceBorrowIntent {
+                workspace_id: current.workspace_id.clone(),
+                directory_identity: current.workspace_identity.unwrap(),
+                reserved_at_ms: 1,
+            });
+            transition(&conn, &current, &borrowed).unwrap();
+            assert!(transition(&conn, &borrowed, &borrowed).is_err());
+            let mut replaced = borrowed.clone();
+            replaced.workspace_identity = Some(directory_identity(3));
+            replaced
+                .directory_borrow_intent
+                .as_mut()
+                .unwrap()
+                .directory_identity = directory_identity(3);
+            assert!(transition(&conn, &borrowed, &replaced).is_err());
+            let mut skipped = borrowed.clone();
+            skipped.phase = QualificationLocalStartPhase::WorkspaceRemoved;
+            assert!(transition(&conn, &borrowed, &skipped).is_err());
+            Ok(())
         });
-        transition(&conn, &current, &borrowed).unwrap();
-        assert!(transition(&conn, &borrowed, &borrowed).is_err());
-        let mut replaced = borrowed.clone();
-        replaced.workspace_identity = Some(directory_identity(3));
-        replaced
-            .directory_borrow_intent
-            .as_mut()
-            .unwrap()
-            .directory_identity = directory_identity(3);
-        assert!(transition(&conn, &borrowed, &replaced).is_err());
-        let mut skipped = borrowed.clone();
-        skipped.phase = QualificationLocalStartPhase::WorkspaceRemoved;
-        assert!(transition(&conn, &borrowed, &skipped).is_err());
     }
     // Public shape testimony for isolated SQL transition tests. These rows do
     // not mint original file custody, accepted-root proof, or adapter execution.
@@ -2099,62 +2119,65 @@ mod tests {
 
     #[test]
     fn canary_journal_requires_append_once_intent_before_binding_and_never_clears_it() {
-        let (conn, initial) = fixture_journal();
-        let current = claim_fixture_credential(&conn, &initial);
-        let (intent, binding) = canary_stage_fixture(&current);
-        let mut reserved = current.clone();
-        reserved.controller_canary_intent = Some(intent);
-        transition(&conn, &current, &reserved).unwrap();
-        assert!(transition(&conn, &reserved, &reserved).is_err());
-        assert!(transition(&conn, &reserved, &current).is_err());
-        let mut substituted = reserved.clone();
-        substituted
-            .controller_canary_intent
-            .as_mut()
-            .unwrap()
-            .guest_input_identity = "e".repeat(64);
-        assert!(transition(&conn, &reserved, &substituted).is_err());
-        let mut bound = reserved.clone();
-        bound.controller_canary_binding = Some(binding);
-        transition(&conn, &reserved, &bound).unwrap();
-        assert!(transition(&conn, &bound, &bound).is_err());
-        assert!(transition(&conn, &bound, &reserved).is_err());
-        // Neither stripping the required-null field nor changing one mirrored
-        // SQL column can erase or replace the original append-only commitment.
-        assert!(conn.execute("UPDATE external_qualification_local_start SET record_json=json_remove(record_json,'$.controller_canary_intent')",[]).is_err());
-        assert!(
-            conn.execute(
-                "UPDATE external_qualification_local_start SET controller_canary_binding_json=NULL",
-                []
-            )
-            .is_err()
-        );
-        let encoded: String = conn
-            .query_row(
-                "SELECT record_json FROM external_qualification_local_start",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(encoded, canonical(&bound).unwrap());
-        // Unsuccessful preparation is still cleanable before any directory
-        // borrow. No missing terminal observation may strand proven-safe cleanup.
-        require_local_processes_settled(&conn, &bound).unwrap();
-        let mut released = bound.clone();
-        released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
-        transition(&conn, &bound, &released).unwrap();
-        let mut late = released.clone();
-        late.controller_canary_terminal = Some(QControllerCanaryEvidence {
-            schema: 1,
-            terminal_file: bound
-                .controller_canary_binding
-                .as_ref()
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let initial = fixture_journal(conn);
+            let current = claim_fixture_credential(&conn, &initial);
+            let (intent, binding) = canary_stage_fixture(&current);
+            let mut reserved = current.clone();
+            reserved.controller_canary_intent = Some(intent);
+            transition(&conn, &current, &reserved).unwrap();
+            assert!(transition(&conn, &reserved, &reserved).is_err());
+            assert!(transition(&conn, &reserved, &current).is_err());
+            let mut substituted = reserved.clone();
+            substituted
+                .controller_canary_intent
+                .as_mut()
                 .unwrap()
-                .initial_file
-                .clone(),
-            binding: bound.controller_canary_binding.clone().unwrap(),
+                .guest_input_identity = "e".repeat(64);
+            assert!(transition(&conn, &reserved, &substituted).is_err());
+            let mut bound = reserved.clone();
+            bound.controller_canary_binding = Some(binding);
+            transition(&conn, &reserved, &bound).unwrap();
+            assert!(transition(&conn, &bound, &bound).is_err());
+            assert!(transition(&conn, &bound, &reserved).is_err());
+            // Neither stripping the required-null field nor changing one mirrored
+            // SQL column can erase or replace the original append-only commitment.
+            assert!(conn.execute("UPDATE external_qualification_local_start SET record_json=json_remove(record_json,'$.controller_canary_intent')",[]).is_err());
+            assert!(
+                conn.execute(
+                    "UPDATE external_qualification_local_start SET controller_canary_binding_json=NULL",
+                    []
+                )
+                .is_err()
+            );
+            let encoded: String = conn
+                .query_row(
+                    "SELECT record_json FROM external_qualification_local_start",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(encoded, canonical(&bound).unwrap());
+            // Unsuccessful preparation is still cleanable before any directory
+            // borrow. No missing terminal observation may strand proven-safe cleanup.
+            require_local_processes_settled(&conn, &bound).unwrap();
+            let mut released = bound.clone();
+            released.credential_custody.as_mut().unwrap().released_at_ms = Some(1);
+            transition(&conn, &bound, &released).unwrap();
+            let mut late = released.clone();
+            late.controller_canary_terminal = Some(QControllerCanaryEvidence {
+                schema: 1,
+                terminal_file: bound
+                    .controller_canary_binding
+                    .as_ref()
+                    .unwrap()
+                    .initial_file
+                    .clone(),
+                binding: bound.controller_canary_binding.clone().unwrap(),
+            });
+            assert!(transition(&conn, &released, &late).is_err());
+            Ok(())
         });
-        assert!(transition(&conn, &released, &late).is_err());
     }
 
     #[test]

@@ -364,8 +364,9 @@ mod tests {
         trust
     }
 
-    #[test]
-    fn outbox_enqueue_claim_deliver_is_idempotent() {
+    /// Append one signed bundle event on chain `chain_id` under a fresh
+    /// runtime root and return it as an outbox record.
+    fn appended_record(chain_id: &str) -> BundleEventRecord {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let refs_root = tmp.path().join("refs");
@@ -373,128 +374,102 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
         let trust = trust_store(&signer);
-        let appended = append_bundle_event(
-            &cas_root,
-            &refs_root,
-            append_request("email_1"),
-            &signer,
-            &trust,
-        )
-        .unwrap();
+        let appended =
+            append_bundle_event(&cas_root, &refs_root, append_request(chain_id), &signer, &trust)
+                .unwrap();
+        BundleEventRecord { event_hash: appended.event_hash, event: appended.event }
+    }
 
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_bundle_outbox_schema(&conn).unwrap();
-        let record = BundleEventRecord {
-            event_hash: appended.event_hash.clone(),
-            event: appended.event.clone(),
-        };
+    /// Run `work` against a fresh outbox schema on a transient native
+    /// connection of this thread's shared test host. The connection closes
+    /// into the host's census before the result is returned, so callers
+    /// assert on the returned values outside the SQL scope.
+    fn with_outbox<T>(work: impl FnOnce(&mut Connection) -> anyhow::Result<T>) -> T {
+        let host = crate::test_support::shared_test_host();
+        let mut connection = host.open_transient();
+        let result = connection.with_sql_mut(|conn| {
+            ensure_bundle_outbox_schema(conn)?;
+            work(conn)
+        });
+        host.close(connection);
+        crate::test_support::release_shared_test_host(host);
+        result.unwrap_or_else(|error| panic!("bundle outbox SQL refused: {error:#}"))
+    }
+
+    fn enqueue_smtp(conn: &Connection, record: &BundleEventRecord) -> anyhow::Result<()> {
         enqueue_bundle_outbox_message(
-            &conn,
+            conn,
             "ryeos-email",
             "smtp",
-            &record,
+            record,
             &serde_json::json!({"to": "user@example.com"}),
         )
-        .unwrap();
-        enqueue_bundle_outbox_message(
-            &conn,
-            "ryeos-email",
-            "smtp",
-            &record,
-            &serde_json::json!({"to": "user@example.com"}),
-        )
-        .unwrap();
+    }
 
-        let claimed = claim_bundle_outbox_messages(
-            &mut conn,
+    fn claim_smtp(
+        conn: &mut Connection,
+        worker_id: &str,
+        limit: usize,
+        lease_until: &str,
+        max_attempts: Option<u32>,
+    ) -> anyhow::Result<Vec<BundleOutboxMessage>> {
+        claim_bundle_outbox_messages(
+            conn,
             "ryeos-email",
             "smtp",
-            "worker_1",
-            10,
-            "9999-01-01T00:00:00Z",
-            None,
+            worker_id,
+            limit,
+            lease_until,
+            max_attempts,
         )
-        .unwrap();
+    }
+
+    fn only(claimed: &[BundleOutboxMessage]) -> anyhow::Result<&BundleOutboxMessage> {
+        anyhow::ensure!(claimed.len() == 1, "expected exactly one claimed message, got {}", claimed.len());
+        Ok(&claimed[0])
+    }
+
+    #[test]
+    fn outbox_enqueue_claim_deliver_is_idempotent() {
+        let record = appended_record("email_1");
+        let (claimed, marked, delivered) = with_outbox(|conn| {
+            enqueue_smtp(conn, &record)?;
+            enqueue_smtp(conn, &record)?;
+            let claimed = claim_smtp(conn, "worker_1", 10, "9999-01-01T00:00:00Z", None)?;
+            let first = only(&claimed)?;
+            let marked = mark_bundle_outbox_delivered(conn, first.id, "worker_1", first.attempts)?;
+            let delivered = get_bundle_outbox_message(conn, first.id)?;
+            Ok((claimed, marked, delivered))
+        });
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].attempts, 1);
-        assert_eq!(claimed[0].event_hash, appended.event_hash);
-
-        assert!(
-            mark_bundle_outbox_delivered(&conn, claimed[0].id, "worker_1", claimed[0].attempts)
-                .unwrap()
-        );
-        let delivered = get_bundle_outbox_message(&conn, claimed[0].id)
-            .unwrap()
-            .unwrap();
+        assert_eq!(claimed[0].event_hash, record.event_hash);
+        assert!(marked);
+        let delivered = delivered.unwrap();
         assert_eq!(delivered.status, "delivered");
         assert!(delivered.delivered_at.is_some());
     }
 
     #[test]
     fn outbox_failed_with_retry_becomes_pending_again() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cas_root = tmp.path().join("objects");
-        let refs_root = tmp.path().join("refs");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::create_dir_all(&refs_root).unwrap();
-        let signer = TestSigner::default();
-        let trust = trust_store(&signer);
-        let appended = append_bundle_event(
-            &cas_root,
-            &refs_root,
-            append_request("email_2"),
-            &signer,
-            &trust,
-        )
-        .unwrap();
-
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_bundle_outbox_schema(&conn).unwrap();
-        let record = BundleEventRecord {
-            event_hash: appended.event_hash.clone(),
-            event: appended.event.clone(),
-        };
-        enqueue_bundle_outbox_message(
-            &conn,
-            "ryeos-email",
-            "smtp",
-            &record,
-            &serde_json::json!({"to": "user@example.com"}),
-        )
-        .unwrap();
-        let claimed = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_1",
-            1,
-            "9999-01-01T00:00:00Z",
-            None,
-        )
-        .unwrap();
-
-        assert!(
-            mark_bundle_outbox_failed(
-                &conn,
-                claimed[0].id,
+        let record = appended_record("email_2");
+        let (marked, retried) = with_outbox(|conn| {
+            enqueue_smtp(conn, &record)?;
+            let claimed = claim_smtp(conn, "worker_1", 1, "9999-01-01T00:00:00Z", None)?;
+            let first = only(&claimed)?;
+            let marked = mark_bundle_outbox_failed(
+                conn,
+                first.id,
                 "worker_1",
-                claimed[0].attempts,
+                first.attempts,
                 Some("0000-01-01T00:00:00Z"),
                 Some("smtp unavailable"),
                 None,
-            )
-            .unwrap()
-        );
-        let retried = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_2",
-            1,
-            "9999-01-01T00:00:00Z",
-            None,
-        )
-        .unwrap();
+            )?;
+            let retried = claim_smtp(conn, "worker_2", 1, "9999-01-01T00:00:00Z", None)?;
+            Ok((marked, retried))
+        });
+        assert!(marked);
         assert_eq!(retried.len(), 1);
         assert_eq!(retried[0].attempts, 2);
         assert_eq!(retried[0].leased_by.as_deref(), Some("worker_2"));
@@ -502,210 +477,65 @@ mod tests {
 
     #[test]
     fn outbox_stale_worker_cannot_finalize_reclaimed_message() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cas_root = tmp.path().join("objects");
-        let refs_root = tmp.path().join("refs");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::create_dir_all(&refs_root).unwrap();
-        let signer = TestSigner::default();
-        let trust = trust_store(&signer);
-        let appended = append_bundle_event(
-            &cas_root,
-            &refs_root,
-            append_request("email_3"),
-            &signer,
-            &trust,
-        )
-        .unwrap();
-        let record = BundleEventRecord {
-            event_hash: appended.event_hash.clone(),
-            event: appended.event.clone(),
-        };
-
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_bundle_outbox_schema(&conn).unwrap();
-        enqueue_bundle_outbox_message(
-            &conn,
-            "ryeos-email",
-            "smtp",
-            &record,
-            &serde_json::json!({"to": "user@example.com"}),
-        )
-        .unwrap();
-
-        let first_claim = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_1",
-            1,
-            "0000-01-01T00:00:00Z",
-            None,
-        )
-        .unwrap();
-        let second_claim = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_2",
-            1,
-            "9999-01-01T00:00:00Z",
-            None,
-        )
-        .unwrap();
-
+        let record = appended_record("email_3");
+        let (second_claim, stale_marked, current_marked) = with_outbox(|conn| {
+            enqueue_smtp(conn, &record)?;
+            let first_claim = claim_smtp(conn, "worker_1", 1, "0000-01-01T00:00:00Z", None)?;
+            let second_claim = claim_smtp(conn, "worker_2", 1, "9999-01-01T00:00:00Z", None)?;
+            let first = only(&first_claim)?;
+            let stale_marked =
+                mark_bundle_outbox_delivered(conn, first.id, "worker_1", first.attempts)?;
+            let second = only(&second_claim)?;
+            let current_marked =
+                mark_bundle_outbox_delivered(conn, second.id, "worker_2", second.attempts)?;
+            Ok((second_claim, stale_marked, current_marked))
+        });
         assert_eq!(second_claim.len(), 1);
-        assert!(
-            !mark_bundle_outbox_delivered(
-                &conn,
-                first_claim[0].id,
-                "worker_1",
-                first_claim[0].attempts
-            )
-            .unwrap()
-        );
-        assert!(
-            mark_bundle_outbox_delivered(
-                &conn,
-                second_claim[0].id,
-                "worker_2",
-                second_claim[0].attempts
-            )
-            .unwrap()
-        );
+        assert!(!stale_marked);
+        assert!(current_marked);
     }
 
     #[test]
     fn outbox_max_attempts_moves_failure_to_terminal_failed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cas_root = tmp.path().join("objects");
-        let refs_root = tmp.path().join("refs");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::create_dir_all(&refs_root).unwrap();
-        let signer = TestSigner::default();
-        let trust = trust_store(&signer);
-        let appended = append_bundle_event(
-            &cas_root,
-            &refs_root,
-            append_request("email_4"),
-            &signer,
-            &trust,
-        )
-        .unwrap();
-        let record = BundleEventRecord {
-            event_hash: appended.event_hash.clone(),
-            event: appended.event.clone(),
-        };
-
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_bundle_outbox_schema(&conn).unwrap();
-        enqueue_bundle_outbox_message(
-            &conn,
-            "ryeos-email",
-            "smtp",
-            &record,
-            &serde_json::json!({"to": "user@example.com"}),
-        )
-        .unwrap();
-        let claimed = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_1",
-            1,
-            "9999-01-01T00:00:00Z",
-            Some(1),
-        )
-        .unwrap();
-
-        assert!(
-            mark_bundle_outbox_failed(
-                &conn,
-                claimed[0].id,
+        let record = appended_record("email_4");
+        let (marked, failed, reclaimed) = with_outbox(|conn| {
+            enqueue_smtp(conn, &record)?;
+            let claimed = claim_smtp(conn, "worker_1", 1, "9999-01-01T00:00:00Z", Some(1))?;
+            let first = only(&claimed)?;
+            let marked = mark_bundle_outbox_failed(
+                conn,
+                first.id,
                 "worker_1",
-                claimed[0].attempts,
+                first.attempts,
                 Some("0000-01-01T00:00:00Z"),
                 Some("smtp unavailable"),
                 Some(1),
-            )
-            .unwrap()
-        );
-        let failed = get_bundle_outbox_message(&conn, claimed[0].id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(failed.status, "failed");
-        let reclaimed = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_2",
-            1,
-            "9999-01-01T00:00:00Z",
-            Some(1),
-        )
-        .unwrap();
+            )?;
+            let failed = get_bundle_outbox_message(conn, first.id)?;
+            let reclaimed = claim_smtp(conn, "worker_2", 1, "9999-01-01T00:00:00Z", Some(1))?;
+            Ok((marked, failed, reclaimed))
+        });
+        assert!(marked);
+        assert_eq!(failed.unwrap().status, "failed");
         assert!(reclaimed.is_empty());
     }
 
     #[test]
     fn outbox_expired_final_attempt_is_marked_failed_on_next_claim() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cas_root = tmp.path().join("objects");
-        let refs_root = tmp.path().join("refs");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::create_dir_all(&refs_root).unwrap();
-        let signer = TestSigner::default();
-        let trust = trust_store(&signer);
-        let appended = append_bundle_event(
-            &cas_root,
-            &refs_root,
-            append_request("email_5"),
-            &signer,
-            &trust,
-        )
-        .unwrap();
-        let record = BundleEventRecord {
-            event_hash: appended.event_hash.clone(),
-            event: appended.event.clone(),
-        };
-
-        let mut conn = Connection::open_in_memory().unwrap();
-        ensure_bundle_outbox_schema(&conn).unwrap();
-        enqueue_bundle_outbox_message(
-            &conn,
-            "ryeos-email",
-            "smtp",
-            &record,
-            &serde_json::json!({"to": "user@example.com"}),
-        )
-        .unwrap();
-        let claimed = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_1",
-            1,
-            "0000-01-01T00:00:00Z",
-            Some(1),
-        )
-        .unwrap();
+        let record = appended_record("email_5");
+        let (claimed, reclaimed, failed) = with_outbox(|conn| {
+            enqueue_smtp(conn, &record)?;
+            let claimed = claim_smtp(conn, "worker_1", 1, "0000-01-01T00:00:00Z", Some(1))?;
+            let first = only(&claimed)?;
+            let id = first.id;
+            let reclaimed = claim_smtp(conn, "worker_2", 1, "9999-01-01T00:00:00Z", Some(1))?;
+            let failed = get_bundle_outbox_message(conn, id)?;
+            Ok((claimed, reclaimed, failed))
+        });
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].attempts, 1);
-
-        let reclaimed = claim_bundle_outbox_messages(
-            &mut conn,
-            "ryeos-email",
-            "smtp",
-            "worker_2",
-            1,
-            "9999-01-01T00:00:00Z",
-            Some(1),
-        )
-        .unwrap();
         assert!(reclaimed.is_empty());
-        let failed = get_bundle_outbox_message(&conn, claimed[0].id)
-            .unwrap()
-            .unwrap();
+        let failed = failed.unwrap();
         assert_eq!(failed.status, "failed");
         assert_eq!(failed.leased_by, None);
         assert_eq!(failed.lease_until, None);

@@ -17,6 +17,8 @@ pub mod planning;
 pub mod projection;
 pub mod reconcile;
 pub mod result_outcome;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
 pub mod timer;
 pub mod types;
 

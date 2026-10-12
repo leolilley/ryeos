@@ -779,11 +779,7 @@ mod tests {
 
     fn fixture(
         path: &std::path::Path,
-    ) -> Result<(
-        Connection,
-        lillux::PinnedDirectory,
-        QualificationGuestScratchRecord,
-    )> {
+    ) -> Result<(lillux::PinnedDirectory, QualificationGuestScratchRecord)> {
         let private = lillux::PinnedDirectory::open(path)?
             .context("Q scratch fixture has no private parent")?
             .create_child(OsStr::new("qualification-guest-inputs"), 0o700)?;
@@ -821,156 +817,165 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        let conn = Connection::open(path.join("scratch.sqlite3"))?;
-        conn.execute_batch(
-            "PRAGMA foreign_keys=ON;
-             CREATE TABLE runtime_snapshot_qualification(operation_id TEXT PRIMARY KEY);
-             CREATE TABLE external_execution_allocation(
-               placement_thread_id TEXT PRIMARY KEY,
-               capacity_owner TEXT,
-               reservation_json TEXT,
-               phase TEXT,
-               occurrence_json TEXT);
-             CREATE TABLE external_qualification_local_start(placement_thread_id TEXT PRIMARY KEY);
-             CREATE TABLE external_qualification_worker_process(placement_thread_id TEXT PRIMARY KEY);
-             CREATE TABLE external_execution_connector(placement_thread_id TEXT PRIMARY KEY);",
-        )?;
-        conn.execute_batch(JOURNAL_SQL)?;
-        conn.execute(
-            "INSERT INTO runtime_snapshot_qualification VALUES (?1)",
-            [&operation],
-        )?;
-        conn.execute(
-            "INSERT INTO external_qualification_guest_scratch VALUES (?1,?2,'reserved',?3,1,1)",
-            params![placement, operation, canonical(&record)?],
-        )?;
-        Ok((conn, private, record))
+        crate::runtime_db::test_native::with_created(&path.join("scratch.sqlite3"), |conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE runtime_snapshot_qualification(operation_id TEXT PRIMARY KEY);
+                 CREATE TABLE external_execution_allocation(
+                   placement_thread_id TEXT PRIMARY KEY,
+                   capacity_owner TEXT,
+                   reservation_json TEXT,
+                   phase TEXT,
+                   occurrence_json TEXT);
+                 CREATE TABLE external_qualification_local_start(placement_thread_id TEXT PRIMARY KEY);
+                 CREATE TABLE external_qualification_worker_process(placement_thread_id TEXT PRIMARY KEY);
+                 CREATE TABLE external_execution_connector(placement_thread_id TEXT PRIMARY KEY);",
+            )?;
+            conn.execute_batch(JOURNAL_SQL)?;
+            conn.execute(
+                "INSERT INTO runtime_snapshot_qualification VALUES (?1)",
+                [&operation],
+            )?;
+            conn.execute(
+                "INSERT INTO external_qualification_guest_scratch VALUES (?1,?2,'reserved',?3,1,1)",
+                params![placement, operation, canonical(&record)?],
+            )?;
+            Ok(())
+        });
+        Ok((private, record))
     }
 
     #[test]
     fn reserved_before_child_survives_restart_without_descriptor_adoption() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let (conn, parent, record) = fixture(root.path())?;
+        let (parent, record) = fixture(root.path())?;
         ensure!(
             parent
                 .open_child_directory(OsStr::new(&record.placement_thread_id))?
                 .is_none(),
             "Reserved intent unexpectedly created a child"
         );
-        drop(conn);
-        let reopened = Connection::open(root.path().join("scratch.sqlite3"))?;
-        ensure!(
-            read_scratch(&reopened, &record.placement_thread_id)? == Some(record.clone()),
-            "Reserved intent disappeared across restart"
-        );
-        ensure!(
-            QualificationWorkspaceCustodyRegistry::new()
-                .borrow_guest_scratch(&record)
-                .is_err(),
-            "restart adopted a path as original descriptor custody"
-        );
-        let closed = retire_absent_reserved(&reopened, &record, &parent)?;
-        ensure!(
-            closed.phase == QualificationGuestScratchPhase::Closed
-                && closed.cleanup_basis
-                    == Some(QualificationGuestScratchCleanupBasis::NoAllocation)
-                && read_scratch(&reopened, &record.placement_thread_id)? == Some(closed.clone())
-                && retire_absent_reserved(&reopened, &record, &parent).is_err(),
-            "absent precreation scratch did not close exactly once"
-        );
+        crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |reopened| {
+            ensure!(
+                read_scratch(&reopened, &record.placement_thread_id)? == Some(record.clone()),
+                "Reserved intent disappeared across restart"
+            );
+            ensure!(
+                QualificationWorkspaceCustodyRegistry::new()
+                    .borrow_guest_scratch(&record)
+                    .is_err(),
+                "restart adopted a path as original descriptor custody"
+            );
+            let closed = retire_absent_reserved(&reopened, &record, &parent)?;
+            ensure!(
+                closed.phase == QualificationGuestScratchPhase::Closed
+                    && closed.cleanup_basis
+                        == Some(QualificationGuestScratchCleanupBasis::NoAllocation)
+                    && read_scratch(&reopened, &record.placement_thread_id)? == Some(closed.clone())
+                    && retire_absent_reserved(&reopened, &record, &parent).is_err(),
+                "absent precreation scratch did not close exactly once"
+            );
+            Ok(())
+        });
         Ok(())
     }
 
     #[test]
     fn precreation_recovery_refuses_present_child_or_later_local_owner() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let (conn, parent, record) = fixture(root.path())?;
-        let child = parent.create_child(OsStr::new(&record.placement_thread_id), 0o700)?;
-        ensure!(
-            retire_absent_reserved(&conn, &record, &parent).is_err()
-                && read_scratch(&conn, &record.placement_thread_id)? == Some(record.clone()),
-            "precreation recovery adopted a present child"
-        );
-        drop(child);
-        std::fs::remove_dir(parent.path().join(&record.placement_thread_id))?;
-        conn.execute(
-            "INSERT INTO external_qualification_local_start VALUES (?1)",
-            [&record.placement_thread_id],
-        )?;
-        ensure!(
-            retire_absent_reserved(&conn, &record, &parent).is_err()
-                && read_scratch(&conn, &record.placement_thread_id)? == Some(record),
-            "precreation recovery erased a later local owner"
-        );
+        let (parent, record) = fixture(root.path())?;
+        crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |conn| {
+            let child = parent.create_child(OsStr::new(&record.placement_thread_id), 0o700)?;
+            ensure!(
+                retire_absent_reserved(&conn, &record, &parent).is_err()
+                    && read_scratch(&conn, &record.placement_thread_id)? == Some(record.clone()),
+                "precreation recovery adopted a present child"
+            );
+            drop(child);
+            std::fs::remove_dir(parent.path().join(&record.placement_thread_id))?;
+            conn.execute(
+                "INSERT INTO external_qualification_local_start VALUES (?1)",
+                [&record.placement_thread_id],
+            )?;
+            ensure!(
+                retire_absent_reserved(&conn, &record, &parent).is_err()
+                    && read_scratch(&conn, &record.placement_thread_id)? == Some(record),
+                "precreation recovery erased a later local owner"
+            );
+            Ok(())
+        });
         Ok(())
     }
 
     #[test]
     fn created_before_allocation_and_lost_remove_ack_keep_original_custody() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let (conn, parent, reserved) = fixture(root.path())?;
-        let child = parent.create_child(OsStr::new(&reserved.placement_thread_id), 0o700)?;
-        let guard = Arc::new(TempDirGuard::new_pinned(
-            parent,
-            reserved.placement_thread_id.clone().into(),
-            Arc::new(child),
-        ));
-        let custody = Arc::new(QualificationGuestScratchCustody::new(&reserved, guard)?);
-        let registry = QualificationWorkspaceCustodyRegistry::new();
-        registry.retain_guest_scratch(Arc::clone(&custody))?;
-        let mut created = reserved.clone();
-        created.phase = QualificationGuestScratchPhase::Created;
-        created.updated_at_ms = 2;
-        transition(&conn, &reserved, &created)?;
-        ensure!(
-            read(&conn, &created.placement_thread_id)?.is_none()
-                && Arc::ptr_eq(&registry.borrow_guest_scratch(&created)?, &custody),
-            "Created scratch lost its original pre-allocation custody"
-        );
-        let mut intent = created.clone();
-        intent.phase = QualificationGuestScratchPhase::CleanupIntent;
-        intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
-        intent.updated_at_ms = 3;
-        require_cleanup_basis(&conn, &intent)?;
-        transition(&conn, &created, &intent)?;
-        ensure!(
-            conn.execute(
-                "INSERT INTO external_execution_allocation(placement_thread_id,reservation_json)
-                 VALUES (?1,'{\"owner\":{\"kind\":\"qualification_candidate\"}}')",
-                [&intent.placement_thread_id],
-            )
-            .is_err(),
-            "cleanup intent admitted a late Q allocation"
-        );
-        custody.guard().remove_now()?;
-        custody.guard().prove_owned_scratch_removed()?;
-        // The unlink committed but the journal update did not. Only this
-        // daemon's retained original guard can retry the physical proof.
-        ensure!(
-            read_scratch(&conn, &intent.placement_thread_id)? == Some(intent.clone()),
-            "lost removal ACK advanced the journal"
-        );
-        ensure!(
-            QualificationWorkspaceCustodyRegistry::new()
-                .borrow_guest_scratch(&intent)
+        let (parent, reserved) = fixture(root.path())?;
+        crate::runtime_db::test_native::read_existing(&root.path().join("scratch.sqlite3"), |conn| {
+            let child = parent.create_child(OsStr::new(&reserved.placement_thread_id), 0o700)?;
+            let guard = Arc::new(TempDirGuard::new_pinned(
+                parent,
+                reserved.placement_thread_id.clone().into(),
+                Arc::new(child),
+            ));
+            let custody = Arc::new(QualificationGuestScratchCustody::new(&reserved, guard)?);
+            let registry = QualificationWorkspaceCustodyRegistry::new();
+            registry.retain_guest_scratch(Arc::clone(&custody))?;
+            let mut created = reserved.clone();
+            created.phase = QualificationGuestScratchPhase::Created;
+            created.updated_at_ms = 2;
+            transition(&conn, &reserved, &created)?;
+            ensure!(
+                read(&conn, &created.placement_thread_id)?.is_none()
+                    && Arc::ptr_eq(&registry.borrow_guest_scratch(&created)?, &custody),
+                "Created scratch lost its original pre-allocation custody"
+            );
+            let mut intent = created.clone();
+            intent.phase = QualificationGuestScratchPhase::CleanupIntent;
+            intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
+            intent.updated_at_ms = 3;
+            require_cleanup_basis(&conn, &intent)?;
+            transition(&conn, &created, &intent)?;
+            ensure!(
+                conn.execute(
+                    "INSERT INTO external_execution_allocation(placement_thread_id,reservation_json)
+                     VALUES (?1,'{\"owner\":{\"kind\":\"qualification_candidate\"}}')",
+                    [&intent.placement_thread_id],
+                )
                 .is_err(),
-            "restart adopted removed scratch from its diagnostic path"
-        );
-        let mut removed = intent.clone();
-        removed.phase = QualificationGuestScratchPhase::Removed;
-        removed.removed_at_ms = Some(4);
-        removed.updated_at_ms = 4;
-        transition(&conn, &intent, &removed)?;
-        let mut closed = removed.clone();
-        closed.phase = QualificationGuestScratchPhase::Closed;
-        closed.closed_at_ms = Some(5);
-        closed.updated_at_ms = 5;
-        transition(&conn, &removed, &closed)?;
-        registry.release_closed_guest_scratch(&closed)?;
-        ensure!(
-            registry.borrow_guest_scratch(&closed).is_err(),
-            "Closed scratch retained active descriptor custody"
-        );
+                "cleanup intent admitted a late Q allocation"
+            );
+            custody.guard().remove_now()?;
+            custody.guard().prove_owned_scratch_removed()?;
+            // The unlink committed but the journal update did not. Only this
+            // daemon's retained original guard can retry the physical proof.
+            ensure!(
+                read_scratch(&conn, &intent.placement_thread_id)? == Some(intent.clone()),
+                "lost removal ACK advanced the journal"
+            );
+            ensure!(
+                QualificationWorkspaceCustodyRegistry::new()
+                    .borrow_guest_scratch(&intent)
+                    .is_err(),
+                "restart adopted removed scratch from its diagnostic path"
+            );
+            let mut removed = intent.clone();
+            removed.phase = QualificationGuestScratchPhase::Removed;
+            removed.removed_at_ms = Some(4);
+            removed.updated_at_ms = 4;
+            transition(&conn, &intent, &removed)?;
+            let mut closed = removed.clone();
+            closed.phase = QualificationGuestScratchPhase::Closed;
+            closed.closed_at_ms = Some(5);
+            closed.updated_at_ms = 5;
+            transition(&conn, &removed, &closed)?;
+            registry.release_closed_guest_scratch(&closed)?;
+            ensure!(
+                registry.borrow_guest_scratch(&closed).is_err(),
+                "Closed scratch retained active descriptor custody"
+            );
+            Ok(())
+        });
         Ok(())
     }
 }

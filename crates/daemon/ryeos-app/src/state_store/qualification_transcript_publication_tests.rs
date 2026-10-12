@@ -33,17 +33,9 @@ impl Harness {
         }
     }
 
-    fn open(&self) -> StateStore {
-        let runtime = self.root.path().join(".ai/state");
-        StateStore::new_with_head_trust(
-            self.root.path().to_path_buf(),
-            runtime.clone(),
-            runtime.join("runtime.sqlite3"),
-            self.signer.clone(),
-            WriteBarrier::new(),
-            self.trust.clone(),
-        )
-        .unwrap()
+    fn open(&self) -> super::test_native::TestStateStore {
+        super::test_native::TestStateStore::open(self.root.path(), self.signer.clone(), self.trust.clone())
+            .unwrap()
     }
 }
 

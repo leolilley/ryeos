@@ -3025,10 +3025,8 @@ mod tests {
     use crate::projection::{project_event, project_thread_edge, project_thread_snapshot};
     use serde_json::json;
 
-    fn test_db() -> ProjectionDb {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("test.db");
-        ProjectionDb::open(&path).unwrap()
+    fn test_db() -> crate::test_support::TestProjection {
+        crate::test_support::TestProjection::open()
     }
 
     fn budget_transition_event(chain_seq: u64, config_hash: &str) -> crate::ThreadEvent {

@@ -3,13 +3,12 @@
 //! Unlike [`crate::projection::ProjectionDb`], this database is never selected
 //! through `generation.json` and is never replaced by projection rebuilds.
 
-use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+use std::ffi::OsStr;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::sqlite_schema;
 mod original;
@@ -17,8 +16,9 @@ mod original_mutation;
 mod offline_replay;
 pub use offline_replay::{
     CarriedOwner, CarriedOwners, RetainTerminal, activate_replay_indexes_offline, prepare_operational_schema_reference,
+    release_schema_reference_failure,
 };
-mod live_native;
+pub(crate) mod live_native;
 pub use live_native::{LiveOperationalOpenFailure, LiveOperationalStartupRecoveryFailure, ReleasedLiveOperationalStartup, ReleasedLiveOperationalPhysicalCustody};
 #[doc(hidden)]
 pub use live_native::{
@@ -41,15 +41,13 @@ pub use original_mutation::OriginalOperationalMutationAuthority;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
-pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 4;
-/// One main Operational source plus its four fixed schema-reference sources.
+pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 1;
+/// One main Operational source plus its current-schema reference source.
 pub const MAX_LIVE_OPERATIONAL_PACKET_SOURCES: usize = MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1;
 // Dispatch-effect records retain complete launch and caller authority, so each
-// launch-capsule schema change needs its own replay-index epoch. Epoch 15 is the
-// clean-cut activation for launch-capsule schema 36. Predecessor dispatch rows
-// were sealed under an earlier capsule contract, cannot prove current authority
-// and must be retired under the supported explicit replay-index reset.
-// Provider-call records do not carry that dependency and remain current.
+// launch-capsule schema change needs its own replay-index epoch. Epoch 15 pairs
+// with launch-capsule schema 36. Rows of any earlier epoch cannot prove current
+// authority; the explicit replay-index reset discards every replay row.
 //
 // The epoch literal lives only in this macro so the fresh-schema marker in
 // `SCHEMA_SQL` and the Rust constant cannot drift apart.
@@ -193,178 +191,10 @@ CREATE INDEX idx_credential_profiles_owner_state
     ON credential_profiles(owner_principal, state);
 "#);
 
-/// Schema-v5 addition: credential-profile lifecycle authority is stable node
-/// state, not disposable execution history. RuntimeDb retains only the live
-/// projection needed for session/lease transactions. A monotonically
-/// increasing revision makes a crash between the two SQLite commits
-/// recoverable without guessing from timestamps or provider-owned files.
-const CREDENTIAL_PROFILES_DDL: &str = r#"
-CREATE TABLE credential_profiles (
-    profile_id TEXT PRIMARY KEY,
-    owner_principal TEXT NOT NULL,
-    home_id TEXT NOT NULL UNIQUE,
-    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0),
-    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
-    state TEXT NOT NULL CHECK (state IN (
-        'unauthenticated', 'enrolling', 'confirming', 'active',
-        'revoking', 'revoked', 'deleting', 'deleted'
-    )),
-    active_login_id TEXT,
-    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
-    login_expires_at_ms INTEGER,
-    sanitized_account_json TEXT,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-);
-
-CREATE INDEX idx_credential_profiles_owner_state
-    ON credential_profiles(owner_principal, state);
-"#;
-
-/// Schema-v6 addition: a durable sync job retains the immutable canonical
-/// operation it is coordinating. Phases and mutable roots remain recovery
-/// progress; they are never allowed to manufacture the caller, peer, or
-/// authority operands after a crash.
-const SYNC_JOB_OPERATION_DDL: &str = r#"
-ALTER TABLE sync_jobs ADD COLUMN operation_json BLOB NOT NULL DEFAULT X'7B7D';
-"#;
-
-// Exact sync-job fragments used to prove and atomically rebuild the one
-// non-additive part of the v5→v6 migration. `ALTER TABLE ADD COLUMN` appends
-// the new column, while fresh v6 stores place the immutable operation beside
-// its type. The migration therefore admits only the exact v5 fragment (or the
-// exact appended-column intermediate produced by the original v6 migrator),
-// then rebuilds the table into the same SQL and column order as `SCHEMA_SQL`.
-const SYNC_JOBS_V5_DDL: &str = r#"
-CREATE TABLE sync_jobs (
-    job_id TEXT PRIMARY KEY,
-    operation_type TEXT NOT NULL,
-    peer TEXT,
-    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
-    phase TEXT NOT NULL,
-    roots_json BLOB NOT NULL,
-    heads_json BLOB NOT NULL,
-    uploaded_hashes_json BLOB NOT NULL,
-    fetched_hashes_json BLOB NOT NULL,
-    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
-    last_error TEXT,
-    result_json BLOB,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    finished_at TEXT
-);
-
-CREATE INDEX idx_sync_jobs_state ON sync_jobs(state);
-CREATE INDEX idx_sync_jobs_operation_type ON sync_jobs(operation_type);
-CREATE INDEX idx_sync_jobs_peer ON sync_jobs(peer);
-"#;
-
-const SYNC_JOBS_V6_DDL: &str = r#"
-CREATE TABLE sync_jobs (
-    job_id TEXT PRIMARY KEY,
-    operation_type TEXT NOT NULL,
-    operation_json BLOB NOT NULL DEFAULT X'7B7D',
-    peer TEXT,
-    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
-    phase TEXT NOT NULL,
-    roots_json BLOB NOT NULL,
-    heads_json BLOB NOT NULL,
-    uploaded_hashes_json BLOB NOT NULL,
-    fetched_hashes_json BLOB NOT NULL,
-    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
-    last_error TEXT,
-    result_json BLOB,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    finished_at TEXT
-);
-
-CREATE INDEX idx_sync_jobs_state ON sync_jobs(state);
-CREATE INDEX idx_sync_jobs_operation_type ON sync_jobs(operation_type);
-CREATE INDEX idx_sync_jobs_peer ON sync_jobs(peer);
-"#;
-
-/// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
-/// test asserts this block appears verbatim inside `SCHEMA_SQL`, so a
-/// migrated store and a fresh store cannot drift apart.
-const EFFECT_RECORDS_DDL: &str = r#"
-CREATE TABLE effect_records (
-    cache_key TEXT PRIMARY KEY,
-    answer_digest TEXT NOT NULL,
-    record_hash TEXT NOT NULL,
-    produced_at TEXT NOT NULL,
-    last_replayed_at TEXT NOT NULL
-);
-
-CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
-CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
-"#;
-
-/// Schema-v3 additions, applied verbatim by the v2→v3 forward migration,
-/// under the same verbatim-inside-`SCHEMA_SQL` assertion as v2's block.
-const PROVIDER_CALL_RECORDS_DDL: &str = r#"
-CREATE TABLE provider_call_records (
-    cache_key TEXT PRIMARY KEY,
-    answer_digest TEXT NOT NULL,
-    record_hash TEXT NOT NULL,
-    produced_at TEXT NOT NULL,
-    last_replayed_at TEXT NOT NULL
-);
-
-CREATE INDEX idx_provider_call_records_last_replayed ON provider_call_records(last_replayed_at);
-CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(record_hash);
-"#;
-
-/// The global operational layout can advance without translating runtime-only
-/// replay authority. A predecessor store receives only this marker; ordinary
-/// open then refuses until the operator explicitly activates the current
-/// replay contract.
-const REPLAY_INDEX_EPOCH_MARKER_DDL: &str = r#"
-CREATE TABLE replay_index_epoch (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    epoch INTEGER NOT NULL CHECK (epoch > 0)
-);
-
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
-"#;
-
-/// Exact immediate-predecessor cut. Dispatch effects from the prior epoch were
-/// sealed under a predecessor launch-capsule contract; provider-call evidence
-/// is independent of that launch authority and remains current.
+/// The explicit replay-index reset discards every replay row before entering
+/// the current epoch; durable CAS objects remain.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
-DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
-"#;
-
-/// A skipped replay generation is not interpreted piecemeal. The explicit
-/// reset still succeeds, but discards every replay row because intermediate
-/// compatibility was not proven.
-const STALE_UNIFIED_REPLAY_INDEX_RESET_DDL: &str = r#"
 DELETE FROM replay_records;
-"#;
-
-/// A store upgraded directly from the pre-unified operational layout has no
-/// current namespace table to preserve. Its explicit clean cut discards both
-/// predecessor indexes before entering the current epoch; durable CAS objects
-/// remain.
-const LEGACY_REPLAY_INDEX_RESET_DDL: &str = r#"
-DROP TABLE effect_records;
-DROP TABLE provider_call_records;
-
-CREATE TABLE replay_records (
-    namespace TEXT NOT NULL,
-    cache_key TEXT NOT NULL,
-    answer_digest TEXT NOT NULL,
-    record_hash TEXT NOT NULL,
-    produced_at TEXT NOT NULL,
-    last_replayed_at TEXT NOT NULL,
-    PRIMARY KEY (namespace, cache_key)
-);
-
-CREATE INDEX idx_replay_records_retention
-    ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
-CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 "#;
 
 pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -917,9 +747,9 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
 }
 
 /// Stable SQLite state for operational records that cannot be rebuilt from
-/// signed heads.
+/// signed heads, always on a native connection: the live node's store, or an
+/// original offline owner.
 enum OperationalConnection {
-    Plain(Connection),
     Live(live_native::LiveOperationalConnection),
     Original {
         owner: lillux_sqlite::OriginalNativeConnection,
@@ -935,9 +765,6 @@ pub struct OperationalDb {
     path: PathBuf,
     _runtime_directory: std::sync::Arc<lillux::PinnedDirectory>,
     _directory_lock: lillux::secure_fs::PinnedDirectoryLock,
-    _database_file: Option<File>,
-    _wal_file: Option<File>,
-    _shm_file: Option<File>,
     _initialization_marker: Option<File>,
 }
 
@@ -1148,7 +975,6 @@ impl std::error::Error for ReplayIndexActivationRequired {}
 #[serde(rename_all = "snake_case")]
 pub enum ReplayIndexResetScope {
     Unchanged,
-    DispatchEffects,
     AllReplayRecords,
 }
 
@@ -1254,379 +1080,21 @@ impl OperationalDb {
     /// admission and consuming close remain separate reset caller gates.
     fn with_sql<T>(&self, operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>) -> Result<T> {
         match &self.conn {
-            OperationalConnection::Plain(connection) => operation(connection),
-            OperationalConnection::Original { owner, .. } => owner.with_sql(operation),
+            OperationalConnection::Original { owner, factory: _, reference: _ } => owner.with_sql(operation),
             OperationalConnection::Live(live) => live.owner.with_sql(operation),
         }
     }
 
-    /// Native owners carry a prepared native reference; plain owners use the
-    /// stock reference build.
-    fn current_schema_reference(&self) -> Option<&sqlite_schema::SchemaSqlDefinition> {
+    /// The prepared native schema reference every native owner carries.
+    fn current_schema_reference(&self) -> &sqlite_schema::SchemaSqlDefinition {
         match &self.conn {
-            OperationalConnection::Live(live) => Some(live.references.current()),
-            OperationalConnection::Plain(_) => None,
-            OperationalConnection::Original { owner: _, factory: _, reference } => Some(reference),
+            OperationalConnection::Live(live) => live.references.current(),
+            OperationalConnection::Original { owner: _, factory: _, reference } => reference,
         }
-    }
-
-    /// Open the stable store at its protocol-owned runtime-state path.
-    ///
-    /// The independent marker distinguishes a normal first initialization
-    /// from loss of an already-established source-of-truth database.
-    #[cfg(test)]
-    pub(crate) fn open_at_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
-        let runtime_directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
-            .context("pin operational runtime-state directory")?;
-        Self::open_at_pinned_runtime_state_dir(&runtime_directory)
-    }
-
-    /// Open the stable store relative to the exact runtime-state inode already
-    /// selected by StateDb. SQLite still requires a pathname for its main
-    /// database and sibling WAL files, so the open is bracketed by directory,
-    /// main-file, and (on Linux) live SQLite-descriptor identity proofs.
-    pub(crate) fn open_at_pinned_runtime_state_dir(
-        runtime_directory: &lillux::PinnedDirectory,
-    ) -> Result<Self> {
-        ensure_directory_path_still_pinned(runtime_directory)?;
-        let directory_lock = runtime_directory
-            .lock_exclusive()
-            .context("lock operational runtime-state directory")?;
-        Self::open_at_pinned_runtime_state_dir_with_lock(runtime_directory, directory_lock)
-    }
-
-    /// Open while sharing the caller's exclusive lock on the runtime-state
-    /// namespace. RuntimeDb and OperationalDb coexist in this directory, so a
-    /// production opener must pass clones of one guard rather than attempting
-    /// two independent exclusive flocks on the same inode.
-    pub(crate) fn open_at_pinned_runtime_state_dir_with_lock(
-        runtime_directory: &lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-    ) -> Result<Self> {
-        ensure_directory_path_still_pinned(runtime_directory)?;
-        directory_lock
-            .ensure_protects(runtime_directory)
-            .context("verify operational runtime-state directory lock")?;
-        let marker = inspect_initialized_marker(runtime_directory)?;
-        let existing_database = runtime_directory
-            .open_regular(OsStr::new(OPERATIONAL_DB_FILENAME), true)
-            .with_context(|| {
-                format!(
-                    "operational database must be a regular non-symlink file: {}",
-                    runtime_directory
-                        .path()
-                        .join(OPERATIONAL_DB_FILENAME)
-                        .display()
-                )
-            })?;
-        if marker.is_some() && existing_database.is_none() {
-            anyhow::bail!(
-                "established operational database is absent: {}",
-                runtime_directory
-                    .path()
-                    .join(OPERATIONAL_DB_FILENAME)
-                    .display()
-            );
-        }
-
-        let mut db = if marker.is_some() {
-            // Established source-of-truth state must never take the fresh-file
-            // initialization branch, even if the file was truncated to empty.
-            Self::open_in_pinned_directory(
-                runtime_directory,
-                OsStr::new(OPERATIONAL_DB_FILENAME),
-                OperationalOpenMode::ExistingReadWrite,
-                directory_lock,
-            )?
-        } else {
-            Self::open_in_pinned_directory(
-                runtime_directory,
-                OsStr::new(OPERATIONAL_DB_FILENAME),
-                OperationalOpenMode::CreateOrOpen,
-                directory_lock,
-            )?
-        };
-        if marker.is_some() {
-            db.with_sql(|connection| assert_integrity(connection, &db.path))?;
-            db._initialization_marker = marker;
-        } else {
-            db.sync_initialization()?;
-            ensure_operational_bindings(&db)?;
-            db._initialization_marker = Some(write_initialized_marker(runtime_directory)?);
-        }
-        ensure_operational_bindings(&db)?;
-        Ok(db)
-    }
-
-    /// Open or initialize the stable operational database.
-    ///
-    /// Existing files must match the current exact schema. This is retained
-    /// source-of-truth state, so a future deployed predecessor must receive an
-    /// explicit atomic forward migration rather than being reset or archived.
-    /// Version 1 is the first deployed schema, so there is no predecessor to
-    /// migrate today.
-    #[cfg(test)]
-    pub(crate) fn open(path: &Path) -> Result<Self> {
-        let (directory, name) = pin_operational_parent(path, true)?;
-        let directory_lock = directory.lock_exclusive()?;
-        Self::open_in_pinned_directory(
-            &directory,
-            &name,
-            OperationalOpenMode::CreateOrOpen,
-            directory_lock,
-        )
-    }
-
-    /// Strictly open an existing operational database without creating or
-    /// migrating it.
-    pub fn open_existing_current(path: &Path) -> Result<Self> {
-        let db = Self::open_existing_owned(path)?;
-        db.with_sql(|connection| assert_integrity(connection, path))?;
-        Ok(db)
-    }
-
-    /// Strictly open established operational state while sharing the caller's
-    /// already-held runtime-state namespace lock. Offline GC uses this to
-    /// preserve mirrored CAS roots and refuse active sync jobs without
-    /// reacquiring the directory flock through another file description.
-    pub fn open_existing_current_with_namespace_authority(
-        runtime_directory: &lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-        read_only: bool,
-    ) -> Result<Self> {
-        Self::open_established_with_namespace_authority(
-            runtime_directory,
-            directory_lock,
-            if read_only {
-                OperationalOpenMode::ExistingReadOnly
-            } else {
-                OperationalOpenMode::ExistingReadWrite
-            },
-        )
-    }
-
-    fn open_established_with_namespace_authority(
-        runtime_directory: &lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-        mode: OperationalOpenMode,
-    ) -> Result<Self> {
-        ensure_directory_path_still_pinned(runtime_directory)?;
-        directory_lock.ensure_protects(runtime_directory)?;
-        let marker = inspect_initialized_marker(runtime_directory)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "operational state initialization marker is absent: {}",
-                runtime_directory
-                    .path()
-                    .join(OPERATIONAL_INITIALIZED_FILENAME)
-                    .display()
-            )
-        })?;
-        let mut db = Self::open_in_pinned_directory(
-            runtime_directory,
-            OsStr::new(OPERATIONAL_DB_FILENAME),
-            mode,
-            directory_lock,
-        )?;
-        db._initialization_marker = Some(marker);
-        db.with_sql(|connection| assert_integrity(connection, &db.path))?;
-        ensure_operational_bindings(&db)?;
-        Ok(db)
-    }
-
-    fn open_existing_owned(path: &Path) -> Result<Self> {
-        let (directory, name) = pin_operational_parent(path, false)?;
-        let directory_lock = directory.lock_exclusive()?;
-        Self::open_in_pinned_directory(
-            &directory,
-            &name,
-            OperationalOpenMode::ExistingReadWrite,
-            directory_lock,
-        )
-    }
-
-    /// Strictly open an existing operational database read-only.
-    pub fn open_existing_current_read_only(path: &Path) -> Result<Self> {
-        let (directory, name) = pin_operational_parent(path, false)?;
-        let directory_lock = directory.lock_exclusive()?;
-        let db = Self::open_in_pinned_directory(
-            &directory,
-            &name,
-            OperationalOpenMode::ExistingReadOnly,
-            directory_lock,
-        )?;
-        db.with_sql(|connection| assert_integrity(connection, path))?;
-        Ok(db)
-    }
-
-    fn open_in_pinned_directory(
-        directory: &lillux::PinnedDirectory,
-        name: &OsStr,
-        mode: OperationalOpenMode,
-        directory_lock: lillux::secure_fs::PinnedDirectoryLock,
-    ) -> Result<Self> {
-        ensure_directory_path_still_pinned(directory)?;
-        inspect_operational_sidecars(directory, name)?;
-        let path = directory.path().join(name);
-        let database_file = match directory
-            .open_regular(name, !mode.is_read_only())
-            .with_context(|| {
-                format!(
-                    "operational database must be a regular non-symlink file: {}",
-                    path.display()
-                )
-            })? {
-            Some(file) => file,
-            None if mode.may_create() => {
-                let file = directory
-                    .open_regular_create(name, true, true, 0o600)
-                    .with_context(|| format!("create operational database {}", path.display()))?;
-                directory
-                    .sync()
-                    .context("sync operational database creation")?;
-                file
-            }
-            None => anyhow::bail!("operational database is absent: {}", path.display()),
-        };
-        let descriptors_before = matching_open_descriptors(&database_file)?;
-        let wal_name = operational_sidecar_name(name, "-wal");
-        let shm_name = operational_sidecar_name(name, "-shm");
-        let wal_before = directory.open_regular(&wal_name, false)?;
-        let shm_before = directory.open_regular(&shm_name, false)?;
-        let wal_descriptors_before = wal_before
-            .as_ref()
-            .map(matching_open_descriptors)
-            .transpose()?
-            .unwrap_or_default();
-        let shm_descriptors_before = shm_before
-            .as_ref()
-            .map(matching_open_descriptors)
-            .transpose()?
-            .unwrap_or_default();
-        ensure_directory_path_still_pinned(directory)?;
-        ensure_file_binding(directory, name, &database_file, "operational database")?;
-
-        // The exact file was established descriptor-relative above. SQLite's
-        // Unix VFS canonicalizes this intentional /proc/self/fd symlink, so
-        // SQLITE_OPEN_NOFOLLOW cannot be used here. Omit SQLITE_OPEN_CREATE,
-        // prove the main descriptor after open, and eagerly open and retain
-        // WAL/SHM below before the ordinary runtime pathname can be trusted by
-        // any later lazy SQLite open.
-        let sqlite_path = directory.descriptor_child_path(name)?;
-        let flags = if mode.is_read_only() {
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-        } else {
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-        };
-        let conn = Connection::open_with_flags(&sqlite_path, flags)
-            .with_context(|| format!("open operational database {}", path.display()))?;
-        ensure_directory_path_still_pinned(directory)?;
-        ensure_file_binding(directory, name, &database_file, "operational database")?;
-        ensure_sqlite_connection_uses_expected_file(
-            &database_file,
-            &descriptors_before,
-            "operational database",
-        )?;
-
-        if mode.is_read_only() {
-            conn.pragma_update(None, "foreign_keys", "ON")
-                .context("enable operational foreign keys")?;
-        } else {
-            configure_connection(&conn)?;
-        }
-        let spec = operational_schema_spec();
-        if mode.may_initialize() && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-            sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, &path)?;
-        }
-        if !mode.is_read_only() {
-            migrate_forward_if_owned(&conn, &path, None)?;
-        }
-
-        assert_operational_identity(&conn, &path)?;
-        enforce_replay_index_epoch(&conn, &path, false, None)?;
-        assert_current(&conn, &path, None)?;
-        let journal_mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .context("read operational journal mode")?;
-        if journal_mode != "wal" {
-            anyhow::bail!(
-                "operational database journal mode mismatch in {}: stored={journal_mode}, expected=wal",
-                path.display()
-            );
-        }
-
-        let (wal_file, shm_file) = if mode.is_read_only() {
-            // A read-only inspection cannot create absent WAL state. Retain
-            // any already-present sidecars; the runtime source-of-truth path
-            // always uses the read-write branch below.
-            (
-                directory.open_regular(&wal_name, false)?,
-                directory.open_regular(&shm_name, false)?,
-            )
-        } else {
-            conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
-                .context("eagerly establish operational WAL handles")?;
-            let wal_file = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "SQLite did not establish the operational WAL file: {}",
-                    directory.path().join(&wal_name).display()
-                )
-            })?;
-            let shm_file = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "SQLite did not establish the operational shared-memory file: {}",
-                    directory.path().join(&shm_name).display()
-                )
-            })?;
-            if let Some(expected) = wal_before.as_ref() {
-                ensure_same_file(expected, &wal_file, "operational WAL", &path)?;
-            }
-            if let Some(expected) = shm_before.as_ref() {
-                ensure_same_file(expected, &shm_file, "operational shared memory", &path)?;
-            }
-            ensure_sqlite_connection_uses_expected_file(
-                &wal_file,
-                &wal_descriptors_before,
-                "operational WAL",
-            )?;
-            ensure_sqlite_connection_uses_expected_file(
-                &shm_file,
-                &shm_descriptors_before,
-                "operational shared memory",
-            )?;
-            (Some(wal_file), Some(shm_file))
-        };
-        ensure_directory_path_still_pinned(directory)?;
-        ensure_file_binding(directory, name, &database_file, "operational database")?;
-        inspect_operational_sidecars(directory, name)?;
-        Ok(Self {
-            conn: OperationalConnection::Plain(conn),
-            path,
-            _runtime_directory: std::sync::Arc::new(directory.try_clone()?),
-            _directory_lock: directory_lock,
-            _database_file: Some(database_file),
-            _wal_file: wal_file,
-            _shm_file: shm_file,
-            _initialization_marker: None,
-        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    fn sync_initialization(&self) -> Result<()> {
-        self.with_sql(|connection| {
-            connection
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                .context("checkpoint initialized operational database")?;
-            self._database_file.as_ref().context("initialized operational main owner absent")?
-                .sync_all()
-                .with_context(|| format!("sync operational database {}", self.path.display()))?;
-            self._runtime_directory
-                .sync()
-                .with_context(|| format!("sync operational database parent {}", self.path.display()))?;
-            Ok(())
-        })
     }
 
     fn immediate_transaction<T>(
@@ -1822,58 +1290,6 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum OperationalOpenMode {
-    CreateOrOpen,
-    ExistingReadWrite,
-    ExistingReadOnly,
-}
-
-impl OperationalOpenMode {
-    fn may_create(self) -> bool {
-        matches!(self, Self::CreateOrOpen)
-    }
-
-    fn may_initialize(self) -> bool {
-        matches!(self, Self::CreateOrOpen)
-    }
-
-    fn is_read_only(self) -> bool {
-        matches!(self, Self::ExistingReadOnly)
-    }
-}
-
-fn pin_operational_parent(
-    path: &Path,
-    create: bool,
-) -> Result<(lillux::PinnedDirectory, OsString)> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "operational database path has no filename: {}",
-                path.display()
-            )
-        })?
-        .to_os_string();
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let directory = if create {
-        lillux::PinnedDirectory::open_or_create(parent)
-            .with_context(|| format!("pin operational database parent {}", parent.display()))?
-    } else {
-        lillux::PinnedDirectory::open(parent)
-            .with_context(|| format!("pin operational database parent {}", parent.display()))?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "operational database parent is absent: {}",
-                    parent.display()
-                )
-            })?
-    };
-    ensure_directory_path_still_pinned(&directory)?;
-    Ok((directory, name))
-}
-
 fn ensure_directory_path_still_pinned(directory: &lillux::PinnedDirectory) -> Result<()> {
     let current = lillux::PinnedDirectory::open(directory.path())?.ok_or_else(|| {
         anyhow::anyhow!(
@@ -1904,27 +1320,6 @@ fn files_are_same(left: &File, right: &File) -> Result<bool> {
         let right = right.metadata()?;
         Ok(left.dev() == right.dev() && left.ino() == right.ino())
     }
-}
-
-fn ensure_file_binding(
-    directory: &lillux::PinnedDirectory,
-    name: &OsStr,
-    expected: &File,
-    label: &str,
-) -> Result<()> {
-    let current = directory.open_regular(name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "{label} disappeared while it was in use: {}",
-            directory.path().join(name).display()
-        )
-    })?;
-    if !files_are_same(expected, &current)? {
-        anyhow::bail!(
-            "{label} path changed while it was in use: {}",
-            directory.path().join(name).display()
-        );
-    }
-    Ok(())
 }
 
 fn ensure_same_file(expected: &File, current: &File, label: &str, path: &Path) -> Result<()> {
@@ -1977,88 +1372,6 @@ pub(crate) fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> R
     })
 }
 
-fn inspect_operational_sidecars(
-    directory: &lillux::PinnedDirectory,
-    database_name: &OsStr,
-) -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let sidecar_name = operational_sidecar_name(database_name, suffix);
-        let _ = directory
-            .open_regular(&sidecar_name, false)
-            .with_context(|| {
-                format!(
-                    "inspect operational database sidecar {}",
-                    directory.path().join(&sidecar_name).display()
-                )
-            })?;
-    }
-    Ok(())
-}
-
-fn operational_sidecar_name(database_name: &OsStr, suffix: &str) -> OsString {
-    let mut sidecar_name = database_name.to_os_string();
-    sidecar_name.push(suffix);
-    sidecar_name
-}
-
-#[cfg(target_os = "linux")]
-fn matching_open_descriptors(file: &File) -> Result<BTreeSet<i32>> {
-    use std::os::unix::fs::MetadataExt;
-
-    let expected = file.metadata()?;
-    let mut descriptors = BTreeSet::new();
-    for entry in fs::read_dir("/proc/self/fd").context("enumerate process descriptors")? {
-        let entry = entry.context("read process descriptor entry")?;
-        let Some(descriptor) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let metadata = match fs::metadata(entry.path()) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspect process descriptor {}", entry.path().display())
-                });
-            }
-        };
-        if metadata.dev() == expected.dev() && metadata.ino() == expected.ino() {
-            descriptors.insert(descriptor);
-        }
-    }
-    Ok(descriptors)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn matching_open_descriptors(_file: &File) -> Result<BTreeSet<i32>> {
-    Ok(BTreeSet::new())
-}
-
-fn ensure_sqlite_connection_uses_expected_file(
-    file: &File,
-    descriptors_before: &BTreeSet<i32>,
-    label: &str,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-
-        let mut descriptors_after = matching_open_descriptors(file)?;
-        // Do not count the verifier's own pinned handle as evidence that
-        // SQLite retained this inode.
-        descriptors_after.remove(&file.as_raw_fd());
-        if descriptors_after.is_subset(descriptors_before) {
-            anyhow::bail!("SQLite did not retain a descriptor for the pinned {label} inode");
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (file, descriptors_before, label);
-    Ok(())
-}
-
 fn ensure_operational_bindings(db: &OperationalDb) -> Result<()> {
     ensure_directory_path_still_pinned(&db._runtime_directory)?;
     let name = db.path.file_name().ok_or_else(|| {
@@ -2068,79 +1381,30 @@ fn ensure_operational_bindings(db: &OperationalDb) -> Result<()> {
         )
     })?;
     db._directory_lock.ensure_protects(&db._runtime_directory)?;
-    if let OperationalConnection::Live(live) = &db.conn {
-        anyhow::ensure!(db._database_file.is_none() && db._wal_file.is_none() && db._shm_file.is_none(),
-            "live Operational must not duplicate Bound data custody");
-        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(live.original.as_ref(), live.original.factory())?;
-        let identity = live.owner.bound_main_identity()?;
-        let current = db._runtime_directory.entry_no_follow(name)?.context("live Operational main absent")?;
-        anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
-            && (current.containing_device, current.inode) == identity,
-            "live Operational differs from actual Bound identity");
-        let marker = inspect_initialized_marker(&db._runtime_directory)?.context("live Operational initialized marker absent")?;
-        ensure_same_file(db._initialization_marker.as_ref().context("original live marker absent")?, &marker,
-            "live Operational marker", &db.path)?;
-        return Ok(());
-    }
-    if let OperationalConnection::Original { owner, factory, reference: _ } = &db.conn {
-        anyhow::ensure!(db._database_file.is_none() && db._wal_file.is_none()
-            && db._shm_file.is_none() && db._initialization_marker.is_none(),
-            "original Operational owner must not duplicate lower source/keeper custody");
-        factory.require_runtime_binding(&db._runtime_directory)?;
-        // This actual native call validates the retained destination authority,
-        // including its original charged marker read, before observing identity.
-        let identity = owner.bound_main_identity()?;
-        let current = db._runtime_directory.entry_no_follow(name)?
-            .context("original Operational main coordinate disappeared")?;
-        anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
-            && (current.containing_device, current.inode) == identity,
-            "original Operational main differs from actual Bound keeper");
-        return Ok(());
-    }
-    ensure_file_binding(
-        &db._runtime_directory,
-        name,
-        db._database_file.as_ref().context("plain Operational main owner absent")?,
-        "operational database",
-    )?;
-    inspect_operational_sidecars(&db._runtime_directory, name)?;
-    if let Some(wal_file) = db._wal_file.as_ref() {
-        let wal_name = operational_sidecar_name(name, "-wal");
-        ensure_file_binding(
-            &db._runtime_directory,
-            &wal_name,
-            wal_file,
-            "operational WAL",
-        )?;
-    }
-    if let Some(shm_file) = db._shm_file.as_ref() {
-        let shm_name = operational_sidecar_name(name, "-shm");
-        ensure_file_binding(
-            &db._runtime_directory,
-            &shm_name,
-            shm_file,
-            "operational shared memory",
-        )?;
-    }
-    if let Some(expected_marker) = db._initialization_marker.as_ref() {
-        let current_marker =
-            inspect_initialized_marker(&db._runtime_directory)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "operational initialization marker disappeared: {}",
-                    db._runtime_directory
-                        .path()
-                        .join(OPERATIONAL_INITIALIZED_FILENAME)
-                        .display()
-                )
-            })?;
-        if !files_are_same(expected_marker, &current_marker)? {
-            anyhow::bail!(
-                "operational initialization marker changed while it was in use: {}",
-                db._runtime_directory
-                    .path()
-                    .join(OPERATIONAL_INITIALIZED_FILENAME)
-                    .display()
-            );
+    match &db.conn {
+        OperationalConnection::Live(live) => {
+            lillux_sqlite::OriginalNativeDestinationAuthority::require_original(live.original.as_ref(), live.original.factory())?;
+            let identity = live.owner.bound_main_identity()?;
+            let current = db._runtime_directory.entry_no_follow(name)?.context("live Operational main absent")?;
+            anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
+                && (current.containing_device, current.inode) == identity,
+                "live Operational differs from actual Bound identity");
+            let marker = inspect_initialized_marker(&db._runtime_directory)?.context("live Operational initialized marker absent")?;
+            ensure_same_file(db._initialization_marker.as_ref().context("original live marker absent")?, &marker,
+                "live Operational marker", &db.path)?;
+        }
+        OperationalConnection::Original { owner, factory, reference: _ } => {
+            anyhow::ensure!(db._initialization_marker.is_none(),
+                "original Operational owner must not duplicate lower source/keeper custody");
+            factory.require_runtime_binding(&db._runtime_directory)?;
+            // This actual native call validates the retained destination authority,
+            // including its original charged marker read, before observing identity.
+            let identity = owner.bound_main_identity()?;
+            let current = db._runtime_directory.entry_no_follow(name)?
+                .context("original Operational main coordinate disappeared")?;
+            anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
+                && (current.containing_device, current.inode) == identity,
+                "original Operational main differs from actual Bound keeper");
         }
     }
     Ok(())
@@ -2157,274 +1421,6 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SyncJobSchemaEntry {
-    object_type: String,
-    name: String,
-    table_name: String,
-    sql: Option<String>,
-}
-
-fn sync_job_schema_entries(conn: &Connection) -> Result<Vec<SyncJobSchemaEntry>> {
-    let mut statement = conn.prepare(
-        "SELECT type, name, tbl_name, sql
-           FROM sqlite_master
-          WHERE tbl_name='sync_jobs'
-          ORDER BY type, name",
-    )?;
-    statement
-        .query_map([], |row| {
-            Ok(SyncJobSchemaEntry {
-                object_type: row.get(0)?,
-                name: row.get(1)?,
-                table_name: row.get(2)?,
-                sql: row.get(3)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("read sync-job schema fragment")
-}
-
-fn sync_job_schema_matches(conn: &Connection, reference_ddl: &str, references: Option<&live_native::LiveOperationalSchemaReferences>) -> Result<bool> {
-    if let Some(references) = references { return references.sync_jobs_match(conn, reference_ddl); }
-    let reference = Connection::open_in_memory().context("open sync-job schema reference")?;
-    reference
-        .execute_batch(reference_ddl)
-        .context("build sync-job schema reference")?;
-    Ok(sync_job_schema_entries(conn)? == sync_job_schema_entries(&reference)?)
-}
-
-fn appended_sync_job_v6_ddl() -> String {
-    format!("{SYNC_JOBS_V5_DDL}\n{SYNC_JOB_OPERATION_DDL}")
-}
-
-fn backfill_legacy_sync_job_operations(conn: &Connection) -> Result<()> {
-    let legacy_jobs = {
-        let mut statement = conn
-            .prepare(
-                "SELECT job_id, operation_type, peer FROM sync_jobs WHERE operation_json = X'7B7D'",
-            )
-            .context("prepare legacy sync-job operation migration")?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (job_id, operation_type, peer) in legacy_jobs {
-        let operation = serde_json::to_vec(&serde_json::json!({
-            "schema": 1,
-            "operation_type": operation_type,
-            "legacy_recovery": true,
-            "peer": peer,
-        }))?;
-        conn.execute(
-            "UPDATE sync_jobs SET operation_json = ? WHERE job_id = ? AND operation_json = X'7B7D'",
-            rusqlite::params![operation, job_id],
-        )
-        .context("retain canonical legacy sync-job operation")?;
-    }
-    Ok(())
-}
-
-/// Convert the exact v5 sync-job fragment, or the exact appended-column
-/// intermediate committed by the original v6 migrator, into the canonical v6
-/// table. Every row is retained. Pre-v6 jobs receive a typed, explicitly
-/// legacy operation envelope; the intermediate repair preserves the envelope
-/// it already wrote. No unknown schema is modified.
-fn migrate_sync_jobs_to_v6(
-    conn: &Connection,
-    path: &Path,
-    appended_column_present: bool,
-    references: Option<&live_native::LiveOperationalSchemaReferences>,
-) -> Result<()> {
-    let expected = if appended_column_present {
-        appended_sync_job_v6_ddl()
-    } else {
-        SYNC_JOBS_V5_DDL.to_owned()
-    };
-    if !sync_job_schema_matches(conn, &expected, references)? {
-        anyhow::bail!(
-            "operational sync-job schema is not the exact recognized {} contract in {}; refusing forward migration",
-            if appended_column_present {
-                "v6 appended-column intermediate"
-            } else {
-                "v5 predecessor"
-            },
-            path.display()
-        );
-    }
-
-    let tx = conn
-        .unchecked_transaction()
-        .context("begin operational v5→v6 sync-operation migration")?;
-    if !appended_column_present {
-        tx.execute_batch(SYNC_JOB_OPERATION_DDL)
-            .context("install durable sync-job operation payload")?;
-    }
-
-    // v5 rows predate immutable operation retention. Preserve their exact
-    // existing type and peer as explicitly marked legacy recovery evidence;
-    // never leave an untyped `{}` that a later reconciler could reinterpret as
-    // caller authority. The predicate makes repair of the committed
-    // appended-column intermediate idempotent.
-    backfill_legacy_sync_job_operations(&tx)?;
-
-    tx.execute_batch(
-        "DROP INDEX idx_sync_jobs_state;
-         DROP INDEX idx_sync_jobs_operation_type;
-         DROP INDEX idx_sync_jobs_peer;
-         ALTER TABLE sync_jobs RENAME TO sync_jobs_v6_predecessor;",
-    )
-    .context("retire predecessor sync-job table inside migration transaction")?;
-    tx.execute_batch(SYNC_JOBS_V6_DDL)
-        .context("create canonical durable sync-job table")?;
-    tx.execute_batch(
-        "INSERT INTO sync_jobs (
-             job_id, operation_type, operation_json, peer, state, phase,
-             roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
-             attempt_count, max_attempts, last_error, result_json,
-             created_at, updated_at, finished_at
-         )
-         SELECT job_id, operation_type, operation_json, peer, state, phase,
-                roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
-                attempt_count, max_attempts, last_error, result_json,
-                created_at, updated_at, finished_at
-           FROM sync_jobs_v6_predecessor;
-         DROP TABLE sync_jobs_v6_predecessor;",
-    )
-    .context("copy predecessor sync jobs into canonical table")?;
-    tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
-        .context("stamp operational schema v6")?;
-    tx.commit()
-        .context("commit operational v5→v6 sync-operation migration")?;
-    Ok(())
-}
-
-/// Explicit atomic forward migration for the versioned operational store,
-/// per this store's charter: never reset, never archived, one transaction
-/// per schema step, using the same DDL fresh initialization uses. A store
-/// stamped NEWER than this binary is untouched and fails loudly downstream —
-/// that is an operator downgrade, not a cutover. A foreign application id is
-/// untouched for the same reason: the strict ownership check speaks.
-fn migrate_forward_if_owned(conn: &Connection, path: &Path, references: Option<&live_native::LiveOperationalSchemaReferences>) -> Result<()> {
-    let application_id: i32 = conn
-        .query_row("PRAGMA application_id", [], |row| row.get(0))
-        .context("read operational application id before migration")?;
-    if application_id != OPERATIONAL_APP_ID {
-        return Ok(());
-    }
-    loop {
-        let stored: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .context("read operational schema version before migration")?;
-        match stored {
-            v if v > OPERATIONAL_SCHEMA_VERSION => return Ok(()),
-            OPERATIONAL_SCHEMA_VERSION => {
-                if sync_job_schema_matches(conn, &appended_sync_job_v6_ddl(), references)? {
-                    migrate_sync_jobs_to_v6(conn, path, true, references)?;
-                    tracing::warn!(
-                        path = %path.display(),
-                        "repaired exact operational v6 appended-column intermediate"
-                    );
-                }
-                return Ok(());
-            }
-            0 => return Ok(()),
-            1 => {
-                let tx = conn
-                    .unchecked_transaction()
-                    .context("begin operational v1→v2 migration")?;
-                tx.execute_batch(EFFECT_RECORDS_DDL)
-                    .context("apply operational v1→v2 migration DDL")?;
-                tx.pragma_update(None, "user_version", 2)
-                    .context("stamp operational schema v2")?;
-                tx.commit().context("commit operational v1→v2 migration")?;
-                tracing::info!(
-                    path = %path.display(),
-                    "operational schema migrated v1 → v2 (effect records)"
-                );
-            }
-            2 => {
-                let tx = conn
-                    .unchecked_transaction()
-                    .context("begin operational v2→v3 migration")?;
-                tx.execute_batch(PROVIDER_CALL_RECORDS_DDL)
-                    .context("apply operational v2→v3 migration DDL")?;
-                tx.pragma_update(None, "user_version", 3)
-                    .context("stamp operational schema v3")?;
-                tx.commit().context("commit operational v2→v3 migration")?;
-                tracing::info!(
-                    path = %path.display(),
-                    "operational schema migrated v2 → v3 (provider call records)"
-                );
-            }
-            3 => {
-                let tx = conn
-                    .unchecked_transaction()
-                    .context("begin operational schema-4 replay epoch marker migration")?;
-                tx.execute_batch(REPLAY_INDEX_EPOCH_MARKER_DDL)
-                    .context("install predecessor replay-index epoch marker")?;
-                tx.pragma_update(None, "user_version", 4)
-                    .context("stamp operational schema 4")?;
-                tx.commit()
-                    .context("commit operational schema-4 replay epoch marker migration")?;
-                tracing::warn!(
-                    path = %path.display(),
-                    "operational replay indexes require explicit clean-cut activation"
-                );
-            }
-            4 => {
-                let tx = conn
-                    .unchecked_transaction()
-                    .context("begin operational v4→v5 credential authority migration")?;
-                tx.execute_batch(CREDENTIAL_PROFILES_DDL)
-                    .context("install stable credential-profile authority")?;
-                tx.pragma_update(None, "user_version", 5)
-                    .context("stamp operational schema v5")?;
-                tx.commit()
-                    .context("commit operational v4→v5 credential authority migration")?;
-                tracing::info!(
-                    path = %path.display(),
-                    "operational schema migrated v4 → v5 (credential-profile authority)"
-                );
-            }
-            5 => {
-                if sync_job_schema_matches(conn, SYNC_JOBS_V6_DDL, references)? {
-                    // A partially staged forward migration may already have
-                    // installed the exact canonical fragment before stamping
-                    // the global version. Complete only its typed legacy-row
-                    // backfill and stamp; unknown variants still fail closed.
-                    let tx = conn
-                        .unchecked_transaction()
-                        .context("finish staged operational v6 sync-operation migration")?;
-                    backfill_legacy_sync_job_operations(&tx)?;
-                    tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
-                        .context("stamp operational schema v6")?;
-                    tx.commit()
-                        .context("commit staged operational v6 sync-operation migration")?;
-                } else {
-                    migrate_sync_jobs_to_v6(conn, path, false, references)?;
-                }
-                tracing::info!(
-                    path = %path.display(),
-                    "operational schema migrated v5 → v6 (durable sync operations)"
-                );
-            }
-            other => {
-                anyhow::bail!(
-                    "operational schema version {other} has no forward migration in {}",
-                    path.display()
-                );
-            }
-        }
-    }
 }
 
 fn replay_index_epoch(conn: &Connection) -> Result<i32> {
@@ -2451,42 +1447,10 @@ fn assert_operational_identity(conn: &Connection, path: &Path) -> Result<()> {
         .context("read operational schema version")?;
     if version != OPERATIONAL_SCHEMA_VERSION {
         anyhow::bail!(
-            "operational schema version mismatch in {}: stored={version}, expected={OPERATIONAL_SCHEMA_VERSION}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-fn replay_layout_entries(
-    conn: &Connection,
-) -> Result<Vec<(String, String, String, Option<String>)>> {
-    conn.prepare(
-        "SELECT type, name, tbl_name, sql
-         FROM sqlite_master
-         WHERE name NOT LIKE 'sqlite_%'
-           AND (name IN ('effect_records', 'provider_call_records')
-                OR tbl_name IN ('effect_records', 'provider_call_records'))
-         ORDER BY type, name",
-    )?
-    .query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-    })?
-    .collect::<rusqlite::Result<Vec<_>>>()
-    .context("read predecessor replay-index schema")
-}
-
-fn assert_exact_legacy_replay_layout(conn: &Connection, path: &Path) -> Result<()> {
-    let reference = Connection::open_in_memory().context("open legacy replay reference schema")?;
-    reference
-        .execute_batch(EFFECT_RECORDS_DDL)
-        .context("build effect replay reference schema")?;
-    reference
-        .execute_batch(PROVIDER_CALL_RECORDS_DDL)
-        .context("build provider-call replay reference schema")?;
-    if replay_layout_entries(conn)? != replay_layout_entries(&reference)? {
-        anyhow::bail!(
-            "unrecognized predecessor replay-index layout in {}; refusing destructive reset",
+            "operational schema version mismatch in {}: stored={version}, expected={OPERATIONAL_SCHEMA_VERSION}; \
+             this binary has no migration. Preserve the file, then with the node stopped remove \
+             {OPERATIONAL_DB_FILENAME}, its {OPERATIONAL_DB_FILENAME}-wal and {OPERATIONAL_DB_FILENAME}-shm \
+             sidecars, and {OPERATIONAL_INITIALIZED_FILENAME} to start a fresh store",
             path.display()
         );
     }
@@ -2496,7 +1460,7 @@ fn assert_exact_legacy_replay_layout(conn: &Connection, path: &Path) -> Result<(
 fn inspect_replay_index_reset(
     conn: &Connection,
     path: &Path,
-    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+    reference: &sqlite_schema::SchemaSqlDefinition,
 ) -> Result<ReplayIndexResetReport> {
     let stored = replay_index_epoch(conn)?;
     if stored == REPLAY_INDEX_EPOCH {
@@ -2515,32 +1479,14 @@ fn inspect_replay_index_reset(
     }
     // The pinned opener performs the full integrity check once before giving
     // out a preparation. Reinspection under that retained namespace lock
-    // checks schema/epoch, not repeated full-database integrity scans.
-    let has_unified_replay_index: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'replay_records')",
-            [],
-            |row| row.get(0),
-        )
-        .context("inspect predecessor replay-index layout")?;
-    if has_unified_replay_index {
-        // Epoch contents may be stale, but a unified predecessor must retain
-        // the exact current physical schema before any row is discarded.
-        assert_current(conn, path, reference).context("validate unified replay predecessor before reset")?;
-    } else {
-        // The only admitted pre-unified shape is the exact v2/v3 pair. Do not
-        // let DROP TABLE normalize an unknown/corrupt table into something
-        // that merely looks current after the destructive cut.
-        assert_exact_legacy_replay_layout(conn, path)?;
-    }
+    // checks schema/epoch, not repeated full-database integrity scans. Epoch
+    // contents may be stale, but the store must retain the exact current
+    // physical schema before any row is discarded.
+    assert_current(conn, path, reference).context("validate replay predecessor before reset")?;
     Ok(ReplayIndexResetReport {
         stored_epoch: stored,
         current_epoch: REPLAY_INDEX_EPOCH,
-        scope: if has_unified_replay_index && stored == REPLAY_INDEX_EPOCH - 1 {
-            ReplayIndexResetScope::DispatchEffects
-        } else {
-            ReplayIndexResetScope::AllReplayRecords
-        },
+        scope: ReplayIndexResetScope::AllReplayRecords,
     })
 }
 
@@ -2548,7 +1494,7 @@ fn enforce_replay_index_epoch(
     conn: &Connection,
     path: &Path,
     explicit_reset: bool,
-    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+    reference: &sqlite_schema::SchemaSqlDefinition,
 ) -> Result<()> {
     let stored = replay_index_epoch(conn)?;
     if stored == REPLAY_INDEX_EPOCH {
@@ -2567,23 +1513,12 @@ fn enforce_replay_index_epoch(
         }
         .into());
     }
-    let report = inspect_replay_index_reset(conn, path, reference)?;
-    let has_unified_replay_index: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'replay_records')",
-        [], |row| row.get(0),
-    )?;
+    inspect_replay_index_reset(conn, path, reference)?;
     let tx = conn
         .unchecked_transaction()
         .context("begin explicit replay-index reset")?;
-    let preserve_provider_records = report.scope == ReplayIndexResetScope::DispatchEffects;
-    tx.execute_batch(if preserve_provider_records {
-        REPLAY_INDEX_RESET_DDL
-    } else if has_unified_replay_index {
-        STALE_UNIFIED_REPLAY_INDEX_RESET_DDL
-    } else {
-        LEGACY_REPLAY_INDEX_RESET_DDL
-    })
-    .context("recreate current replay indexes")?;
+    tx.execute_batch(REPLAY_INDEX_RESET_DDL)
+        .context("discard stale replay indexes")?;
     tx.execute(
         "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
         rusqlite::params![REPLAY_INDEX_EPOCH],
@@ -2596,15 +1531,14 @@ fn enforce_replay_index_epoch(
     tx.commit().context("commit explicit replay-index reset")?;
     tracing::warn!(
         database = %path.display(),
-        preserved_provider_records = preserve_provider_records,
         "explicitly activated current replay indexes"
     );
     Ok(())
 }
 
-fn assert_current(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> Result<()> {
+fn assert_current(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
     sqlite_schema::assert_owned(conn, &operational_schema_spec(), path)?;
-    match reference { Some(reference) => reference.require_matches(conn, path)?, None => sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?, }
+    reference.require_matches(conn, path)?;
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read operational schema version")?;
@@ -4487,11 +3421,38 @@ fn cas_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CasEntryAttri
 mod tests {
     use super::*;
 
+    /// The Operational store of a live test State opened the way a node
+    /// opens it, in the directory of `path` (the database file path).
+    struct TestOperational {
+        state: crate::test_support::TestState,
+    }
+
+    impl TestOperational {
+        fn open(path: &Path) -> Self {
+            Self::at(path.parent().expect("Operational database parent")).unwrap()
+        }
+
+        fn at(runtime_state_dir: &Path) -> Result<Self> {
+            let state = crate::test_support::TestState::open(
+                runtime_state_dir,
+                std::sync::Arc::new(crate::refs::TrustStore::new()),
+            )?;
+            Ok(Self { state })
+        }
+    }
+
+    impl std::ops::Deref for TestOperational {
+        type Target = OperationalDb;
+        fn deref(&self) -> &OperationalDb {
+            self.state.test_operational()
+        }
+    }
+
     #[test]
     fn open_creates_exact_stable_schema() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         let app_id: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA application_id", [], |row| row.get(0))?))
             .unwrap();
@@ -4532,122 +3493,6 @@ mod tests {
         ReplayIndexNamespace::new(value).unwrap()
     }
 
-    fn rewrite_current_sync_jobs_as_v5(db: &OperationalDb) {
-        db.with_sql(|connection| {
-        let tx = connection.unchecked_transaction().unwrap();
-        tx.execute_batch(
-            "DROP INDEX idx_sync_jobs_state;
-             DROP INDEX idx_sync_jobs_operation_type;
-             DROP INDEX idx_sync_jobs_peer;
-             ALTER TABLE sync_jobs RENAME TO sync_jobs_current;",
-        )
-        .unwrap();
-        tx.execute_batch(SYNC_JOBS_V5_DDL).unwrap();
-        tx.execute_batch(
-            "INSERT INTO sync_jobs (
-                 job_id, operation_type, peer, state, phase, roots_json,
-                 heads_json, uploaded_hashes_json, fetched_hashes_json,
-                 attempt_count, max_attempts, last_error, result_json,
-                 created_at, updated_at, finished_at
-             )
-             SELECT job_id, operation_type, peer, state, phase, roots_json,
-                    heads_json, uploaded_hashes_json, fetched_hashes_json,
-                    attempt_count, max_attempts, last_error, result_json,
-                    created_at, updated_at, finished_at
-               FROM sync_jobs_current;
-             DROP TABLE sync_jobs_current;
-             PRAGMA user_version=5;",
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-            Ok(())
-        }).unwrap();
-    }
-
-    fn create_migration_fixture(db: &OperationalDb) {
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job:predecessor".to_owned(),
-            operation_type: "mirror_pull".to_owned(),
-            operation: serde_json::json!({
-                "schema": 1,
-                "operation_type": "mirror_pull",
-                "modern_only": true,
-            }),
-            peer: Some("node-predecessor".to_owned()),
-            roots: vec!["1".repeat(64)],
-            heads: vec!["2".repeat(64)],
-            max_attempts: 3,
-        })
-        .unwrap();
-        db.merge_credential_profile(&OperationalCredentialProfileRecord {
-            profile_id: "profile-preserved".to_owned(),
-            owner_principal: "fp:operator".to_owned(),
-            home_id: "credential-preserved".to_owned(),
-            authority_revision: 4,
-            credential_generation: 2,
-            state: "active".to_owned(),
-            active_login_id: None,
-            login_epoch: 1,
-            login_expires_at_ms: None,
-            sanitized_account: Some(serde_json::json!({"account_id":"preserved"})),
-            created_at_ms: 1,
-            updated_at_ms: 2,
-        })
-        .unwrap();
-    }
-
-    fn assert_migrated_fixture(db: &OperationalDb) {
-        db.with_sql(|connection| assert_current(connection, db.path(), None)).unwrap();
-        let job = db.get_sync_job("job:predecessor").unwrap().unwrap();
-        assert_eq!(
-            job.operation,
-            serde_json::json!({
-                "schema": 1,
-                "operation_type": "mirror_pull",
-                "legacy_recovery": true,
-                "peer": "node-predecessor",
-            })
-        );
-        let profile = db.credential_profile("profile-preserved").unwrap().unwrap();
-        assert_eq!(profile.authority_revision, 4);
-        assert_eq!(profile.credential_generation, 2);
-        assert_eq!(profile.state, "active");
-    }
-
-    #[test]
-    fn v5_forward_migration_rebuilds_exact_sync_job_schema_and_preserves_authority() {
-        assert!(SCHEMA_SQL.contains(SYNC_JOBS_V6_DDL));
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            let db = OperationalDb::open(&path).unwrap();
-            create_migration_fixture(&db);
-            rewrite_current_sync_jobs_as_v5(&db);
-        }
-
-        let db = OperationalDb::open(&path).unwrap();
-        assert_migrated_fixture(&db);
-    }
-
-    #[test]
-    fn v6_appended_column_intermediate_repairs_exactly_and_preserves_authority() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        {
-            let db = OperationalDb::open(&path).unwrap();
-            create_migration_fixture(&db);
-            rewrite_current_sync_jobs_as_v5(&db);
-            db.with_sql(|connection| Ok(connection.execute_batch(SYNC_JOB_OPERATION_DDL)?)).unwrap();
-            db.with_sql(|connection| Ok(connection.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)?))
-                .unwrap();
-            assert!(db.with_sql(|connection| sync_job_schema_matches(connection, &appended_sync_job_v6_ddl(), None)).unwrap());
-        }
-
-        let db = OperationalDb::open(&path).unwrap();
-        assert_migrated_fixture(&db);
-    }
-
     fn publish_verified(
         db: &OperationalDb,
         namespace: &ReplayIndexNamespace,
@@ -4662,7 +3507,7 @@ mod tests {
         for kind in [&namespace("dispatch.effect"), &namespace("provider.call")] {
             let tempdir = tempfile::tempdir().unwrap();
             let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-            let db = OperationalDb::open(&path).unwrap();
+            let db = TestOperational::open(&path);
             let first = replay_record('a', 'b', 'c');
             assert_eq!(
                 db.lookup_replay_record(kind, &first.cache_key, |_| {
@@ -4766,7 +3611,7 @@ mod tests {
     fn immutable_replay_never_replaces_the_first_observation() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let first = replay_record('a', 'b', 'c');
         db.publish_replay_record(&namespace("dispatch.effect"), &first, |_| {
             ReplayRecordVerification::Verified
@@ -4807,7 +3652,7 @@ mod tests {
     #[test]
     fn credential_profile_authority_folds_by_monotonic_revision() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open(&tempdir.path().join(OPERATIONAL_DB_FILENAME)).unwrap();
+        let db = TestOperational::open(&tempdir.path().join(OPERATIONAL_DB_FILENAME));
         let mut profile = OperationalCredentialProfileRecord {
             profile_id: "profile-one".to_string(),
             owner_principal: "fp:operator".to_string(),
@@ -4859,7 +3704,7 @@ mod tests {
     fn provider_call_records_round_trip_and_prune_by_lanes() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         let record = replay_record('a', 'b', 'c');
         let key = record.cache_key.clone();
@@ -4937,7 +3782,7 @@ mod tests {
     fn effect_record_pruning_drops_least_recently_replayed_first() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         // Wall-clock stamps are second-granular, so recency is set
         // explicitly: `b` is oldest, `a` newest.
         for (key_char, answer_char, object_char, at) in [
@@ -4983,7 +3828,7 @@ mod tests {
     fn effect_record_pruning_spares_replayed_records_from_publication_churn() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         // One banked record replayed long ago, and two fresh never-replayed
         // rows (publication stamps both columns equal) whose recency is
         // NEWER than the banked record's last replay. Recency order alone
@@ -5035,7 +3880,7 @@ mod tests {
     fn transaction_commit_failure_rolls_back_source_of_truth_rows() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         db.with_sql(|connection| Ok(connection.execute_batch(
                 "CREATE TABLE tx_parent (id INTEGER PRIMARY KEY);
                  CREATE TABLE tx_child (
@@ -5067,7 +3912,7 @@ mod tests {
     fn transaction_operation_failure_reports_rollback_failure() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         let error = db
             .immediate_transaction(
@@ -5089,18 +3934,18 @@ mod tests {
     #[test]
     fn initialized_marker_makes_missing_database_fail_closed() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
+        let db = TestOperational::at(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();
         drop(db);
         std::fs::remove_file(&path).unwrap();
 
-        let error = OperationalDb::open_at_runtime_state_dir(tempdir.path())
+        let error = TestOperational::at(tempdir.path())
             .err()
             .expect("an established missing database must fail");
         assert!(
             error
                 .to_string()
-                .contains("established operational database is absent")
+                .contains("established live Operational database is absent")
         );
         assert!(
             !path.exists(),
@@ -5111,7 +3956,7 @@ mod tests {
     #[test]
     fn initialized_marker_makes_empty_database_fail_closed() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
+        let db = TestOperational::at(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();
         drop(db);
         std::fs::OpenOptions::new()
@@ -5120,7 +3965,7 @@ mod tests {
             .open(&path)
             .unwrap();
 
-        let error = OperationalDb::open_at_runtime_state_dir(tempdir.path())
+        let error = TestOperational::at(tempdir.path())
             .err()
             .expect("an established empty database must not be initialized");
         assert!(error.to_string().contains("application_id"));
@@ -5130,7 +3975,7 @@ mod tests {
     fn stable_store_reopen_preserves_rows() {
         let tempdir = tempfile::tempdir().unwrap();
         let hash = "ab".repeat(32);
-        let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
+        let db = TestOperational::at(tempdir.path()).unwrap();
         db.record_cas_entry(&NewCasEntryAttribution {
             hash: hash.clone(),
             entry_kind: CasEntryKind::Object,
@@ -5143,7 +3988,7 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let reopened = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
+        let reopened = TestOperational::at(tempdir.path()).unwrap();
         let row = reopened
             .get_cas_entry(CasEntryKind::Object, &hash)
             .unwrap()
@@ -5153,17 +3998,41 @@ mod tests {
     }
 
     #[test]
-    fn unknown_operational_schema_fails_without_reset() {
+    fn runtime_state_open_rejects_database_symlink() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
+        let target = tempdir.path().join("target.sqlite3");
+        std::fs::write(&target, b"").unwrap();
+        let runtime_state_dir = tempdir.path().join("runtime-state");
+        std::fs::create_dir(&runtime_state_dir).unwrap();
+        lillux::PinnedDirectory::open(&runtime_state_dir)
+            .unwrap()
+            .unwrap()
+            .create_symlink(
+                std::ffi::OsStr::new(OPERATIONAL_DB_FILENAME),
+                target.to_str().unwrap().as_bytes(),
+            )
+            .unwrap();
+
+        let error = TestOperational::at(&runtime_state_dir)
+            .err()
+            .expect("symlink must be rejected");
+        assert!(format!("{error:#}").contains("is not regular"), "{error:#}");
+    }
+
+    #[test]
+    fn predecessor_operational_schema_is_refused_with_its_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = TestOperational::at(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();
-        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=0;")?)).unwrap();
+        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=5;")?)).unwrap();
         drop(db);
 
-        let error = OperationalDb::open_at_runtime_state_dir(tempdir.path())
+        let error = TestOperational::at(tempdir.path())
             .err()
-            .expect("owned stale schema must fail");
-        assert!(error.to_string().contains("schema version mismatch"));
+            .expect("owned predecessor schema must fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("schema version mismatch"), "{message}");
+        assert!(message.contains("has no migration"), "{message}");
         assert!(path.is_file(), "source-of-truth file must not be reset");
     }
 
@@ -5171,37 +4040,44 @@ mod tests {
     fn exact_schema_rejects_a_stamped_database_missing_check_constraints() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let conn = Connection::open(&path).unwrap();
-        configure_connection(&conn).unwrap();
-        let weakened = SCHEMA_SQL.replace(" CHECK (bytes >= 0)", "");
-        sqlite_schema::init_owned(&conn, &operational_schema_spec(), &weakened, &path).unwrap();
-
-        let error = assert_current(&conn, &path, None).unwrap_err();
-        assert!(error.to_string().contains("complete schema SQL mismatch"));
+        // A transient native connection; the path only names the store in
+        // messages.
+        let host = crate::test_support::shared_test_host();
+        // The current schema's native reference, built before the subject's
+        // SQL scope.
+        // SAFETY: test-only issuance under the shared host's funded factory.
+        let reference_inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeOperationalSchemaReference,
+                host.destination(),
+            )
+        }
+        .unwrap();
+        let reference = prepare_operational_schema_reference(std::sync::Arc::clone(host.factory()), reference_inputs)
+            .unwrap_or_else(|failure| panic!("Operational schema reference refused: {failure}"));
+        let connection = host.open_transient();
+        let error = connection
+            .with_sql(|conn| {
+                configure_connection(conn)?;
+                let weakened = SCHEMA_SQL.replace(" CHECK (bytes >= 0)", "");
+                sqlite_schema::init_owned(conn, &operational_schema_spec(), &weakened, &path)?;
+                Ok(assert_current(conn, &path, reference.definition()).unwrap_err())
+            })
+            .unwrap();
+        host.close(connection);
+        let (_definition, terminal) = reference.into_original_parts();
+        host.retain_terminal(terminal);
+        crate::test_support::release_shared_test_host(host);
+        let message = format!("{error:#}");
+        assert!(message.contains("complete schema SQL mismatch"), "{message}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn strict_open_rejects_database_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let tempdir = tempfile::tempdir().unwrap();
-        let target = tempdir.path().join("target.sqlite3");
-        drop(OperationalDb::open(&target).unwrap());
-        let link = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        symlink(&target, &link).unwrap();
-
-        let error = OperationalDb::open_existing_current(&link)
-            .err()
-            .expect("symlink must be rejected");
-        assert!(error.to_string().contains("regular non-symlink file"));
-    }
-
-    #[test]
     fn retention_deletes_only_old_terminal_sync_jobs() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         let insert_job = |job_id: &str, state: &str, ts: &str, finished_at: Option<&str>| {
             db.with_sql(|connection| Ok(connection.execute(
@@ -5261,7 +4137,7 @@ mod tests {
     fn record_cas_entry_preserves_first_seen_and_updates_state() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let hash = "ab".repeat(32);
 
         db.record_cas_entry(&NewCasEntryAttribution {
@@ -5386,7 +4262,7 @@ mod tests {
     fn cas_entry_state_queries_are_deterministic() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let staged_hash = "cd".repeat(32);
         let mirrored_hash = "ef".repeat(32);
 
@@ -5434,7 +4310,7 @@ mod tests {
     fn cas_entry_lookup_is_keyed_by_kind_and_hash() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let hash = "99".repeat(32);
 
         db.record_cas_entry(&NewCasEntryAttribution {
@@ -5479,7 +4355,7 @@ mod tests {
     fn admission_attestation_index_is_queryable_by_subject_and_policy() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let subject = "11".repeat(32);
         let attestation = "22".repeat(32);
 
@@ -5536,7 +4412,7 @@ mod tests {
     fn record_cas_entry_rejects_invalid_hash() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         let err = db
             .record_cas_entry(&NewCasEntryAttribution {
@@ -5569,7 +4445,7 @@ mod tests {
     fn sync_job_lifecycle_is_persisted() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let root_hash = "11".repeat(32);
         let head_hash = "22".repeat(32);
         let uploaded_hash = "33".repeat(32);
@@ -5664,10 +4540,12 @@ mod tests {
     fn sync_recovery_scans_do_not_exhaust_worker_stack() {
         std::thread::Builder::new()
             .name("sync-recovery-bounded-stack".to_string())
-            .stack_size(256 * 1024)
+            // A Tokio worker's default stack. The State opens on this same
+            // thread, since a live store never crosses threads.
+            .stack_size(2 * 1024 * 1024)
             .spawn(|| {
                 let tempdir = tempfile::tempdir().unwrap();
-                let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+                let db = TestOperational::open(&tempdir.path().join("operational.sqlite3"));
 
                 assert!(
                     db.list_active_sync_jobs_by_operation_type_after(
@@ -5697,7 +4575,7 @@ mod tests {
     #[test]
     fn active_operation_recovery_keyset_reaches_more_than_one_page() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let db = TestOperational::open(&tempdir.path().join("operational.sqlite3"));
         for index in 0..70 {
             db.create_sync_job(&NewSyncJob {
                 job_id: format!("job:paged:{index:03}"),
@@ -5784,7 +4662,7 @@ mod tests {
     #[test]
     fn sync_job_can_begin_at_an_already_durable_boundary() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let db = TestOperational::open(&tempdir.path().join("operational.sqlite3"));
         let progress = serde_json::json!({
             "schema":"ryeos.worker_session_handoff_progress.v1",
             "operation_id":"11".repeat(32),
@@ -5821,7 +4699,7 @@ mod tests {
     #[test]
     fn sync_job_refuses_an_operation_type_outside_its_canonical_payload() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let db = TestOperational::open(&tempdir.path().join("operational.sqlite3"));
         let error = db
             .create_sync_job(&NewSyncJob {
                 job_id: "job:mismatch".to_string(),
@@ -5848,7 +4726,7 @@ mod tests {
     fn sync_job_attempt_lifecycle_is_persisted() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         db.create_sync_job(&NewSyncJob {
             job_id: "job:attempts".to_string(),
@@ -5964,7 +4842,7 @@ mod tests {
     fn daemon_restart_settles_running_attempt_and_preserves_retryable_job() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         db.create_sync_job(&NewSyncJob {
             job_id: "job:interrupted".to_owned(),
             operation_type: "worker_session_handoff".to_owned(),
@@ -6012,7 +4890,7 @@ mod tests {
     fn authoritative_result_can_complete_an_exhausted_interrupted_job() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         db.create_sync_job(&NewSyncJob {
             job_id: "job:authoritative-recovery".to_owned(),
             operation_type: "external_content_activation".to_owned(),
@@ -6064,7 +4942,7 @@ mod tests {
     fn sync_job_attempt_completion_must_match_parent_job() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         for job_id in ["job:attempt-owner-a", "job:attempt-owner-b"] {
             db.create_sync_job(&NewSyncJob {
@@ -6120,7 +4998,7 @@ mod tests {
     fn sync_job_attempts_respect_parent_limits_and_state() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         db.create_sync_job(&NewSyncJob {
             job_id: "job:limited".to_string(),
@@ -6212,7 +5090,7 @@ mod tests {
     fn zero_attempt_limit_is_an_unbounded_exact_operation_lane() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         db.create_sync_job(&NewSyncJob {
             job_id: "job:unbounded".to_owned(),
@@ -6269,7 +5147,7 @@ mod tests {
     fn startup_reconciliation_prunes_the_interrupted_unbounded_attempt_at_the_cap() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         db.create_sync_job(&NewSyncJob {
             job_id: "job:restart-at-cap".to_owned(),
@@ -6342,7 +5220,7 @@ mod tests {
     fn active_sync_job_count_only_includes_non_terminal_jobs() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         db.create_sync_job(&NewSyncJob {
             job_id: "job-running".to_string(),
@@ -6400,7 +5278,7 @@ mod tests {
     fn sync_job_rejects_illegal_and_terminal_transitions() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         db.create_sync_job(&NewSyncJob {
             job_id: "job-transition".to_string(),
@@ -6487,7 +5365,7 @@ mod tests {
     fn exhausted_failed_sync_job_requires_exact_authoritative_completion() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
         let operation = serde_json::json!({
             "schema":"fixture.v1",
             "operation_type":"external_content_activation"
@@ -6564,7 +5442,7 @@ mod tests {
     fn sync_job_rejects_invalid_hashes() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
-        let db = OperationalDb::open(&path).unwrap();
+        let db = TestOperational::open(&path);
 
         let err = db
             .create_sync_job(&NewSyncJob {

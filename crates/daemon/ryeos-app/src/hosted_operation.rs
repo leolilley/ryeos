@@ -669,7 +669,6 @@ mod tests {
 
         let root_id = "root-async-drain-fixture";
         let dir = tempfile::tempdir().unwrap();
-        let runtime_state_dir = dir.path().join(".ai/state");
         let identity =
             ryeos_node_runtime::identity::NodeIdentity::create(&dir.path().join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
@@ -677,17 +676,13 @@ mod tests {
         ));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state_store = Arc::new(
-            crate::state_store::StateStore::new_with_head_trust(
-                dir.path().to_path_buf(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                signer,
-                crate::write_barrier::WriteBarrier::new(),
-                Arc::new(head_trust),
-            )
-            .unwrap(),
-        );
+        let store_owner = crate::state_store::test_native::TestStateStore::open(
+            dir.path(),
+            signer,
+            Arc::new(head_trust),
+        )
+        .unwrap();
+        let state_store = Arc::clone(store_owner.store());
         let appendable = Arc::new(AtomicBool::new(true));
         let operation = Arc::new(Mutex::new(Some(
             begin_hosted_root_operation_with_check(root_id, || Ok(true)).unwrap(),

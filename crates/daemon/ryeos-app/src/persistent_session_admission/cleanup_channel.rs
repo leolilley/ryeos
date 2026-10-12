@@ -580,12 +580,6 @@ enum Phase {
     Failed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StartupMode {
-    InitFirst,
-    Preflight,
-}
-
 /// One original channel and absolute deadline, never a per-frame timeout.
 /// No API returns RuntimeDb cleanup evidence, financial authority or release.
 pub(crate) struct TrustedCleanupChannel {
@@ -593,7 +587,6 @@ pub(crate) struct TrustedCleanupChannel {
     bindings: Option<CleanupBindings>,
     deadline: lillux::time::MonotonicDeadline,
     phase: Phase,
-    startup_mode: StartupMode,
     preflight: Option<PreflightRequest>,
     preflight_candidate: Option<PendingPreflightObservation>,
 }
@@ -609,28 +602,17 @@ impl PendingDriverClose {
 }
 
 impl TrustedCleanupChannel {
-    pub(crate) fn prepare(
-        deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<(
-        Self,
-        ryeos_engine::isolation::IsolationTargetChannelAuthority,
-    )> {
-        Self::prepare_mode(deadline, StartupMode::InitFirst)
-    }
-
-    /// Explicit new mode; no production caller or accepting factory yet.
     pub(crate) fn prepare_preflight(
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<(
         Self,
         ryeos_engine::isolation::IsolationTargetChannelAuthority,
     )> {
-        Self::prepare_mode(deadline, StartupMode::Preflight)
+        Self::prepare_mode(deadline)
     }
 
     fn prepare_mode(
         deadline: lillux::time::MonotonicDeadline,
-        startup_mode: StartupMode,
     ) -> Result<(
         Self,
         ryeos_engine::isolation::IsolationTargetChannelAuthority,
@@ -652,7 +634,6 @@ impl TrustedCleanupChannel {
                 bindings: None,
                 deadline,
                 phase: Phase::Created,
-                startup_mode,
                 preflight: None,
                 preflight_candidate: None,
             },
@@ -674,7 +655,7 @@ impl TrustedCleanupChannel {
             "preflight original deadline expired"
         );
         ensure!(
-            self.startup_mode == StartupMode::Preflight && previous == Phase::Created,
+            previous == Phase::Created,
             "preflight queue reused or wrong startup mode"
         );
         self.preflight = Some(PreflightRequest {
@@ -713,7 +694,7 @@ impl TrustedCleanupChannel {
             "preflight original deadline expired"
         );
         ensure!(
-            self.startup_mode == StartupMode::Preflight && previous == Phase::PreflightQueued,
+            previous == Phase::PreflightQueued,
             "preflight result premature/reused"
         );
         let request = self
@@ -739,9 +720,9 @@ impl TrustedCleanupChannel {
             .expect("retained before late checks"))
     }
 
-    /// Legacy mode queues before release. Explicit preflight mode requires a
-    /// parsed candidate and a separately issued private startup value afterwards.
-    /// No production factory exists; phase correspondence alone cannot issue it.
+    /// Initialization requires the parsed preflight candidate and a separately
+    /// issued private startup value afterwards; phase correspondence alone
+    /// cannot issue it.
     pub(crate) fn queue_init(
         &mut self,
         bindings: CleanupBindings,
@@ -749,48 +730,42 @@ impl TrustedCleanupChannel {
     ) -> Result<()> {
         let previous = std::mem::replace(&mut self.phase, Phase::Failed);
         ensure!(
-            (self.startup_mode == StartupMode::InitFirst && previous == Phase::Created)
-                || (self.startup_mode == StartupMode::Preflight
-                    && previous == Phase::PreflightResultRead),
+            previous == Phase::PreflightResultRead,
             "cleanup initialization was reused"
         );
         bindings.validate()?;
-        if self.startup_mode == StartupMode::Preflight {
-            ensure!(
-                !self.deadline.remaining().is_zero(),
-                "preflight original deadline expired before init"
-            );
-            ensure!(
-                self.preflight
-                    .as_ref()
-                    .is_some_and(|request| request.bindings == bindings),
-                "preflight initialization changed original bindings"
-            );
-            let candidate = self
-                .preflight_candidate
+        ensure!(
+            !self.deadline.remaining().is_zero(),
+            "preflight original deadline expired before init"
+        );
+        ensure!(
+            self.preflight
                 .as_ref()
-                .context("preflight parsed candidate missing")?;
-            ensure!(
-                candidate.observation.uuid_v2_hex == startup.uuid_v2_hex
-                    && candidate.request.inputs.gnu_bounds == startup.gnu_bounds
-                    && candidate.request.inputs.driver_bounds == startup.driver_bounds,
-                "preflight initialization changed parsed comparisons"
-            );
-            self.channel
-                .ensure_peer_live_and_quiet()
-                .context("unexpected producer bytes before init")?;
-        }
+                .is_some_and(|request| request.bindings == bindings),
+            "preflight initialization changed original bindings"
+        );
+        let candidate = self
+            .preflight_candidate
+            .as_ref()
+            .context("preflight parsed candidate missing")?;
+        ensure!(
+            candidate.observation.uuid_v2_hex == startup.uuid_v2_hex
+                && candidate.request.inputs.gnu_bounds == startup.gnu_bounds
+                && candidate.request.inputs.driver_bounds == startup.driver_bounds,
+            "preflight initialization changed parsed comparisons"
+        );
+        self.channel
+            .ensure_peer_live_and_quiet()
+            .context("unexpected producer bytes before init")?;
         write_init(
             &mut self.channel.with_deadline(self.deadline),
             &bindings,
             startup,
         )?;
-        if self.startup_mode == StartupMode::Preflight {
-            ensure!(
-                !self.deadline.remaining().is_zero(),
-                "preflight original deadline expired after init"
-            );
-        }
+        ensure!(
+            !self.deadline.remaining().is_zero(),
+            "preflight original deadline expired after init"
+        );
         self.bindings = Some(bindings);
         self.phase = Phase::InitQueued;
         Ok(())
@@ -994,15 +969,6 @@ mod tests {
                 .queue_preflight(request.bindings, request.challenge, request.inputs)
                 .is_err()
         );
-        let (mut legacy, _legacy_peer) = TrustedCleanupChannel::prepare(deadline).unwrap();
-        let request = preflight_request();
-        assert!(
-            legacy
-                .queue_preflight(request.bindings, request.challenge, request.inputs)
-                .is_err()
-        );
-        assert!(matches!(legacy.phase, Phase::Failed));
-        assert!(legacy.queue_init(bindings(), &startup()).is_err());
     }
 
     #[test]
@@ -1014,7 +980,6 @@ mod tests {
             bindings: None,
             deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::ZERO),
             phase: Phase::PreflightQueued,
-            startup_mode: StartupMode::Preflight,
             preflight: Some(request),
             preflight_candidate: None,
         };
@@ -1066,9 +1031,11 @@ mod tests {
 
         let mut frame = Vec::new();
         write_frame(&mut frame, "retired", &bindings).unwrap();
+        // POSIX printf reads `\ddd` (one to three octal digits) in its format
+        // string; the `\0ddd` form is only portable inside `%b` arguments.
         let octal = frame
             .iter()
-            .map(|byte| format!("\\0{byte:03o}"))
+            .map(|byte| format!("\\{byte:03o}"))
             .collect::<String>();
         // The shell writes the exact frame, duplicates fd 4, closes fd 4,
         // then blocks reading from its duplicate. A frame is not write closure.
@@ -1082,7 +1049,6 @@ mod tests {
             bindings: Some(bindings),
             deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2)),
             phase: Phase::ShutdownSent,
-            startup_mode: StartupMode::InitFirst,
             preflight: None,
             preflight_candidate: None,
         };

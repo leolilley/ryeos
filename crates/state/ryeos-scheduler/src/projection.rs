@@ -537,8 +537,8 @@ mod tests {
 
     const TEST_KEY: [u8; 32] = [42; 32];
 
-    fn test_db() -> SchedulerDb {
-        SchedulerDb::new_in_memory().expect("open in-memory scheduler db")
+    fn test_db() -> crate::test_native::TestSchedulerDb {
+        crate::test_native::TestSchedulerDb::open()
     }
 
     fn schedule_dir(root: &Path) -> PathBuf {

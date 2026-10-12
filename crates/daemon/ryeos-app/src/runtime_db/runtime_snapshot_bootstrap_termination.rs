@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn snapshot_upload_and_source_termination_exclude_each_other() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (first_source, first_occurrence) = source(&db, false);
         let snapshot = ready_snapshot(&db, &first_source, &first_occurrence);
         db.reserve_runtime_snapshot(&snapshot).unwrap();
@@ -658,7 +658,7 @@ mod tests {
                 .is_err()
         );
 
-        let other = RuntimeDb::new_in_memory().unwrap();
+        let other = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&other, false);
         let snapshot = ready_snapshot(&other, &source, &occurrence);
         other
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn recovery_selects_only_due_or_already_reserved_exact_sources() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&db, false);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         assert!(db.recoverable_bootstrap_sources(now).unwrap().is_empty());
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn recovery_rotates_past_permanently_uncertain_oldest_sources() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let created = chrono::Utc::now().to_rfc3339();
         let mut all = std::collections::BTreeSet::new();
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn materialized_parent_window_is_bounded_by_retained_source_expiry() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&db, false);
         let mut snapshot = ready_snapshot(&db, &source, &occurrence);
         let created =
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn uncertain_upload_allows_only_read_only_cleanup_after_exact_lifetime() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let created_at = (chrono::Utc::now() - chrono::Duration::seconds(898)).to_rfc3339();
         let (source, occurrence) = source_with_created_at(&db, false, &created_at);
         let mut snapshot = ready_snapshot(&db, &source, &occurrence);
@@ -781,7 +781,7 @@ mod tests {
         mutation.mode = BootstrapCleanupMode::TerminateOnce;
         assert!(db.reserve_bootstrap_termination(&mutation).is_err());
 
-        let other = RuntimeDb::new_in_memory().unwrap();
+        let other = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let created_at = chrono::Utc::now().to_rfc3339();
         let (source, occurrence) = source_with_created_at(&other, false, &created_at);
         let mut early = termination(&source, &occurrence);
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn expired_uncontacted_deadline_renews_without_reminting_termination() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source_intent, occurrence) = source(&db, false);
         let mut original = termination(&source_intent, &occurrence);
         original.attempt_deadline_ms =

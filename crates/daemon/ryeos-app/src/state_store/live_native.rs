@@ -923,8 +923,10 @@ impl OriginalNativeDestinationAuthority for LiveStateOpen {
     }
 
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
+        // Failing to read this process's own identity says nothing about the
+        // original; the mismatch below is the fact.
         let process = lillux::process_control::capture_current_process_identity()
-            .map_err(anyhow::Error::msg)?;
+            .map_err(|error| anyhow::Error::msg(error).context(lillux_sqlite::NativeCheckUnobservable))?;
         anyhow::ensure!(
             process == self.process && Arc::ptr_eq(factory, &self.factory),
             "live State admission differs from original process/factory"
@@ -2817,6 +2819,146 @@ impl ReleasedLiveStateStoreStartup {
         Ok(terminals)
     }
     pub fn prior_refusal(&self) -> Option<&anyhow::Error> { self.progress.prior_refusal.as_ref() }
+
+    /// End a released failed start whose sources never left it, in process,
+    /// yielding its native census: every connection terminal and closed
+    /// generation lease, for the in-process host to record before it finishes
+    /// its backend. The opening roots end with this call. A start that began
+    /// any outside handoff is refused whole; a refused part goes back into
+    /// the retained close progress for [`LiveStateStoreStartupRecoveryFailure::retry`].
+    pub fn into_census(self, factory: Arc<OriginalNativeFactory>)
+        -> std::result::Result<super::StateStoreCensus, LiveStateStoreStartupRecoveryFailure> {
+        let retain = |progress: std::mem::ManuallyDrop<StoreStartupCloseProgress>| {
+            LiveStateStoreStartupRecoveryFailure { custody: StoreStartupRecoveryCustody::Closing {
+                factory: Arc::clone(&factory),
+                progress: std::mem::ManuallyDrop::new(Mutex::new(std::mem::ManuallyDrop::into_inner(progress))),
+            } }
+        };
+        let Self { mut progress } = self;
+        let checked = (|| -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
+            factory.require_original_process()?;
+            progress.original()?.require_close_factory(&factory)?;
+            let p = &*progress;
+            anyhow::ensure!(p.store_destination_join.get().is_none()
+                && p.runtime_packet_parts.iter().all(Option::is_none)
+                && p.operational_packet_parts.iter().all(Option::is_none)
+                && p.scheduler_packet_parts.is_none() && p.scheduler_unopened_database.is_none()
+                && p.scheduler_unopened_schema_reference.is_none()
+                && p.runtime_schema_source_parts.is_none() && p.runtime_schema_unused_inputs.is_none()
+                && p.runtime_unopened_schema_reference.is_none() && p.scheduler_admission_sources.is_none()
+                && p.operational_sql_custody.iter().all(Option::is_none)
+                && p.runtime_sql_custody.iter().all(Option::is_none)
+                && p.physical_registry.is_none() && p.store_parent.is_none() && p.store_parent_parts.is_none()
+                && p.store_parent_finalization.is_none() && !p.store_parent_finalization_retired
+                && p.runtime.is_none() && p.runtime_failure.is_none() && p.runtime_outside.is_none()
+                && p.runtime_open_failure.is_none() && p.runtime_released_outside.is_none()
+                && p.state.is_none() && p.state_failure.is_none() && p.state_open_failure.is_none()
+                && p.state_recovery_failure.is_none() && p.state_physical.is_none()
+                && p.operational_open_failure.is_none() && p.operational_recovery_failure.is_none()
+                && p.operational_physical.is_none() && p.schema_failure.is_none(),
+                "released Store startup began an outside source handoff");
+            let mut terminals = Vec::new();
+            if let Some(closed) = &p.runtime_closed { terminals.extend(closed.native_terminals()?); }
+            if let Some(released) = &p.runtime_released { terminals.extend(released.native_terminals(&factory)?); }
+            if let Some(released) = &p.schema_released {
+                if let Some(terminal) = released.terminal(&factory)? { terminals.push(terminal.clone()); }
+            }
+            for terminal in &terminals { terminal.require_original(&factory)?; }
+            Ok(terminals)
+        })();
+        let mut terminals = match checked {
+            Ok(terminals) => terminals,
+            Err(_) => return Err(retain(progress)),
+        };
+        let mut leases = Vec::new();
+        let mut lease_retirements = Vec::new();
+        let mut prior_refusals = Vec::new();
+        if let Some(closed) = progress.state_closed.take() {
+            match closed.into_census(Arc::clone(&factory)) {
+                Ok(census) => {
+                    let ryeos_state::state_db::LiveStateCensus { terminals: state, leases: state_leases,
+                        lease_retirement, prior_refusal } = census;
+                    terminals.extend(state);
+                    leases.extend(state_leases);
+                    lease_retirements.push(lease_retirement);
+                    prior_refusals.extend(prior_refusal);
+                }
+                Err(failure) => {
+                    progress.state_failure = Some(failure);
+                    return Err(retain(progress));
+                }
+            }
+        }
+        if let Some(released) = progress.state_released.take() {
+            match released.into_census(&factory) {
+                Ok(census) => {
+                    let ryeos_state::state_db::LiveStateCensus { terminals: state, leases: state_leases,
+                        lease_retirement, prior_refusal } = census;
+                    terminals.extend(state);
+                    leases.extend(state_leases);
+                    lease_retirements.push(lease_retirement);
+                    prior_refusals.extend(prior_refusal);
+                }
+                Err((released, _error)) => {
+                    progress.state_released = Some(released);
+                    return Err(retain(progress));
+                }
+            }
+        }
+        if let Some(released) = progress.operational_released.take() {
+            match released.into_census(&factory) {
+                Ok(operational) => terminals.extend(operational),
+                Err((released, _error)) => {
+                    progress.operational_released = Some(released);
+                    return Err(retain(progress));
+                }
+            }
+        }
+        // A schema reference refused before any ticket holds only unused
+        // one-shot inputs; they end in their issuing process here.
+        if let Some(released) = progress.schema_released.take() {
+            let has_terminal = released.terminal(&factory).map(|terminal| terminal.is_some());
+            match has_terminal {
+                Ok(false) => match released.release_unused(&factory) {
+                    Ok(prior) => prior_refusals.push(prior),
+                    Err((released, _error)) => {
+                        progress.schema_released = Some(released);
+                        return Err(retain(progress));
+                    }
+                },
+                Ok(true) | Err(_) => progress.schema_released = Some(released),
+            }
+        }
+        let StoreStartupCloseProgress { store_destination_join, runtime_packet_parts, operational_packet_parts,
+            scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
+            runtime_schema_source_parts, runtime_schema_unused_inputs, runtime_unopened_schema_reference,
+            runtime_schema_refusal, scheduler_admission_sources, failed_auxiliary_sources,
+            operational_sql_custody, runtime_sql_custody, physical_registry, original, store_parent,
+            store_parent_parts, store_parent_finalization, store_parent_finalization_retired: _,
+            runtime, runtime_failure, runtime_closed, runtime_outside, runtime_open_failure,
+            runtime_released, runtime_released_outside, state, state_failure, state_closed,
+            state_open_failure, state_recovery_failure, state_released, state_physical,
+            operational_open_failure, operational_recovery_failure, operational_released,
+            operational_physical, schema_failure, schema_released, prior_refusal }
+            = std::mem::ManuallyDrop::into_inner(progress);
+        // Every outside slot was checked empty above and every native owner's
+        // terminal is in the census; the facades and opening roots end here.
+        drop(std::mem::ManuallyDrop::into_inner(store_parent));
+        drop(std::mem::ManuallyDrop::into_inner(store_parent_parts));
+        drop((store_destination_join, runtime_packet_parts, operational_packet_parts, scheduler_packet_parts,
+            scheduler_unopened_database, scheduler_unopened_schema_reference, runtime_schema_source_parts,
+            runtime_schema_unused_inputs, runtime_unopened_schema_reference, scheduler_admission_sources,
+            failed_auxiliary_sources, operational_sql_custody, runtime_sql_custody, physical_registry,
+            store_parent_finalization));
+        drop((runtime, runtime_failure, runtime_closed, runtime_outside, runtime_open_failure,
+            runtime_released, runtime_released_outside));
+        drop((state, state_failure, state_closed, state_open_failure, state_recovery_failure,
+            state_released, state_physical, operational_open_failure, operational_recovery_failure,
+            operational_released, operational_physical, schema_failure, schema_released));
+        drop(original);
+        let prior_refusal = prior_refusal.or(runtime_schema_refusal).or(prior_refusals.into_iter().next());
+        Ok(super::StateStoreCensus { terminals, leases, lease_retirements, prior_refusal })
+    }
 }
 enum StoreStartupRecoveryCustody {
     Opening(LiveStateStoreOpenFailure),

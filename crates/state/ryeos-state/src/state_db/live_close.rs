@@ -970,7 +970,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: LiveStateCloseCus
                 let original = state.original_projection_context.as_ref().context("live State native context absent")?;
                 anyhow::ensure!(original.factory.same_original(&factory)
                     && matches!(&original.authority, OriginalProjectionStateOwner::Live(_))
-                    && state.projection.original_factory().is_some_and(|owner| owner.same_original(&factory))
+                    && state.projection.original_factory().same_original(&factory)
                     && matches!(&state.operational, OperationalAccess::Available(_)),
                     "live State close changed factory or capability ownership");
                 original.authority.require_selected_runtime(&state._runtime_state_directory)?;
@@ -1047,6 +1047,118 @@ impl StateDb {
     pub fn close_live(self, factory: Arc<OriginalNativeFactory>, guard: &crate::recovery::CasMutationGuard)
         -> std::result::Result<ClosedLiveState, LiveStateCloseFailure> {
         advance_close(factory, LiveStateCloseCustody::State(self), guard, None)
+    }
+
+    /// Close live State into its native census alone, for a host that settles
+    /// in process: every connection terminal and every closed generation
+    /// lease, ready for the host's terminal and lease census. The roots,
+    /// recovery and trust end with this call; the terminals keep their own
+    /// destination owners until the host's census ends. A refusal retains the
+    /// whole close custody for [`LiveStateCloseFailure::retry_census`].
+    pub fn close_live_census(self, factory: Arc<OriginalNativeFactory>, guard: &crate::recovery::CasMutationGuard)
+        -> std::result::Result<LiveStateCensus, LiveStateCloseFailure> {
+        advance_close(Arc::clone(&factory), LiveStateCloseCustody::State(self), guard, None)?
+            .into_census(factory)
+    }
+}
+
+/// The native census of a closed live State: what an in-process host must
+/// record before it finishes its backend.
+pub struct LiveStateCensus {
+    pub terminals: Vec<OriginalNativeConnectionTerminal>,
+    pub leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
+    /// The generation lease owners behind `leases`. A closed lease keeps a
+    /// factory alias until it is retired against the finished native
+    /// backend; run [`GenerationLeaseRetirement::retire_after_backend`]
+    /// after the host finishes its backend and before it releases.
+    pub lease_retirement: GenerationLeaseRetirement,
+    /// The refusal an earlier attempt recorded before this one completed:
+    /// a retried close's first refusal, or a failed start's open refusal.
+    pub prior_refusal: Option<anyhow::Error>,
+}
+
+/// The generation lease owners of a closed State, kept for their retirement
+/// after the native backend finishes. Dropping it without retirement keeps
+/// each lease's factory alias, and the host then refuses its release.
+#[must_use = "retire the generation leases after the native backend finishes"]
+pub struct GenerationLeaseRetirement {
+    leases: Vec<Arc<crate::projection::OriginalGenerationLease>>,
+}
+impl GenerationLeaseRetirement {
+    pub(crate) fn new(leases: Vec<Arc<crate::projection::OriginalGenerationLease>>) -> Self {
+        Self { leases }
+    }
+    /// No lease to retire.
+    pub fn empty() -> Self {
+        Self { leases: Vec::new() }
+    }
+    /// Retire every lease against the finished native backend. A retry skips
+    /// leases already retired; a refusal keeps this owner for that retry.
+    pub fn retire_after_backend(&self, terminal: &lillux_sqlite::OriginalNativeTerminal) -> anyhow::Result<()> {
+        for lease in &self.leases {
+            lease.retire_after_native_terminal(terminal)?;
+        }
+        Ok(())
+    }
+    /// The number of leases not yet retired.
+    pub fn unretired(&self) -> anyhow::Result<usize> {
+        let mut unretired = 0;
+        for lease in &self.leases {
+            if !lease.is_retired()? {
+                unretired += 1;
+            }
+        }
+        Ok(unretired)
+    }
+}
+
+impl ClosedLiveState {
+    /// End a closed live State whose sources never left it, yielding its
+    /// native census. A State whose sources began an outside handoff, or
+    /// whose leases refuse to close, is refused whole.
+    pub fn into_census(self, factory: Arc<OriginalNativeFactory>)
+        -> std::result::Result<LiveStateCensus, LiveStateCloseFailure> {
+        let collected = (|| -> anyhow::Result<(Vec<OriginalNativeConnectionTerminal>,
+            Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
+            Vec<Arc<crate::projection::OriginalGenerationLease>>)> {
+            factory.require_original_process()?;
+            anyhow::ensure!(self.progress.context.generated.factory.same_original(&factory),
+                "closed live State census selected a foreign factory");
+            anyhow::ensure!(!self.projection_sources_started && self.destination_join.get().is_none()
+                && self.destination_inputs.is_empty() && self.projection_files.is_empty()
+                && self.projection_native.is_empty() && self.projection_refusals.is_empty()
+                && self.schema_definitions.is_empty(),
+                "closed live State began an outside source handoff");
+            let terminals = self.native_terminals()?;
+            let leases = self.generation_lease_terminals()?;
+            let owners = self.progress.context.generated.generation_leases.try_lock()
+                .map_err(|_| anyhow::anyhow!("actual generation lease registry busy"))?.clone();
+            Ok((terminals, leases, owners))
+        })();
+        let (terminals, leases, owners) = match collected {
+            Ok(collected) => collected,
+            Err(error) => return Err(LiveStateCloseFailure { error, factory,
+                custody: std::mem::ManuallyDrop::new(Mutex::new(LiveStateCloseCustody::Closed(self))) }),
+        };
+        let Self { schema_definitions, projection_files, projection_native, projection_refusals,
+            projection_sources_started: _, destination_inputs, destination_join, progress, prior_refusal } = self;
+        // Each is checked empty above; the census holds every native owner.
+        drop((std::mem::ManuallyDrop::into_inner(schema_definitions),
+            std::mem::ManuallyDrop::into_inner(projection_files),
+            std::mem::ManuallyDrop::into_inner(projection_native),
+            std::mem::ManuallyDrop::into_inner(projection_refusals),
+            std::mem::ManuallyDrop::into_inner(destination_inputs), destination_join));
+        drop(std::mem::ManuallyDrop::into_inner(progress));
+        Ok(LiveStateCensus { terminals, leases, lease_retirement: GenerationLeaseRetirement::new(owners), prior_refusal })
+    }
+}
+
+impl LiveStateCloseFailure {
+    /// Retry a refused [`StateDb::close_live_census`] from its retained custody.
+    pub fn retry_census(self, guard: &crate::recovery::CasMutationGuard)
+        -> std::result::Result<LiveStateCensus, Self> {
+        let factory = Arc::clone(&self.factory);
+        self.retry(guard)?.into_census(factory)
     }
 }
 

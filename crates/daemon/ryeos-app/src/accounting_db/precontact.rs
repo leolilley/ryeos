@@ -956,20 +956,28 @@ mod tests {
         (fixture, scratch, owner)
     }
 
+    /// Run `operation` on the ledger's own native connection.
+    fn sql<T>(db: &AccountingDb, operation: impl FnOnce(&Connection) -> T) -> T {
+        db.with_conn(|conn| Ok(operation(conn))).unwrap()
+    }
+
     fn exact_hold(owner: &OriginalFundingOwner) -> i64 {
-        let conn = owner.accounting.lock_conn().unwrap();
-        conn.query_row("SELECT COALESCE(SUM(held_usd_nanos),0) FROM resource_financial_debit WHERE operation_id=?1",
-            [owner.operation_id.as_str()], |row| row.get(0)).unwrap()
+        owner.accounting.with_conn(|conn| {
+            Ok(conn.query_row("SELECT COALESCE(SUM(held_usd_nanos),0) FROM resource_financial_debit WHERE operation_id=?1",
+                [owner.operation_id.as_str()], |row| row.get(0)).unwrap())
+        }).unwrap()
     }
 
     fn audits(owner: &OriginalFundingOwner) -> Vec<serde_json::Value> {
-        let conn = owner.accounting.lock_conn().unwrap();
-        let mut statement = conn.prepare("SELECT payload FROM accounting_audit_outbox WHERE operation_id=?1 ORDER BY outbox_seq").unwrap();
-        statement
-            .query_map([owner.operation_id.as_str()], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
-            .collect()
+        owner.accounting.with_conn(|conn| {
+            let mut statement = conn.prepare("SELECT payload FROM accounting_audit_outbox WHERE operation_id=?1 ORDER BY outbox_seq").unwrap();
+            let payloads = statement
+                .query_map([owner.operation_id.as_str()], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+                .collect();
+            Ok(payloads)
+        }).unwrap()
     }
 
     #[cfg(test)]
@@ -1192,21 +1200,22 @@ mod tests {
         drop(owner);
         drop(fixture);
         let reopened =
-            AccountingDb::open_default(&root.path().join("budget-fixture-ledger")).unwrap();
+            crate::state_store::test_native::TestAccountingDb::open(&root.path().join("budget-fixture-ledger")).unwrap();
         assert!(reopened.startup_verify().unwrap().hard_admission_enabled);
-        let conn = reopened.lock_conn().unwrap();
-        let row: (String, Option<String>) = conn.query_row(
-            "SELECT state,owner_incarnation FROM resource_owner_accounting_gate WHERE original_reservation_id=?1", [original], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-        assert_eq!(row, ("precontact_spawn_intent".into(), None));
-        assert_eq!(
-            conn.query_row(
-                "SELECT SUM(held_usd_nanos) FROM resource_financial_debit WHERE operation_id=?1",
-                [operation.as_str()],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            hold
-        );
+        sql(&reopened, |conn| {
+            let row: (String, Option<String>) = conn.query_row(
+                "SELECT state,owner_incarnation FROM resource_owner_accounting_gate WHERE original_reservation_id=?1", [original], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(row, ("precontact_spawn_intent".into(), None));
+            assert_eq!(
+                conn.query_row(
+                    "SELECT SUM(held_usd_nanos) FROM resource_financial_debit WHERE operation_id=?1",
+                    [operation.as_str()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                hold
+            );
+        });
     }
     #[cfg(test)]
     #[test]
@@ -1238,29 +1247,30 @@ mod tests {
         drop(owner);
         drop(fixture);
         let reopened =
-            AccountingDb::open_default(&root.path().join("budget-fixture-ledger")).unwrap();
+            crate::state_store::test_native::TestAccountingDb::open(&root.path().join("budget-fixture-ledger")).unwrap();
         assert!(reopened.startup_verify().unwrap().hard_admission_enabled);
-        let conn = reopened.lock_conn().unwrap();
-        let row: (String, Option<String>) = conn.query_row("SELECT state,owner_incarnation FROM resource_owner_accounting_gate WHERE original_reservation_id=?1", [original], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-        assert_eq!(row, ("precontact_reserved".into(), None));
-        assert_eq!(
-            conn.query_row(
-                "SELECT SUM(held_usd_nanos) FROM resource_financial_debit WHERE operation_id=?1",
-                [operation.as_str()],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            held
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM accounting_audit_outbox WHERE operation_id=?1",
-                [operation.as_str()],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
+        sql(&reopened, |conn| {
+            let row: (String, Option<String>) = conn.query_row("SELECT state,owner_incarnation FROM resource_owner_accounting_gate WHERE original_reservation_id=?1", [original], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(row, ("precontact_reserved".into(), None));
+            assert_eq!(
+                conn.query_row(
+                    "SELECT SUM(held_usd_nanos) FROM resource_financial_debit WHERE operation_id=?1",
+                    [operation.as_str()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                held
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM accounting_audit_outbox WHERE operation_id=?1",
+                    [operation.as_str()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+        });
     }
     pub(super) fn publication_fixture(
         root: &Path,
@@ -1303,25 +1313,25 @@ mod tests {
         assert!(!owner.reserve().unwrap());
         assert_eq!(exact_hold(&owner), 0);
         assert!(owner.take_contact_permit().is_err());
-        let conn = owner.accounting.lock_conn().unwrap();
-        let row: (String, Option<String>) = conn.query_row("SELECT state,directive_budget_id FROM resource_financial_operation WHERE operation_id=?1", [owner.operation_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-        assert_eq!(
-            row,
-            (
-                "reservation_denied".into(),
-                Some("D-original-narrower".into())
-            )
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT SUM(held_usd_nanos) FROM budget_account",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-        drop(conn);
+        sql(&owner.accounting, |conn| {
+            let row: (String, Option<String>) = conn.query_row("SELECT state,directive_budget_id FROM resource_financial_operation WHERE operation_id=?1", [owner.operation_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(
+                row,
+                (
+                    "reservation_denied".into(),
+                    Some("D-original-narrower".into())
+                )
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT SUM(held_usd_nanos) FROM budget_account",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        });
         let event: ryeos_accounting::ResourcePrecontactBudgetTransitionV1 =
             serde_json::from_value(audits(&owner)[0].clone()).unwrap();
         assert_eq!(event.transition, ResourceBudgetState::ReservationDenied);

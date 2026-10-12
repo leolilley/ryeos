@@ -119,27 +119,28 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
             return Ok(original.clone());
         }
         let inspected = permit
-            .inspect_database(
-                |directory, lease, sql_work| match SchedulerDb::inspect_history_reset(
-                    directory, lease, sql_work,
-                ) {
-                    Ok((accounting, proof)) => {
-                        Ok(SqliteInspectionOutcome::Closed { accounting, proof })
+            .inspect_database(|factory, inputs, schema| {
+                match SchedulerDb::inspect_history_reset(factory, inputs, schema) {
+                    Ok((accounting, terminal)) => {
+                        Ok(SqliteInspectionOutcome { accounting, terminal })
                     }
                     Err(error) => {
-                        let recovery = error.chain().find_map(|cause| {
-                        cause.downcast_ref::<ryeos_scheduler::db::SchedulerInspectionCloseFailure>()
-                    }).map(|failure| failure.retry_close().and_then(|()| failure.take_release()));
+                        // A refused acquisition or close retries its same
+                        // native owner; the terminal it reaches still goes to
+                        // the census, carrying the refusal as its accounting.
+                        let recovery = error
+                            .chain()
+                            .find_map(|cause| {
+                                cause.downcast_ref::<ryeos_scheduler::db::SchedulerInspectionCloseFailure>()
+                            })
+                            .map(|failure| {
+                                failure.retry_close().and_then(|()| failure.take_terminal())
+                            });
                         match recovery {
-                            Some(Ok(ryeos_scheduler::db::SchedulerInspectionRelease::Closed(
-                                proof,
-                            ))) => Ok(SqliteInspectionOutcome::Closed {
+                            Some(Ok(terminal)) => Ok(SqliteInspectionOutcome {
                                 accounting: Err(error),
-                                proof,
+                                terminal,
                             }),
-                            Some(Ok(
-                                ryeos_scheduler::db::SchedulerInspectionRelease::Acquisition(proof),
-                            )) => Ok(SqliteInspectionOutcome::AcquisitionReleased { error, proof }),
                             Some(Err(retry)) => Err(anyhow::Error::new(InspectionRetryFailure {
                                 original: error,
                                 retry,
@@ -147,8 +148,8 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
                             None => Err(error),
                         }
                     }
-                },
-            )
+                }
+            })
             .context("inspect disposable scheduler database copy")?;
         Ok(
             inspected.unwrap_or_else(|| SchedulerFireHistoryAccounting::Exact {

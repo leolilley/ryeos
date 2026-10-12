@@ -153,6 +153,16 @@ impl SelectedInvocationBookkeeping {
         self.slots.iter().any(Option::is_some)
     }
 
+    /// End every record the way a daemon exit does: the bookkeeping is
+    /// process memory and owns no native resource, while the durable claims
+    /// it mirrors stay for the next opening's recovery. Test Stores only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn end_process_records(&mut self) {
+        for slot in &mut self.slots {
+            *slot = None;
+        }
+    }
+
     // Registration names only this metadata domain, never an installed owner.
     pub(crate) fn register_generation(
         &mut self,

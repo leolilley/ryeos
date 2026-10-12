@@ -13,20 +13,23 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 
 const WORKER: &str = "worker:fixture/session";
 
+/// Fields drop in declaration order: the application, then the owner that
+/// closes its Store, then the directory.
 struct Fixture {
-    _root: tempfile::TempDir,
     state: AppState,
     bundle: PathBuf,
     kind_root: PathBuf,
     signer: SigningKey,
     worker_body: String,
     manifest: SourceClosureManifest,
+    _store_owner: crate::state_store::test_native::TestStateStore,
+    _root: tempfile::TempDir,
 }
 
 impl Fixture {
     fn new() -> anyhow::Result<Self> {
         let root = tempfile::tempdir()?;
-        let state = crate::state::test_support::build(root.path())?;
+        let (store_owner, state) = crate::state::test_support::build(root.path())?;
         let bundle = root.path().join("fixture-bundle");
         let source = bundle.join(".ai/workers/fixture/lib/session");
         let profile = json!({
@@ -124,12 +127,13 @@ external_content:
         );
         let mut fixture = Self {
             kind_root: root.path().join("fixture-kinds"),
-            _root: root,
             state,
             bundle,
             signer: SigningKey::from_bytes(&[19; 32]),
             worker_body,
             manifest,
+            _store_owner: store_owner,
+            _root: root,
         };
         fixture.write_worker()?;
         fixture.reload_engine()?;

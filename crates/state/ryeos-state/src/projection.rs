@@ -4,17 +4,11 @@
 //! It provides fast read access and is the authoritative source for thread
 //! queries during normal operation.
 
-use std::fs;
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 
 use crate::sqlite_schema;
 
@@ -44,51 +38,26 @@ pub(crate) use chain_commit::{project_committed_chain, project_initial_root_comm
 pub use cursor::ProjectionMeta;
 #[cfg(test)]
 use schema::schema_spec_fingerprint;
-use schema::{PROJECTION_APP_ID, SCHEMA_SQL, projection_schema_epoch, projection_schema_spec};
+use schema::{SCHEMA_SQL, projection_schema_epoch, projection_schema_spec};
 
-pub(crate) enum ProjectionInstanceLease {
-    Host(fs::File),
-    Original(std::sync::Arc<OriginalGenerationLease>),
-}
-impl ProjectionInstanceLease {
-    fn metadata(&self) -> anyhow::Result<fs::Metadata> {
-        match self { Self::Host(file) => Ok(file.metadata()?), Self::Original(owner) => owner.metadata() }
-    }
-    fn share_original(&self) -> anyhow::Result<Self> {
-        match self {
-            Self::Host(file) => Ok(Self::Host(file.try_clone()?)),
-            Self::Original(owner) => { owner.require_active(&owner.factory()?)?; Ok(Self::Original(std::sync::Arc::clone(owner))) }
-        }
-    }
-}
-
-/// Projection database connection wrapper.
+/// Projection database connection wrapper. Every instance is a connection on
+/// a ticket of an original native factory: a transient in-memory projection,
+/// or a generation bound relative to the pinned runtime directory together
+/// with that generation's native lease.
 pub struct ProjectionDb {
     conn: ProjectionConnection,
     path: PathBuf,
-    // Selected generation instances are opened relative to the exact runtime
-    // directory retained by StateDb. Keeping this descriptor alive also keeps
-    // SQLite's /proc/self/fd pathname valid for lazy WAL/SHM opens.
+    // Generation instances are opened relative to the exact runtime directory
+    // retained by StateDb; the native Bound owner holds the data, WAL and SHM
+    // descriptors, and this directory, name and lease are the generation's
+    // filesystem custody. Transient projections hold none of the three.
     _instance_directory: Option<lillux::PinnedDirectory>,
     _instance_name: Option<std::ffi::OsString>,
-    // Pin the exact regular database inode for the lifetime of the SQLite
-    // connection. Selected-generation opens validate the namespace still
-    // names this inode after SQLite has opened it with SQLITE_OPEN_NOFOLLOW;
-    // durable close syncs this descriptor instead of reopening by path.
-    _instance_file: Option<fs::File>,
-    _wal_file: Option<fs::File>,
-    _shm_file: Option<fs::File>,
-    // Every open projection instance holds a shared lease. Retention takes an
-    // exclusive non-blocking lease before unlinking an unselected generation,
-    // so abandoned WAL/journal sidecars can be reclaimed without racing a
-    // process that still has the generation instance open.
-    _instance_lease: Option<ProjectionInstanceLease>,
-}
-
-/// Result of opening the projection database.
-pub struct ProjectionOpenResult {
-    pub db: ProjectionDb,
-    pub reset: bool,
+    // Every open generation holds its shared native lease. Retention takes an
+    // exclusive lease before unlinking an unselected generation, so abandoned
+    // sidecars can be reclaimed without racing a process that still has the
+    // generation open.
+    _instance_lease: Option<Arc<OriginalGenerationLease>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,37 +88,6 @@ fn classify_projection_db(
     })
 }
 
-/// Prove that an obsolete projection-path file still belongs to RyeOS before
-/// an explicit history-discard path removes it. Stale schema epochs are
-/// acceptable here; an empty, foreign, or rebound file is not.
-pub(crate) fn assert_owned_projection_file_in_directory(
-    directory: &lillux::PinnedDirectory,
-    name: &std::ffi::OsStr,
-    expected: &fs::File,
-) -> anyhow::Result<()> {
-    let descriptor_path = directory.descriptor_child_path(name)?;
-    let conn = Connection::open_with_flags(
-        descriptor_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    ensure_pinned_projection_file(directory, name, expected)?;
-    ensure_sqlite_retains_projection_file(expected, "obsolete projection database")?;
-    match classify_projection_db(&conn, PROJECTION_APP_ID)? {
-        ProjectionOwnershipState::Owned => Ok(()),
-        ProjectionOwnershipState::Empty => anyhow::bail!(
-            "obsolete projection path is empty and has no RyeOS ownership stamp: {}",
-            directory.path().join(name).display()
-        ),
-        ProjectionOwnershipState::Foreign {
-            app_id,
-            user_tables,
-        } => anyhow::bail!(
-            "obsolete projection path is foreign and will not be removed: {} (application_id={app_id}, user_tables={user_tables})",
-            directory.path().join(name).display()
-        ),
-    }
-}
-
 fn user_table_count(conn: &Connection) -> anyhow::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -177,34 +115,25 @@ fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
 
 pub(crate) fn projection_schema_sql() -> &'static str { SCHEMA_SQL }
 
-fn assert_projection_schema_sql(
-    conn: &Connection,
-    path: &Path,
-    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
-) -> anyhow::Result<()> {
-    match reference {
-        Some(reference) => reference.require_matches(conn, path),
-        None => sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path),
-    }
-}
-
+/// Initializes a generation this code just created, then verifies it against
+/// the natively prepared same-library schema reference.
 fn init_current_projection_schema(
     conn: &Connection,
     spec: &sqlite_schema::SchemaSpec,
     path: &Path,
-    reference: Option<&sqlite_schema::SchemaSqlDefinition>,
+    reference: &sqlite_schema::SchemaSqlDefinition,
 ) -> anyhow::Result<()> {
     sqlite_schema::init_owned(conn, spec, SCHEMA_SQL, path)?;
     stamp_projection_schema_epoch(conn)?;
     sqlite_schema::assert_owned(conn, spec, path)?;
-    assert_projection_schema_sql(conn, path, reference)?;
+    reference.require_matches(conn, path)?;
     Ok(())
 }
 
 /// Initializes a transient this code just opened as an empty in-memory DB.
 /// `init_owned` refuses any non-empty connection and then runs exactly
 /// `SCHEMA_SQL`, so a same-library reference comparison cannot differ; it is
-/// skipped because the stock reference open is refused under a native scope.
+/// skipped because the transient needs no second reference ticket.
 pub(crate) fn init_fresh_transient_projection_schema(
     conn: &Connection,
     spec: &sqlite_schema::SchemaSpec,
@@ -216,710 +145,19 @@ pub(crate) fn init_fresh_transient_projection_schema(
     Ok(())
 }
 
-fn close_connection(conn: Connection) -> anyhow::Result<()> {
-    conn.close()
-        .map_err(|(_, err)| err)
-        .context("failed to close projection database")
-}
-
-fn reset_projection_files(
-    path: &Path,
-    stored_epoch: i32,
-    current_epoch: i32,
-) -> anyhow::Result<()> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before UNIX_EPOCH")?
-        .as_secs();
-    let suffix = format!(
-        "reset.{stored_epoch}-to-{current_epoch}.{timestamp}.{}",
-        process::id()
-    );
-
-    let mut candidates = Vec::new();
-    for candidate in projection_reset_candidates(path) {
-        let Some(candidate_file) =
-            open_projection_regular_file_no_follow(&candidate, false, false)?
-        else {
-            continue;
-        };
-        let backup = backup_path(&candidate, &suffix);
-        if open_projection_regular_file_no_follow(&backup, false, false)?.is_some() {
-            anyhow::bail!(
-                "projection reset backup path already exists: {}",
-                backup.display()
-            );
-        }
-        candidates.push((candidate, candidate_file, backup));
-    }
-
-    // Validate the entire reset set before mutating any member. A symlink or
-    // special sidecar must fail the reset without first moving the main file.
-    for (candidate, candidate_file, _) in &candidates {
-        ensure_open_projection_regular_file_path(candidate, candidate_file)?;
-    }
-    for (candidate, candidate_file, backup) in candidates {
-        ensure_open_projection_regular_file_path(&candidate, &candidate_file)?;
-        rename_open_projection_file_no_follow(&candidate, &backup, &candidate_file)?;
-        tracing::warn!(
-            path = %candidate.display(),
-            backup = %backup.display(),
-            stored_epoch,
-            current_epoch,
-            "renamed stale projection file"
-        );
-    }
-
-    Ok(())
-}
-
-fn projection_reset_candidates(path: &Path) -> Vec<PathBuf> {
-    let base = path.to_string_lossy();
-    vec![
-        path.to_path_buf(),
-        PathBuf::from(format!("{base}-wal")),
-        PathBuf::from(format!("{base}-shm")),
-        PathBuf::from(format!("{base}-journal")),
-    ]
-}
-
-fn backup_path(path: &Path, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}.{}", path.to_string_lossy(), suffix))
-}
-
-#[cfg(unix)]
-fn open_projection_parent_no_follow(path: &Path) -> anyhow::Result<(fs::File, std::ffi::CString)> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("projection path has no filename: {}", path.display()))?;
-    let file_name =
-        std::ffi::CString::new(file_name.as_bytes()).context("projection filename contains NUL")?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let start = if parent.is_absolute() { "/" } else { "." };
-    let start = std::ffi::CString::new(start).expect("static path contains no NUL");
-    let descriptor = unsafe {
-        libc::open(
-            start.as_ptr(),
-            libc::O_RDONLY
-                | libc::O_DIRECTORY
-                | libc::O_NOFOLLOW
-                | libc::O_CLOEXEC
-                | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error()).context("open projection path traversal root");
-    }
-    let mut directory = unsafe { fs::File::from_raw_fd(descriptor) };
-    for component in parent.components() {
-        use std::path::Component;
-        let component = match component {
-            Component::RootDir | Component::CurDir => continue,
-            Component::Normal(component) => component,
-            Component::ParentDir | Component::Prefix(_) => {
-                anyhow::bail!(
-                    "projection path contains an unsafe parent component: {}",
-                    path.display()
-                )
-            }
-        };
-        let component = std::ffi::CString::new(component.as_bytes())
-            .context("projection path component contains NUL")?;
-        let descriptor = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY
-                    | libc::O_DIRECTORY
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-            )
-        };
-        if descriptor < 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!(
-                    "open projection directory component {:?} without following links",
-                    component
-                )
-            });
-        }
-        directory = unsafe { fs::File::from_raw_fd(descriptor) };
-    }
-    Ok((directory, file_name))
-}
-
-/// Open a projection database, lease, or sidecar descriptor-relative without
-/// following any path component. Missing files are reported as `None` only
-/// when creation was not requested; every opened entry must be regular.
-pub(crate) fn open_projection_regular_file_no_follow(
-    path: &Path,
-    writable: bool,
-    create: bool,
-) -> anyhow::Result<Option<fs::File>> {
-    #[cfg(not(unix))]
-    {
-        let _ = (path, writable, create);
-        anyhow::bail!("secure projection file opening is unavailable on this platform");
-    }
-
-    #[cfg(unix)]
-    {
-        let (parent, file_name) = open_projection_parent_no_follow(path)?;
-        let access = if writable {
-            libc::O_RDWR
-        } else {
-            libc::O_RDONLY
-        };
-        let flags = access
-            | libc::O_NOFOLLOW
-            | libc::O_CLOEXEC
-            | libc::O_NONBLOCK
-            | if create { libc::O_CREAT } else { 0 };
-        let descriptor = if create {
-            unsafe { libc::openat(parent.as_raw_fd(), file_name.as_ptr(), flags, 0o666) }
-        } else {
-            unsafe { libc::openat(parent.as_raw_fd(), file_name.as_ptr(), flags) }
-        };
-        if descriptor < 0 {
-            let error = std::io::Error::last_os_error();
-            if !create && error.kind() == std::io::ErrorKind::NotFound {
-                return Ok(None);
-            }
-            return Err(error).with_context(|| {
-                format!(
-                    "open projection regular file without links {}",
-                    path.display()
-                )
-            });
-        }
-        let file = unsafe { fs::File::from_raw_fd(descriptor) };
-        if !file
-            .metadata()
-            .with_context(|| format!("inspect opened projection file {}", path.display()))?
-            .file_type()
-            .is_file()
-        {
-            anyhow::bail!("projection path is not a regular file: {}", path.display());
-        }
-        Ok(Some(file))
-    }
-}
-
-fn require_projection_regular_file_no_follow(path: &Path) -> anyhow::Result<fs::File> {
-    open_projection_regular_file_no_follow(path, false, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "selected projection instance does not exist: {}",
-            path.display()
-        )
-    })
-}
-
-pub(crate) fn ensure_open_projection_regular_file_path(
-    path: &Path,
-    held: &fs::File,
-) -> anyhow::Result<()> {
-    let current = require_projection_regular_file_no_follow(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let held_metadata = held.metadata()?;
-        let current_metadata = current.metadata()?;
-        if held_metadata.dev() != current_metadata.dev()
-            || held_metadata.ino() != current_metadata.ino()
-        {
-            anyhow::bail!(
-                "projection path changed while it was being opened: {}",
-                path.display()
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (path, held, current);
-    Ok(())
-}
-
-#[cfg(unix)]
-fn projection_files_are_same(left: &fs::File, right: &fs::File) -> anyhow::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let left = left.metadata()?;
-    let right = right.metadata()?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
-}
-
-#[cfg(not(unix))]
-fn projection_files_are_same(_left: &fs::File, _right: &fs::File) -> anyhow::Result<bool> {
-    anyhow::bail!("projection file identity checks are unavailable on this platform")
-}
-
-#[cfg(unix)]
-fn open_projection_entry_at(
-    parent: &fs::File,
-    file_name: &std::ffi::CStr,
-    display_path: &Path,
-) -> anyhow::Result<fs::File> {
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            file_name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| {
-            format!(
-                "open projection entry descriptor-relative {}",
-                display_path.display()
-            )
-        });
-    }
-    let file = unsafe { fs::File::from_raw_fd(descriptor) };
-    if !file.metadata()?.file_type().is_file() {
-        anyhow::bail!(
-            "projection path is not a regular file: {}",
-            display_path.display()
-        );
-    }
-    Ok(file)
-}
-
-fn rename_open_projection_file_no_follow(
-    source: &Path,
-    destination: &Path,
-    held: &fs::File,
-) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (source, destination, held);
-        anyhow::bail!("secure projection reset rename is unavailable on this platform");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if source.parent() != destination.parent() {
-            anyhow::bail!("projection reset must remain within one pinned directory");
-        }
-        let (parent, source_name) = open_projection_parent_no_follow(source)?;
-        let destination_name = destination.file_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "projection reset destination has no filename: {}",
-                destination.display()
-            )
-        })?;
-        let destination_name = std::ffi::CString::new(destination_name.as_bytes())
-            .context("projection reset destination contains NUL")?;
-        let current = open_projection_entry_at(&parent, &source_name, source)?;
-        if !projection_files_are_same(held, &current)? {
-            anyhow::bail!(
-                "projection path changed before reset rename: {}",
-                source.display()
-            );
-        }
-        let renamed = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                parent.as_raw_fd(),
-                source_name.as_ptr(),
-                parent.as_raw_fd(),
-                destination_name.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if renamed != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!(
-                    "rename projection entry descriptor-relative {} to {}",
-                    source.display(),
-                    destination.display()
-                )
-            });
-        }
-        let renamed_file = open_projection_entry_at(&parent, &destination_name, destination)?;
-        if !projection_files_are_same(held, &renamed_file)? {
-            anyhow::bail!(
-                "projection reset rename moved an unexpected file: {}",
-                source.display()
-            );
-        }
-        parent.sync_all().with_context(|| {
-            format!(
-                "sync projection parent after reset rename {}",
-                source.display()
-            )
-        })
-    }
-}
-
-fn open_existing_projection_connection(
-    path: &Path,
-    read_only: bool,
-) -> anyhow::Result<(Connection, fs::File)> {
-    let instance_file = require_projection_regular_file_no_follow(path)?;
-    let access = if read_only {
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-    } else {
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-    };
-    let flags = access | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let conn = Connection::open_with_flags(path, flags)?;
-    // SQLITE_OPEN_NOFOLLOW closes the pathname-open race for SQLite itself;
-    // this identity check also ensures the namespace still names the inode we
-    // pinned before the call.
-    ensure_open_projection_regular_file_path(path, &instance_file)?;
-    Ok((conn, instance_file))
-}
-
 impl ProjectionDb {
-    /// Strictly open the selected generation relative to the exact runtime
-    /// directory already pinned by StateDb. No ordinary ancestor pathname is
-    /// resolved while opening SQLite, its lease, or its main file.
-    pub(crate) fn open_selected_current_in_directory(
-        directory: &lillux::PinnedDirectory,
-        name: &std::ffi::OsStr,
-        read_only: bool,
-    ) -> anyhow::Result<Self> {
-        let lease = acquire_projection_instance_lease_in_directory(directory, name, true)?;
-        let instance_file = directory.open_regular(name, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "selected projection instance does not exist: {}",
-                directory.path().join(name).display()
-            )
-        })?;
-        let descriptor_path = directory.descriptor_child_path(name)?;
-        let flags = if read_only {
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-        } else {
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-        } | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(&descriptor_path, flags).with_context(|| {
-            format!(
-                "open selected projection through pinned runtime directory {}",
-                directory.path().join(name).display()
-            )
-        })?;
-        ensure_pinned_projection_file(directory, name, &instance_file)?;
-        ensure_sqlite_retains_projection_file(&instance_file, "projection database")?;
-        validate_selected_current(&conn, &directory.path().join(name), None)?;
-        let (wal_file, shm_file) = if read_only {
-            let sidecars = open_existing_projection_sidecars_in_directory(directory, name)?;
-            if let Some(wal) = sidecars.0.as_ref() {
-                ensure_sqlite_retains_projection_file(wal, "projection WAL")?;
-            }
-            if let Some(shm) = sidecars.1.as_ref() {
-                ensure_sqlite_retains_projection_file(shm, "projection shared memory")?;
-            }
-            sidecars
-        } else {
-            establish_projection_sidecars_in_directory(&conn, directory, name)?
-        };
-        Ok(Self {
-            conn: ProjectionConnection::Standard(conn),
-            path: directory.path().join(name),
-            _instance_directory: Some(directory.try_clone()?),
-            _instance_name: Some(name.to_os_string()),
-            _instance_file: Some(instance_file),
-            _wal_file: wal_file,
-            _shm_file: shm_file,
-            _instance_lease: Some(ProjectionInstanceLease::Host(lease)),
-        })
-    }
-
-    /// Create a fresh current-schema generation relative to the exact runtime
-    /// directory. This clean-cut entry point never resets or migrates an
-    /// existing instance; a colliding name fails closed.
-    pub(crate) fn create_in_directory(
-        directory: &lillux::PinnedDirectory,
-        name: &std::ffi::OsStr,
-    ) -> anyhow::Result<Self> {
-        let lease = acquire_projection_instance_lease_in_directory(directory, name, false)?;
-        let instance_file = directory
-            .open_regular_create(name, true, true, 0o600)
-            .with_context(|| {
-                format!(
-                    "create projection through pinned runtime directory {}",
-                    directory.path().join(name).display()
-                )
-            })?;
-        directory.sync()?;
-        let descriptor_path = directory.descriptor_child_path(name)?;
-        let conn = Connection::open_with_flags(
-            &descriptor_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        ensure_pinned_projection_file(directory, name, &instance_file)?;
-        ensure_sqlite_retains_projection_file(&instance_file, "projection database")?;
-        conn.pragma_update(None, "synchronous", "FULL")
-            .context("failed to set projection synchronous=FULL")?;
-        let path = directory.path().join(name);
-        let spec = projection_schema_spec();
-        init_current_projection_schema(&conn, &spec, &path, None)?;
-        let (wal_file, shm_file) =
-            establish_projection_sidecars_in_directory(&conn, directory, name)?;
-        Ok(Self {
-            conn: ProjectionConnection::Standard(conn),
-            path,
-            _instance_directory: Some(directory.try_clone()?),
-            _instance_name: Some(name.to_os_string()),
-            _instance_file: Some(instance_file),
-            _wal_file: wal_file,
-            _shm_file: shm_file,
-            _instance_lease: Some(ProjectionInstanceLease::Host(lease)),
-        })
-    }
-
-    /// Strictly open an existing selected projection without creating files,
-    /// sidecars, leases, schema, or reset backups.
-    pub fn open_selected_current_read_only(path: &Path) -> anyhow::Result<Self> {
-        let instance_lease = acquire_existing_projection_instance_lease(path)?;
-        let (conn, instance_file) = open_existing_projection_connection(path, true)
-            .context("failed to open selected projection instance read-only")?;
-        validate_selected_current(&conn, path, None)?;
-        Ok(Self {
-            conn: ProjectionConnection::Standard(conn),
-            path: path.to_path_buf(),
-            _instance_directory: None,
-            _instance_name: None,
-            _instance_file: Some(instance_file),
-            _wal_file: None,
-            _shm_file: None,
-            _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
-        })
-    }
-
-    /// Open an already-selected current instance without reset/rename side
-    /// effects. A mismatch is reported so the caller can build another
-    /// generation instance while generation.json continues selecting this one.
-    pub fn open_selected_current(path: &Path) -> anyhow::Result<Self> {
-        let instance_lease = acquire_projection_instance_lease(path)?;
-        let (conn, instance_file) = open_existing_projection_connection(path, false)
-            .context("failed to open selected projection instance")?;
-        validate_selected_current(&conn, path, None)?;
-        Ok(Self {
-            conn: ProjectionConnection::Standard(conn),
-            path: path.to_path_buf(),
-            _instance_directory: None,
-            _instance_name: None,
-            _instance_file: Some(instance_file),
-            _wal_file: None,
-            _shm_file: None,
-            _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
-        })
-    }
-
-    /// Create a current-schema projection that is never selected or persisted.
-    /// Offline rebuild/verification control paths use this handle so opening
-    /// the service itself cannot trigger, publish, or acknowledge recovery.
-    pub(crate) fn open_transient() -> anyhow::Result<Self> {
-        let path = PathBuf::from(":memory:");
-        let conn = Connection::open_in_memory().context("open transient projection")?;
-        conn.pragma_update(None, "synchronous", "FULL")
-            .context("configure transient projection durability mode")?;
-        let spec = projection_schema_spec();
-        init_current_projection_schema(&conn, &spec, &path, None)?;
-        Ok(Self {
-            conn: ProjectionConnection::Standard(conn),
-            path,
-            _instance_directory: None,
-            _instance_name: None,
-            _instance_file: None,
-            _wal_file: None,
-            _shm_file: None,
-            _instance_lease: None,
-        })
-    }
-
-    /// Open or create a projection database.
-    ///
-    /// If the file exists, verifies it matches the schema spec exactly
-    /// (tables, columns, indexes, application_id, projection schema epoch).
-    /// If the file is empty or missing, initialises it from the current DDL.
-    /// If an owned file has a stale projection schema epoch, it is renamed
-    /// aside and recreated from the current DDL.
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self::open_with_status(path)?.db)
-    }
-
-    /// Open or create a projection database and report whether it was reset
-    /// because its stored projection schema epoch did not match the current
-    /// epoch. Callers with CAS/refs access should rebuild the projection when
-    /// `reset` is true.
-    pub fn open_with_status(path: &Path) -> anyhow::Result<ProjectionOpenResult> {
-        let instance_lease = acquire_projection_instance_lease(path)?;
-        let (conn, instance_file) =
-            open_projection_connection(path).context("failed to open projection database")?;
-
-        let spec = projection_schema_spec();
-
-        match classify_projection_db(&conn, spec.application_id)? {
-            ProjectionOwnershipState::Empty => {
-                init_current_projection_schema(&conn, &spec, path, None)?;
-                return Ok(ProjectionOpenResult {
-                    db: Self {
-                        conn: ProjectionConnection::Standard(conn),
-                        path: path.to_path_buf(),
-                        _instance_directory: None,
-                        _instance_name: None,
-                        _instance_file: Some(instance_file),
-                        _wal_file: None,
-                        _shm_file: None,
-                        _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
-                    },
-                    reset: false,
-                });
-            }
-            ProjectionOwnershipState::Foreign {
-                app_id,
-                user_tables,
-            } => {
-                bail!(
-                    "projection database application_id is {app_id}, expected {}; \
-                     user_tables={user_tables}; this file ({}) was not created by RyeOS. \
-                     Refusing to modify it; use the explicit projection rebuild path.",
-                    spec.application_id,
-                    path.display(),
-                );
-            }
-            ProjectionOwnershipState::Owned => {}
-        }
-
-        let stored_epoch = stored_projection_schema_epoch(&conn)?;
-        let current_epoch = projection_schema_epoch();
-        if stored_epoch != current_epoch {
-            tracing::warn!(
-                path = %path.display(),
-                stored_epoch,
-                current_epoch,
-                "owned projection schema epoch mismatch; resetting projection database"
-            );
-            close_connection(conn)?;
-            drop(instance_file);
-            reset_projection_files(path, stored_epoch, current_epoch)?;
-
-            let (conn, instance_file) =
-                open_projection_connection(path).context("failed to reopen projection database")?;
-            init_current_projection_schema(&conn, &spec, path, None)?;
-            return Ok(ProjectionOpenResult {
-                db: Self {
-                    conn: ProjectionConnection::Standard(conn),
-                    path: path.to_path_buf(),
-                    _instance_directory: None,
-                    _instance_name: None,
-                    _instance_file: Some(instance_file),
-                    _wal_file: None,
-                    _shm_file: None,
-                    _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
-                },
-                reset: true,
-            });
-        }
-
-        sqlite_schema::assert_owned(&conn, &spec, path)?;
-        sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path)?;
-        Ok(ProjectionOpenResult {
-            db: Self {
-                conn: ProjectionConnection::Standard(conn),
-                path: path.to_path_buf(),
-                _instance_directory: None,
-                _instance_name: None,
-                _instance_file: Some(instance_file),
-                _wal_file: None,
-                _shm_file: None,
-                _instance_lease: Some(ProjectionInstanceLease::Host(instance_lease)),
-            },
-            reset: false,
-        })
-    }
-
     /// Run SQL without allowing a connection or statement borrow to escape.
-    /// The selected native connection owner supplies this same scoped entry
-    /// when offline reset admission is joined; callers retain owned results.
+    /// The native connection owner supplies the scoped entry; callers retain
+    /// owned results.
     pub fn with_sql<T>(
         &self,
         operation: impl for<'connection> FnOnce(&'connection Connection) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        match &self.conn {
-            ProjectionConnection::Standard(connection) => operation(connection),
-            ProjectionConnection::Original { connection, .. } => connection.with_sql(operation),
-        }
+        self.conn.connection.with_sql(operation)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// Checkpoint WAL contents, close SQLite, and fsync the database file so a
-    /// staged projection can be atomically installed without orphan sidecars.
-    pub fn close_durable(self) -> anyhow::Result<()> {
-        let Self {
-            conn,
-            path,
-            _instance_directory: instance_directory,
-            _instance_name: instance_name,
-            _instance_file: instance_file,
-            _wal_file: wal_file,
-            _shm_file: shm_file,
-            _instance_lease: instance_lease,
-        } = self;
-        let conn = match conn {
-            ProjectionConnection::Standard(connection) => connection,
-            original @ ProjectionConnection::Original { .. } => {
-                let retained = Self {
-                    conn: original, path,
-                    _instance_directory: instance_directory,
-                    _instance_name: instance_name,
-                    _instance_file: instance_file,
-                    _wal_file: wal_file,
-                    _shm_file: shm_file,
-                    _instance_lease: instance_lease,
-                };
-                return Err(anyhow::Error::new(OriginalProjectionFailure::retain_projection(
-                    retained,
-                    anyhow::anyhow!("original projection requires supervised native close and retained terminal proof"),
-                )));
-            }
-        };
-        let instance_file = instance_file.ok_or_else(|| {
-            anyhow::anyhow!("transient projection cannot be durably closed by filesystem path")
-        })?;
-        if let (Some(directory), Some(name)) = (instance_directory.as_ref(), instance_name.as_ref())
-        {
-            ensure_pinned_projection_file(directory, name, &instance_file)?;
-        } else {
-            ensure_open_projection_regular_file_path(&path, &instance_file)?;
-        }
-        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .context("failed to checkpoint projection WAL")?;
-        if busy != 0 || log_frames != checkpointed_frames {
-            anyhow::bail!(
-                "projection WAL checkpoint was incomplete: busy={busy}, \
-                 log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
-            );
-        }
-        close_connection(conn)?;
-        drop(wal_file);
-        drop(shm_file);
-        instance_file
-            .sync_all()
-            .with_context(|| format!("sync projection {}", path.display()))?;
-        if let (Some(directory), Some(name)) = (instance_directory.as_ref(), instance_name.as_ref())
-        {
-            directory
-                .sync()
-                .with_context(|| format!("sync projection parent for {}", path.display()))?;
-            ensure_no_live_projection_wal_in_directory(directory, name)?;
-        } else {
-            #[cfg(unix)]
-            open_projection_parent_no_follow(&path)?
-                .0
-                .sync_all()
-                .with_context(|| format!("sync projection parent for {}", path.display()))?;
-            ensure_no_live_projection_wal(&path)?;
-        }
-        drop(instance_lease);
-        Ok(())
     }
 
     pub fn current_schema_epoch() -> i32 {
@@ -927,134 +165,7 @@ impl ProjectionDb {
     }
 }
 
-fn ensure_no_live_projection_wal(path: &Path) -> anyhow::Result<()> {
-    let mut wal_path = path.as_os_str().to_os_string();
-    wal_path.push("-wal");
-    let wal_path = PathBuf::from(wal_path);
-    match open_projection_regular_file_no_follow(&wal_path, false, false)? {
-        Some(file) if file.metadata()?.len() != 0 => anyhow::bail!(
-            "projection WAL remains live after checkpoint and close: {} ({} bytes)",
-            wal_path.display(),
-            file.metadata()?.len()
-        ),
-        Some(_) | None => Ok(()),
-    }
-}
-
-fn ensure_no_live_projection_wal_in_directory(
-    directory: &lillux::PinnedDirectory,
-    projection_name: &std::ffi::OsStr,
-) -> anyhow::Result<()> {
-    let mut wal_name = projection_name.to_os_string();
-    wal_name.push("-wal");
-    match directory.open_regular(&wal_name, false)? {
-        Some(file) if file.metadata()?.len() != 0 => anyhow::bail!(
-            "projection WAL remains live after checkpoint and close: {} ({} bytes)",
-            directory.path().join(&wal_name).display(),
-            file.metadata()?.len()
-        ),
-        Some(_) | None => Ok(()),
-    }
-}
-
-fn ensure_pinned_projection_file(
-    directory: &lillux::PinnedDirectory,
-    name: &std::ffi::OsStr,
-    held: &fs::File,
-) -> anyhow::Result<()> {
-    let current = directory.open_regular(name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "projection instance disappeared: {}",
-            directory.path().join(name).display()
-        )
-    })?;
-    if !projection_files_are_same(held, &current)? {
-        anyhow::bail!(
-            "projection instance changed while in use: {}",
-            directory.path().join(name).display()
-        );
-    }
-    Ok(())
-}
-
-fn projection_sidecar_name(name: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
-    let mut sidecar = name.to_os_string();
-    sidecar.push(suffix);
-    sidecar
-}
-
-fn open_existing_projection_sidecars_in_directory(
-    directory: &lillux::PinnedDirectory,
-    name: &std::ffi::OsStr,
-) -> anyhow::Result<(Option<fs::File>, Option<fs::File>)> {
-    Ok((
-        directory.open_regular(&projection_sidecar_name(name, "-wal"), false)?,
-        directory.open_regular(&projection_sidecar_name(name, "-shm"), false)?,
-    ))
-}
-
-fn establish_projection_sidecars_in_directory(
-    conn: &Connection,
-    directory: &lillux::PinnedDirectory,
-    name: &std::ffi::OsStr,
-) -> anyhow::Result<(Option<fs::File>, Option<fs::File>)> {
-    let journal_mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-    if journal_mode != "wal" {
-        anyhow::bail!(
-            "projection journal mode mismatch in {}: stored={journal_mode}, expected=wal",
-            directory.path().join(name).display()
-        );
-    }
-    // Force the Unix VFS to open WAL/SHM before the ordinary runtime pathname
-    // could be replaced. Retaining and proving those exact inodes prevents a
-    // later lazy sidecar open from rebinding projection writes.
-    conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
-    let wal_name = projection_sidecar_name(name, "-wal");
-    let shm_name = projection_sidecar_name(name, "-shm");
-    let wal = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "SQLite did not establish projection WAL: {}",
-            directory.path().join(&wal_name).display()
-        )
-    })?;
-    let shm = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "SQLite did not establish projection shared memory: {}",
-            directory.path().join(&shm_name).display()
-        )
-    })?;
-    ensure_sqlite_retains_projection_file(&wal, "projection WAL")?;
-    ensure_sqlite_retains_projection_file(&shm, "projection shared memory")?;
-    Ok((Some(wal), Some(shm)))
-}
-
-fn ensure_sqlite_retains_projection_file(file: &fs::File, label: &str) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, label);
-        anyhow::bail!("descriptor-bound projection SQLite is unavailable on this platform");
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::MetadataExt;
-        let expected = file.metadata()?;
-        let retained = fs::read_dir("/proc/self/fd")?
-            .filter_map(std::result::Result::ok)
-            .filter_map(|entry| {
-                let descriptor = entry.file_name().to_str()?.parse::<i32>().ok()?;
-                (descriptor != file.as_raw_fd()).then_some(entry.path())
-            })
-            .filter_map(|path| fs::metadata(path).ok())
-            .any(|metadata| metadata.dev() == expected.dev() && metadata.ino() == expected.ino());
-        if !retained {
-            anyhow::bail!("SQLite did not retain a descriptor for the pinned {label} inode");
-        }
-        Ok(())
-    }
-}
-
-fn validate_selected_current(conn: &Connection, path: &Path, reference: Option<&sqlite_schema::SchemaSqlDefinition>) -> anyhow::Result<()> {
+fn validate_selected_current(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> anyhow::Result<()> {
     let spec = projection_schema_spec();
     match classify_projection_db(conn, spec.application_id)? {
         ProjectionOwnershipState::Owned => {}
@@ -1074,106 +185,7 @@ fn validate_selected_current(conn: &Connection, path: &Path, reference: Option<&
         );
     }
     sqlite_schema::assert_owned(conn, &spec, path)?;
-    assert_projection_schema_sql(conn, path, reference)
-}
-
-pub(crate) fn projection_instance_lease_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.lease", path.to_string_lossy()))
-}
-
-fn acquire_projection_instance_lease(path: &Path) -> anyhow::Result<fs::File> {
-    let lease_path = projection_instance_lease_path(path);
-    let lease = open_projection_regular_file_no_follow(&lease_path, true, true)?
-        .expect("create=true always returns an opened projection lease");
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!("acquire shared projection lease {}", lease_path.display())
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    anyhow::bail!("projection instance leasing is unavailable on this platform");
-    Ok(lease)
-}
-
-fn acquire_existing_projection_instance_lease(path: &Path) -> anyhow::Result<fs::File> {
-    let lease_path = projection_instance_lease_path(path);
-    let lease =
-        open_projection_regular_file_no_follow(&lease_path, false, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "existing projection lease does not exist: {}",
-                lease_path.display()
-            )
-        })?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!("acquire shared projection lease {}", lease_path.display())
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    anyhow::bail!("projection instance leasing is unavailable on this platform");
-    Ok(lease)
-}
-
-fn acquire_projection_instance_lease_in_directory(
-    directory: &lillux::PinnedDirectory,
-    projection_name: &std::ffi::OsStr,
-    require_existing: bool,
-) -> anyhow::Result<fs::File> {
-    let mut lease_name = projection_name.to_os_string();
-    lease_name.push(".lease");
-    let lease = if require_existing {
-        directory.open_regular(&lease_name, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "existing projection lease does not exist: {}",
-                directory.path().join(&lease_name).display()
-            )
-        })?
-    } else {
-        directory.open_regular_create(&lease_name, true, false, 0o600)?
-    };
-    directory.sync()?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!(
-                    "acquire shared projection lease {}",
-                    directory.path().join(&lease_name).display()
-                )
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    anyhow::bail!("projection instance leasing is unavailable on this platform");
-    Ok(lease)
-}
-
-fn open_projection_connection(path: &Path) -> anyhow::Result<(Connection, fs::File)> {
-    // Pin an existing inode before SQLite opens it. For a new generation the
-    // file is pinned immediately after SQLite atomically creates it.
-    let existing = open_projection_regular_file_no_follow(path, false, false)?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-        | OpenFlags::SQLITE_OPEN_CREATE
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let conn = Connection::open_with_flags(path, flags)?;
-    let instance_file = match existing {
-        Some(file) => file,
-        None => require_projection_regular_file_no_follow(path)?,
-    };
-    ensure_open_projection_regular_file_path(path, &instance_file)?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .context("failed to set projection synchronous=FULL")?;
-    Ok((conn, instance_file))
+    reference.require_matches(conn, path)
 }
 
 #[cfg(test)]
@@ -1185,10 +197,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn open_creates_projection_db() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+    fn transient_native_open_creates_projection_schema() {
+        let db = crate::test_support::TestProjection::open();
 
         // Verify tables were created
         let tables: Vec<String> = db.with_sql(|connection| {
@@ -1222,191 +232,6 @@ mod tests {
         let synchronous: i64 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(synchronous, 2, "projection DB must use synchronous=FULL");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn selected_projection_open_rejects_symlink_database_and_lease() {
-        use std::os::unix::fs::symlink;
-
-        let tempdir = tempfile::tempdir().unwrap();
-        let real_path = tempdir.path().join("real.sqlite3");
-        drop(ProjectionDb::open(&real_path).unwrap());
-
-        let linked_path = tempdir.path().join("linked.sqlite3");
-        symlink(&real_path, &linked_path).unwrap();
-        assert!(ProjectionDb::open_selected_current(&linked_path).is_err());
-
-        let lease_path = projection_instance_lease_path(&real_path);
-        std::fs::remove_file(&lease_path).unwrap();
-        let other_lease = tempdir.path().join("other.lease");
-        std::fs::write(&other_lease, b"").unwrap();
-        symlink(&other_lease, &lease_path).unwrap();
-        assert!(ProjectionDb::open_selected_current(&real_path).is_err());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn pinned_selected_open_does_not_rebind_after_runtime_replacement() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let runtime = tempdir.path().join("runtime");
-        std::fs::create_dir(&runtime).unwrap();
-        let original_runtime = lillux::PinnedDirectory::open(&runtime)
-            .unwrap()
-            .expect("runtime exists");
-        let name = std::ffi::OsStr::new("projection.instance.sqlite3");
-
-        let original = ProjectionDb::create_in_directory(&original_runtime, name).unwrap();
-        original.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO projection_meta (
-                    chain_root_id, indexed_chain_state_hash, updated_at
-                 ) VALUES ('original', 'original-hash', '2026-01-01T00:00:00Z')",
-                [],
-            )?))
-            .unwrap();
-        original.close_durable().unwrap();
-
-        let displaced = tempdir.path().join("runtime.displaced");
-        std::fs::rename(&runtime, &displaced).unwrap();
-        std::fs::create_dir(&runtime).unwrap();
-        let replacement_runtime = lillux::PinnedDirectory::open(&runtime)
-            .unwrap()
-            .expect("replacement runtime exists");
-        let replacement = ProjectionDb::create_in_directory(&replacement_runtime, name).unwrap();
-        replacement.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO projection_meta (
-                    chain_root_id, indexed_chain_state_hash, updated_at
-                 ) VALUES ('replacement', 'replacement-hash', '2026-01-01T00:00:00Z')",
-                [],
-            )?))
-            .unwrap();
-        replacement.close_durable().unwrap();
-
-        let selected =
-            ProjectionDb::open_selected_current_in_directory(&original_runtime, name, true)
-                .unwrap();
-        let selected_root: String = selected.with_sql(|connection| Ok(connection.query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
-                row.get(0)
-            })?))
-            .unwrap();
-        assert_eq!(selected_root, "original");
-
-        let replacement =
-            ProjectionDb::open_selected_current_in_directory(&replacement_runtime, name, true)
-                .unwrap();
-        let replacement_root: String = replacement.with_sql(|connection| Ok(connection.query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
-                row.get(0)
-            })?))
-            .unwrap();
-        assert_eq!(replacement_root, "replacement");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn pinned_selected_open_never_creates_a_missing_database() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let directory = lillux::PinnedDirectory::open(tempdir.path())
-            .unwrap()
-            .expect("temporary directory exists");
-        let name = std::ffi::OsStr::new("projection.missing.sqlite3");
-        let lease_name = std::ffi::OsStr::new("projection.missing.sqlite3.lease");
-        drop(
-            directory
-                .open_regular_create(lease_name, true, true, 0o600)
-                .unwrap(),
-        );
-
-        assert!(ProjectionDb::open_selected_current_in_directory(&directory, name, true).is_err());
-        assert!(directory.open_regular(name, false).unwrap().is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reset_rejects_symlink_sidecar_before_moving_main_file() {
-        use std::os::unix::fs::symlink;
-
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let target = tempdir.path().join("outside-wal");
-        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
-        std::fs::write(&path, b"db").unwrap();
-        std::fs::write(&target, b"outside").unwrap();
-        symlink(&target, &wal).unwrap();
-
-        assert!(reset_projection_files(&path, 0, projection_schema_epoch()).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"db");
-        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
-    }
-
-    #[test]
-    fn close_durable_checkpoints_and_leaves_no_live_wal() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        db.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO projection_meta (
-                    chain_root_id, indexed_chain_state_hash, updated_at
-                 ) VALUES ('T-root', 'hash', '2026-01-01T00:00:00Z')",
-                [],
-            )?))
-            .unwrap();
-
-        db.close_durable().unwrap();
-
-        let wal_path = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
-        assert!(
-            !wal_path.exists() || wal_path.metadata().unwrap().len() == 0,
-            "durably closed projection must not retain live WAL data"
-        );
-        let reopened = ProjectionDb::open_selected_current(&path).unwrap();
-        let rows: i64 = reopened.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))?))
-            .unwrap();
-        assert_eq!(rows, 1);
-    }
-
-    #[test]
-    fn close_durable_rejects_a_busy_incomplete_checkpoint() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        db.with_sql(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
-            .unwrap();
-        db.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO projection_meta (
-                    chain_root_id, indexed_chain_state_hash, updated_at
-                 ) VALUES ('T-before', 'before', '2026-01-01T00:00:00Z')",
-                [],
-            )?))
-            .unwrap();
-        db.with_sql(|connection| Ok(connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?))
-            .unwrap();
-
-        let reader = Connection::open(&path).unwrap();
-        reader.execute_batch("BEGIN").unwrap();
-        let _: i64 = reader
-            .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
-            .unwrap();
-        db.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO projection_meta (
-                    chain_root_id, indexed_chain_state_hash, updated_at
-                 ) VALUES ('T-after', 'after', '2026-01-01T00:00:01Z')",
-                [],
-            )?))
-            .unwrap();
-
-        let error = db.close_durable().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("projection WAL checkpoint was incomplete"),
-            "unexpected error: {error:#}"
-        );
-        let wal_path = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
-        assert!(
-            wal_path.metadata().unwrap().len() != 0,
-            "failed close must not erase WAL data that could not be checkpointed"
-        );
-        reader.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
@@ -1446,195 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn open_with_status_reports_no_reset_for_current_schema() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        ProjectionDb::open(&path).unwrap();
-
-        let opened = ProjectionDb::open_with_status(&path).unwrap();
-        assert!(!opened.reset);
-        assert_eq!(
-            opened.db.with_sql(stored_projection_schema_epoch).unwrap(),
-            projection_schema_epoch()
-        );
-        let synchronous: i64 = opened
-            .db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
-            .unwrap();
-        assert_eq!(synchronous, 2, "reopened projection DB must use FULL");
-        assert!(reset_backups(&path).is_empty());
-    }
-
-    #[test]
-    fn open_with_status_resets_owned_stale_epoch_before_validation() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(&format!(
-            "PRAGMA application_id = {PROJECTION_APP_ID};
-             PRAGMA user_version = 0;
-             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
-        ))
-        .unwrap();
-        drop(conn);
-
-        let opened = ProjectionDb::open_with_status(&path).unwrap();
-        assert!(opened.reset);
-        assert_eq!(
-            opened.db.with_sql(stored_projection_schema_epoch).unwrap(),
-            projection_schema_epoch()
-        );
-        assert!(opened.db.with_sql(|connection| Ok(table_exists(connection, "thread_usage_subjects"))).unwrap());
-        let synchronous: i64 = opened
-            .db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
-            .unwrap();
-        assert_eq!(
-            synchronous, 2,
-            "post-epoch-reset projection DB must use FULL"
-        );
-        assert!(!opened.db.with_sql(|connection| Ok(table_exists(connection, "sentinel"))).unwrap());
-        assert_eq!(reset_backups(&path).len(), 1);
-    }
-
-    #[test]
-    fn reset_projection_files_renames_projection_sidecars() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
-        let shm = PathBuf::from(format!("{}-shm", path.to_string_lossy()));
-        let journal = PathBuf::from(format!("{}-journal", path.to_string_lossy()));
-        std::fs::write(&path, b"db").unwrap();
-        std::fs::write(&wal, b"wal").unwrap();
-        std::fs::write(&shm, b"shm").unwrap();
-        std::fs::write(&journal, b"journal").unwrap();
-
-        reset_projection_files(&path, 0, projection_schema_epoch()).unwrap();
-
-        let backups = reset_backups(&path);
-        assert_eq!(backups.len(), 4);
-        assert!(
-            backups
-                .iter()
-                .any(|backup| backup_has_stem(backup, "projection.db-wal"))
-        );
-        assert!(
-            backups
-                .iter()
-                .any(|backup| backup_has_stem(backup, "projection.db-shm"))
-        );
-        assert!(
-            backups
-                .iter()
-                .any(|backup| backup_has_stem(backup, "projection.db-journal"))
-        );
-    }
-
-    #[test]
-    fn open_with_status_current_epoch_bad_schema_fails_without_reset() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let conn = Connection::open(&path).unwrap();
-        let epoch = projection_schema_epoch();
-        conn.execute_batch(&format!(
-            "PRAGMA application_id = {PROJECTION_APP_ID};
-             PRAGMA user_version = {epoch};
-             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
-        ))
-        .unwrap();
-        drop(conn);
-
-        let err = ProjectionDb::open_with_status(&path)
-            .err()
-            .expect("current epoch bad schema should fail");
-        assert!(err.to_string().contains("missing expected table"));
-        assert!(reset_backups(&path).is_empty());
-
-        let conn = Connection::open(&path).unwrap();
-        assert!(table_exists(&conn, "sentinel"));
-    }
-
-    #[test]
-    fn open_with_status_foreign_db_fails_without_reset() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE sentinel (id INTEGER PRIMARY KEY);")
-            .unwrap();
-        drop(conn);
-
-        let err = ProjectionDb::open_with_status(&path)
-            .err()
-            .expect("foreign projection database should fail");
-        assert!(err.to_string().contains("was not created by RyeOS"));
-        assert!(reset_backups(&path).is_empty());
-
-        let conn = Connection::open(&path).unwrap();
-        assert!(table_exists(&conn, "sentinel"));
-    }
-
-    #[test]
-    fn open_with_status_wrong_nonzero_app_id_fails_without_reset() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "PRAGMA application_id = 1234;
-             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);",
-        )
-        .unwrap();
-        drop(conn);
-
-        let err = ProjectionDb::open_with_status(&path)
-            .err()
-            .expect("wrong nonzero application_id should fail");
-        assert!(err.to_string().contains("application_id is 1234"));
-        assert!(reset_backups(&path).is_empty());
-
-        let conn = Connection::open(&path).unwrap();
-        assert!(table_exists(&conn, "sentinel"));
-    }
-
-    fn table_exists(conn: &Connection, table: &str) -> bool {
-        conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
-            [table],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap()
-            > 0
-    }
-
-    fn reset_backups(path: &Path) -> Vec<PathBuf> {
-        let dir = path.parent().unwrap();
-        let prefix = path.file_name().unwrap().to_string_lossy().to_string();
-        std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|candidate| {
-                candidate
-                    .file_name()
-                    .map(|name| {
-                        let name = name.to_string_lossy();
-                        name.starts_with(&prefix) && name.contains(".reset.")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect()
-    }
-
-    fn backup_has_stem(path: &Path, expected_stem: &str) -> bool {
-        path.file_name()
-            .map(|name| {
-                name.to_string_lossy()
-                    .starts_with(&format!("{expected_stem}.reset."))
-            })
-            .unwrap_or(false)
-    }
-
-    #[test]
     fn update_and_get_projection_meta() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         let meta = ProjectionMeta {
             chain_root_id: "T-root".to_string(),
@@ -1656,9 +294,7 @@ mod tests {
 
     #[test]
     fn get_missing_projection_meta_returns_none() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         let result = db.get_projection_meta("T-missing").unwrap();
         assert!(result.is_none());
@@ -1666,9 +302,7 @@ mod tests {
 
     #[test]
     fn project_thread_snapshot_succeeds() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         let snapshot = ThreadSnapshotBuilder::new(
             "T-test",
@@ -1713,9 +347,7 @@ mod tests {
 
     #[test]
     fn project_thread_snapshot_propagates_edge_lookup_failure() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
         db.with_sql(|connection| Ok(connection.execute_batch("DROP TABLE thread_edges")?))
             .unwrap();
         let snapshot = ThreadSnapshotBuilder::new(
@@ -1740,9 +372,7 @@ mod tests {
 
     #[test]
     fn project_snapshot_writes_result_row_for_outcome_code_only_terminal() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         // A terminal snapshot carrying only an outcome_code (no result, no
         // error) must still produce a thread_results row so the outcome is
@@ -1773,9 +403,7 @@ mod tests {
 
     #[test]
     fn project_snapshot_stores_structured_error_as_round_trippable_json() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         // A structured (object) error must persist as JSON text so the read
         // path parses it back into the same object, not a stringified blob.
@@ -1810,9 +438,7 @@ mod tests {
 
     #[test]
     fn project_chain_state_updates_metadata() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         let mut threads = BTreeMap::new();
         threads.insert(
@@ -1848,9 +474,7 @@ mod tests {
 
     #[test]
     fn project_event_emits_span() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
+        let db = crate::test_support::TestProjection::open();
 
         use crate::objects::thread_event::NewEvent;
         let event = NewEvent::new("T-trace", "T-trace", "test_event")
@@ -1883,8 +507,7 @@ mod tests {
     fn replaying_event_derived_rows_is_semantically_idempotent() {
         use crate::objects::thread_event::NewEvent;
 
-        let tempdir = tempfile::tempdir().unwrap();
-        let db = ProjectionDb::open(&tempdir.path().join("projection.db")).unwrap();
+        let db = crate::test_support::TestProjection::open();
         let artifact = NewEvent::new("T-root", "T-root", crate::event_types::ARTIFACT_PUBLISHED)
             .chain_seq(1)
             .thread_seq(1)
@@ -1925,8 +548,7 @@ mod tests {
     fn event_sequence_conflict_never_derives_rows() {
         use crate::objects::thread_event::NewEvent;
 
-        let tempdir = tempfile::tempdir().unwrap();
-        let db = ProjectionDb::open(&tempdir.path().join("projection.db")).unwrap();
+        let db = crate::test_support::TestProjection::open();
         let existing = NewEvent::new("T-root", "T-root", "existing")
             .chain_seq(1)
             .thread_seq(1)

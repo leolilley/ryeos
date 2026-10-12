@@ -153,9 +153,9 @@ pub fn quote_operational_startup_packet_transfer(
     retained_packets: usize,
 ) -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     anyhow::ensure!(retained_sources <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-        "Operational startup source quote exceeds its four schema and one main slots");
+        "Operational startup source quote exceeds its one schema and one main slots");
     anyhow::ensure!(retained_packets <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-        "Operational startup packet quote exceeds its four schema and one main slots");
+        "Operational startup packet quote exceeds its one schema and one main slots");
     let bytes = retained_sources.checked_mul(std::mem::size_of::<OperationalStartupNativeSource>())
         .and_then(|n| retained_packets.checked_mul(std::mem::size_of::<lillux_sqlite::OriginalNativeOutsideConnectionCustody>())
             .and_then(|packets| n.checked_add(packets)))
@@ -224,14 +224,6 @@ impl LiveOperationalSchemaReferences {
             .1
             .definition()
     }
-    pub(super) fn sync_jobs_match(&self, conn: &Connection, ddl: &str) -> Result<bool> {
-        let reference = self
-            .entries
-            .iter()
-            .find(|(source, _)| source == ddl)
-            .context("actual sync-job reference absent")?;
-        reference.1.definition().matches_table(conn, "sync_jobs")
-    }
 }
 struct LiveOperationalOpenCustody {
     original: Arc<LiveStateNativeOwner>,
@@ -255,24 +247,51 @@ impl Drop for LiveOperationalOpenCustody {
             || self.acquisition.is_some()
             || self.sync_failure.is_some()
         {
-            // Local unwind preserves the same checkout too. Success takes
-            // every actual owner before this guard drops; errors retain it.
-            std::mem::forget(Arc::clone(&self.original));
-            std::mem::forget(self.references.take());
-            std::mem::forget(self.acquisition.take());
-            std::mem::forget(self.owner.take());
-            std::mem::forget(self.sync_failure.take());
-            std::mem::forget(self.initialization.take());
-            std::mem::forget(self.marker.take());
+            // Local unwind or a discarded open failure preserves the same
+            // checkout: success takes every actual owner before this guard
+            // drops, and a settled failure takes them through close_retained.
+            // Native handles may still be live, so the owners and the State
+            // parent move whole into the process-lifetime registry.
+            crate::state_db::live_native::retain_abandoned_live_opening(
+                crate::state_db::live_native::AbandonedLiveOpening::Operational(Box::new(
+                    AbandonedLiveOperationalOpening {
+                        _marker: self.marker.take(),
+                        _initialization: self.initialization.take(),
+                        _sync_failure: self.sync_failure.take(),
+                        _owner: self.owner.take(),
+                        _acquisition: self.acquisition.take(),
+                        _references: self.references.take(),
+                        _original: Arc::clone(&self.original),
+                    },
+                )),
+            );
         }
     }
 }
+
+/// The owners of a live Operational opening discarded without settlement,
+/// kept with a strong reference to their State parent.
+pub(crate) struct AbandonedLiveOperationalOpening {
+    _marker: Option<File>,
+    _initialization: Option<DurableLiveOperationalInitialization>,
+    _sync_failure: Option<LiveOperationalInitializationFailure>,
+    _owner: Option<OriginalNativeConnection>,
+    _acquisition: Option<OriginalNativeOpenFailure>,
+    _references: Option<LiveOperationalSchemaReferences>,
+    _original: Arc<LiveStateNativeOwner>,
+}
+
+/// A refused live Operational opening. It retains every partial owner;
+/// settle it through [`Self::close_retained`]. Discarding it moves the owners
+/// into the process-lifetime abandoned-opening registry.
+#[must_use = "settle a refused live Operational opening through close_retained"]
 pub struct LiveOperationalOpenFailure {
     error: anyhow::Error,
     factory: Arc<lillux_sqlite::OriginalNativeFactory>,
-    // No native effects under this retention mutex. Discard is not cleanup;
-    // a supervised recovery consumer must take the original checkout.
-    _custody: std::mem::ManuallyDrop<Mutex<LiveOperationalOpenCustody>>,
+    // No native effects under this retention mutex. Discard is not cleanup:
+    // the custody's own Drop retains it in the abandoned-opening registry; a
+    // supervised recovery consumer takes the original checkout instead.
+    _custody: Mutex<LiveOperationalOpenCustody>,
 }
 impl std::fmt::Debug for LiveOperationalOpenFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -336,18 +355,11 @@ impl OperationalDb {
                     "live Operational database is not regular"
                 );
             }
-            // References are genuine independent transient tickets, built and
-            // closed BEFORE the main SQL scope; nested new-ticket intake is
-            // forbidden by the native scope and is never attempted here.
+            // The reference is a genuine independent transient ticket, built
+            // and closed BEFORE the main SQL scope; nested new-ticket intake
+            // is forbidden by the native scope and is never attempted here.
             let references = custody.references.as_mut().expect("reference checkout");
-            for ddl in [
-                SCHEMA_SQL.to_owned(),
-                SYNC_JOBS_V5_DDL.to_owned(),
-                SYNC_JOBS_V6_DDL.to_owned(),
-                appended_sync_job_v6_ddl(),
-            ] {
-                references.add(original, ddl)?;
-            }
+            references.add(original, SCHEMA_SQL.to_owned())?;
             let inputs = original.operational_inputs(established)?;
             let owner = match original.factory().open_bound(inputs) {
                 Ok(owner) => owner,
@@ -368,10 +380,9 @@ impl OperationalDb {
                 {
                     sqlite_schema::init_owned(connection, &spec, SCHEMA_SQL, &path)?;
                 }
-                migrate_forward_if_owned(connection, &path, Some(references))?;
                 assert_operational_identity(connection, &path)?;
-                enforce_replay_index_epoch(connection, &path, false, Some(references.current()))?;
-                assert_current(connection, &path, Some(references.current()))?;
+                enforce_replay_index_epoch(connection, &path, false, references.current())?;
+                assert_current(connection, &path, references.current())?;
                 assert_integrity(connection, &path)?;
                 let mode: String =
                     connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -432,7 +443,7 @@ impl OperationalDb {
             return Err(anyhow::Error::new(LiveOperationalOpenFailure {
                 error,
                 factory: Arc::clone(custody.original.factory()),
-                _custody: std::mem::ManuallyDrop::new(Mutex::new(custody)),
+                _custody: Mutex::new(custody),
             }));
         }
         Ok(Self {
@@ -446,9 +457,6 @@ impl OperationalDb {
             path,
             _runtime_directory: Arc::clone(custody.original.runtime()),
             _directory_lock: custody.original.namespace(),
-            _database_file: None,
-            _wal_file: None,
-            _shm_file: None,
             _initialization_marker: custody.marker.take(),
         })
     }
@@ -569,10 +577,8 @@ impl ReleasedLiveOperationalPhysicalCustody {
         let metadata = &mut *self._metadata;
         drop(metadata._references.take());
         drop(metadata._initialization_retirement.take());
-        let sources = unsafe { std::mem::ManuallyDrop::take(&mut metadata._sources) };
-        metadata._sources = std::mem::ManuallyDrop::new(Vec::new());
-        let packets = unsafe { std::mem::ManuallyDrop::take(&mut metadata._sql_custody) };
-        metadata._sql_custody = std::mem::ManuallyDrop::new(Vec::new());
+        let sources = std::mem::take(&mut *metadata._sources);
+        let packets = std::mem::take(&mut *metadata._sql_custody);
         drop(sources);
         drop(packets);
         self.startup_metadata_retired = true;
@@ -772,7 +778,7 @@ impl ReleasedLiveOperationalStartup {
         }
         let references = p.custody.references.as_ref().map_or(0, |r| r.original_source_count());
         anyhow::ensure!(references <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES,
-            "Operational startup schema references exceed their four fixed DDL owners");
+            "Operational startup schema references exceed their one fixed DDL owner");
         anyhow::ensure!(p.native_sources.len() <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES
             && p.sql_custody.len() <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
             "Operational startup source or packet vector exceeds its owner-derived bound");
@@ -783,11 +789,11 @@ impl ReleasedLiveOperationalStartup {
         let total = p.native_sources.len().checked_add(remaining)
             .context("Operational startup retained source count overflow")?;
         anyhow::ensure!(total <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-            "Operational startup retained native sources exceed four schema slots plus one main slot");
+            "Operational startup retained native sources exceed one schema slot plus one main slot");
         let packets = p.sql_custody.len().checked_add(total)
             .context("Operational startup packet count overflow")?;
         anyhow::ensure!(packets <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-            "Operational startup packet vector exceeds four schema sources plus one main source");
+            "Operational startup packet vector exceeds one schema source plus one main source");
         let quote = quote_operational_startup_packet_transfer(total, packets)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
@@ -927,6 +933,42 @@ impl ReleasedLiveOperationalStartup {
     }
 
 }
+impl ReleasedLiveOperationalStartup {
+    /// End a failed-start Operational whose sources never left it, yielding
+    /// its native terminals for a host that settles in process. The marker,
+    /// roots and State parent end with this call. A startup whose sources
+    /// began an outside handoff, or whose census refuses, is returned whole.
+    pub fn into_census(self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>)
+        -> std::result::Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, (Self, anyhow::Error)> {
+        let collected = (|| -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
+            factory.require_original_process()?;
+            anyhow::ensure!(self.progress.destination_join.get().is_none() && self.progress.schema_refusal.is_none()
+                && self.progress.close_failure.is_none() && self.progress.schema_failure.is_none()
+                && self.progress.custody.owner.is_none() && self.progress.custody.acquisition.is_none()
+                && self.progress.custody.sync_failure.is_none(),
+                "failed-start Operational close is incomplete or began an outside handoff");
+            self.native_terminals(factory)
+        })();
+        let terminals = match collected {
+            Ok(terminals) => terminals,
+            Err(error) => return Err((self, error)),
+        };
+        let Self { progress } = self;
+        let OperationalStartupCloseProgress { destination_join, native_sources_started: _, native_sources,
+            native_failure, sql_custody, schema_refusal, mut custody, close_failure, closed, released,
+            schema_failure, schema_released, partial_durability, initialization_retirement, prior_refusal } =
+            std::mem::ManuallyDrop::into_inner(progress);
+        // The closed references' terminals are in the census; taking them
+        // here lets the custody end as settled rather than abandoned.
+        let references = custody.references.take();
+        drop((destination_join, std::mem::ManuallyDrop::into_inner(native_sources), native_failure,
+            std::mem::ManuallyDrop::into_inner(sql_custody), std::mem::ManuallyDrop::into_inner(schema_refusal)));
+        drop((close_failure, closed, released, schema_failure, schema_released, references));
+        drop((partial_durability, initialization_retirement, prior_refusal));
+        drop(custody);
+        Ok(terminals)
+    }
+}
 enum OperationalStartupRecoveryCustody {
     Opening(LiveOperationalOpenFailure),
     Closing { factory: Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -950,8 +992,7 @@ impl LiveOperationalOpenFailure {
             return Err(LiveOperationalStartupRecoveryFailure { custody: OperationalStartupRecoveryCustody::Opening(self) });
         }
         let Self { error, factory: _, _custody } = self;
-        let custody = std::mem::ManuallyDrop::into_inner(_custody)
-            .into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let custody = _custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut progress = OperationalStartupCloseProgress {
             destination_join: std::sync::OnceLock::new(),
             native_sources_started: false, native_sources: std::mem::ManuallyDrop::new(Vec::new()),
@@ -1051,11 +1092,11 @@ mod outside_quote_tests {
 
     #[test]
     fn operational_failed_start_quotes_cover_source_and_packet_vectors() {
-        let quote = quote_operational_startup_packet_transfer(3, 2).unwrap();
-        let bytes = 3 * size_of::<OperationalStartupNativeSource>()
+        let quote = quote_operational_startup_packet_transfer(2, 2).unwrap();
+        let bytes = 2 * size_of::<OperationalStartupNativeSource>()
             + 2 * size_of::<lillux_sqlite::OriginalNativeOutsideConnectionCustody>()
             + 2 * size_of::<Vec<()>>();
-        assert_eq!(quote, OutsideWork { bytes: bytes as u64, steps: 40 });
+        assert_eq!(quote, OutsideWork { bytes: bytes as u64, steps: 32 });
         assert!(quote_operational_startup_packet_transfer(
             super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES + 1, 0,
         ).is_err());
@@ -1077,7 +1118,7 @@ mod outside_quote_tests {
             super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
             super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES,
             true,
-        ).unwrap(), OutsideWork { bytes: 0, steps: 59 });
+        ).unwrap(), OutsideWork { bytes: 0, steps: 32 });
         assert!(quote_operational_startup_metadata_retirement(
             super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES + 1, 0, 0, false,
         ).is_err());
@@ -1088,7 +1129,7 @@ mod outside_quote_tests {
             0, 0, super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1, false,
         ).is_err());
         let selected = quote_maximum_operational_metadata_retirement().unwrap();
-        assert_eq!(selected, OutsideWork { bytes: 0, steps: 59 });
+        assert_eq!(selected, OutsideWork { bytes: 0, steps: 32 });
     }
 }
 

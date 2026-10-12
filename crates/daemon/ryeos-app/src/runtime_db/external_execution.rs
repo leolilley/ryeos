@@ -3259,8 +3259,10 @@ pub(crate) mod tests {
         assert!(db.conn.with_sql(|connection| Ok(require_contactable_direct_owner(connection, &original)?)).is_err());
         assert!(!db.conn.with_sql(|connection| Ok(direct_owner_is_contactable(connection, &original)?)).unwrap());
         // A failed authority query is not an ordinary closed transport gate.
-        let missing_schema = Connection::open_in_memory().unwrap();
-        assert!(direct_owner_is_contactable(&missing_schema, &original).is_err());
+        crate::runtime_db::test_native::with_transient(|missing_schema| {
+            assert!(direct_owner_is_contactable(missing_schema, &original).is_err());
+            Ok(())
+        });
     }
 
     #[test]
@@ -4789,33 +4791,35 @@ pub(crate) mod tests {
 
     #[test]
     fn external_reset_guard_does_not_decode_predecessor_execution_rows() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(GUARD_SQL).unwrap();
-        conn.execute_batch(
-            "INSERT INTO external_execution_guard VALUES(1,1,1);
-            CREATE TABLE unknown_execution_authority(opaque BLOB);
-            INSERT INTO unknown_execution_authority VALUES(X'FF00');",
-        )
-        .unwrap();
-        assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
-        assert!(ensure_resettable(&conn, FIRST_EPOCH + 1).is_err());
-        conn.execute("UPDATE external_execution_guard SET unsettled=0", [])
+        crate::runtime_db::test_native::with_transient(|conn| {
+            conn.execute_batch(GUARD_SQL).unwrap();
+            conn.execute_batch(
+                "INSERT INTO external_execution_guard VALUES(1,1,1);
+                CREATE TABLE unknown_execution_authority(opaque BLOB);
+                INSERT INTO unknown_execution_authority VALUES(X'FF00');",
+            )
             .unwrap();
-        ensure_resettable(&conn, FIRST_EPOCH).unwrap();
-        conn.execute("DELETE FROM external_execution_guard", [])
-            .unwrap();
-        assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
-        conn.execute("DROP TABLE external_execution_guard", [])
-            .unwrap();
-        assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
-        ensure_resettable(&conn, FIRST_EPOCH - 1).unwrap();
+            assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
+            assert!(ensure_resettable(&conn, FIRST_EPOCH + 1).is_err());
+            conn.execute("UPDATE external_execution_guard SET unsettled=0", [])
+                .unwrap();
+            ensure_resettable(&conn, FIRST_EPOCH).unwrap();
+            conn.execute("DELETE FROM external_execution_guard", [])
+                .unwrap();
+            assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
+            conn.execute("DROP TABLE external_execution_guard", [])
+                .unwrap();
+            assert!(ensure_resettable(&conn, FIRST_EPOCH).is_err());
+            ensure_resettable(&conn, FIRST_EPOCH - 1).unwrap();
+            Ok(())
+        });
     }
 
     #[test]
     fn external_reservation_rejects_changed_or_unowned_authority() {
         let missing_claim = tempfile::tempdir().unwrap();
         let missing_claim_db =
-            RuntimeDb::open(&missing_claim.path().join("runtime.sqlite3")).unwrap();
+            crate::runtime_db::test_native::TestRuntime::open(&missing_claim.path().join("runtime.sqlite3"));
         let missing_claim_reservation = reservation(&missing_claim_db, "missing-claim");
         missing_claim_db
             .conn.with_sql(|connection| Ok(connection.execute(

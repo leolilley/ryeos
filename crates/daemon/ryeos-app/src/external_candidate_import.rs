@@ -362,6 +362,9 @@ mod tests {
         quiesce_sequence: u64,
         quiesce_digest: String,
         completion_request_digest: String,
+        /// Owner of `store`. Fields drop in declaration order, so the pool
+        /// and Store shares drop before it closes the Store.
+        store_owner: crate::state_store::test_native::TestStateStore,
     }
 
     struct CandidateContent {
@@ -382,7 +385,8 @@ mod tests {
             use crate::vault::external_channel::ExternalChannelAuthority;
 
             let root = tempfile::tempdir().unwrap().keep();
-            let store = Arc::new(open_store(&root));
+            let store_owner = open_store(&root);
+            let store = Arc::clone(store_owner.store());
             let authority = store.external_candidate_test_authority();
             let guard = authority.acquire_shared_guard().unwrap();
             let cas = authority.cas_store().unwrap();
@@ -610,6 +614,7 @@ mod tests {
                 quiesce_sequence: quiesce.frame().sequence,
                 quiesce_digest: quiesce.digest().to_owned(),
                 completion_request_digest,
+                store_owner,
             }
         }
 
@@ -676,7 +681,7 @@ mod tests {
         }
     }
 
-    fn open_store(root: &std::path::Path) -> StateStore {
+    fn open_store(root: &std::path::Path) -> crate::state_store::test_native::TestStateStore {
         let identity_path = root.join("node-key.pem");
         let identity = if identity_path.exists() {
             ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
@@ -688,16 +693,8 @@ mod tests {
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state_dir = root.join(".ai/state");
-        StateStore::new_with_head_trust(
-            root.to_owned(),
-            state_dir.clone(),
-            state_dir.join("runtime.sqlite3"),
-            signer,
-            crate::write_barrier::WriteBarrier::new(),
-            Arc::new(trust),
-        )
-        .unwrap()
+        crate::state_store::test_native::TestStateStore::open(root, signer, Arc::new(trust))
+            .unwrap()
     }
 
     fn signed_wire(
@@ -934,7 +931,8 @@ mod tests {
         let placement = fixture.binding.placement_thread_id.clone();
         drop(fixture);
 
-        let store = Arc::new(open_store(&root));
+        let store_owner = open_store(&root);
+        let store = Arc::clone(store_owner.store());
         let pool = Arc::new(ExternalCandidateImportPool::default());
         assert_eq!(
             pool.wake_recoverable(Arc::clone(&store), Some(&placement))
@@ -1002,6 +1000,10 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // One test Store per thread: close the pending node before the
+        // claimed one opens.
+        pending.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
+        drop(pending);
 
         let mut claimed = CandidateFixture::new();
         let claimed_content = candidate_content(&claimed);

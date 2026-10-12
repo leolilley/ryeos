@@ -1703,8 +1703,15 @@ mod tests {
             FiniteScratchRemoval::RootPresent
         ));
         std::fs::remove_file(path.join("foreign")).unwrap();
+        // A projectless workspace is created with its control directory;
+        // only a root emptied of it too is eligible for empty-only removal.
+        std::fs::remove_dir(path.join(ryeos_engine::AI_DIR)).unwrap();
         FAIL_FINITE_AFTER_ROOT_REMOVAL.with(|slot| slot.set(true));
-        assert!(guard.remove_empty_now_until(deadline).is_err());
+        let error = guard.remove_empty_now_until(deadline).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("acknowledgement failure after root removal"),
+            "{error:#}"
+        );
         assert!(!path.exists());
         assert!(guard.path().is_some());
         guard.remove_empty_now_until(deadline).unwrap();

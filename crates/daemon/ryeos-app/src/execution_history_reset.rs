@@ -33,6 +33,8 @@ mod scratch;
 mod stale_recovery;
 #[cfg(test)]
 mod fixture_operational_source;
+#[cfg(test)]
+mod native_composition_tests;
 pub use scratch::{
     ExecutionHistoryScratchInspection, ExecutionHistoryScratchRepairOptions,
     ExecutionHistoryScratchRepairReport, ScratchEntry, ScratchLocation,
@@ -48,7 +50,7 @@ use ryeos_node_runtime::config::{Config, ConfigSources};
 use crate::runtime_db::{
     InspectionCopyCleanup, InspectionCopyDisposal, RuntimeDb, RuntimeInspectionNativeFailure,
     RuntimeInspectionRelease, RuntimeThreadHistoryDiscardReport,
-    SqliteInspectionAcquisitionReleased, SqliteInspectionClosed, SqliteInspectionCopyCustodyError,
+    SqliteInspectionClosed, SqliteInspectionCopyCustodyError,
     SqliteInspectionCopyLease,
 };
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
@@ -123,17 +125,13 @@ impl<'locks> OfflineResetAuthority<'locks> {
     }
 }
 
-/// Native close and partial-acquisition release are distinct terminal outcomes.
-/// Neither admits physical cleanup or settles the original reservation.
-pub enum SqliteInspectionOutcome<T> {
-    Closed {
-        accounting: Result<T>,
-        proof: lillux_sqlite::ClosedSqliteInspection,
-    },
-    AcquisitionReleased {
-        error: anyhow::Error,
-        proof: lillux_sqlite::ReleasedSqliteInspection,
-    },
+/// What a scheduler inspection callback hands back: its accounting and the
+/// terminal its native ticket reached. A terminal that only released the
+/// acquisition never supplies accounting, whatever the callback reports.
+/// Neither outcome admits physical cleanup or settles the reservation.
+pub struct SqliteInspectionOutcome<T> {
+    pub accounting: Result<T>,
+    pub terminal: lillux_sqlite::OriginalNativeConnectionTerminal,
 }
 
 /// Borrowed inspection namespace. Only this controller issues the permit.
@@ -154,16 +152,22 @@ pub struct SchedulerResetPreview<'a> {
 impl SchedulerResetPreview<'_> {
     /// Inspect only an isolated copy of the fixed scheduler database. The
     /// original DB and sidecars are never opened by the supplied decoder.
-    /// The selected pinned copy and an erased strong lease for its original
-    /// TempDir guard are passed to the callback. A native owner must retain the
-    /// lease through its full-release/reaper boundary. On callback error, this
-    /// error retains both the callback owner and the same lease, in drop order.
+    /// The callback receives the claim's own native factory and readonly
+    /// inspection inputs for the copy; it opens the copy on one ticket of
+    /// that factory and returns the terminal the ticket reached. The callback
+    /// also receives the current scheduler schema definition, captured from a
+    /// native reference on the same host before the copy exists.
+    ///
+    /// Every terminal joins the controller's census before any check runs on
+    /// it: the closed or released copy with its proof, or a terminal that
+    /// carries no copy proof on its own. On callback error, this error
+    /// retains the callback's owner and the same copy lease, in drop order.
     pub fn inspect_database<T>(
         &self,
         inspect: impl FnOnce(
-            Arc<lillux::PinnedDirectory>,
-            Arc<dyn Send + Sync>,
-            Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>,
+            &Arc<lillux_sqlite::OriginalNativeFactory>,
+            lillux_sqlite::OriginalNativeBoundInputs,
+            &ryeos_state::sqlite_schema::SchemaSqlDefinition,
         ) -> Result<SqliteInspectionOutcome<T>>,
     ) -> Result<Option<T>> {
         let runtime = self.runtime_directory().map_err(|error| {
@@ -208,6 +212,13 @@ impl SchedulerResetPreview<'_> {
             self.inspection_custody.borrow().is_none(),
             "scheduler accounting was already inspected"
         );
+        let controller = self.controller_custody.ok_or_else(|| {
+            self.quota_claim.retain_failure(
+                anyhow!("scheduler inspection has no controller census for its native terminals"),
+                QuotaFailurePhase::Admission,
+            )
+        })?;
+        let schema_definition = self.capture_scheduler_schema_definition(runtime)?;
         let (inspection_directory, lease) = crate::runtime_db::create_sqlite_inspection_copy(
             runtime,
             name,
@@ -219,39 +230,99 @@ impl SchedulerResetPreview<'_> {
                 .retain_failure(error, QuotaFailurePhase::Acquisition)
         })?;
         let inspection_directory = Arc::new(inspection_directory);
-        let opaque_lease: Arc<dyn Send + Sync> = lease.clone();
         // Claim the one inspection before invoking external decoder code. A
         // reentrant call cannot replace the original accounting provenance.
         *self.inspection_custody.borrow_mut() = Some(lease.clone());
+        // Every refusal from here keeps the copy lease, and the copy root's
+        // namespace and SQL work once they exist.
+        let refuse = |error: anyhow::Error,
+                      namespace: Option<&lillux::PinnedDirectoryLock>,
+                      sql: Option<&Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
+                      phase: QuotaFailurePhase| {
+            let error = anyhow::Error::new(SchedulerCopyRefusal {
+                error,
+                _sql: sql.cloned(),
+                _namespace: namespace.cloned(),
+            });
+            self.quota_claim.retain_failure(
+                SqliteInspectionCopyCustodyError::retain(error, lease.clone()),
+                phase,
+            )
+        };
+        // The copy root's own namespace stays held through the native
+        // terminal and the copy's later cleanup.
+        let copy_namespace = self
+            .copy_work
+            .remaining_service_window()
+            .and_then(|window| inspection_directory.lock_exclusive_with_timeout(window))
+            .map_err(|error| refuse(error, None, None, QuotaFailurePhase::Admission))?;
         let sql_work = self
             .copy_work
             .clone()
             .issue_sql_work(&inspection_directory)
             .map_err(|error| {
-                self.quota_claim.retain_failure(
-                    SqliteInspectionCopyCustodyError::retain(error, lease.clone()),
-                    QuotaFailurePhase::Admission,
-                )
+                refuse(error, Some(&copy_namespace), None, QuotaFailurePhase::Admission)
             })?;
-        match inspect(
-            Arc::clone(&inspection_directory),
-            opaque_lease,
-            sql_work.clone(),
-        ) {
-            Ok(SqliteInspectionOutcome::Closed { accounting, proof }) => {
-                let closed = Arc::new(SqliteInspectionClosed::retain(
-                    proof,
-                    lease.clone(),
-                    sql_work,
-                    name.to_os_string(),
-                    None,
-                ));
-                // Retain the actual proof BEFORE either join validation or
-                // accounting can fail. No claim/operation back-edge owns it.
-                *self.inspection_closed.borrow_mut() = Some(closed.clone());
-                if let Some(controller) = self.controller_custody {
-                    controller.retain(closed.clone());
+        let (factory, inputs) = self
+            .quota_claim
+            .issue_scheduler_inspection_inputs(
+                runtime,
+                self.namespace_lock,
+                original_quota_claim::SchedulerInspectionCopyOwners {
+                    root: Arc::clone(&inspection_directory),
+                    namespace: copy_namespace.clone(),
+                    copy: Arc::clone(&lease),
+                    sql: Arc::clone(&sql_work),
+                    work: self.copy_work.clone(),
+                },
+            )
+            .map_err(|error| {
+                refuse(error, Some(&copy_namespace), Some(&sql_work), QuotaFailurePhase::Admission)
+            })?;
+        let SqliteInspectionOutcome { accounting, terminal } =
+            match inspect(&factory, inputs, &schema_definition) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err(refuse(
+                        error,
+                        Some(&copy_namespace),
+                        Some(&sql_work),
+                        QuotaFailurePhase::Acquisition,
+                    ));
                 }
+            };
+        let release = match crate::runtime_db::retain_copy_inspection_terminal(
+            factory,
+            terminal,
+            Arc::clone(&lease),
+            Arc::clone(&sql_work),
+            copy_namespace.clone(),
+            name.to_os_string(),
+        ) {
+            Ok(release) => release,
+            Err((factory, terminal)) => {
+                // A terminal without a copy proof still ends a ticket; it
+                // joins the census and the refusal keeps the copy owners.
+                controller.retain_unproven_scheduler_terminal(factory, terminal);
+                let refusal = anyhow!("scheduler inspection terminal carries no copy proof");
+                let refusal = match accounting {
+                    Err(error) => error.context(refusal),
+                    Ok(_) => refusal,
+                };
+                return Err(refuse(
+                    refusal,
+                    Some(&copy_namespace),
+                    Some(&sql_work),
+                    QuotaFailurePhase::NativeClose,
+                ));
+            }
+        };
+        // The release joins the controller before any check: a refused join
+        // cannot drop the one terminal proof the native owner produced.
+        let release = controller.retain_scheduler_release(release);
+        match release.as_ref() {
+            RuntimeInspectionRelease::Closed(closed) => {
+                *self.inspection_closed.borrow_mut() = Some(Arc::clone(closed));
                 closed
                     .require_original()
                     .and_then(|()| accounting)
@@ -263,19 +334,13 @@ impl SchedulerResetPreview<'_> {
                         )
                     })
             }
-            Ok(SqliteInspectionOutcome::AcquisitionReleased { error, proof }) => {
-                let released = Arc::new(SqliteInspectionAcquisitionReleased::retain(
-                    proof,
-                    lease,
-                    sql_work,
-                    name.to_os_string(),
-                    None,
-                ));
-                if let Some(controller) = self.controller_custody {
-                    controller.retain_acquisition(released.clone());
-                }
-                // The refusal and proof are preserved even if the context join
-                // fails. An acquisition release never supplies accounting.
+            RuntimeInspectionRelease::Acquisition(released) => {
+                // An acquisition release never supplies accounting. The
+                // refusal and its proof are kept even if the join fails.
+                let error = match accounting {
+                    Err(error) => error,
+                    Ok(_) => anyhow!("scheduler inspection released its acquisition without a close"),
+                };
                 let refusal = match released.require_original() {
                     Ok(()) => error,
                     Err(retry) => anyhow::Error::new(NativeInspectionRetryFailure {
@@ -286,16 +351,74 @@ impl SchedulerResetPreview<'_> {
                 Err(self.quota_claim.retain_failure(
                     anyhow::Error::new(SchedulerAcquisitionReleaseFailure {
                         error: refusal,
-                        _released: released,
+                        _released: Arc::clone(&release),
                     }),
                     QuotaFailurePhase::NativeClose,
                 ))
             }
-            Err(error) => Err(self.quota_claim.retain_failure(
-                SqliteInspectionCopyCustodyError::retain(error, lease),
-                QuotaFailurePhase::Acquisition,
-            )),
         }
+    }
+
+    /// Build and close the current scheduler schema reference on one ticket
+    /// of the claim's own issued host, outside any SQL scope. The closed
+    /// reference, or a refused one after its same-owner close, is handed to
+    /// the controller's census before its definition is used; a reference
+    /// whose close stays refused rides the returned error. Without controller
+    /// custody no ticket is taken, since its terminal would have no census.
+    fn capture_scheduler_schema_definition(
+        &self,
+        runtime: &lillux::PinnedDirectory,
+    ) -> Result<ryeos_state::sqlite_schema::SchemaSqlDefinition> {
+        let controller = self.controller_custody.ok_or_else(|| {
+            self.quota_claim.retain_failure(
+                anyhow!("scheduler inspection has no controller census for its schema reference"),
+                QuotaFailurePhase::Admission,
+            )
+        })?;
+        let (factory, inputs) = self
+            .quota_claim
+            .issue_scheduler_reference_inputs(runtime, self.namespace_lock)
+            .map_err(|error| {
+                self.quota_claim
+                    .retain_failure(error, QuotaFailurePhase::Admission)
+            })?;
+        let reference = match ryeos_scheduler::db::SchedulerDb::prepare_scheduler_schema_reference(
+            Arc::clone(&factory),
+            inputs,
+        ) {
+            Ok(reference) => reference,
+            Err(refused) => {
+                let original = anyhow!("scheduler inspection schema reference refused: {refused:#}");
+                let error = match refused.close_retained() {
+                    Ok(released) => {
+                        controller.retain_runtime_inspection_reference(
+                            crate::runtime_db::RuntimeInspectionReferenceRelease::Released {
+                                factory,
+                                released,
+                            },
+                        );
+                        original
+                    }
+                    Err(refused) => anyhow::Error::new(refused).context(original),
+                };
+                return Err(self
+                    .quota_claim
+                    .retain_failure(error, QuotaFailurePhase::Acquisition));
+            }
+        };
+        let checked = reference.require_original_closed(
+            &factory,
+            lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference,
+        );
+        let definition = reference.definition().clone();
+        controller.retain_runtime_inspection_reference(
+            crate::runtime_db::RuntimeInspectionReferenceRelease::Closed(reference),
+        );
+        checked.map_err(|error| {
+            self.quota_claim
+                .retain_failure(error, QuotaFailurePhase::Acquisition)
+        })?;
+        Ok(definition)
     }
 
     pub fn runtime_directory(&self) -> Result<&lillux::PinnedDirectory> {
@@ -523,6 +646,22 @@ pub struct ExecutionHistoryResetOptions {
     /// invocation against the named current epoch is a non-destructive no-op;
     /// every other epoch pairing is refused.
     pub schema_cut: Option<ExecutionHistorySchemaCut>,
+    /// The operator attests that the host has rebooted since the Runtime
+    /// store's scope lifetime fence was written. A fence this binary cannot
+    /// read as a current witness is then discarded (after checking its boot
+    /// id differs from the current boot, where that id is still readable)
+    /// instead of refusing the reset.
+    pub discard_unreadable_lifetime_fence_after_reboot: bool,
+}
+
+impl ExecutionHistoryResetOptions {
+    fn unreadable_lifetime_fence(&self) -> crate::runtime_db::UnreadableLifetimeFence {
+        if self.discard_unreadable_lifetime_fence_after_reboot {
+            crate::runtime_db::UnreadableLifetimeFence::DiscardAfterAttestedReboot
+        } else {
+            crate::runtime_db::UnreadableLifetimeFence::Refuse
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -643,6 +782,10 @@ pub struct ExecutionHistoryResetReport {
     pub recovered: Vec<RecoveredReservation>,
     /// How the native host's release ended its census durability pins.
     pub durability_pins: DurabilityPinsReport,
+    /// The unreadable scope lifetime fence this reset discarded (or, in a
+    /// preview, would discard) under the operator's attested reboot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_fence_discard: Option<crate::runtime_db::LifetimeFenceDiscard>,
 }
 
 /// Census durability pins the native host's release ended.
@@ -710,6 +853,27 @@ pub fn run_execution_history_reset_with_progress(
     observer: &mut dyn FnMut(&ExecutionHistoryResetProgress),
 ) -> Result<ExecutionHistoryResetReport> {
     run_execution_history_reset_inner(options, participant, Some(observer))
+}
+
+/// A closed scheduler copy inspection made the way a preview makes it: the
+/// claim's own native host, a readonly native open and close of the copy of
+/// `scheduler.sqlite3` (seeded by `sql`) beneath `root`, and the closed proof
+/// its controller retained, with the pinned and locked `root`. The last
+/// element holds the claim, its host and the host's serial guard; the host
+/// ends only with the process, so only an isolated child may call this.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn fixture_closed_scheduler_inspection(
+    root: &Path,
+    sql: &str,
+) -> (
+    lillux::PinnedDirectory,
+    lillux::PinnedDirectoryLock,
+    StateLock,
+    Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+    Arc<SqliteInspectionClosed>,
+    Box<dyn std::any::Any>,
+) {
+    tests::closed_scheduler_inspection(root, sql)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -885,8 +1049,8 @@ impl std::fmt::Display for RetainedRuntimeReference {
     }
 }
 impl std::error::Error for RetainedRuntimeReference {}
-/// The closed schema reference of the Runtime inspection phase, held for
-/// the census after its inspection connection closed.
+/// The closed schema references of the Runtime and scheduler inspection
+/// phases, held for the census after each reference connection closed.
 #[derive(Default)]
 struct OfflineRuntimeInspectionReferenceSlot {
     references: Vec<crate::runtime_db::RuntimeInspectionReferenceRelease>,
@@ -944,6 +1108,23 @@ impl Drop for OfflineRuntimeLoan {
     }
 }
 
+/// Scheduler copy terminals that carry no copy proof, each with the factory
+/// it is checked against. They join the census; no cleanup reaches them.
+#[derive(Default)]
+struct UnprovenSchedulerTerminalSlot {
+    terminals: Vec<(
+        Arc<lillux_sqlite::OriginalNativeFactory>,
+        lillux_sqlite::OriginalNativeConnectionTerminal,
+    )>,
+}
+impl std::fmt::Debug for UnprovenSchedulerTerminalSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnprovenSchedulerTerminalSlot")
+            .field("terminals", &self.terminals.len())
+            .finish()
+    }
+}
+
 #[derive(Default)]
 struct OriginalNativeCensusSlot {
     terminals: Option<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>>,
@@ -972,7 +1153,7 @@ struct InspectionControllerCustody {
     settlement: std::sync::Mutex<Option<Arc<OriginalInspectionSettlement>>>,
     cleanup_failures: std::sync::Mutex<Vec<anyhow::Error>>,
     runtime_released: std::sync::Mutex<Vec<Arc<RuntimeInspectionRelease>>>,
-    acquisition_released: std::sync::Mutex<Vec<Arc<SqliteInspectionAcquisitionReleased>>>,
+    scheduler_unproven: std::sync::Mutex<UnprovenSchedulerTerminalSlot>,
     /// Set once this attempt's reservation is published: from then on a
     /// failure leaves scratch that the next reset settles.
     reservation_published: std::sync::atomic::AtomicBool,
@@ -983,8 +1164,7 @@ impl InspectionControllerCustody {
         self.append_runtime_reference_terminals(&mut terminals)?;
         let closed = self.closed.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for owner in closed { if let Some(terminal) = owner.original_native_terminal()? { terminals.push(terminal); } }
-        let acquired = self.acquisition_released.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        for owner in acquired { if let Some(terminal) = owner.original_native_terminal()? { terminals.push(terminal); } }
+        self.append_unproven_scheduler_terminals(&mut terminals)?;
         let released = self.runtime_released.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for owner in released {
             let terminal = match owner.as_ref() {
@@ -1108,11 +1288,45 @@ impl InspectionControllerCustody {
             .unwrap_or_else(|poison| poison.into_inner())
             .push(closed);
     }
-    fn retain_acquisition(&self, released: Arc<SqliteInspectionAcquisitionReleased>) {
-        self.acquisition_released
+    /// File the scheduler copy's terminal release with the other inspection
+    /// releases, BEFORE the caller checks it, and hand back the filed owner.
+    fn retain_scheduler_release(&self, release: RuntimeInspectionRelease) -> Arc<RuntimeInspectionRelease> {
+        let release = Arc::new(release);
+        // Bookkeeping only; poisoning cannot discard acquired native evidence.
+        self.runtime_released
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .push(released);
+            .push(Arc::clone(&release));
+        release
+    }
+    /// A scheduler copy terminal that carries no copy proof. It still ended
+    /// a ticket of the host, so it waits here for the census.
+    fn retain_unproven_scheduler_terminal(
+        &self,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        terminal: lillux_sqlite::OriginalNativeConnectionTerminal,
+    ) {
+        self.scheduler_unproven
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .terminals
+            .push((factory, terminal));
+    }
+    /// Ticketed scheduler copy terminals without a copy proof, each checked
+    /// against the factory it was filed with.
+    fn append_unproven_scheduler_terminals(
+        &self,
+        terminals: &mut Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    ) -> Result<()> {
+        for (factory, terminal) in &self.scheduler_unproven.lock()
+            .unwrap_or_else(|p| p.into_inner()).terminals
+        {
+            terminal.require_original(factory)?;
+            if terminal.ticket().is_some() {
+                terminals.push(terminal.clone());
+            }
+        }
+        Ok(())
     }
     fn retain_runtime_release(&self, release: RuntimeInspectionRelease) -> Result<()> {
         let release = Arc::new(release);
@@ -1166,20 +1380,12 @@ impl InspectionControllerCustody {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        let acquired = self
-            .acquisition_released
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
         let runtime = self
             .runtime_released
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         for owner in closed {
-            owner.acknowledge_producer_terminal()?;
-        }
-        for owner in acquired {
             owner.acknowledge_producer_terminal()?;
         }
         for owner in runtime {
@@ -1202,27 +1408,14 @@ impl InspectionControllerCustody {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone();
-        let acquired = self
-            .acquisition_released
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
         let runtime = self
             .runtime_released
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone();
-        let mut cleanup = Vec::with_capacity(closed.len() + acquired.len() + runtime.len());
+        let mut cleanup = Vec::with_capacity(closed.len() + runtime.len());
         for owner in closed {
             let owner = InspectionCopyCleanup::for_closed(owner)?;
-            self.cleanup
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(owner.clone());
-            cleanup.push(owner);
-        }
-        for owner in acquired {
-            let owner = InspectionCopyCleanup::for_acquisition(owner)?;
             self.cleanup
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -1407,10 +1600,36 @@ impl std::error::Error for InspectionControllerFailure {
     }
 }
 
+/// A scheduler copy refusal with the copy root's namespace and the SQL work
+/// issued for the copy, once they exist; the copy lease rides the enclosing
+/// custody error.
+struct SchedulerCopyRefusal {
+    error: anyhow::Error,
+    _sql: Option<Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>>,
+    _namespace: Option<lillux::PinnedDirectoryLock>,
+}
+impl std::fmt::Debug for SchedulerCopyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerCopyRefusal")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for SchedulerCopyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+impl std::error::Error for SchedulerCopyRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
 #[derive(Debug)]
 struct SchedulerAcquisitionReleaseFailure {
     error: anyhow::Error,
-    _released: Arc<SqliteInspectionAcquisitionReleased>,
+    _released: Arc<RuntimeInspectionRelease>,
 }
 impl std::fmt::Display for SchedulerAcquisitionReleaseFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1651,18 +1870,21 @@ fn run_execution_history_reset_owned(
     let copy_work = quota_claim
         .issue_copy_work(&offline_policy, &identity)
         .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
+    let mut lifetime_fence_preview = None;
     let (
         mut runtime_db,
         observed_runtime_schema_epoch,
         runtime_schema_reset_required,
         inspected_runtime_rows,
     ) = if options.dry_run {
+        // A preview reports the attested fence discard it would perform.
         let db = open_inspection_runtime_db(
             &config,
             &runtime_directory,
             &runtime_directory_lock,
             copy_work.clone(),
             Arc::clone(&native_factory),
+            options.unreadable_lifetime_fence(),
         )
         .map_err(|error| {
             quota_claim.retain_failure(
@@ -1686,15 +1908,16 @@ fn run_execution_history_reset_owned(
                         .context("inspect daemon runtime thread rows")?,
                 }
             };
-            Ok((epoch, reset_required, accounting))
+            let fence = db
+                .unreadable_lifetime_fence_decision(options.unreadable_lifetime_fence())
+                .context("inspect the scope lifetime fence")?;
+            Ok((epoch, reset_required, accounting, fence))
         })();
         match db.close_owned_inspection() {
             Ok((closed, reference)) => {
                 inspection_custody.retain(closed);
-                if let Some(reference) = reference {
-                    inspection_custody.retain_runtime_inspection_reference(
-                        crate::runtime_db::RuntimeInspectionReferenceRelease::Closed(reference));
-                }
+                inspection_custody.retain_runtime_inspection_reference(
+                    crate::runtime_db::RuntimeInspectionReferenceRelease::Closed(reference));
             }
             Err(close) => {
                 let close = inspection_custody.retry_runtime_failure(close);
@@ -1707,14 +1930,16 @@ fn run_execution_history_reset_owned(
                 ));
             }
         }
-        let (epoch, reset_required, accounting) = inspected
+        let (epoch, reset_required, accounting, fence) = inspected
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Acquisition))?;
+        lifetime_fence_preview = fence;
         (None, epoch, reset_required, Some(accounting))
     } else {
         let permit = inspection_custody.begin_runtime_mutation()
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Admission))?;
         let db = open_original_runtime_db(&config, &runtime_directory, &runtime_directory_lock,
-            &quota_claim, Arc::clone(&native_factory), &inspection_custody)
+            &quota_claim, Arc::clone(&native_factory), &inspection_custody,
+            options.unreadable_lifetime_fence())
             .map_err(|error| quota_claim.retain_failure(error, QuotaFailurePhase::Acquisition))?;
         // Adopt before the first caller query: later errors transfer the SAME
         // live native Runtime into the report/error controller, never Drop SQL.
@@ -1927,6 +2152,7 @@ fn run_execution_history_reset_owned(
             released_sha256,
             recovered,
             durability_pins,
+            lifetime_fence_discard: lifetime_fence_preview,
             app_root: config.app_root,
             dry_run: options.dry_run,
             performed: false,
@@ -2063,6 +2289,12 @@ fn run_execution_history_reset_owned(
     // Only actual durable publication can advance this private capability.
     reset_authority.phase = OfflineResetAuthorityPhase::IntentPublished;
     reset_authority.authorize_mutation(&runtime_db)?;
+    // The attested discard of an unreadable scope lifetime fence is the first
+    // Runtime mutation after durable intent, so no later step reads the old
+    // witness. A current or empty fence is left untouched.
+    let lifetime_fence_discard = runtime_db
+        .discard_unreadable_lifetime_fence(&reset_authority, options.unreadable_lifetime_fence())
+        .context("discard the unreadable scope lifetime fence under the attested reboot")?;
     // Only after durable intent may any replay rows or enrolling ceremonies
     // be retired. A crash leaves the existing discard marker for safe retry.
     let operational_db = {
@@ -2436,6 +2668,7 @@ fn run_execution_history_reset_owned(
         released_sha256,
         recovered,
         durability_pins,
+        lifetime_fence_discard,
         app_root: config.app_root,
         dry_run: false,
         performed: true,
@@ -2546,6 +2779,7 @@ fn open_original_runtime_db(
     claim: &Arc<OriginalQuotaClaim>,
     factory: Arc<lillux_sqlite::OriginalNativeFactory>,
     custody: &Arc<InspectionControllerCustody>,
+    fence: crate::runtime_db::UnreadableLifetimeFence,
 ) -> Result<RuntimeDb> {
     let parent_path = config.db_path.parent().unwrap_or_else(|| Path::new("."));
     let root = Arc::new(lillux::PinnedDirectory::open(parent_path)?
@@ -2574,29 +2808,9 @@ fn open_original_runtime_db(
         Err(error) => return Err(custody.retain_unused_runtime_reference(schema_reference, error)),
     };
     RuntimeDb::open_original_history_reset_mutation(&config.db_path, root, namespace, factory,
-        inputs, schema_reference)
+        inputs, schema_reference, fence)
         .map_err(anyhow::Error::new)
         .with_context(|| format!("open original Runtime database {}", config.db_path.display()))
-}
-
-#[cfg(test)]
-fn open_mutating_runtime_db(
-    config: &Config,
-    runtime_directory: &lillux::PinnedDirectory,
-    runtime_directory_lock: &lillux::PinnedDirectoryLock,
-) -> Result<RuntimeDb> {
-    let parent_path = config.db_path.parent().unwrap_or_else(|| Path::new("."));
-    let parent = lillux::PinnedDirectory::open_or_create(parent_path)?;
-    if runtime_directory.is_same_directory(&parent)? {
-        RuntimeDb::open_for_explicit_history_reset_with_namespace_authority(
-            &config.db_path,
-            parent,
-            runtime_directory_lock.clone(),
-        )
-    } else {
-        RuntimeDb::open_for_explicit_history_reset(&config.db_path)
-    }
-    .with_context(|| format!("open runtime database {}", config.db_path.display()))
 }
 
 fn open_inspection_runtime_db(
@@ -2605,6 +2819,7 @@ fn open_inspection_runtime_db(
     runtime_directory_lock: &lillux::PinnedDirectoryLock,
     copy_work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
     factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+    fence: crate::runtime_db::UnreadableLifetimeFence,
 ) -> Result<RuntimeDb> {
     let parent_path = config.db_path.parent().unwrap_or_else(|| Path::new("."));
     let parent = lillux::PinnedDirectory::open(parent_path)?
@@ -2619,30 +2834,7 @@ fn open_inspection_runtime_db(
         )?
     };
     RuntimeDb::open_original_history_reset_inspection(&config.db_path, parent, parent_lock,
-        Arc::new(runtime_directory.try_clone()?), copy_work, factory)
-        .with_context(|| format!("inspect runtime database {}", config.db_path.display()))
-}
-
-#[cfg(test)]
-fn open_mechanism_inspection_runtime_db(
-    config: &Config,
-    runtime_directory: &lillux::PinnedDirectory,
-    runtime_directory_lock: &lillux::PinnedDirectoryLock,
-    copy_work: Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
-) -> Result<RuntimeDb> {
-    let parent_path = config.db_path.parent().unwrap_or_else(|| Path::new("."));
-    let parent = lillux::PinnedDirectory::open(parent_path)?
-        .context("runtime inspection parent is absent")?;
-    let parent_lock = if runtime_directory.is_same_directory(&parent)? {
-        runtime_directory_lock.clone()
-    } else {
-        parent.lock_exclusive_with_timeout(
-            copy_work
-                .remaining_service_window()?
-                .min(std::time::Duration::from_secs(1)),
-        )?
-    };
-    RuntimeDb::open_owned_history_reset_inspection(&config.db_path, parent, parent_lock, copy_work)
+        Arc::new(runtime_directory.try_clone()?), copy_work, factory, fence)
         .with_context(|| format!("inspect runtime database {}", config.db_path.display()))
 }
 
@@ -3032,6 +3224,57 @@ mod tests {
         let policy =
             OfflineResetPolicyOwner::load(&config, &identity, &state_lock, &runtime, &namespace)
                 .unwrap();
+        // A refused issuance drops its production permit and drains its
+        // claim, by design. The deliberately refused attempts therefore run
+        // on a probe claim of a separate node; the successful issuances
+        // below run on a fresh claim.
+        {
+            let probe_tmp = TempDir::new().unwrap();
+            let probe_config = Config::load(&ConfigSources {
+                app_root: Some(probe_tmp.path().to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+            let probe_identity =
+                ryeos_node_runtime::identity::NodeIdentity::create(&probe_config.node_signing_key_path)
+                    .unwrap();
+            crate::runtime_db::test_native::seed_node(&probe_config, false);
+            install_offline_policy(&probe_config, &probe_identity, true);
+            let probe_lock = StateLock::acquire(&default_lock_path(probe_tmp.path())).unwrap();
+            let probe_runtime = lillux::PinnedDirectory::open(&probe_config.runtime_state_dir())
+                .unwrap()
+                .unwrap();
+            let probe_namespace = probe_runtime.lock_exclusive().unwrap();
+            let probe_policy = OfflineResetPolicyOwner::load(
+                &probe_config, &probe_identity, &probe_lock, &probe_runtime, &probe_namespace,
+            )
+            .unwrap();
+            let probe = OriginalQuotaClaim::prepare(
+                &probe_policy,
+                &probe_identity,
+                None,
+                inspection_destination::OriginalInspectionMode::DryRun,
+                false,
+            )
+            .unwrap();
+            assert!(
+                probe.issue_copy_work(&probe_policy, &probe_identity).is_err(),
+                "prepared policy/record is not an issued copy owner"
+            );
+            super::original_quota_claim::fail_next_publication_ack();
+            let uncertain = probe.publish(&probe_policy, &probe_identity).unwrap_err();
+            assert!(
+                uncertain
+                    .downcast_ref::<QuotaCustodyFailure>()
+                    .unwrap()
+                    .retains(&probe)
+            );
+            probe.require_published(&probe_policy, &probe_identity).unwrap();
+            assert!(
+                probe.issue_copy_work(&probe_policy, &probe_identity).is_err(),
+                "uncertain publication bytes cannot substitute for original acknowledgement"
+            );
+        }
         let first = OriginalQuotaClaim::prepare(
             &policy,
             &identity,
@@ -3040,29 +3283,16 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(
-            first.issue_copy_work(&policy, &identity).is_err(),
-            "prepared policy/record is not an issued copy owner"
-        );
-        super::original_quota_claim::fail_next_publication_ack();
-        let uncertain = first.publish(&policy, &identity).unwrap_err();
-        assert!(
-            uncertain
-                .downcast_ref::<QuotaCustodyFailure>()
-                .unwrap()
-                .retains(&first)
-        );
         let ledger_path = config.app_root.join(".ai/node/offline-reset-quota");
         let first_path = ledger_path.join(format!("reserved.{}", first.operation_id()));
-        let exact_signed = std::fs::read(&first_path).unwrap();
-        first.require_published(&policy, &identity).unwrap();
-        assert!(
-            first.issue_copy_work(&policy, &identity).is_err(),
-            "uncertain publication bytes cannot substitute for original acknowledgement"
-        );
         first.publish(&policy, &identity).unwrap();
+        let exact_signed = std::fs::read(&first_path).unwrap();
         let work_one = first.issue_copy_work(&policy, &identity).unwrap();
-        let work_two = first.issue_copy_work(&policy, &identity).unwrap();
+        let reissued = match first.issue_copy_work(&policy, &identity) {
+            Ok(_) => panic!("a second issued view could reset original role charges"),
+            Err(error) => error,
+        };
+        assert!(format!("{reissued:#}").contains("issuer already entered"), "{reissued:#}");
         let absent = std::ffi::OsStr::new("scheduler.sqlite3");
         let destination = work_one
             .clone()
@@ -3079,19 +3309,7 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        assert!(
-            lillux_sqlite::copy_regular_without_sqlite_alias(
-                &runtime,
-                absent,
-                destination.root.as_ref(),
-                0,
-                work_two.as_ref()
-            )
-            .is_err(),
-            "a second issued view cannot reset original role charges"
-        );
         drop(work_one);
-        drop(work_two);
         let unknown_copy = config
             .app_root
             .join(".ai/node/offline-reset-inspections/unclassified");
@@ -3102,7 +3320,6 @@ mod tests {
         assert_eq!(std::fs::read(&first_path).unwrap(), exact_signed);
         std::fs::remove_dir(&unknown_copy).unwrap(); // only this test's injected empty object
         drop(blocked);
-        drop(uncertain);
         assert_eq!(std::fs::read(&first_path).unwrap(), exact_signed);
         let second = OriginalQuotaClaim::prepare(
             &policy,
@@ -3378,336 +3595,6 @@ mod tests {
             missing,
             std::collections::BTreeSet::from(["6".repeat(64), "7".repeat(64), "a".repeat(64),])
         );
-    }
-
-    #[test]
-    fn offline_capability_requires_actual_locks_exact_opened_db_and_published_intent() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources {
-            app_root: Some(tmp.path().to_owned()),
-            ..Default::default()
-        })
-        .unwrap();
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
-        install_offline_policy(&config, &identity, true);
-        let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let trust = Arc::new(trust);
-        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), Arc::clone(&trust)).unwrap());
-        drop(RuntimeDb::open(&config.db_path).unwrap());
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
-        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir())
-            .unwrap()
-            .unwrap();
-        let namespace = directory.lock_exclusive().unwrap();
-        let mut state =
-            ryeos_state::StateDb::open_for_projection_rebuild(&config.runtime_state_dir(), trust)
-                .unwrap();
-        let pinned = state.pinned_authority().unwrap();
-        let cas_guard = pinned.acquire_exclusive_guard(true).unwrap();
-        let mut db = open_mutating_runtime_db(&config, &directory, &namespace).unwrap();
-        let mut authority =
-            OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &db)
-                .unwrap();
-        assert!(
-            db.apply_explicit_history_reset(&authority, &config.db_path)
-                .is_err()
-        );
-        assert!(db.discard_all_thread_history(&authority).is_err());
-        let policy =
-            OfflineResetPolicyOwner::load(&config, &identity, &state_lock, &directory, &namespace)
-                .unwrap();
-        let quota_claim = OriginalQuotaClaim::prepare(
-            &policy,
-            &identity,
-            None,
-            inspection_destination::OriginalInspectionMode::Mutating,
-            false,
-        )
-        .unwrap();
-        quota_claim.publish(&policy, &identity).unwrap();
-        let copy_work = quota_claim.issue_copy_work(&policy, &identity).unwrap();
-        let operation = OriginalOperation::prepare(
-            &authority,
-            &db,
-            &pinned,
-            &cas_guard,
-            &identity,
-            &ExecutionHistoryResetOptions::default(),
-            false,
-            &ryeos_scheduler_contract::SchedulerFireHistoryAccounting::Exact {
-                counts: Default::default(),
-            },
-            None,
-            &quota_claim,
-        )
-        .unwrap();
-        assert_eq!(
-            operation.reference().operation_id,
-            quota_claim.operation_id()
-        );
-        assert!(operation.retains_quota_claim(&quota_claim));
-        let different_runtime_root = TempDir::new().unwrap();
-        let different_runtime = lillux::PinnedDirectory::open(different_runtime_root.path())
-            .unwrap()
-            .unwrap();
-        assert!(
-            quota_claim
-                .require_original_identity(&different_runtime, &identity, &config.app_root)
-                .is_err()
-        );
-        let stage_error = operation.stage(&different_runtime).unwrap_err();
-        let retained = stage_error
-            .downcast_ref::<original_operation::OperationPublicationFailure>()
-            .unwrap();
-        assert!(Arc::ptr_eq(retained.operation(), &operation));
-        assert!(retained.operation().retains_quota_claim(&quota_claim));
-        assert_eq!(
-            retained.phase(),
-            original_operation::PublicationPhase::Staging
-        );
-        assert!(
-            different_runtime
-                .entry_names_bounded(4096)
-                .unwrap()
-                .is_empty()
-        );
-        drop(stage_error);
-        operation.stage(&directory).unwrap();
-        let original_bytes = operation.signed_bytes().to_vec();
-        operation.stage(&directory).unwrap(); // Same memoized bytes on retry.
-        assert_eq!(operation.signed_bytes(), original_bytes);
-        assert!(
-            OriginalOperation::read_active(
-                &config.app_root,
-                &pinned,
-                &cas_guard,
-                &directory,
-                &namespace,
-                &identity,
-                &ExecutionHistoryResetOptions::default(),
-                false,
-            )
-            .unwrap()
-            .is_none()
-        ); // Staging alone never activates authority.
-        assert!(operation.require_active(&pinned, &cas_guard).is_err());
-        let permit = SchedulerResetRetirement {
-            authority: &authority,
-            runtime_db: &db,
-            cas_guard: &cas_guard,
-            state_authority: &pinned,
-            identity: &identity,
-            operation: &operation,
-            native_factory: None,
-        };
-        assert!(permit.runtime_directory().is_err());
-        let other = open_mutating_runtime_db(&config, &directory, &namespace).unwrap();
-        assert!(authority.require_held(&other).is_err());
-        drop(other);
-        let wrong_directory_fixture = TempDir::new().unwrap();
-        let wrong_directory = lillux::PinnedDirectory::open(wrong_directory_fixture.path())
-            .unwrap()
-            .unwrap();
-        let wrong_namespace = wrong_directory.lock_exclusive().unwrap();
-        assert!(
-            OfflineResetAuthority::capture(&state_lock, &directory, &wrong_namespace, &config, &db)
-                .is_err()
-        );
-        let wrong_preview = SchedulerResetPreview {
-            runtime_directory: &directory,
-            namespace_lock: &wrong_namespace,
-            identity: None,
-            inspection_custody: std::cell::RefCell::new(None),
-            inspection_closed: std::cell::RefCell::new(None),
-            controller_custody: None,
-            original_operation: None,
-            quota_claim: Arc::clone(&quota_claim),
-            copy_work: copy_work.clone(),
-        };
-        assert!(wrong_preview.runtime_directory().is_err());
-        assert!(
-            open_mechanism_inspection_runtime_db(&config, &directory, &namespace, copy_work.clone()).is_err(),
-            "inspection must not copy a source held by an original live native SQLite binding"
-        );
-        state
-            .begin_thread_history_discard_admitted(&cas_guard, operation.reference())
-            .unwrap();
-        let other_app_root = TempDir::new().unwrap();
-        assert!(
-            OriginalOperation::read_active(
-                other_app_root.path(),
-                &pinned,
-                &cas_guard,
-                &directory,
-                &namespace,
-                &identity,
-                &ExecutionHistoryResetOptions::default(),
-                false,
-            )
-            .is_err(),
-            "the same runtime cannot activate an operation under another app root"
-        );
-        let reloaded = OriginalOperation::read_active(
-            &config.app_root,
-            &pinned,
-            &cas_guard,
-            &directory,
-            &namespace,
-            &identity,
-            &ExecutionHistoryResetOptions::default(),
-            false,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(reloaded.reference(), operation.reference());
-        assert_eq!(reloaded.signed_bytes(), original_bytes);
-        assert_eq!(reloaded.accounting(), operation.accounting());
-        assert!(
-            OriginalOperation::read_active(
-                &config.app_root,
-                &pinned,
-                &cas_guard,
-                &directory,
-                &namespace,
-                &identity,
-                &ExecutionHistoryResetOptions {
-                    discard_project_heads: true,
-                    ..Default::default()
-                },
-                false,
-            )
-            .is_err()
-        );
-        assert!(
-            OriginalOperation::read_active(
-                &config.app_root,
-                &pinned,
-                &cas_guard,
-                &directory,
-                &namespace,
-                &identity,
-                &ExecutionHistoryResetOptions::default(),
-                true,
-            )
-            .is_err()
-        );
-        authority.phase = OfflineResetAuthorityPhase::IntentPublished;
-        let permit = SchedulerResetRetirement {
-            authority: &authority,
-            runtime_db: &db,
-            cas_guard: &cas_guard,
-            state_authority: &pinned,
-            identity: &identity,
-            operation: &operation,
-            native_factory: None,
-        };
-        assert!(permit.runtime_directory().is_ok());
-        let other_state_root = TempDir::new().unwrap();
-        let other_state = ryeos_state::StateDb::open(
-            other_state_root.path(),
-            Arc::new(ryeos_state::refs::TrustStore::new()),
-        )
-        .unwrap();
-        let other_state_authority = other_state.pinned_authority().unwrap();
-        let wrong_state_owner = SchedulerResetRetirement {
-            authority: &authority,
-            runtime_db: &db,
-            cas_guard: &cas_guard,
-            state_authority: &other_state_authority,
-            identity: &identity,
-            operation: &operation,
-            native_factory: None,
-        };
-        assert!(wrong_state_owner.runtime_directory().is_err());
-        let activation_error = operation
-            .activate(&other_state, &other_state_authority, &cas_guard)
-            .unwrap_err();
-        let retained = activation_error
-            .downcast_ref::<original_operation::OperationPublicationFailure>()
-            .unwrap();
-        assert_eq!(
-            retained.phase(),
-            original_operation::PublicationPhase::StateActivation
-        );
-        assert!(Arc::ptr_eq(retained.operation(), &operation));
-        operation.require_active(&pinned, &cas_guard).unwrap();
-        let admission_error = operation
-            .validate_pre_activation(&pinned, &cas_guard, || {
-                anyhow::bail!("injected domain namespace reservation refusal")
-            })
-            .unwrap_err();
-        let retained = admission_error
-            .downcast_ref::<original_operation::OperationPublicationFailure>()
-            .unwrap();
-        assert_eq!(
-            retained.phase(),
-            original_operation::PublicationPhase::PreActivationAdmission
-        );
-        assert!(Arc::ptr_eq(retained.operation(), &operation));
-        operation.require_active(&pinned, &cas_guard).unwrap();
-        drop(admission_error);
-        assert!(
-            other_state_authority
-                .require_recovery()
-                .unwrap()
-                .thread_history_discard_operation()
-                .unwrap()
-                .is_none()
-        );
-        drop(activation_error);
-        assert!(
-            db.apply_explicit_history_reset(&authority, Path::new("wrong-target"))
-                .is_err()
-        );
-        db.apply_explicit_history_reset(&authority, &config.db_path)
-            .unwrap();
-        assert!(authority.require_held(&db).is_ok());
-        db.discard_all_thread_history(&authority).unwrap();
-        // Authority still borrows original locks; later opener has a new marker.
-        drop(db);
-        let reopened = open_mutating_runtime_db(&config, &directory, &namespace).unwrap();
-        assert!(authority.authorize_mutation(&reopened).is_err());
-        let wrong_incarnation = SchedulerResetRetirement {
-            authority: &authority,
-            runtime_db: &reopened,
-            cas_guard: &cas_guard,
-            state_authority: &pinned,
-            identity: &identity,
-            operation: &operation,
-            native_factory: None,
-        };
-        assert!(wrong_incarnation.runtime_directory().is_err());
-        assert!(StateLock::acquire(&default_lock_path(tmp.path())).is_err());
-    }
-
-    #[test]
-    fn offline_capability_wrong_root_refuses_before_intent() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources {
-            app_root: Some(tmp.path().to_owned()),
-            ..Default::default()
-        })
-        .unwrap();
-        drop(RuntimeDb::open(&config.db_path).unwrap());
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
-        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir())
-            .unwrap()
-            .unwrap();
-        let namespace = directory.lock_exclusive().unwrap();
-        let db = open_mutating_runtime_db(&config, &directory, &namespace).unwrap();
-        let other_root = TempDir::new().unwrap();
-        let other_config = Config::load(&ConfigSources {
-            app_root: Some(other_root.path().to_owned()),
-            ..Default::default()
-        })
-        .unwrap();
-        assert!(
-            OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &other_config, &db)
-                .is_err()
-        );
-        assert!(db.inspect_thread_history_discard().is_ok());
     }
 
     #[test]
@@ -4001,253 +3888,6 @@ mod tests {
     }
 
     #[test]
-    fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources {
-            app_root: Some(tmp.path().to_owned()),
-            ..Default::default()
-        })
-        .unwrap();
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
-        install_offline_policy(&config, &identity, true);
-        let identity_bytes = std::fs::read(&config.node_signing_key_path).unwrap();
-        let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let trust = Arc::new(trust);
-        drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), trust.clone()).unwrap());
-        drop(RuntimeDb::open(&config.db_path).unwrap());
-        drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
-        // Raw imports are durable CAS staging authority, outside the retired
-        // thread/runtime rows. A/B qualification recovery relies on reopening
-        // these exact uploads under the new source generation.
-        let import_owner = identity.fingerprint().to_owned();
-        let import_key =
-            ryeos_state::DurableCasPublicationKey::external_content_import(&"a".repeat(64))
-                .unwrap();
-        let (import_stage_id, import_object_hash) = {
-            let state =
-                ryeos_state::StateDb::open(&config.runtime_state_dir(), trust.clone()).unwrap();
-            let authority = state.pinned_authority().unwrap();
-            let guard = authority.acquire_shared_guard().unwrap();
-            let object_hash = authority
-                .cas_store()
-                .unwrap()
-                .store_object(&serde_json::json!({"kind": "raw-import-reset-fixture"}))
-                .unwrap();
-            let mut stage = authority
-                .require_recovery()
-                .unwrap()
-                .begin_durable_cas_upload_admitted(
-                    &guard,
-                    &import_owner,
-                    "external-content-import",
-                    &import_key,
-                    None,
-                )
-                .unwrap();
-            stage
-                .protect_cas_closure(&guard, [object_hash.as_str()], std::iter::empty())
-                .unwrap();
-            (stage.staging_id().to_owned(), object_hash)
-        };
-        let operational_path = config
-            .runtime_state_dir()
-            .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
-        let profile = ryeos_state::operational::OperationalCredentialProfileRecord {
-            profile_id: "retained-active".to_owned(),
-            owner_principal: "operator".to_owned(),
-            home_id: "home".to_owned(),
-            authority_revision: 3,
-            credential_generation: 2,
-            state: "active".to_owned(),
-            active_login_id: None,
-            login_epoch: 1,
-            login_expires_at_ms: None,
-            sanitized_account: Some(serde_json::json!({"account_id":"retained-account"})),
-            created_at_ms: 1,
-            updated_at_ms: 2,
-        };
-        let mut enrolling = profile.clone();
-        enrolling.profile_id = "retired-enrollment".to_owned();
-        enrolling.home_id = "enrollment-home".to_owned();
-        enrolling.state = "enrolling".to_owned();
-        enrolling.active_login_id = Some("old-login".to_owned());
-        enrolling.login_expires_at_ms = Some(100);
-        {
-            let db = ryeos_state::OperationalDb::open_existing_current(&operational_path).unwrap();
-            db.merge_credential_profile(&profile).unwrap();
-            db.merge_credential_profile(&enrolling).unwrap();
-        }
-        let current_replay_epoch = {
-            let conn = rusqlite::Connection::open(&operational_path).unwrap();
-            let epoch: i32 = conn
-                .query_row("SELECT epoch FROM replay_index_epoch", [], |r| r.get(0))
-                .unwrap();
-            conn.execute_batch("UPDATE replay_index_epoch SET epoch = epoch - 2;")
-                .unwrap();
-            epoch
-        };
-        {
-            let conn = rusqlite::Connection::open(&config.db_path).unwrap();
-            let app_id: i32 = conn
-                .query_row("PRAGMA application_id", [], |r| r.get(0))
-                .unwrap();
-            conn.pragma_update(None, "application_id", app_id - 1)
-                .unwrap();
-        }
-        let options = ExecutionHistoryResetOptions {
-            app_root: Some(tmp.path().to_owned()),
-            dry_run: true,
-            discard_project_heads: false,
-            schema_cut: Some(ExecutionHistorySchemaCut {
-                from: RuntimeDb::current_operator_schema_epoch() - 1,
-                to: RuntimeDb::current_operator_schema_epoch(),
-            }),
-        };
-        let runtime_before = std::fs::read(&config.db_path).unwrap();
-        let operational_before = std::fs::read(&operational_path).unwrap();
-        let preview = run_execution_history_reset(&options, None).unwrap();
-        assert!(!preview.performed);
-        assert_eq!(
-            preview.schema_cut.as_ref().unwrap().status,
-            ExecutionHistorySchemaCutStatus::Required
-        );
-        assert_eq!(
-            preview.replay_indexes.scope,
-            ryeos_state::operational::ReplayIndexResetScope::AllReplayRecords
-        );
-        assert_eq!(
-            preview.replay_indexes.stored_epoch,
-            current_replay_epoch - 2
-        );
-        assert_eq!(std::fs::read(&config.db_path).unwrap(), runtime_before);
-        assert_eq!(
-            std::fs::read(&operational_path).unwrap(),
-            operational_before
-        );
-        assert!(ryeos_state::OperationalDb::open_existing_current(&operational_path).is_err());
-
-        // Model resumption after a process dies with the existing durable
-        // discard intent published but before replay/runtime activation.
-        {
-            let state = ryeos_state::StateDb::open_for_projection_rebuild(
-                &config.runtime_state_dir(),
-                trust.clone(),
-            )
-            .unwrap();
-            let authority = state.pinned_authority().unwrap();
-            let guard = authority.acquire_exclusive_guard(true).unwrap();
-            let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
-            let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir())
-                .unwrap()
-                .unwrap();
-            let namespace = directory.lock_exclusive().unwrap();
-            let db = open_mutating_runtime_db(&config, &directory, &namespace).unwrap();
-            let offline =
-                OfflineResetAuthority::capture(&state_lock, &directory, &namespace, &config, &db)
-                    .unwrap();
-            let policy = OfflineResetPolicyOwner::load(
-                &config,
-                &identity,
-                &state_lock,
-                &directory,
-                &namespace,
-            )
-            .unwrap();
-            let quota_claim = OriginalQuotaClaim::prepare(
-                &policy,
-                &identity,
-                None,
-                inspection_destination::OriginalInspectionMode::Mutating,
-                false,
-            )
-            .unwrap();
-            let operation = OriginalOperation::prepare(
-                &offline,
-                &db,
-                &authority,
-                &guard,
-                &identity,
-                &options,
-                false,
-                &ryeos_scheduler_contract::SchedulerFireHistoryAccounting::Exact {
-                    counts: Default::default(),
-                },
-                None,
-                &quota_claim,
-            )
-            .unwrap();
-            operation.stage(&directory).unwrap();
-            state
-                .begin_thread_history_discard_admitted(&guard, operation.reference())
-                .unwrap();
-        }
-        let options = ExecutionHistoryResetOptions {
-            dry_run: false,
-            ..options
-        };
-        let report = run_execution_history_reset(&options, None).unwrap();
-        assert!(report.performed);
-        assert_eq!(
-            report.schema_cut.as_ref().unwrap().status,
-            ExecutionHistorySchemaCutStatus::Completed
-        );
-        assert_eq!(report.replay_indexes, preview.replay_indexes);
-        let db = ryeos_state::OperationalDb::open_existing_current(&operational_path).unwrap();
-        assert_eq!(
-            db.credential_profile(&profile.profile_id).unwrap(),
-            Some(profile)
-        );
-        let retired = db
-            .credential_profile(&enrolling.profile_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(retired.state, "unauthenticated");
-        assert_eq!(retired.authority_revision, enrolling.authority_revision + 1);
-        assert_eq!(
-            retired.credential_generation,
-            enrolling.credential_generation
-        );
-        assert_eq!(retired.home_id, enrolling.home_id);
-        assert!(retired.active_login_id.is_none());
-        assert!(retired.sanitized_account.is_none());
-        drop(db);
-        drop(RuntimeDb::open(&config.db_path).unwrap());
-        let state = ryeos_state::StateDb::open(&config.runtime_state_dir(), trust).unwrap();
-        let authority = state.pinned_authority().unwrap();
-        let guard = authority.acquire_shared_guard().unwrap();
-        let stage = authority
-            .require_recovery()
-            .unwrap()
-            .open_durable_cas_upload_admitted(&guard, &import_stage_id, &import_owner)
-            .unwrap();
-        stage
-            .ensure_publication_contract(&import_key, None)
-            .unwrap();
-        stage.ensure_protects_object(&import_object_hash).unwrap();
-        drop(stage);
-        drop(guard);
-        drop(authority);
-        drop(state);
-        let repeated = run_execution_history_reset(&options, None).unwrap();
-        assert!(!repeated.performed);
-        assert!(!repeated.dry_run);
-        assert_eq!(
-            repeated.schema_cut.as_ref().unwrap().status,
-            ExecutionHistorySchemaCutStatus::AlreadyCurrent
-        );
-        assert_eq!(
-            repeated.replay_indexes.scope,
-            ryeos_state::operational::ReplayIndexResetScope::Unchanged
-        );
-        assert_eq!(
-            std::fs::read(&config.node_signing_key_path).unwrap(),
-            identity_bytes
-        );
-    }
-
-    #[test]
     fn absent_scheduler_participant_refuses_artifacts_without_mutation() {
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
@@ -4297,6 +3937,59 @@ mod tests {
         drop(host.release());
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn closed_scheduler_inspection(
+        root: &Path,
+        sql: &str,
+    ) -> (
+        lillux::PinnedDirectory,
+        lillux::PinnedDirectoryLock,
+        StateLock,
+        Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+        Arc<SqliteInspectionClosed>,
+        Box<dyn std::any::Any>,
+    ) {
+        seed_scheduler_source(root, sql);
+        let directory = lillux::PinnedDirectory::open(root).unwrap().unwrap();
+        let namespace = directory.lock_exclusive().unwrap();
+        let (state_lock, quota_claim, copy_work, host) = issue_inspection_claim_with_host(
+            &directory,
+            &namespace,
+            &directory.path().join("runtime.sqlite3"),
+        );
+        let permit = SchedulerResetPreview {
+            runtime_directory: &directory,
+            namespace_lock: &namespace,
+            identity: None,
+            inspection_custody: std::cell::RefCell::new(None),
+            inspection_closed: std::cell::RefCell::new(None),
+            controller_custody: Some(&host.controller),
+            original_operation: None,
+            quota_claim: Arc::clone(&quota_claim),
+            copy_work: Arc::clone(&copy_work),
+        };
+        permit
+            .inspect_database(|factory, inputs, _schema| {
+                let owner = match factory.open_bound(inputs) {
+                    Ok(owner) => owner,
+                    Err(failure) => panic!("scheduler copy refused its native ticket: {failure}"),
+                };
+                let closed = match owner.close() {
+                    Ok(closed) => closed,
+                    Err(failure) => panic!("scheduler copy close refused: {failure}"),
+                };
+                Ok(SqliteInspectionOutcome {
+                    accounting: Ok(()),
+                    terminal: lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed),
+                })
+            })
+            .unwrap()
+            .unwrap();
+        let closed = permit.inspection_closed.borrow().clone().unwrap();
+        drop(permit);
+        (directory, namespace, state_lock, copy_work, closed, Box::new((quota_claim, host)))
+    }
+
     pub(super) fn issue_inspection_claim(
         directory: &lillux::PinnedDirectory,
         namespace: &lillux::PinnedDirectoryLock,
@@ -4305,6 +3998,49 @@ mod tests {
         StateLock,
         Arc<OriginalQuotaClaim>,
         Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+    ) {
+        let (state_lock, claim, work, host) =
+            prepare_inspection_claim(directory, namespace, db_target, false);
+        assert!(host.is_none(), "no native host was requested");
+        (state_lock, claim, work)
+    }
+
+    /// The claim's own offline native host, filed in a fresh controller the
+    /// way a reset files it, with the serial guard that excludes every test
+    /// host while it lives. Nothing here releases that host, so a test that
+    /// issues one runs as an isolated child and ends with its process.
+    struct IssuedInspectionHost {
+        controller: Arc<InspectionControllerCustody>,
+        serial: lillux_sqlite::test_host::TestHostSerial,
+    }
+
+    /// [`issue_inspection_claim`] whose claim has also issued its own native
+    /// host, before its copy work, as a reset issues them.
+    fn issue_inspection_claim_with_host(
+        directory: &lillux::PinnedDirectory,
+        namespace: &lillux::PinnedDirectoryLock,
+        db_target: &Path,
+    ) -> (
+        StateLock,
+        Arc<OriginalQuotaClaim>,
+        Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+        IssuedInspectionHost,
+    ) {
+        let (state_lock, claim, work, host) =
+            prepare_inspection_claim(directory, namespace, db_target, true);
+        (state_lock, claim, work, host.expect("claim native host issued"))
+    }
+
+    fn prepare_inspection_claim(
+        directory: &lillux::PinnedDirectory,
+        namespace: &lillux::PinnedDirectoryLock,
+        db_target: &Path,
+        native_host: bool,
+    ) -> (
+        StateLock,
+        Arc<OriginalQuotaClaim>,
+        Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
+        Option<IssuedInspectionHost>,
     ) {
         let mut config = Config::load(&ConfigSources {
             app_root: Some(directory.path().to_path_buf()),
@@ -4333,25 +4069,48 @@ mod tests {
         )
         .unwrap();
         claim.publish(&policy, &identity).unwrap();
+        let host = native_host.then(|| {
+            // Every test host this thread used is released by now; the
+            // claim's own host is the only arena while the guard is held.
+            let serial = lillux_sqlite::test_host::serial();
+            let controller = Arc::new(InspectionControllerCustody::default());
+            let factory = controller
+                .adopt_native_host(claim.issue_native_host(&policy, &identity))
+                .unwrap();
+            drop(factory);
+            IssuedInspectionHost { controller, serial }
+        });
         let work = claim.issue_copy_work(&policy, &identity).unwrap();
         drop(policy);
-        (state_lock, claim, work)
+        (state_lock, claim, work, host)
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn scheduler_preview_retains_real_native_close_proof_without_mutating_source() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::scheduler_preview_retains_real_native_close_proof_without_mutating_source"
+        );
+        // The claim's own native host ends only with its process, so the
+        // scenario runs in a child and this process checks what it saw.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "closed scheduler copy proof retained by its controller");
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let source = tmp.path().join("scheduler.sqlite3");
         seed_scheduler_source(tmp.path(), "CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(7);");
         let original = std::fs::read(&source).unwrap();
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
+        let (state_lock, quota_claim, copy_work, host) = issue_inspection_claim_with_host(
             &directory,
             &namespace,
             &directory.path().join("runtime.sqlite3"),
         );
-        let controller = Arc::new(InspectionControllerCustody::default());
+        let IssuedInspectionHost { controller, serial } = host;
         let permit = SchedulerResetPreview {
             runtime_directory: &directory,
             namespace_lock: &namespace,
@@ -4364,38 +4123,44 @@ mod tests {
             copy_work,
         };
         let copied_path = permit
-            .inspect_database(|directory, lease, sql_work| {
-                let copy = directory.path().join("scheduler.sqlite3");
+            .inspect_database(|factory, inputs, _schema| {
+                let copy = permit
+                    .inspection_custody
+                    .borrow()
+                    .as_ref()
+                    .expect("copy lease claimed before the callback")
+                    .directory()?
+                    .path()
+                    .join("scheduler.sqlite3");
                 assert_ne!(copy, source);
-                let owner = lillux_sqlite::ReadonlySqliteCopy::open(
-                    directory,
-                    std::ffi::OsStr::new("scheduler.sqlite3"),
-                    lease,
-                    sql_work,
-                )
-                .map_err(|failure| anyhow::anyhow!("{failure}"))?;
+                let owner = match factory.open_bound(inputs) {
+                    Ok(owner) => owner,
+                    Err(failure) => panic!("scheduler copy refused its native ticket: {failure}"),
+                };
                 // Never open/drop a filesystem alias while SQLite owns the inode.
-                let value: i64 =
-                    owner
-                        .connection()
-                        .query_row("SELECT value FROM sample", [], |row| row.get(0))?;
+                let read = owner.with_sql(|connection| {
+                    let value: i64 =
+                        connection.query_row("SELECT value FROM sample", [], |row| row.get(0))?;
+                    let refused = connection.execute_batch("DELETE FROM sample").is_err();
+                    Ok((value, refused))
+                });
+                let closed = match owner.close() {
+                    Ok(closed) => closed,
+                    Err(failure) => panic!("scheduler copy close refused: {failure}"),
+                };
+                let (value, refused) = read.expect("read the copied sample row");
                 assert_eq!(value, 7);
-                assert!(
-                    owner
-                        .connection()
-                        .execute_batch("DELETE FROM sample")
-                        .is_err()
-                );
-                let proof = owner.close().map_err(|failure| anyhow::anyhow!("{failure}"))?;
-                Ok(SqliteInspectionOutcome::Closed {
+                assert!(refused, "the readonly copy must refuse a write");
+                Ok(SqliteInspectionOutcome {
                     accounting: Ok(copy),
-                    proof,
+                    terminal: lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed),
                 })
             })
             .unwrap()
             .unwrap();
         let closed = permit.inspection_closed.borrow().clone().unwrap();
         closed.require_original().unwrap();
+        assert!(closed.original_native_terminal().unwrap().is_some(), "the census sees its ticket");
         assert!(Arc::ptr_eq(
             closed.lease(),
             permit.inspection_custody.borrow().as_ref().unwrap()
@@ -4425,44 +4190,206 @@ mod tests {
             copied_path.exists(),
             "native closure does not grant physical disposal"
         );
+        lillux_sqlite::test_host::end_isolated_process(
+            (quota_claim, state_lock, namespace, directory, tmp, serial),
+            "closed scheduler copy proof retained by its controller",
+        )
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn scheduler_accounting_failure_retains_actual_native_close_proof() {
+    fn genuine_native_interval_blocks_seal_until_original_closed_ack() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::genuine_native_interval_blocks_seal_until_original_closed_ack"
+        );
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "seal waited for the acknowledged native close");
+            return;
+        }
         let tmp = TempDir::new().unwrap();
-        let source = tmp.path().join("scheduler.sqlite3");
-        seed_scheduler_source(tmp.path(), "CREATE TABLE sample(value INTEGER);");
+        seed_scheduler_source(tmp.path(), "CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(19);");
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
+        let (state_lock, quota_claim, copy_work, host) = issue_inspection_claim_with_host(
             &directory,
             &namespace,
             &directory.path().join("runtime.sqlite3"),
         );
+        let IssuedInspectionHost { controller, serial } = host;
         let permit = SchedulerResetPreview {
             runtime_directory: &directory,
             namespace_lock: &namespace,
             identity: None,
             inspection_custody: std::cell::RefCell::new(None),
             inspection_closed: std::cell::RefCell::new(None),
-            controller_custody: None,
+            controller_custody: Some(&controller),
+            original_operation: None,
+            quota_claim: Arc::clone(&quota_claim),
+            copy_work: Arc::clone(&copy_work),
+        };
+        permit
+            .inspect_database(|factory, inputs, _schema| {
+                let owner = match factory.open_bound(inputs) {
+                    Ok(owner) => owner,
+                    Err(failure) => panic!("scheduler copy refused its native ticket: {failure}"),
+                };
+                let value = owner.with_sql(|connection| {
+                    Ok(connection.query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0))?)
+                });
+                // A refused seal still begins the drain, so it is attempted
+                // only after the last SQL on this connection.
+                assert!(
+                    quota_claim.seal_production(&copy_work).is_err(),
+                    "an open native interval blocks the seal"
+                );
+                let closed = match owner.close() {
+                    Ok(closed) => closed,
+                    Err(failure) => panic!("scheduler copy close refused: {failure}"),
+                };
+                assert_eq!(value.expect("read the copied sample row"), 19);
+                Ok(SqliteInspectionOutcome {
+                    accounting: Ok(()),
+                    terminal: lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed),
+                })
+            })
+            .unwrap()
+            .unwrap();
+        // The preview acknowledges the interval only from the closed proof
+        // its controller retained; that proof is what admits the seal.
+        let closed = permit.inspection_closed.borrow().clone().unwrap();
+        closed.require_original().unwrap();
+        let seal = quota_claim.seal_production(&copy_work).unwrap();
+        assert!(seal.slot(0).unwrap().never_started, "the Runtime store was never produced");
+        assert!(!seal.slot(1).unwrap().never_started, "the scheduler store was produced");
+        assert!(
+            quota_claim.begin_inspection_settlement(seal, Vec::new()).is_err(),
+            "attempted store cannot be replaced by an empty disposal aggregate"
+        );
+        drop(permit);
+        lillux_sqlite::test_host::end_isolated_process(
+            (closed, copy_work, quota_claim, controller, state_lock, namespace, directory, tmp, serial),
+            "seal waited for the acknowledged native close",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn genuine_never_started_seal_rejects_foreign_issuer_and_retains_charge() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::genuine_never_started_seal_rejects_foreign_issuer_and_retains_charge"
+        );
+        // Disposal records the claim's native quota, so the claim issues its
+        // own host, which ends only with this child's process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "never-started seal kept its charge");
+            return;
+        }
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let a = lillux::PinnedDirectory::open(first.path()).unwrap().unwrap();
+        let b = lillux::PinnedDirectory::open(second.path()).unwrap().unwrap();
+        let al = a.lock_exclusive().unwrap();
+        let bl = b.lock_exclusive().unwrap();
+        // The foreign claim issues no host; it is prepared first because the
+        // serial guard the issuing claim holds excludes every later test host.
+        let (state_b, other, foreign) =
+            issue_inspection_claim(&b, &bl, &second.path().join("runtime.sqlite3"));
+        let (state_a, claim, work, host) =
+            issue_inspection_claim_with_host(&a, &al, &first.path().join("runtime.sqlite3"));
+        assert!(claim.seal_production(&foreign).is_err());
+        let seal = claim.seal_production(&work).unwrap();
+        assert!(seal.slot(0).unwrap().never_started && seal.slot(1).unwrap().never_started);
+        let mut config = Config::load(&ConfigSources {
+            app_root: Some(first.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        config.db_path = first.path().join("runtime.sqlite3");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path).unwrap();
+        let policy = OfflineResetPolicyOwner::load(&config, &identity, &state_a, &a, &al).unwrap();
+        assert!(
+            claim.issue_copy_work(&policy, &identity).is_err(),
+            "sealed original issuer cannot be reissued"
+        );
+        drop(policy);
+        assert!(other.begin_inspection_settlement(seal.clone(), Vec::new()).is_err());
+        let settlement = claim.begin_inspection_settlement(seal, Vec::new()).unwrap();
+        settlement.disposition_record().unwrap();
+        settlement.dispose_witnesses().unwrap();
+        settlement.seal_disposition().unwrap();
+        // A retry of the same sealed step is idempotent.
+        settlement.seal_disposition().unwrap();
+        let error = settlement.require_completed().unwrap_err();
+        assert!(format!("{error:#}").contains("not captured"), "{error:#}");
+        assert!(
+            first
+                .path()
+                .join(".ai/node/offline-reset-quota")
+                .join(format!("reserved.{}", claim.operation_id()))
+                .exists()
+        );
+        assert!(
+            work.clone()
+                .create_destination(&a, std::ffi::OsStr::new("runtime.sqlite3"))
+                .is_err()
+        );
+        lillux_sqlite::test_host::end_isolated_process(
+            (settlement, work, claim, host, state_a, other, foreign, state_b, al, bl, a, b, first, second),
+            "never-started seal kept its charge",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scheduler_accounting_failure_retains_actual_native_close_proof() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::scheduler_accounting_failure_retains_actual_native_close_proof"
+        );
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "refused accounting kept its closed scheduler copy proof");
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        seed_scheduler_source(tmp.path(), "CREATE TABLE sample(value INTEGER);");
+        let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let namespace = directory.lock_exclusive().unwrap();
+        let (state_lock, quota_claim, copy_work, host) = issue_inspection_claim_with_host(
+            &directory,
+            &namespace,
+            &directory.path().join("runtime.sqlite3"),
+        );
+        let IssuedInspectionHost { controller, serial } = host;
+        let permit = SchedulerResetPreview {
+            runtime_directory: &directory,
+            namespace_lock: &namespace,
+            identity: None,
+            inspection_custody: std::cell::RefCell::new(None),
+            inspection_closed: std::cell::RefCell::new(None),
+            controller_custody: Some(&controller),
             original_operation: None,
             quota_claim,
             copy_work,
         };
         let error = permit
-            .inspect_database::<()>(|directory, lease, sql_work| {
-                let owner = lillux_sqlite::ReadonlySqliteCopy::open(
-                    directory,
-                    std::ffi::OsStr::new("scheduler.sqlite3"),
-                    lease,
-                    sql_work,
-                )
-                .map_err(|failure| anyhow::anyhow!("{failure}"))?;
-                let proof = owner.close().map_err(|failure| anyhow::anyhow!("{failure}"))?;
-                Ok(SqliteInspectionOutcome::Closed {
+            .inspect_database::<()>(|factory, inputs, _schema| {
+                let owner = match factory.open_bound(inputs) {
+                    Ok(owner) => owner,
+                    Err(failure) => panic!("scheduler copy refused its native ticket: {failure}"),
+                };
+                let closed = match owner.close() {
+                    Ok(closed) => closed,
+                    Err(failure) => panic!("scheduler copy close refused: {failure}"),
+                };
+                Ok(SqliteInspectionOutcome {
                     accounting: Err(anyhow::anyhow!("injected accounting refusal")),
-                    proof,
+                    terminal: lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed),
                 })
             })
             .unwrap_err();
@@ -4478,6 +4405,7 @@ mod tests {
             .join("scheduler.sqlite3");
         drop(closed);
         drop(permit);
+        drop(controller);
         assert!(
             weak.upgrade().is_some(),
             "error must own the actual closed proof"
@@ -4491,21 +4419,34 @@ mod tests {
             copy.exists(),
             "dropping evidence does not settle physical obligations"
         );
+        lillux_sqlite::test_host::end_isolated_process(
+            (state_lock, namespace, directory, tmp, serial),
+            "refused accounting kept its closed scheduler copy proof",
+        )
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn scheduler_partial_acquisition_release_never_supplies_completed_accounting() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::scheduler_partial_acquisition_release_never_supplies_completed_accounting"
+        );
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "released scheduler acquisition supplied no accounting");
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"retained main").unwrap();
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
+        let (state_lock, quota_claim, copy_work, host) = issue_inspection_claim_with_host(
             &directory,
             &namespace,
             &directory.path().join("runtime.sqlite3"),
         );
-        let controller = Arc::new(InspectionControllerCustody::default());
+        let IssuedInspectionHost { controller, serial } = host;
         let permit = SchedulerResetPreview {
             runtime_directory: &directory,
             namespace_lock: &namespace,
@@ -4518,30 +4459,43 @@ mod tests {
             copy_work,
         };
         let error = permit
-            .inspect_database::<()>(|directory, lease, sql_work| {
+            .inspect_database::<()>(|factory, inputs, _schema| {
                 // Inject an invalid sidecar into the isolated destination. The
                 // original source is untouched; cleanup must retain this deposit.
-                std::fs::create_dir(directory.path().join("scheduler.sqlite3-wal"))?;
-                let failure = lillux_sqlite::ReadonlySqliteCopy::open(
-                    directory,
-                    std::ffi::OsStr::new("scheduler.sqlite3"),
-                    lease,
-                    sql_work,
-                )
-                .err()
-                .expect("nonregular WAL must refuse acquisition");
-                let proof = failure.retry_close().map_err(|failure| anyhow::anyhow!("{failure}"))?;
-                Ok(SqliteInspectionOutcome::AcquisitionReleased {
-                    error: anyhow::anyhow!("injected acquisition refusal"),
-                    proof,
+                let copy = permit
+                    .inspection_custody
+                    .borrow()
+                    .as_ref()
+                    .expect("copy lease claimed before the callback")
+                    .directory()?
+                    .path()
+                    .to_path_buf();
+                std::fs::create_dir(copy.join("scheduler.sqlite3-wal"))?;
+                let failure = match factory.open_bound(inputs) {
+                    Ok(owner) => {
+                        let closed = owner.close().map(|_| ()).map_err(|failure| failure.to_string());
+                        panic!("nonregular WAL must refuse acquisition; close: {closed:?}");
+                    }
+                    Err(failure) => failure,
+                };
+                let released = match failure.retry_close() {
+                    Ok(released) => released,
+                    Err(failure) => panic!("refused scheduler acquisition kept its owner: {failure}"),
+                };
+                Ok(SqliteInspectionOutcome {
+                    accounting: Err(anyhow::anyhow!("injected acquisition refusal")),
+                    terminal: lillux_sqlite::OriginalNativeConnectionTerminal::Released(released),
                 })
             })
             .unwrap_err();
         assert!(format!("{error:#}").contains("injected acquisition refusal"));
         assert!(permit.inspection_closed.borrow().is_none());
         assert!(controller.closed.lock().unwrap().is_empty());
-        let released = controller.acquisition_released.lock().unwrap()[0].clone();
-        released.require_original().unwrap();
+        let released = controller.runtime_released.lock().unwrap()[0].clone();
+        match released.as_ref() {
+            RuntimeInspectionRelease::Acquisition(owner) => owner.require_original().unwrap(),
+            RuntimeInspectionRelease::Closed(_) => panic!("a refused acquisition has no closed proof"),
+        }
         let weak = Arc::downgrade(&released);
         let copy = permit
             .inspection_custody
@@ -4570,6 +4524,10 @@ mod tests {
             std::fs::read(tmp.path().join("scheduler.sqlite3")).unwrap(),
             b"retained main"
         );
+        lillux_sqlite::test_host::end_isolated_process(
+            (state_lock, namespace, directory, tmp, serial),
+            "released scheduler acquisition supplied no accounting",
+        )
     }
 
     #[test]
@@ -4610,7 +4568,9 @@ mod tests {
             Ok(_) => panic!("original role must stay charged after copy Drop"),
             Err(error) => error,
         };
-        assert!(format!("{error:#}").contains("already allocated"));
+        // The namespace producer admits one attempt per store, so the
+        // second copy is refused before any allocation is considered.
+        assert!(format!("{error:#}").contains("namespace producer already attempted"), "{error:#}");
         assert_eq!(std::fs::read(&record).unwrap(), charged);
         drop(error);
         std::fs::rename(&record, record.with_extension("original-retained")).unwrap();
@@ -4649,6 +4609,11 @@ mod tests {
         let foreign = TempDir::new().unwrap();
         let foreign = lillux::PinnedDirectory::open(foreign.path())
             .unwrap()
+            .unwrap();
+        // SQL service runs only inside the store's native producer interval.
+        assert!(scheduler_sql.require_destination(&scheduler).is_err());
+        let _production = scheduler_sql
+            .begin_native_production(&scheduler, std::ffi::OsStr::new("scheduler.sqlite3"))
             .unwrap();
         assert!(scheduler_sql.require_destination(&foreign).is_err());
         assert!(scheduler_sql.require_destination(&scheduler).is_ok());

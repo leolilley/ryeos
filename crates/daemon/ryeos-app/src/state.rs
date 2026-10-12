@@ -311,6 +311,11 @@ impl AppState {
 /// caller owns the directory lifetime. No API handlers, placement binding, or
 /// vault authority is preinstalled; composed tests must add only the exact
 /// production boundary they exercise.
+///
+/// The Store opens through the native test gate. Its owner comes first in the
+/// returned pair so that `let (store_owner, state) = build(..)` drops the
+/// application, and every Store `Arc` it holds, before the owner closes the
+/// Store. The owner stays on the opening thread.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::sync::Arc;
@@ -318,14 +323,60 @@ pub mod test_support {
     use anyhow::Result;
 
     use super::{AppState, CatalogHealth};
+    use crate::state_store::test_native::TestStateStore;
 
-    pub fn build(root: &std::path::Path) -> Result<AppState> {
-        let runtime_state_dir = root.join(".ai/state");
-        let runtime_db_path = root.join("runtime.sqlite3");
+    pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        let (config, identity) = test_identity(root)?;
+        let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let write_barrier = crate::write_barrier::WriteBarrier::new();
+        let store_owner = TestStateStore::open_with_barrier(
+            root,
+            signer,
+            write_barrier.clone(),
+            Arc::new(head_trust),
+        )?;
+        let state_store = Arc::clone(store_owner.store());
+        // The owner already holds this App root's operator lock; a second
+        // acquisition would conflict with it.
+        let controller_lifetime = store_owner.controller_lifetime();
+        let state = compose(config, identity, state_store, write_barrier, controller_lifetime)?;
+        Ok((store_owner, state))
+    }
+
+    /// Compose an application over a Store the caller already holds, without
+    /// opening another. A thread holds one test Store at a time, so a test
+    /// that needs an application over an existing Store uses this. `root`
+    /// receives the application's own identity keys and configuration.
+    pub fn build_with_store(
+        root: &std::path::Path,
+        state_store: Arc<crate::state_store::StateStore>,
+        controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+    ) -> Result<AppState> {
+        let (config, identity) = test_identity(root)?;
+        compose(
+            config,
+            identity,
+            state_store,
+            crate::write_barrier::WriteBarrier::new(),
+            controller_lifetime,
+        )
+    }
+
+    fn test_identity(
+        root: &std::path::Path,
+    ) -> Result<(
+        ryeos_node_runtime::config::Config,
+        ryeos_node_runtime::identity::NodeIdentity,
+    )> {
+        let runtime_db_path = TestStateStore::runtime_state_dir(root).join("runtime.sqlite3");
         let key_path = root.join("identity/node-key.pem");
         let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse()?,
-            db_path: runtime_db_path.clone(),
+            db_path: runtime_db_path,
             uds_path: root.join("test.sock"),
             app_root: root.to_path_buf(),
             node_signing_key_path: key_path.clone(),
@@ -334,20 +385,16 @@ pub mod test_support {
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
-        let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
-            &identity,
-        ));
-        let mut head_trust = ryeos_state::refs::TrustStore::new();
-        head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let write_barrier = crate::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(crate::state_store::StateStore::new_with_head_trust(
-            root.to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier.clone(),
-            Arc::new(head_trust),
-        )?);
+        Ok((config, identity))
+    }
+
+    fn compose(
+        config: ryeos_node_runtime::config::Config,
+        identity: ryeos_node_runtime::identity::NodeIdentity,
+        state_store: Arc<crate::state_store::StateStore>,
+        write_barrier: crate::write_barrier::WriteBarrier,
+        controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+    ) -> Result<AppState> {
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -376,7 +423,6 @@ pub mod test_support {
             kind_profiles,
             events.clone(),
         ));
-        let controller_lifetime = ryeos_node_runtime::state_lock::test_controller_lifetime(root)?;
         Ok(AppState {
             config: Arc::new(config),
             daemon_build: crate::build_info::get(),

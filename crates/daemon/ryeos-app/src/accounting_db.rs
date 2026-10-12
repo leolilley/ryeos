@@ -30,15 +30,15 @@
 //! outcome and a contradictory replay is an integrity error (plan §7.8).
 
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+use std::ffi::OsStr;
+use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use ryeos_accounting::{
@@ -2956,7 +2956,9 @@ fn resource_attribution_interval_overlaps(
 /// transitions additionally advance the external financial anchor after
 /// commit and before success is returned.
 pub struct AccountingDb {
-    sql: LedgerSql,
+    /// The ledger's SQL owner: the live native owner issued from the
+    /// daemon's original factory.
+    ledger: Arc<AccountingNativeLedger>,
     path: PathBuf,
     site_id: String,
     epoch: u64,
@@ -2966,48 +2968,13 @@ pub struct AccountingDb {
     holders: LedgerHolders,
 }
 
-/// The ledger's SQL owner: the live native owner issued from the daemon's
-/// original factory, or a stock connection for the pre-gate test fixtures.
-enum LedgerSql {
-    Stock(Mutex<Connection>),
-    Native(Arc<AccountingNativeLedger>),
-}
-
 /// Descriptors held beside the SQL owner. The bound native VFS owns the
 /// database, WAL and directory binding itself, so the native ledger keeps
 /// only its initialization marker.
 enum LedgerHolders {
-    Stock {
-        runtime_directory: lillux::PinnedDirectory,
-        _directory_lock: DirectoryGuard,
-        database_file: File,
-        wal_file: Option<File>,
-        shm_file: Option<File>,
-        initialization_marker: Option<File>,
-    },
     Native {
         _initialization_marker: File,
     },
-}
-
-/// Exclusive-ownership proof for the ledger's directory, held for the
-/// process lifetime. Either the daemon's runtime-state namespace lock or a
-/// dedicated `.accounting.sqlite3.lock` anchor independent of it.
-enum DirectoryGuard {
-    Namespace(lillux::PinnedDirectoryLock),
-    // Held for its process-lifetime OS lock; the value is never read.
-    #[allow(dead_code)]
-    Dedicated(lillux::ExclusiveFileLock),
-}
-
-struct RawAccountingDb {
-    conn: Connection,
-    path: PathBuf,
-    runtime_directory: lillux::PinnedDirectory,
-    directory_lock: DirectoryGuard,
-    database_file: File,
-    wal_file: Option<File>,
-    shm_file: Option<File>,
 }
 
 impl AccountingDb {
@@ -3684,43 +3651,6 @@ impl AccountingDb {
         })
     }
 
-    /// Open the ledger at a runtime-state directory path with its own
-    /// dedicated exclusive OS lock, independent of the runtime-state
-    /// namespace lock. The daemon composition calls this directly after
-    /// state-store construction.
-    pub fn open_default(runtime_state_dir: &Path) -> Result<Self> {
-        let runtime_directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
-            .context("pin accounting runtime-state directory")?;
-        let guard = lillux::ExclusiveFileLock::acquire_in(
-            &runtime_directory,
-            OsStr::new(ACCOUNTING_DB_FILENAME),
-        )
-        .context("acquire dedicated accounting ledger lock")?;
-        Self::open_with_guard(&runtime_directory, DirectoryGuard::Dedicated(guard))
-    }
-
-    /// Open the ledger at a runtime-state directory path (tests only).
-    #[cfg(test)]
-    pub(crate) fn open_at_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
-        Self::open_default(runtime_state_dir)
-    }
-
-    /// Open the ledger relative to the exact runtime-state inode already
-    /// selected and exclusively locked by the daemon. The independent
-    /// initialization marker distinguishes a normal first initialization
-    /// from loss of established financial source-of-truth state, which
-    /// fails closed.
-    pub fn open_at_pinned_runtime_state_dir_with_lock(
-        runtime_directory: &lillux::PinnedDirectory,
-        directory_lock: lillux::PinnedDirectoryLock,
-    ) -> Result<Self> {
-        ensure_directory_path_still_pinned(runtime_directory)?;
-        directory_lock
-            .ensure_protects(runtime_directory)
-            .context("verify accounting runtime-state directory lock")?;
-        Self::open_with_guard(runtime_directory, DirectoryGuard::Namespace(directory_lock))
-    }
-
     /// Open the ledger on the daemon's live native factory from the fixed
     /// inputs the live Store owner issued. The returned native owner holds
     /// every ticket-bearing owner whether or not the open succeeds, and must
@@ -3731,6 +3661,44 @@ impl AccountingDb {
     ) -> (Arc<AccountingNativeLedger>, Result<Self>) {
         let (factory, runtime_directory, established, inputs, reference) = admission.into_parts();
         Self::open_native(factory, runtime_directory, established, inputs, reference)
+    }
+
+    /// Open the ledger in `directory` on a test host's factory, issuing the
+    /// fixed ledger role and its schema reference under that host's
+    /// destination authority. The returned owner holds every native owner
+    /// whether or not the open succeeds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn open_native_for_test(
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        directory: &Arc<lillux::PinnedDirectory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+    ) -> Result<(Arc<AccountingNativeLedger>, Result<Self>)> {
+        let established = ledger_established(directory)?;
+        let mode = if established {
+            lillux_sqlite::OriginalNativeBoundMode::Existing
+        } else {
+            lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate
+        };
+        // SAFETY: test-only issuance under the calling test host's own funded
+        // factory, whose destination authority admits this directory.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                Arc::clone(directory),
+                OsStr::new(ACCOUNTING_DB_FILENAME),
+                mode,
+                lillux_sqlite::OriginalNativeDomain::NodeAccounting,
+                Arc::clone(&destination),
+                None,
+            )
+        }?;
+        // SAFETY: as above, for the fixed ledger schema reference only.
+        let reference = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference,
+                destination,
+            )
+        }?;
+        Ok(Self::open_native(factory, directory.try_clone()?, established, inputs, reference))
     }
 
     fn open_native(
@@ -3772,7 +3740,7 @@ impl AccountingDb {
                     sqlite_schema::init_owned(conn, &spec, &schema_sql, &path)?;
                 }
             }
-            refuse_native_predecessor_migration(conn, &path)?;
+            refuse_earlier_accounting_schema(conn, &path)?;
             assert_current_against(conn, &path, definition)?;
             let journal_mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -3808,7 +3776,7 @@ impl AccountingDb {
         let credential_binding_key =
             load_or_create_credential_binding_key(runtime_directory, established_epoch)?;
         let db = AccountingDb {
-            sql: LedgerSql::Native(Arc::clone(ledger)),
+            ledger: Arc::clone(ledger),
             path,
             site_id,
             epoch,
@@ -3819,107 +3787,6 @@ impl AccountingDb {
                 _initialization_marker: marker_file,
             },
         };
-        ensure_accounting_bindings(&db)?;
-        Ok(db)
-    }
-
-    fn open_with_guard(
-        runtime_directory: &lillux::PinnedDirectory,
-        directory_lock: DirectoryGuard,
-    ) -> Result<Self> {
-        ensure_directory_path_still_pinned(runtime_directory)?;
-        if let DirectoryGuard::Namespace(lock) = &directory_lock {
-            lock.ensure_protects(runtime_directory)
-                .context("verify accounting runtime-state directory lock")?;
-        }
-        let marker = inspect_initialized_marker(runtime_directory)?;
-        let established_epoch = marker.is_some();
-        let existing_database = runtime_directory
-            .open_regular(OsStr::new(ACCOUNTING_DB_FILENAME), true)
-            .with_context(|| {
-                format!(
-                    "accounting database must be a regular non-symlink file: {}",
-                    runtime_directory
-                        .path()
-                        .join(ACCOUNTING_DB_FILENAME)
-                        .display()
-                )
-            })?;
-        if marker.is_some() && existing_database.is_none() {
-            bail!(
-                "established accounting database is absent; hard admission is fail-closed: {}",
-                runtime_directory
-                    .path()
-                    .join(ACCOUNTING_DB_FILENAME)
-                    .display()
-            );
-        }
-
-        let raw = if marker.is_some() {
-            // Established source-of-truth state must never take the
-            // fresh-file initialization branch, even if truncated to empty.
-            open_raw_in_pinned_directory(
-                runtime_directory,
-                OsStr::new(ACCOUNTING_DB_FILENAME),
-                false,
-                directory_lock,
-            )?
-        } else {
-            open_raw_in_pinned_directory(
-                runtime_directory,
-                OsStr::new(ACCOUNTING_DB_FILENAME),
-                true,
-                directory_lock,
-            )?
-        };
-        let existing_marker = if let Some(marker) = marker {
-            assert_integrity(&raw.conn, &raw.path)?;
-            Some(marker)
-        } else {
-            sync_initialization(&raw)?;
-            None
-        };
-
-        let (site_id, epoch) = establish_site_identity(&raw.conn, &raw.path)?;
-        // Every established active epoch must find its anchor, including at
-        // sequence zero. Re-creating genesis after the initialization marker
-        // exists would let total anchor loss revive pre-issue reservations
-        // and old execution allowances. Only the same first-initialization
-        // path that created the independent marker may create the anchor.
-        let anchor = Arc::new(if established_epoch {
-            AccountingAnchor::open_requiring_existing(runtime_directory.path(), &site_id, epoch)?
-        } else {
-            AccountingAnchor::open_or_init(runtime_directory.path(), &site_id, epoch)?
-        });
-        // The initialization marker is the epoch-activation witness. Publish
-        // it only after both the database identity and external genesis
-        // anchor are durable; a crash before this point remains a retryable
-        // first initialization, while any later anchor loss fails closed.
-        let marker_file = match existing_marker {
-            Some(marker) => marker,
-            None => write_initialized_marker(runtime_directory)?,
-        };
-
-        let credential_binding_key =
-            load_or_create_credential_binding_key(&raw.runtime_directory, established_epoch)?;
-        let db = AccountingDb {
-            sql: LedgerSql::Stock(Mutex::new(raw.conn)),
-            path: raw.path,
-            site_id,
-            epoch,
-            anchor,
-            hard_admission: AtomicBool::new(true),
-            credential_binding_key,
-            holders: LedgerHolders::Stock {
-                runtime_directory: raw.runtime_directory,
-                _directory_lock: raw.directory_lock,
-                database_file: raw.database_file,
-                wal_file: raw.wal_file,
-                shm_file: raw.shm_file,
-                initialization_marker: Some(marker_file),
-            },
-        };
-        ensure_accounting_bindings(&db)?;
         Ok(db)
     }
 
@@ -3966,33 +3833,21 @@ impl AccountingDb {
         &self,
         operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
     ) -> Result<T> {
-        match &self.sql {
-            LedgerSql::Stock(conn) => {
-                let conn = conn
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("accounting connection mutex poisoned"))?;
-                operation(&conn)
-            }
-            LedgerSql::Native(ledger) => ledger.with_sql(operation),
-        }
+        self.ledger.with_sql(operation)
     }
 
-    /// Stock-fixture connection guard for tests and test-support fixtures.
-    #[cfg(any(test, feature = "test-support"))]
-    fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>> {
-        let LedgerSql::Stock(conn) = &self.sql else {
-            bail!("native accounting ledger has no stock connection guard");
-        };
-        conn.lock()
-            .map_err(|_| anyhow::anyhow!("accounting connection mutex poisoned"))
+    /// Ledger SQL on the live owner for a test that reads durable rows.
+    #[cfg(test)]
+    pub(crate) fn fixture_with_conn<T>(
+        &self,
+        operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.with_conn(operation)
     }
 
     /// Whether this ledger's SQL admission has ended (native owner closed).
     pub fn is_closed(&self) -> bool {
-        match &self.sql {
-            LedgerSql::Stock(_) => false,
-            LedgerSql::Native(ledger) => ledger.is_closed(),
-        }
+        self.ledger.is_closed()
     }
 
     /// Resolve one committed transaction's anchor obligation. Failure here
@@ -8707,6 +8562,22 @@ impl AccountingDb {
         })
     }
 
+    /// Count of provider-call attempts issued to their provider and not yet
+    /// settled: the attempts whose publication still depends on the
+    /// provider-call replay rows. Read-only.
+    pub fn unsettled_provider_attempt_count(&self) -> Result<u64> {
+        self.with_conn(|conn| {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_attempt_reservation WHERE state = ?1",
+                    [AttemptBudgetState::Issued.as_str()],
+                    |row| row.get(0),
+                )
+                .context("count issued unsettled provider attempts")?;
+            u64::try_from(count).context("negative provider attempt count")
+        })
+    }
+
     /// Snapshot of every account under one execution budget.
     pub fn account_snapshot(&self, execution_budget_id: &str) -> Result<Vec<AccountRow>> {
         self.with_conn(|conn| {
@@ -11394,151 +11265,11 @@ impl AccountingDb {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Open machinery (pattern per ryeos_state::operational)
-// ---------------------------------------------------------------------------
-
-fn open_raw_in_pinned_directory(
-    directory: &lillux::PinnedDirectory,
-    name: &OsStr,
-    may_create: bool,
-    directory_lock: DirectoryGuard,
-) -> Result<RawAccountingDb> {
-    ensure_directory_path_still_pinned(directory)?;
-    inspect_accounting_sidecars(directory, name)?;
-    let path = directory.path().join(name);
-    let database_file = match directory.open_regular(name, true).with_context(|| {
-        format!(
-            "accounting database must be a regular non-symlink file: {}",
-            path.display()
-        )
-    })? {
-        Some(file) => file,
-        None if may_create => {
-            let file = directory
-                .open_regular_create(name, true, true, 0o600)
-                .with_context(|| format!("create accounting database {}", path.display()))?;
-            directory
-                .sync()
-                .context("sync accounting database creation")?;
-            file
-        }
-        None => bail!("accounting database is absent: {}", path.display()),
-    };
-    let descriptors_before = matching_open_descriptors(&database_file)?;
-    let wal_name = accounting_sidecar_name(name, "-wal");
-    let shm_name = accounting_sidecar_name(name, "-shm");
-    let wal_before = directory.open_regular(&wal_name, false)?;
-    let shm_before = directory.open_regular(&shm_name, false)?;
-    let wal_descriptors_before = wal_before
-        .as_ref()
-        .map(matching_open_descriptors)
-        .transpose()?
-        .unwrap_or_default();
-    let shm_descriptors_before = shm_before
-        .as_ref()
-        .map(matching_open_descriptors)
-        .transpose()?
-        .unwrap_or_default();
-    ensure_directory_path_still_pinned(directory)?;
-    ensure_file_binding(directory, name, &database_file, "accounting database")?;
-
-    // The exact file was established descriptor-relative above. SQLite's
-    // Unix VFS canonicalizes this intentional /proc/self/fd symlink, so
-    // SQLITE_OPEN_NOFOLLOW cannot be used. Omit SQLITE_OPEN_CREATE, prove the
-    // main descriptor after open, and eagerly retain WAL/SHM below.
-    let sqlite_path = directory.descriptor_child_path(name)?;
-    let conn = Connection::open_with_flags(&sqlite_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .with_context(|| format!("open accounting database {}", path.display()))?;
-    ensure_directory_path_still_pinned(directory)?;
-    ensure_file_binding(directory, name, &database_file, "accounting database")?;
-    ensure_sqlite_connection_uses_expected_file(
-        &database_file,
-        &descriptors_before,
-        "accounting database",
-    )?;
-
-    configure_connection(&conn)?;
-    let spec = accounting_schema_spec();
-    if may_create && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-        let schema_sql = current_schema_sql();
-        sqlite_schema::init_owned(&conn, &spec, &schema_sql, &path)?;
-    } else {
-        migrate_accounting_schema(&conn, &path)?;
-    }
-    assert_current(&conn, &path)?;
-    let journal_mode: String = conn
-        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-        .context("read accounting journal mode")?;
-    if journal_mode != "wal" {
-        bail!(
-            "accounting database journal mode mismatch in {}: stored={journal_mode}, expected=wal",
-            path.display()
-        );
-    }
-
-    conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
-        .context("eagerly establish accounting WAL handles")?;
-    let wal_file = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "SQLite did not establish the accounting WAL file: {}",
-            directory.path().join(&wal_name).display()
-        )
-    })?;
-    let shm_file = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "SQLite did not establish the accounting shared-memory file: {}",
-            directory.path().join(&shm_name).display()
-        )
-    })?;
-    if let Some(expected) = wal_before.as_ref() {
-        ensure_same_file(expected, &wal_file, "accounting WAL", &path)?;
-    }
-    if let Some(expected) = shm_before.as_ref() {
-        ensure_same_file(expected, &shm_file, "accounting shared memory", &path)?;
-    }
-    ensure_sqlite_connection_uses_expected_file(
-        &wal_file,
-        &wal_descriptors_before,
-        "accounting WAL",
-    )?;
-    ensure_sqlite_connection_uses_expected_file(
-        &shm_file,
-        &shm_descriptors_before,
-        "accounting shared memory",
-    )?;
-    ensure_directory_path_still_pinned(directory)?;
-    ensure_file_binding(directory, name, &database_file, "accounting database")?;
-    inspect_accounting_sidecars(directory, name)?;
-    Ok(RawAccountingDb {
-        conn,
-        path,
-        runtime_directory: directory.try_clone()?,
-        directory_lock,
-        database_file,
-        wal_file: Some(wal_file),
-        shm_file: Some(shm_file),
-    })
-}
-
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")
         .context("enable accounting foreign keys")?;
     conn.pragma_update(None, "synchronous", "FULL")
         .context("set accounting synchronous=FULL")?;
-    Ok(())
-}
-
-fn sync_initialization(raw: &RawAccountingDb) -> Result<()> {
-    raw.conn
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .context("checkpoint initialized accounting database")?;
-    raw.database_file
-        .sync_all()
-        .with_context(|| format!("sync accounting database {}", raw.path.display()))?;
-    raw.runtime_directory
-        .sync()
-        .with_context(|| format!("sync accounting database parent {}", raw.path.display()))?;
     Ok(())
 }
 
@@ -11554,50 +11285,6 @@ fn ensure_directory_path_still_pinned(directory: &lillux::PinnedDirectory) -> Re
             "accounting directory path changed while it was in use: {}",
             directory.path().display()
         );
-    }
-    Ok(())
-}
-
-fn files_are_same(left: &File, right: &File) -> Result<bool> {
-    #[cfg(not(unix))]
-    {
-        let _ = (left, right);
-        bail!("accounting file identity is unavailable on this platform");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let left = left.metadata()?;
-        let right = right.metadata()?;
-        Ok(left.dev() == right.dev() && left.ino() == right.ino())
-    }
-}
-
-fn ensure_file_binding(
-    directory: &lillux::PinnedDirectory,
-    name: &OsStr,
-    expected: &File,
-    label: &str,
-) -> Result<()> {
-    let current = directory.open_regular(name, false)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "{label} disappeared while it was in use: {}",
-            directory.path().join(name).display()
-        )
-    })?;
-    if !files_are_same(expected, &current)? {
-        bail!(
-            "{label} path changed while it was in use: {}",
-            directory.path().join(name).display()
-        );
-    }
-    Ok(())
-}
-
-fn ensure_same_file(expected: &File, current: &File, label: &str, path: &Path) -> Result<()> {
-    if !files_are_same(expected, current)? {
-        bail!("{label} changed while it was in use: {}", path.display());
     }
     Ok(())
 }
@@ -11716,149 +11403,6 @@ fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<File>
     })
 }
 
-fn inspect_accounting_sidecars(
-    directory: &lillux::PinnedDirectory,
-    database_name: &OsStr,
-) -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let sidecar_name = accounting_sidecar_name(database_name, suffix);
-        let _ = directory
-            .open_regular(&sidecar_name, false)
-            .with_context(|| {
-                format!(
-                    "inspect accounting database sidecar {}",
-                    directory.path().join(&sidecar_name).display()
-                )
-            })?;
-    }
-    Ok(())
-}
-
-fn accounting_sidecar_name(database_name: &OsStr, suffix: &str) -> OsString {
-    let mut sidecar_name = database_name.to_os_string();
-    sidecar_name.push(suffix);
-    sidecar_name
-}
-
-#[cfg(target_os = "linux")]
-fn matching_open_descriptors(file: &File) -> Result<BTreeSet<i32>> {
-    use std::os::unix::fs::MetadataExt;
-
-    let expected = file.metadata()?;
-    let mut descriptors = BTreeSet::new();
-    for entry in fs::read_dir("/proc/self/fd").context("enumerate process descriptors")? {
-        let entry = entry.context("read process descriptor entry")?;
-        let Some(descriptor) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let metadata = match fs::metadata(entry.path()) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspect process descriptor {}", entry.path().display())
-                });
-            }
-        };
-        if metadata.dev() == expected.dev() && metadata.ino() == expected.ino() {
-            descriptors.insert(descriptor);
-        }
-    }
-    Ok(descriptors)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn matching_open_descriptors(_file: &File) -> Result<BTreeSet<i32>> {
-    Ok(BTreeSet::new())
-}
-
-fn ensure_sqlite_connection_uses_expected_file(
-    file: &File,
-    descriptors_before: &BTreeSet<i32>,
-    label: &str,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-
-        let mut descriptors_after = matching_open_descriptors(file)?;
-        descriptors_after.remove(&file.as_raw_fd());
-        if descriptors_after.is_subset(descriptors_before) {
-            bail!("SQLite did not retain a descriptor for the pinned {label} inode");
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (file, descriptors_before, label);
-    Ok(())
-}
-
-fn ensure_accounting_bindings(db: &AccountingDb) -> Result<()> {
-    let LedgerHolders::Stock {
-        runtime_directory,
-        _directory_lock: _,
-        database_file,
-        wal_file,
-        shm_file,
-        initialization_marker,
-    } = &db.holders
-    else {
-        // The bound native VFS proves the database and WAL binding itself.
-        return Ok(());
-    };
-    ensure_directory_path_still_pinned(runtime_directory)?;
-    let name = db.path.file_name().ok_or_else(|| {
-        anyhow::anyhow!(
-            "accounting database path has no filename: {}",
-            db.path.display()
-        )
-    })?;
-    ensure_file_binding(
-        runtime_directory,
-        name,
-        database_file,
-        "accounting database",
-    )?;
-    inspect_accounting_sidecars(runtime_directory, name)?;
-    if let Some(wal_file) = wal_file.as_ref() {
-        let wal_name = accounting_sidecar_name(name, "-wal");
-        ensure_file_binding(runtime_directory, &wal_name, wal_file, "accounting WAL")?;
-    }
-    if let Some(shm_file) = shm_file.as_ref() {
-        let shm_name = accounting_sidecar_name(name, "-shm");
-        ensure_file_binding(
-            runtime_directory,
-            &shm_name,
-            shm_file,
-            "accounting shared memory",
-        )?;
-    }
-    if let Some(expected_marker) = initialization_marker.as_ref() {
-        let current_marker = inspect_initialized_marker(runtime_directory)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "accounting initialization marker disappeared: {}",
-                runtime_directory
-                    .path()
-                    .join(ACCOUNTING_INITIALIZED_FILENAME)
-                    .display()
-            )
-        })?;
-        if !files_are_same(expected_marker, &current_marker)? {
-            bail!(
-                "accounting initialization marker changed while it was in use: {}",
-                runtime_directory
-                    .path()
-                    .join(ACCOUNTING_INITIALIZED_FILENAME)
-                    .display()
-            );
-        }
-    }
-    Ok(())
-}
-
 fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -11872,15 +11416,101 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
-    sqlite_schema::assert_owned(conn, &accounting_schema_spec(), path)?;
-    sqlite_schema::assert_complete_schema_sql(conn, &current_schema_sql(), path)?;
-    assert_current_version(conn, path)
+/// Count the issued, unsettled provider-call attempts of the established
+/// ledger under `runtime`, on the caller's in-process native session: the
+/// ledger and its schema reference open on the session's tickets, the count
+/// is read against the current schema, and the ledger closes again. Every
+/// terminal reaches `retain`; a refusal carries its owners in
+/// [`ryeos_state::operational::CarriedOwners`]. A ledger that was never
+/// established holds no attempt and counts zero.
+/// # Safety
+/// The caller holds the node exclusion and `namespace`, the exclusive lock
+/// of `runtime`, for the whole call, and `factory` is its own funded
+/// in-process host's factory, whose destination is `destination`.
+pub(crate) unsafe fn offline_unsettled_provider_attempt_count(
+    runtime: Arc<lillux::PinnedDirectory>,
+    namespace: lillux::PinnedDirectoryLock,
+    factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+    verify: &dyn Fn() -> anyhow::Result<()>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> anyhow::Result<usize> {
+    use ryeos_state::operational::CarriedOwners;
+    verify()?;
+    namespace.ensure_protects(&runtime)?;
+    if !ledger_established(&runtime)? {
+        return Ok(0);
+    }
+    let path = runtime.path().join(ACCOUNTING_DB_FILENAME);
+    // SAFETY: the caller's funded host issues these tickets under its locks;
+    // the fixed ledger role and the existing-only mode are chosen here.
+    let inputs = unsafe {
+        lillux_sqlite::OriginalNativeBoundInputs::issued(
+            Arc::clone(&runtime),
+            std::ffi::OsStr::new(ACCOUNTING_DB_FILENAME),
+            lillux_sqlite::OriginalNativeBoundMode::Existing,
+            lillux_sqlite::OriginalNativeDomain::NodeAccounting,
+            destination.clone(),
+            None,
+        )
+    }?;
+    // SAFETY: as above; the reference may build only the ledger schema.
+    let reference = unsafe {
+        lillux_sqlite::OriginalNativeTransientInputs::issued(
+            lillux_sqlite::OriginalNativeDomain::NodeAccountingSchemaReference,
+            destination,
+        )
+    }?;
+    let (ledger, opened) = native::AccountingNativeLedger::open(Arc::clone(factory), inputs, reference);
+    let counted = opened.and_then(|()| {
+        verify()?;
+        ledger.with_sql_against_reference(|conn, definition| {
+            configure_connection(conn)?;
+            assert_current_against(conn, &path, definition)?;
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_attempt_reservation WHERE state = ?1",
+                    [AttemptBudgetState::Issued.as_str()],
+                    |row| row.get(0),
+                )
+                .context("count issued unsettled provider attempts")?;
+            usize::try_from(count).context("negative provider attempt count")
+        })
+    });
+    if let Err(error) = ledger.close() {
+        let error = match counted {
+            Ok(_) => error,
+            Err(counted) => counted.context(format!("ledger close also refused: {error:#}")),
+        };
+        return Err(CarriedOwners::carry(error.context("close accounting ledger after inspection"), ledger));
+    }
+    let terminals = match ledger.into_census(factory) {
+        Ok(terminals) => terminals,
+        Err((ledger, error)) => {
+            return Err(CarriedOwners::carry(error.context("closed accounting ledger census refused"), ledger));
+        }
+    };
+    let mut refused = Vec::new();
+    let mut reasons = Vec::new();
+    for terminal in terminals {
+        if let Err((terminal, reason)) = retain(terminal) {
+            refused.push(terminal);
+            reasons.push(format!("{reason:#}"));
+        }
+    }
+    if !refused.is_empty() {
+        return Err(CarriedOwners::carry(
+            anyhow::anyhow!("accounting ledger terminal not retained: {}", reasons.join("; ")),
+            refused,
+        ));
+    }
+    let count = counted?;
+    verify()?;
+    Ok(count)
 }
 
-/// Native form of [`assert_current`]: the complete schema is compared with
-/// the definition captured from the closed native reference, never with a
-/// stock in-memory reference.
+/// The ledger is the exact current owned schema: its complete SQL is compared
+/// with the definition captured from the closed native reference.
 fn assert_current_against(
     conn: &Connection,
     path: &Path,
@@ -11891,11 +11521,10 @@ fn assert_current_against(
     assert_current_version(conn, path)
 }
 
-/// An exact predecessor migration compares the stored schema with every
-/// predecessor reference, which the live native ledger has no ticket for. It
-/// refuses instead, so the ledger stays fail-closed until a stopped-node
-/// migration owner runs.
-fn refuse_native_predecessor_migration(conn: &Connection, path: &Path) -> Result<()> {
+/// Earlier accounting schema versions are not supported. A ledger at one of
+/// them is refused, and hard admission stays fail-closed until the old ledger
+/// is removed and the node starts with a fresh one.
+fn refuse_earlier_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
     let application_id: i32 = conn
         .query_row("PRAGMA application_id", [], |row| row.get(0))
         .context("read accounting application id")?;
@@ -11904,9 +11533,8 @@ fn refuse_native_predecessor_migration(conn: &Connection, path: &Path) -> Result
         .context("read accounting schema version")?;
     if application_id == ACCOUNTING_APP_ID && (1..ACCOUNTING_SCHEMA_VERSION).contains(&version) {
         bail!(
-            "accounting schema v{version} in {} needs a predecessor migration, which the live \
-             native ledger refuses; hard admission stays fail-closed until a stopped-node \
-             migration runs",
+            "accounting schema v{version} in {} is an unsupported earlier version; hard \
+             admission stays fail-closed until the old ledger is removed",
             path.display()
         );
     }
@@ -11923,378 +11551,6 @@ fn assert_current_version(conn: &Connection, path: &Path) -> Result<()> {
              expected={ACCOUNTING_SCHEMA_VERSION}",
             path.display()
         );
-    }
-    Ok(())
-}
-
-/// Exact forward migration for the non-disposable accounting ledger. Unknown,
-/// foreign, or already-divergent predecessor schemas are never normalized by
-/// the migration.
-fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
-    let application_id: i32 = conn
-        .query_row("PRAGMA application_id", [], |row| row.get(0))
-        .context("read accounting application id before migration")?;
-    let version: i32 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .context("read accounting schema version before migration")?;
-    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
-        return Ok(());
-    }
-    let predecessor_sql = match version {
-        1 => SCHEMA_V1_SQL.to_string(),
-        2 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}"),
-        3 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}"),
-        4 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}"),
-        5 => format!(
-            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}"
-        ),
-        6 => format!(
-            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}"
-        ),
-        7 => format!(
-            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}"
-        ),
-        _ => unreachable!("version domain checked above"),
-    };
-    sqlite_schema::assert_complete_schema_sql(conn, &predecessor_sql, path).with_context(|| {
-        format!("accounting v{version} predecessor is not exact; refusing migration")
-    })?;
-    if !conn.is_autocommit() {
-        bail!("accounting migration requires exclusive connection outside a transaction");
-    }
-    assert_integrity(conn, path)?;
-    assert_accounting_foreign_keys(conn)?;
-    if version >= 6 {
-        validate_resource_financial_operations_layout(conn, false)
-            .context("validate exact predecessor financial rows before migration")?;
-    }
-    if version == 7 {
-        validate_resource_usage_partitions(conn)?;
-    }
-    // Foreign-key mode cannot change inside BEGIN. Preserve the actual prior
-    // connection setting, including every failure/COMMIT uncertainty exit.
-    let prior_fk: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-    conn.pragma_update(None, "foreign_keys", false)?;
-    let result = (|| -> Result<()> {
-        let disabled: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-        if disabled {
-            bail!("could not disable FK mode outside migration transaction");
-        }
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .context("begin accounting schema migration")?;
-        if version == 1 {
-            conn.execute_batch(SCHEMA_V2_SQL)
-                .context("apply accounting v2 handoff-ledger schema")?;
-            // A v1 gate committed execution-budget authority only; it had no
-            // field capable of granting one directive budget to the launch.
-            // Preserve that exact meaning as an explicit null v2 binding for
-            // every retained gate. Never infer a broader launch scope from
-            // later per-attempt directive rows.
-            conn.execute(
-                "INSERT INTO launch_accounting_scope_binding (
-                    thread_id, launch_generation, directive_budget_id
-                 ) SELECT thread_id, launch_generation, NULL
-                   FROM launch_accounting_gate",
-                [],
-            )
-            .context("materialize exact v1 execution-only launch-gate bindings")?;
-        }
-        if version < 3 {
-            conn.execute_batch(SCHEMA_V3_SQL)
-                .context("apply accounting v3 aggregate-resource schema")?;
-            backfill_unlimited_execution_resource_budgets(conn)?;
-        }
-        if version < 4 {
-            conn.execute_batch(SCHEMA_V4_SQL)
-                .context("apply accounting v4 resource-financial schema")?;
-        }
-        if version < 5 {
-            conn.execute_batch(SCHEMA_V5_SQL)
-                .context("apply accounting v5 resource-attribution schema")?;
-        }
-        if version < 6 {
-            conn.execute_batch(SCHEMA_V6_SQL)
-                .context("apply accounting v6 resource-owner gate schema")?;
-            backfill_resource_owner_accounting_gates(conn)?;
-            backfill_accounting_outbox_event_types(conn)?;
-        }
-        if version < 7 {
-            conn.execute_batch(SCHEMA_V7_SQL)
-                .context("apply accounting v7 paged partitions")?;
-            let mut statement = conn.prepare("SELECT attribution_id, attribution_json FROM resource_request_attribution ORDER BY attribution_id")?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let id: String = row.get(0)?;
-                let attribution: ResourceRequestAttribution =
-                    serde_json::from_str(&row.get::<_, String>(1)?)?;
-                attribution.validate().map_err(anyhow::Error::msg)?;
-                if attribution.attribution_id.as_str() != id {
-                    bail!("migration attribution identity mismatch");
-                }
-                conn.execute(
-                "UPDATE resource_request_attribution SET start_tick_key=?2, end_tick_key=?3 WHERE attribution_id=?1",
-                rusqlite::params![id, format!("{:020}", attribution.interval.start_tick_ns), format!("{:020}", attribution.interval.end_tick_ns)],
-            )?;
-            }
-            drop(rows);
-            drop(statement);
-            backfill_resource_usage_partitions(conn)?;
-        }
-        validate_resource_financial_operations_layout(conn, false)?;
-        validate_resource_usage_partitions(conn)?;
-        conn.execute_batch(SCHEMA_V8_SQL)
-            .context("preserve existing resource owners in accounting v8")?;
-        assert_current(conn, path).context("validate migrated accounting schema before commit")?;
-        validate_resource_financial_operations(conn)?;
-        assert_accounting_foreign_keys(conn)?;
-        conn.execute_batch("COMMIT")
-            .context("commit accounting schema migration; retain uncertain original database")?;
-        Ok(())
-    })();
-    // COMMIT failures may leave the transaction open. Do not drop the FK guard
-    // before attempting rollback, and never reset/replace the financial DB.
-    let result = if !conn.is_autocommit() {
-        match conn.execute_batch("ROLLBACK") {
-            Ok(()) => result,
-            Err(rollback) => Err(result
-                .err()
-                .unwrap_or_else(|| anyhow::anyhow!("migration unexpectedly retained a transaction"))
-                .context(format!("migration rollback also failed: {rollback}"))),
-        }
-    } else {
-        result
-    };
-    let restored = (|| -> Result<()> {
-        conn.pragma_update(None, "foreign_keys", prior_fk)?;
-        let current: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-        if current != prior_fk {
-            bail!("accounting migration FK mode restoration failed");
-        }
-        Ok(())
-    })();
-    match (result, restored) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error).context("restore FK mode after migration"),
-        (Err(error), Err(restore)) => {
-            Err(error.context(format!("FK restoration also failed: {restore:#}")))
-        }
-    }
-}
-
-fn assert_accounting_foreign_keys(conn: &Connection) -> Result<()> {
-    let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
-    if statement.query([])?.next()?.is_some() {
-        bail!("accounting foreign-key integrity check failed");
-    }
-    Ok(())
-}
-
-fn backfill_resource_owner_accounting_gates(conn: &Connection) -> Result<()> {
-    let mut nonterminal = conn.prepare(
-        "SELECT operation_id, state FROM resource_financial_operation ORDER BY operation_id",
-    )?;
-    let rows = nonterminal
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(nonterminal);
-    for (operation_id, state) in rows {
-        let state = ResourceBudgetState::parse(&state).with_context(|| {
-            format!("legacy resource operation {operation_id} has invalid state")
-        })?;
-        if !state.is_terminal() {
-            bail!(
-                "accounting migration cannot prove cleanup for nonterminal legacy resource operation {operation_id} in state {}; retire or settle the exact owner before upgrading",
-                state.as_str()
-            );
-        }
-    }
-    let mut statement = conn.prepare(
-        "SELECT budget_authority_site_id, ledger_epoch, owner_incarnation,
-                execution_budget_id, directive_budget_id,
-                root_chain_id, audit_chain_root_id, MIN(created_at_ms)
-         FROM resource_financial_operation
-         GROUP BY budget_authority_site_id, ledger_epoch, owner_incarnation,
-                  execution_budget_id, directive_budget_id,
-                  root_chain_id, audit_chain_root_id
-         ORDER BY owner_incarnation",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    for (site_id, epoch, owner, execution, directive, root, audit_root, created_at) in rows {
-        let gate_id = HexDigest::of_canonical_json(&serde_json::json!({
-            "kind": "resource_owner_accounting_gate",
-            "version": 1,
-            "budget_authority_site_id": site_id,
-            "ledger_epoch": u64::try_from(epoch).context("accounting epoch is negative")?,
-            "execution_budget_id": execution,
-            "directive_budget_id": directive,
-            "root_chain_id": root,
-            "audit_chain_root_id": audit_root,
-            "owner_incarnation": owner,
-        }))
-        .map_err(anyhow::Error::msg)?;
-        conn.execute(
-            "INSERT INTO resource_owner_accounting_gate (
-                owner_gate_id, owner_incarnation, budget_authority_site_id,
-                ledger_epoch, execution_budget_id, directive_budget_id,
-                root_chain_id, audit_chain_root_id, owner_recovery_json,
-                state, active_request_count, fenced_reason,
-                created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, 0, ?10, ?11, ?11)",
-            rusqlite::params![
-                gate_id.as_str(),
-                owner,
-                site_id,
-                epoch,
-                execution,
-                directive,
-                root,
-                audit_root,
-                "fenced",
-                Some("migrated_without_owner_recovery"),
-                created_at,
-            ],
-        )?;
-        conn.execute(
-            "UPDATE resource_financial_operation SET owner_gate_id=?1
-             WHERE owner_incarnation=?2 AND execution_budget_id=?3
-               AND directive_budget_id IS ?4 AND root_chain_id=?5 AND audit_chain_root_id=?6",
-            rusqlite::params![
-                gate_id.as_str(),
-                owner,
-                execution,
-                directive,
-                root,
-                audit_root
-            ],
-        )?;
-    }
-    let missing: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM resource_financial_operation WHERE owner_gate_id IS NULL",
-        [],
-        |row| row.get(0),
-    )?;
-    if missing != 0 {
-        bail!("resource-owner gate migration left {missing} operation(s) unbound");
-    }
-    Ok(())
-}
-
-fn backfill_accounting_outbox_event_types(conn: &Connection) -> Result<()> {
-    let mut statement = conn
-        .prepare("SELECT outbox_seq, payload FROM accounting_audit_outbox ORDER BY outbox_seq")
-        .context("prepare accounting outbox event-type backfill")?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })
-        .context("read accounting outbox rows for event-type backfill")?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("decode accounting outbox rows for event-type backfill")?;
-    drop(statement);
-
-    for (outbox_seq, payload) in rows {
-        let value: serde_json::Value = serde_json::from_str(&payload)
-            .with_context(|| format!("decode accounting outbox row {outbox_seq}"))?;
-        let provider =
-            serde_json::from_value::<ProviderAttemptBudgetTransitionV1>(value.clone()).is_ok();
-        let resource = serde_json::from_value::<ResourceBudgetTransitionV1>(value).is_ok();
-        let event_type = match (provider, resource) {
-            (true, false) => "provider_attempt_budget_transition_v1",
-            (false, true) => "resource_budget_transition_v1",
-            (true, true) => bail!(
-                "accounting outbox row {outbox_seq} is ambiguously both provider and resource"
-            ),
-            (false, false) => bail!(
-                "accounting outbox row {outbox_seq} is neither a provider nor resource transition"
-            ),
-        };
-        conn.execute(
-            "UPDATE accounting_audit_outbox SET event_type=?1 WHERE outbox_seq=?2",
-            rusqlite::params![event_type, outbox_seq],
-        )
-        .with_context(|| format!("backfill accounting outbox row {outbox_seq} event type"))?;
-    }
-    Ok(())
-}
-
-/// Executions retained from before aggregate limits existed had exactly no
-/// such limit. Materialize that historical truth rather than attempting to
-/// reconstruct limits from mutable launch projections.
-fn backfill_unlimited_execution_resource_budgets(conn: &Connection) -> Result<()> {
-    let limits = AggregateExecutionLimits::default();
-    let limits_json = canonical_json_string(&serde_json::to_value(limits)?)?;
-    let limits_digest = lillux::cas::sha256_hex(limits_json.as_bytes());
-    let now_ms = wall_clock_ms();
-    conn.execute(
-        "INSERT INTO execution_resource_budget (
-            execution_budget_id, root_chain_id, limits_json, limits_digest,
-            deadline_at_ms, max_worker_executions, max_provider_contacts,
-            used_worker_executions, used_provider_contacts, created_at_ms, updated_at_ms
-         )
-         SELECT execution_budget_id, root_chain_id, ?1, ?2, NULL, NULL, NULL, 0, 0,
-                created_at_ms, ?3
-         FROM budget_account
-         WHERE account_kind = 'execution'",
-        rusqlite::params![limits_json, limits_digest, now_ms],
-    )
-    .context("backfill unlimited aggregate authority for predecessor executions")?;
-    Ok(())
-}
-
-fn backfill_resource_usage_partitions(conn: &Connection) -> Result<()> {
-    let mut statement = conn.prepare(
-        "SELECT operation_id, usage_json, rated_charge_json, settled_at_ms
-           FROM resource_financial_operation
-          WHERE usage_json IS NOT NULL AND rated_charge_json IS NOT NULL
-          ORDER BY operation_id",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(statement);
-    for (_operation_id, usage, charge, settled_at_ms) in rows {
-        let usage: ResourceUsageObservation = serde_json::from_str(&usage)?;
-        let charge: ResourceRatedCharge = serde_json::from_str(&charge)?;
-        // Partial observations intentionally have no usage partition. An
-        // advisory observation remains unsettled with no timestamp; a bounded
-        // observation may already have fenced and settled at its reserved
-        // maximum. Preserve either predecessor meaning without inventing a v7
-        // partition publication coordinate.
-        if usage.coverage == ResourceUsageCoverage::Partial {
-            continue;
-        }
-        let settled_at_ms =
-            settled_at_ms.context("complete resource evidence lacks its settlement timestamp")?;
-        let budget_charge: Option<i64> = conn.query_row(
-            "SELECT budget_charge_usd_nanos FROM resource_financial_operation WHERE operation_id=?1",
-            rusqlite::params![usage.operation_id],
-            |row| row.get(0),
-        )?;
-        persist_resource_usage_partition(conn, &usage, &charge, budget_charge, settled_at_ms)?;
     }
     Ok(())
 }
@@ -12362,6 +11618,7 @@ fn establish_site_identity(conn: &Connection, path: &Path) -> Result<(String, u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_store::test_native::TestAccountingDb;
     use ryeos_accounting::{
         ClosedBillableDimensionSet, Currency, FinalityContract, SPEND_TARIFF_SCHEMA_VERSION,
         SpendBoundCommitments, UnitCount,
@@ -12384,9 +11641,14 @@ mod tests {
         UsdNanos::parse_canonical(s).unwrap()
     }
 
-    fn setup() -> (tempfile::TempDir, AccountingDb) {
+    /// Run `operation` on the ledger's own native connection.
+    fn sql<T>(db: &AccountingDb, operation: impl FnOnce(&Connection) -> T) -> T {
+        db.with_conn(|conn| Ok(operation(conn))).unwrap()
+    }
+
+    fn setup() -> (tempfile::TempDir, TestAccountingDb) {
         let dir = tempfile::tempdir().unwrap();
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         (dir, db)
     }
 
@@ -12883,25 +12145,27 @@ mod tests {
 
         // Both overlap probes are LIMIT-1 covering-index seeks. This guards
         // the admission work bound independently of the retained cardinality.
-        let conn = db.lock_conn().unwrap();
-        for sql in [
-            RESOURCE_ATTRIBUTION_PREDECESSOR_SQL,
-            RESOURCE_ATTRIBUTION_SUCCESSOR_SQL,
-        ] {
-            let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-            let details = plan
-                .query_map(
-                    rusqlite::params![operation_id, format!("{:020}", RETAINED * 2)],
-                    |row| row.get::<_, String>(3),
-                )
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            assert!(details.iter().any(|detail| {
-                detail.contains("USING COVERING INDEX idx_resource_attribution_chronology")
-            }));
-        }
-        drop(conn);
+        db.with_conn(|conn| {
+            for sql in [
+                RESOURCE_ATTRIBUTION_PREDECESSOR_SQL,
+                RESOURCE_ATTRIBUTION_SUCCESSOR_SQL,
+            ] {
+                let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+                let details = plan
+                    .query_map(
+                        rusqlite::params![operation_id, format!("{:020}", RETAINED * 2)],
+                        |row| row.get::<_, String>(3),
+                    )
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert!(details.iter().any(|detail| {
+                    detail.contains("USING COVERING INDEX idx_resource_attribution_chronology")
+                }));
+            }
+            Ok(())
+        })
+        .unwrap();
 
         let middle = RETAINED / 2;
         let exact_gap = attribution(middle * 4 + 2, middle * 4 + 4, "exact-gap");
@@ -13025,14 +12289,14 @@ mod tests {
                             .is_err()
                     );
                     assert_eq!(db.account_snapshot(EXEC).unwrap()[0].held, before);
-                    let conn = db.lock_conn().unwrap();
-                    let pages: u64 = conn
-                        .query_row(
+                    let pages: u64 = sql(&db, |conn| {
+                        conn.query_row(
                             "SELECT COUNT(*) FROM resource_usage_partition_page",
                             [],
                             |row| row.get(0),
                         )
-                        .unwrap();
+                        .unwrap()
+                    });
                     assert_eq!(pages, 0);
                 }
                 let settled = db
@@ -13096,7 +12360,7 @@ mod tests {
                 );
                 assert_healthy_verify(&db);
                 drop(db);
-                let reopened = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+                let reopened = TestAccountingDb::open(dir.path()).unwrap();
                 assert_healthy_verify(&reopened);
                 assert!(
                     reopened
@@ -13105,10 +12369,10 @@ mod tests {
                         .replayed
                 );
                 if count > 1024 {
-                    let conn = reopened.lock_conn().unwrap();
-                    conn.execute("UPDATE resource_usage_partition_page SET page_json='[]' WHERE page_index=1", []).unwrap();
-                    assert!(validate_resource_usage_partitions(&conn).is_err());
-                    drop(conn);
+                    sql(&reopened, |conn| {
+                        conn.execute("UPDATE resource_usage_partition_page SET page_json='[]' WHERE page_index=1", []).unwrap();
+                        assert!(validate_resource_usage_partitions(conn).is_err());
+                    });
                     assert!(
                         reopened
                             .resource_usage_partition_header(&operation_id)
@@ -13129,257 +12393,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn f08_exact_v6_migration_preserves_unsettled_lifetime_evidence() {
-        let (_dir, db) = setup();
-        birth(&db, EXEC, None, None);
-        open_gate(&db, THREAD, GENERATION, EXEC);
-        let authority = bounded_resource_authority();
-        let operation_id = digest_of("legacy").as_str().to_owned();
-        let request_digest = digest_of("legacy-request").as_str().to_owned();
-        let (owner, gate) = open_resource_owner_gate(&db);
-        db.reserve_resource_operation(ReserveResourceOperationArgs {
-            owner_gate_id: &gate,
-            operation_id: &operation_id,
-            request_digest: &request_digest,
-            execution_budget_id: EXEC,
-            directive_budget_id: None,
-            root_chain_id: "root-chain",
-            audit_chain_root_id: "audit-chain",
-            thread_id: THREAD,
-            launch_generation: GENERATION,
-            owner_incarnation: &owner,
-            authority: &authority,
-            now_ms: NOW,
-        })
-        .unwrap();
-        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
-            .unwrap();
-        let advisory_authority = resource_authority(ResourceSpendAuthority::Advisory);
-        let advisory_operation_id = digest_of("legacy-partial-advisory").as_str().to_owned();
-        let advisory_request_digest = digest_of("legacy-partial-advisory-request")
-            .as_str()
-            .to_owned();
-        db.reserve_resource_operation(ReserveResourceOperationArgs {
-            owner_gate_id: &gate,
-            operation_id: &advisory_operation_id,
-            request_digest: &advisory_request_digest,
-            execution_budget_id: EXEC,
-            directive_budget_id: None,
-            root_chain_id: "root-chain",
-            audit_chain_root_id: "audit-chain",
-            thread_id: THREAD,
-            launch_generation: GENERATION,
-            owner_incarnation: &owner,
-            authority: &advisory_authority,
-            now_ms: NOW,
-        })
-        .unwrap();
-        db.issue_resource_operation(&advisory_operation_id, &advisory_request_digest, NOW + 1)
-            .unwrap();
-        let mut advisory_partial = resource_usage(
-            &advisory_operation_id,
-            &owner,
-            &advisory_authority,
-            ResourceUsageCoverage::Partial,
-        );
-        advisory_partial.intervals.clear();
-        let partial_settlement = db
-            .settle_resource_operation(&advisory_operation_id, &advisory_partial, NOW + 2)
-            .unwrap();
-        assert_eq!(
-            partial_settlement.state,
-            ResourceBudgetState::AdvisoryIssued
-        );
-        let legacy = Connection::open_in_memory().unwrap();
-        legacy.execute_batch(&format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}")).unwrap();
-        legacy
-            .pragma_update(None, "application_id", ACCOUNTING_APP_ID)
-            .unwrap();
-        // A v6 predecessor may contain outstanding owners. Unlike the v5
-        // owner-gate migration, v7 must not require them to settle first.
-        let attribution = ResourceRequestAttribution {
-            version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
-            attribution_id: digest_of("placeholder"),
-            operation_id: digest_of("legacy"),
-            thread_id: "thread".to_owned(),
-            request_digest: digest_of("request"),
-            interval: ryeos_accounting::ResourceUsageInterval {
-                start_tick_ns: u64::MAX - 2,
-                end_tick_ns: u64::MAX - 1,
-            },
-        }
-        .sealed()
-        .unwrap();
-        let attributions = (0..1025_u64)
-            .map(|index| {
-                let mut item = attribution.clone();
-                item.interval.start_tick_ns -= 2 * index;
-                item.interval.end_tick_ns -= 2 * index;
-                item.sealed().unwrap()
-            })
-            .collect::<Vec<_>>();
-        db.record_resource_request_attributions(&attributions, NOW + 2)
-            .unwrap();
-        // Project genuine ledger testimony into the exact predecessor schema,
-        // excluding only the new v7 column/table. No malformed financial row
-        // or invented authority is needed to exercise migration.
-        legacy.pragma_update(None, "foreign_keys", "OFF").unwrap();
-        let source = db.lock_conn().unwrap();
-        let mut tables = legacy
-            .prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-            )
-            .unwrap();
-        let names = tables
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        drop(tables);
-        for name in names {
-            let mut info = legacy
-                .prepare(&format!("PRAGMA table_info({name})"))
-                .unwrap();
-            let columns = info
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            drop(info);
-            let list = columns.join(",");
-            let slots = vec!["?"; columns.len()].join(",");
-            let mut select = source
-                .prepare(&format!("SELECT {list} FROM {name}"))
-                .unwrap();
-            let mut rows = select.query([]).unwrap();
-            while let Some(row) = rows.next().unwrap() {
-                let values = (0..columns.len())
-                    .map(|index| row.get::<_, rusqlite::types::Value>(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap();
-                legacy
-                    .execute(
-                        &format!("INSERT INTO {name}({list}) VALUES({slots})"),
-                        rusqlite::params_from_iter(values),
-                    )
-                    .unwrap();
-            }
-        }
-        drop(source);
-        legacy.pragma_update(None, "foreign_keys", "ON").unwrap();
-        migrate_accounting_schema(&legacy, Path::new("v6-test")).unwrap();
-        assert_current(&legacy, Path::new("v7-test")).unwrap();
-        let key: String = legacy
-            .query_row(
-                "SELECT start_tick_key FROM resource_request_attribution ORDER BY start_tick_key DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(key, format!("{:020}", u64::MAX - 2));
-        let state: String = legacy
-            .query_row(
-                "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
-                [&operation_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, "issued");
-        let (advisory_state, advisory_settled_at_ms): (String, Option<i64>) = legacy
-            .query_row(
-                "SELECT state, settled_at_ms FROM resource_financial_operation WHERE operation_id=?1",
-                [&advisory_operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(advisory_state, "advisory_issued");
-        assert_eq!(advisory_settled_at_ms, None);
-        let advisory_partitions: u64 = legacy
-            .query_row(
-                "SELECT COUNT(*) FROM resource_usage_partition WHERE operation_id=?1",
-                [&advisory_operation_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(advisory_partitions, 0);
-        validate_resource_financial_operations(&legacy).unwrap();
-        validate_resource_usage_partitions(&legacy).unwrap();
-        // Exercise actual stopped-ledger upgrade, settlement and reopen with
-        // the original independent financial anchor, not just SQL projection.
-        {
-            let source = db.lock_conn().unwrap();
-            j4_project_financial_tables_to_v7(&source);
-            source
-                .execute_batch(
-                    "DROP INDEX idx_resource_attribution_chronology;
-                DROP TABLE resource_usage_partition_page;
-                ALTER TABLE resource_request_attribution DROP COLUMN start_tick_key;
-                ALTER TABLE resource_request_attribution DROP COLUMN end_tick_key;
-                PRAGMA user_version=6;",
-                )
-                .unwrap();
-        }
-        drop(db);
-        let upgraded = AccountingDb::open_at_runtime_state_dir(_dir.path()).unwrap();
-        assert_healthy_verify(&upgraded);
-        let mut usage = resource_usage(
-            &operation_id,
-            &owner,
-            &authority,
-            ResourceUsageCoverage::Complete,
-        );
-        usage.intervals = vec![ryeos_accounting::ResourceUsageInterval {
-            start_tick_ns: u64::MAX - 2050,
-            end_tick_ns: u64::MAX - 1,
-        }];
-        upgraded
-            .settle_resource_operation(&operation_id, &usage, NOW + 3)
-            .unwrap();
-        let advisory_complete = resource_usage(
-            &advisory_operation_id,
-            &owner,
-            &advisory_authority,
-            ResourceUsageCoverage::Complete,
-        );
-        let advisory_corrected = upgraded
-            .settle_resource_operation(&advisory_operation_id, &advisory_complete, NOW + 3)
-            .unwrap();
-        assert_eq!(
-            advisory_corrected.state,
-            ResourceBudgetState::AdvisoryReconciled
-        );
-        assert!(!advisory_corrected.replayed);
-        assert!(
-            upgraded
-                .resource_usage_partition(&advisory_operation_id)
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(
-            upgraded
-                .resource_usage_partition_header(&operation_id)
-                .unwrap()
-                .unwrap()
-                .attribution_count,
-            1025
-        );
-        drop(upgraded);
-        let reopened = AccountingDb::open_at_runtime_state_dir(_dir.path()).unwrap();
-        assert_healthy_verify(&reopened);
-        assert!(
-            reopened
-                .settle_resource_operation(&operation_id, &usage, NOW + 4)
-                .unwrap()
-                .replayed
-        );
-        assert!(
-            reopened
-                .settle_resource_operation(&advisory_operation_id, &advisory_complete, NOW + 4,)
-                .unwrap()
-                .replayed
-        );
-    }
 
     #[test]
     fn bounded_resource_operation_uses_shared_account_and_exact_usage() {
@@ -14385,7 +13398,7 @@ mod tests {
                 db.execution_resource_budget_snapshot(EXEC).unwrap(),
                 Some(original)
             );
-            db.lock_conn().unwrap().execute(mutation, []).unwrap();
+            sql(&db, |conn| { conn.execute(mutation, []).unwrap(); });
             assert!(
                 db.execution_resource_budget_snapshot(EXEC).is_err(),
                 "{mutation}"
@@ -14401,11 +13414,10 @@ mod tests {
         // tick, so rebasing the deadline to recovery time deterministically
         // fails without a sleep or rewriting persisted authority afterward.
         let born_at = 1_000_i64;
-        {
-            let conn = db.lock_conn().unwrap();
-            immediate_transaction(&conn, "test execution account birth", || {
+        sql(&db, |conn| {
+            immediate_transaction(conn, "test execution account birth", || {
                 db.create_account_prepared_in_tx(
-                    &conn,
+                    conn,
                     EXEC,
                     "execution",
                     EXEC,
@@ -14415,10 +13427,10 @@ mod tests {
                 )
             })
             .unwrap();
-        }
+        });
         drop(db);
 
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         let limits = AggregateExecutionLimits {
             duration_seconds: 60,
             worker_executions: 2,
@@ -14429,7 +13441,7 @@ mod tests {
         assert_eq!(admitted.deadline_at_ms, Some(born_at + 60_000));
         drop(db);
 
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         assert_eq!(
             db.ensure_execution_resource_budget(EXEC, &limits).unwrap(),
             admitted
@@ -14462,11 +13474,13 @@ mod tests {
                 (coordinate, digest)
             })
             .collect();
+        // The fixture stays on this thread; workers share its ledger alias.
+        let shared = db.shared();
         let outcomes = std::thread::scope(|scope| {
             let handles: Vec<_> = requests
                 .iter()
                 .map(|(coordinate, digest)| {
-                    let db = &db;
+                    let db = &shared;
                     scope.spawn(move || {
                         db.claim_execution_resource(
                             EXEC,
@@ -14492,9 +13506,10 @@ mod tests {
             2
         );
         assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, ExecutionResourceClaimOutcome::Denied { reason, .. } if reason == "aggregate_worker_executions_exhausted")).count(), 6);
+        drop(shared);
         drop(db);
 
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         for ((coordinate, digest), original) in requests.iter().zip(outcomes) {
             let replay = db
                 .claim_execution_resource(
@@ -14576,7 +13591,7 @@ mod tests {
         );
         drop(db);
 
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         assert_eq!(
             db.claim_execution_resource(EXEC, dimension, "attempt-1", &digest, wall_clock_ms())
                 .unwrap(),
@@ -14721,15 +13736,14 @@ mod tests {
                 None,
             )
             .unwrap();
-        {
-            let conn = target.lock_conn().unwrap();
+        sql(&target, |conn| {
             conn.execute(
                 "UPDATE budget_account SET committed_usd_nanos = 19
                  WHERE account_kind = 'execution' AND scope_id = ?1",
                 rusqlite::params![target_scope.execution_budget_id],
             )
             .unwrap();
-        }
+        });
         assert!(
             target
                 .validate_handoff_target_scope(&target_scope, Some(100), None)
@@ -14764,8 +13778,7 @@ mod tests {
                 )
                 .is_err()
         );
-        {
-            let conn = target.lock_conn().unwrap();
+        sql(&target, |conn| {
             conn.execute(
                 "UPDATE budget_account
                  SET state = 'closed'
@@ -14773,7 +13786,7 @@ mod tests {
                 rusqlite::params![target_scope.execution_budget_id],
             )
             .unwrap();
-        }
+        });
         target
             .validate_accepted_handoff_target_scope(
                 &operation_id,
@@ -14908,57 +13921,57 @@ mod tests {
         };
         transfer.validate().unwrap();
         let transfer_json = serde_json::to_string(&transfer).unwrap();
-        let conn = source.lock_conn().unwrap();
-        conn.execute(
-            "INSERT INTO accounting_handoff_transfer (
-                operation_id, request_digest, source_budget_authority_site_id, source_ledger_epoch,
-                source_chain_root_id, source_placement_thread_id,
-                source_execution_budget_id, source_directive_budget_id,
-                financial_sequence, financial_chain_digest, response_json, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                operation_id,
-                &transfer.request_digest,
-                &transfer.source_budget_authority_site_id,
-                i64::try_from(transfer.source_ledger_epoch).unwrap(),
-                &transfer.source_chain_root_id,
-                &transfer.source_placement_thread_id,
-                &transfer.source_scope.execution_budget_id,
-                i64::try_from(transfer.source_financial_sequence).unwrap(),
-                &transfer.source_financial_chain_digest,
-                transfer_json,
-                NOW,
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO financial_transition_commitment (
-                budget_authority_site_id, ledger_epoch, financial_sequence,
-                transition_kind, attempt_id, authority_digest,
-                transition_fingerprint, chain_digest, created_at_ms
-             ) VALUES (?1, ?2, 1, 'handoff_allowance_export', NULL, NULL, ?3, ?4, ?5)",
-            rusqlite::params![
-                source_site,
-                i64::try_from(source_epoch).unwrap(),
-                &transfer.request_digest,
-                &transfer.source_financial_chain_digest,
-                NOW,
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE ledger_financial_sequence
-             SET next_financial_sequence = 2, financial_high_water = 1,
-                 financial_chain_digest = ?1
-             WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3",
-            rusqlite::params![
-                &transfer.source_financial_chain_digest,
-                &source_site,
-                i64::try_from(source_epoch).unwrap(),
-            ],
-        )
-        .unwrap();
-        drop(conn);
+        sql(&source, |conn| {
+            conn.execute(
+                "INSERT INTO accounting_handoff_transfer (
+                    operation_id, request_digest, source_budget_authority_site_id, source_ledger_epoch,
+                    source_chain_root_id, source_placement_thread_id,
+                    source_execution_budget_id, source_directive_budget_id,
+                    financial_sequence, financial_chain_digest, response_json, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    operation_id,
+                    &transfer.request_digest,
+                    &transfer.source_budget_authority_site_id,
+                    i64::try_from(transfer.source_ledger_epoch).unwrap(),
+                    &transfer.source_chain_root_id,
+                    &transfer.source_placement_thread_id,
+                    &transfer.source_scope.execution_budget_id,
+                    i64::try_from(transfer.source_financial_sequence).unwrap(),
+                    &transfer.source_financial_chain_digest,
+                    transfer_json,
+                    NOW,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO financial_transition_commitment (
+                    budget_authority_site_id, ledger_epoch, financial_sequence,
+                    transition_kind, attempt_id, authority_digest,
+                    transition_fingerprint, chain_digest, created_at_ms
+                 ) VALUES (?1, ?2, 1, 'handoff_allowance_export', NULL, NULL, ?3, ?4, ?5)",
+                rusqlite::params![
+                    source_site,
+                    i64::try_from(source_epoch).unwrap(),
+                    &transfer.request_digest,
+                    &transfer.source_financial_chain_digest,
+                    NOW,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE ledger_financial_sequence
+                 SET next_financial_sequence = 2, financial_high_water = 1,
+                     financial_chain_digest = ?1
+                 WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3",
+                rusqlite::params![
+                    &transfer.source_financial_chain_digest,
+                    &source_site,
+                    i64::try_from(source_epoch).unwrap(),
+                ],
+            )
+            .unwrap();
+        });
         source
             .anchor()
             .compare_and_advance(&source_site, source_epoch, 1, &"2".repeat(64))
@@ -15045,22 +14058,22 @@ mod tests {
             None,
         )
         .unwrap();
-        let conn = db.lock_conn().unwrap();
-        assert_eq!(
-            db.load_gate(&conn, THREAD, "G-first")
-                .unwrap()
-                .unwrap()
-                .state,
-            "fenced"
-        );
-        assert_eq!(
-            db.load_gate(&conn, THREAD, "G-restarted")
-                .unwrap()
-                .unwrap()
-                .state,
-            "open"
-        );
-        drop(conn);
+        sql(&db, |conn| {
+            assert_eq!(
+                db.load_gate(conn, THREAD, "G-first")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "fenced"
+            );
+            assert_eq!(
+                db.load_gate(conn, THREAD, "G-restarted")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "open"
+            );
+        });
         assert!(
             db.open_launch_gate_with_credential_binding(
                 "T-other",
@@ -15193,16 +14206,16 @@ mod tests {
                 .state,
             "closed"
         );
-        let conn = source.lock_conn().unwrap();
-        let execution = source
-            .load_account(&conn, "execution", EXEC)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            source.account_available(&conn, &execution).unwrap(),
-            Some(60)
-        );
-        drop(conn);
+        sql(&source, |conn| {
+            let execution = source
+                .load_account(conn, "execution", EXEC)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                source.account_available(conn, &execution).unwrap(),
+                Some(60)
+            );
+        });
 
         target
             .accept_handoff_allowance(&transfer.content_hash().unwrap(), &transfer)
@@ -15271,251 +14284,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exact_v1_accounting_schema_migrates_populated_gates_as_execution_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("accounting-v1.sqlite3");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(SCHEMA_V1_SQL).unwrap();
-        conn.pragma_update(None, "application_id", ACCOUNTING_APP_ID)
-            .unwrap();
-        for (thread, generation, state) in [
-            ("T-open", "G-open", "open"),
-            ("T-fenced", "G-fenced", "fenced"),
-        ] {
-            conn.execute(
-                "INSERT INTO launch_accounting_gate (
-                    thread_id, launch_generation, budget_authority_site_id,
-                    ledger_epoch, execution_budget_id, audit_chain_root_id,
-                    credential_binding_digest, state, fenced_reason,
-                    terminal_publication_due, updated_at_ms
-                 ) VALUES (?1, ?2, 'site:v1', 1, 'B-v1', 'T-audit', NULL,
-                           ?3, NULL, 0, 1)",
-                rusqlite::params![thread, generation, state],
-            )
-            .unwrap();
-        }
-        migrate_accounting_schema(&conn, &path).unwrap();
-        assert_current(&conn, &path).unwrap();
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, ACCOUNTING_SCHEMA_VERSION);
-        let bindings: Vec<(String, Option<String>)> = {
-            let mut statement = conn
-                .prepare(
-                    "SELECT thread_id, directive_budget_id
-                     FROM launch_accounting_scope_binding ORDER BY thread_id",
-                )
-                .unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap()
-        };
-        assert_eq!(
-            bindings,
-            vec![("T-fenced".to_owned(), None), ("T-open".to_owned(), None)]
-        );
-        migrate_accounting_schema(&conn, &path).unwrap();
-        assert_current(&conn, &path).unwrap();
-    }
 
-    #[test]
-    fn exact_v4_migration_classifies_provider_and_resource_outbox_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("accounting-v4.sqlite3");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(&format!(
-            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}"
-        ))
-        .unwrap();
-        conn.pragma_update(None, "application_id", ACCOUNTING_APP_ID)
-            .unwrap();
 
-        let provider = ProviderAttemptBudgetTransitionV1 {
-            version: PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
-            transition_id: transition_id("A-migration", 1),
-            transition_sequence: 1,
-            attempt_id: "A-migration".to_string(),
-            budget_authority_site_id: "S-site".to_string(),
-            ledger_epoch: 1,
-            execution_budget_id: "B-execution".to_string(),
-            root_chain_id: "T-root".to_string(),
-            audit_chain_root_id: "T-root".to_string(),
-            directive_budget_id: None,
-            thread_id: "T-provider".to_string(),
-            turn: 1,
-            attempt_number: 1,
-            transition: AttemptBudgetState::Reserved,
-            observation: false,
-            config_hash: "c".repeat(64),
-            provider_id: "provider".to_string(),
-            model: "model".to_string(),
-            profile: None,
-            reserved_usd_nanos: 1,
-            budget_charge_usd_nanos: None,
-            provider_actual_usd_nanos: None,
-            released_usd_nanos: None,
-            charge_basis: None,
-            occurred_at_ms: 1,
-            reason: None,
-        };
-        provider.validate().unwrap();
-        let resource = ResourceBudgetTransitionV1 {
-            version: ryeos_accounting::RESOURCE_BUDGET_TRANSITION_VERSION,
-            transition_id: transition_id("R-migration", 1),
-            transition_sequence: 1,
-            operation_id: "R-migration".to_string(),
-            budget_authority_site_id: "S-site".to_string(),
-            ledger_epoch: 1,
-            execution_budget_id: "B-execution".to_string(),
-            root_chain_id: "T-root".to_string(),
-            audit_chain_root_id: "T-root".to_string(),
-            thread_id: "T-resource".to_string(),
-            launch_generation: "G-launch".to_string(),
-            owner_incarnation: "I-process".to_string(),
-            stable_resource_id: "gpu-0".to_string(),
-            authority_digest: HexDigest::new("d".repeat(64)).unwrap(),
-            transition: ResourceBudgetState::Reserved,
-            reserved_usd_nanos: 2,
-            budget_charge_usd_nanos: None,
-            usage_digest: None,
-            occurred_at_ms: 2,
-        };
-        resource.validate().unwrap();
-        for (attempt_id, sequence, transition_id, transition, payload, created_at_ms) in [
-            (
-                provider.attempt_id.as_str(),
-                provider.transition_sequence,
-                provider.transition_id.as_str(),
-                provider.transition.as_str(),
-                canonical_json_string(&serde_json::to_value(&provider).unwrap()).unwrap(),
-                provider.occurred_at_ms,
-            ),
-            (
-                resource.operation_id.as_str(),
-                resource.transition_sequence,
-                resource.transition_id.as_str(),
-                resource.transition.as_str(),
-                canonical_json_string(&serde_json::to_value(&resource).unwrap()).unwrap(),
-                resource.occurred_at_ms,
-            ),
-        ] {
-            conn.execute(
-                "INSERT INTO accounting_audit_outbox (
-                    attempt_id, audit_chain_root_id, transition_sequence,
-                    transition_id, transition, payload_fingerprint, payload,
-                    published_chain_seq, created_at_ms, lease_expires_at_ms
-                 ) VALUES (?1, 'T-root', ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)",
-                rusqlite::params![
-                    attempt_id,
-                    i64::from(sequence),
-                    transition_id,
-                    transition,
-                    lillux::sha256_hex(payload.as_bytes()),
-                    payload,
-                    created_at_ms,
-                ],
-            )
-            .unwrap();
-        }
-
-        migrate_accounting_schema(&conn, &path).unwrap();
-        assert_current(&conn, &path).unwrap();
-        let mut statement = conn
-            .prepare("SELECT event_type FROM accounting_audit_outbox ORDER BY outbox_seq")
-            .unwrap();
-        let event_types = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            event_types,
-            vec![
-                "provider_attempt_budget_transition_v1".to_string(),
-                "resource_budget_transition_v1".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn exact_v5_migration_refuses_nonterminal_resource_owners_without_recovery_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("accounting-v5.sqlite3");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(&format!(
-            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}"
-        ))
-        .unwrap();
-        conn.pragma_update(None, "application_id", ACCOUNTING_APP_ID)
-            .unwrap();
-
-        let owner = digest_of("legacy-owner").as_str().to_owned();
-        for (operation_id, state) in [
-            (digest_of("legacy-issued").as_str().to_owned(), "issued"),
-            (
-                digest_of("legacy-charged-maximum").as_str().to_owned(),
-                "charged_reserved_maximum",
-            ),
-        ] {
-            conn.execute(
-                "INSERT INTO resource_financial_operation (
-                    operation_id, request_digest, authority_digest,
-                    budget_authority_site_id, ledger_epoch, execution_budget_id,
-                    directive_budget_id, root_chain_id, audit_chain_root_id,
-                    thread_id, launch_generation, owner_incarnation,
-                    stable_resource_id, state, reserved_usd_nanos,
-                    budget_charge_usd_nanos, usage_json, rated_charge_json,
-                    created_at_ms, issued_at_ms, settled_at_ms, authority_json
-                 ) VALUES (?1, ?2, ?3, 'S-legacy', 1, 'B-legacy', NULL,
-                           'T-root', 'T-audit', 'T-thread', 'G-launch', ?4,
-                           'gpu-0', ?5, 1, NULL, NULL, NULL, 10, 11, NULL, '{}')",
-                rusqlite::params![
-                    operation_id,
-                    digest_of(&format!("{state}-request")).as_str(),
-                    digest_of("legacy-authority").as_str(),
-                    owner,
-                    state,
-                ],
-            )
-            .unwrap();
-        }
-
-        let error = migrate_accounting_schema(&conn, &path).unwrap_err();
-        assert!(
-            format!("{error:#}")
-                .contains("cannot prove cleanup for nonterminal legacy resource operation"),
-            "{error:#}"
-        );
-        let version: i32 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 5);
-
-        conn.execute(
-            "UPDATE resource_financial_operation
-                SET state='released_unissued', issued_at_ms=NULL, settled_at_ms=12",
-            [],
-        )
-        .unwrap();
-        migrate_accounting_schema(&conn, &path).unwrap();
-        assert_current(&conn, &path).unwrap();
-        let gate: (String, Option<String>, i64, Option<String>) = conn
-            .query_row(
-                "SELECT state, owner_recovery_json, active_request_count, fenced_reason
-                   FROM resource_owner_accounting_gate",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(gate.0, "fenced");
-        assert_eq!(gate.1, None);
-        assert_eq!(gate.2, 0);
-        assert_eq!(gate.3.as_deref(), Some("migrated_without_owner_recovery"));
-    }
 
     #[test]
     fn account_birth_and_gate_are_idempotent_and_fail_closed() {
@@ -15761,7 +14531,7 @@ mod tests {
     fn established_epoch_missing_anchor_fails_closed_at_sequence_zero() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+            let db = TestAccountingDb::open(dir.path()).unwrap();
             birth(&db, EXEC, None, Some("10"));
             open_gate(&db, THREAD, GENERATION, EXEC);
             assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 0);
@@ -15773,7 +14543,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = match AccountingDb::open_at_runtime_state_dir(dir.path()) {
+        let error = match TestAccountingDb::open(dir.path()) {
             Ok(_) => panic!("established epoch unexpectedly recreated its missing anchor"),
             Err(error) => error,
         };
@@ -16431,7 +15201,7 @@ mod tests {
         assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 2);
 
         drop(db);
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         let report = db.startup_verify().unwrap();
         assert!(!report.hard_admission_enabled);
         assert!(
@@ -16954,7 +15724,7 @@ mod tests {
     fn startup_verify_passes_on_a_healthy_store_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+            let db = TestAccountingDb::open(dir.path()).unwrap();
             birth(&db, EXEC, Some(DIRECTIVE), Some("10"));
             open_gate(&db, THREAD, GENERATION, EXEC);
             let authority = tariff_authority("a", "0.5", None, &tariff_io());
@@ -16977,7 +15747,7 @@ mod tests {
         }
         // Account/debit invariants and chain/anchor agreement survive a
         // restart/reopen of the same store.
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         let report = db.startup_verify().unwrap();
         assert!(report.hard_admission_enabled, "{:?}", report.reasons);
         assert_eq!(report.unpublished_outbox, 2);
@@ -16999,7 +15769,7 @@ mod tests {
     fn startup_verify_fails_closed_on_a_tampered_financial_chain() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+            let db = TestAccountingDb::open(dir.path()).unwrap();
             birth(&db, EXEC, None, Some("10"));
             open_gate(&db, THREAD, GENERATION, EXEC);
             let authority = tariff_authority("a", "0.5", None, &tariff_io());
@@ -17009,14 +15779,16 @@ mod tests {
             issue(&db, &attempt_id, "h1").unwrap();
         }
         {
-            let conn = Connection::open(dir.path().join(ACCOUNTING_DB_FILENAME)).unwrap();
-            conn.execute(
-                "UPDATE financial_transition_commitment SET transition_fingerprint = 'tampered'",
-                [],
-            )
-            .unwrap();
+            let tamper = TestAccountingDb::open(dir.path()).unwrap();
+            sql(&tamper, |conn| {
+                conn.execute(
+                    "UPDATE financial_transition_commitment SET transition_fingerprint = 'tampered'",
+                    [],
+                )
+                .unwrap();
+            });
         }
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         let report = db.startup_verify().unwrap();
         assert!(!report.hard_admission_enabled);
         assert!(
@@ -17043,7 +15815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let site_epoch;
         {
-            let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+            let db = TestAccountingDb::open(dir.path()).unwrap();
             birth(&db, EXEC, None, Some("10"));
             open_gate(&db, THREAD, GENERATION, EXEC);
             let authority = tariff_authority("a", "0.5", None, &tariff_io());
@@ -17057,37 +15829,39 @@ mod tests {
         // second irreversible transition: append a valid chain entry
         // directly, leaving the anchor at sequence 1.
         {
-            let conn = Connection::open(dir.path().join(ACCOUNTING_DB_FILENAME)).unwrap();
-            let (site, epoch) = site_epoch;
-            let head: String = conn
-                .query_row(
-                    "SELECT financial_chain_digest FROM ledger_financial_sequence
-                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2",
-                    rusqlite::params![site, epoch as i64],
-                    |row| row.get(0),
+            let ahead = TestAccountingDb::open(dir.path()).unwrap();
+            sql(&ahead, |conn| {
+                let (site, epoch) = site_epoch;
+                let head: String = conn
+                    .query_row(
+                        "SELECT financial_chain_digest FROM ledger_financial_sequence
+                         WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2",
+                        rusqlite::params![site, epoch as i64],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let fingerprint = lillux::cas::sha256_hex(b"post-crash transition");
+                let digest = financial_chain_digest(&head, 2, &fingerprint);
+                conn.execute(
+                    "INSERT INTO financial_transition_commitment (
+                        budget_authority_site_id, ledger_epoch, financial_sequence,
+                        transition_kind, attempt_id, authority_digest, transition_fingerprint,
+                        chain_digest, created_at_ms
+                    ) VALUES (?1, ?2, 2, 'issued', NULL, NULL, ?3, ?4, ?5)",
+                    rusqlite::params![site, epoch as i64, fingerprint, digest, NOW],
                 )
                 .unwrap();
-            let fingerprint = lillux::cas::sha256_hex(b"post-crash transition");
-            let digest = financial_chain_digest(&head, 2, &fingerprint);
-            conn.execute(
-                "INSERT INTO financial_transition_commitment (
-                    budget_authority_site_id, ledger_epoch, financial_sequence,
-                    transition_kind, attempt_id, authority_digest, transition_fingerprint,
-                    chain_digest, created_at_ms
-                ) VALUES (?1, ?2, 2, 'issued', NULL, NULL, ?3, ?4, ?5)",
-                rusqlite::params![site, epoch as i64, fingerprint, digest, NOW],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE ledger_financial_sequence
-                 SET next_financial_sequence = 3, financial_high_water = 2,
-                     financial_chain_digest = ?1
-                 WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3",
-                rusqlite::params![digest, site, epoch as i64],
-            )
-            .unwrap();
+                conn.execute(
+                    "UPDATE ledger_financial_sequence
+                     SET next_financial_sequence = 3, financial_high_water = 2,
+                         financial_chain_digest = ?1
+                     WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3",
+                    rusqlite::params![digest, site, epoch as i64],
+                )
+                .unwrap();
+            });
         }
-        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let db = TestAccountingDb::open(dir.path()).unwrap();
         assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 1);
         let report = db.startup_verify().unwrap();
         assert!(report.hard_admission_enabled, "{:?}", report.reasons);
@@ -17095,227 +15869,22 @@ mod tests {
         assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 2);
         assert_healthy_verify(&db);
     }
-    // Test-only projection of genuine ledger testimony into exact predecessor
-    // financial tables and audit vocabulary. Anchors, debits and outbox highwater stay untouched.
-    fn j4_project_financial_tables_to_v7(conn: &Connection) {
-        let reference = Connection::open_in_memory().unwrap();
-        reference.execute_batch(&format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}")).unwrap();
-        let pending: i64 = conn.query_row("SELECT COUNT(*) FROM resource_owner_accounting_gate WHERE precontact_json IS NOT NULL", [], |row| row.get(0)).unwrap();
-        assert_eq!(
-            pending, 0,
-            "test predecessor projection cannot discard new authority"
-        );
-        let prior: bool = conn
-            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-            .unwrap();
-        conn.pragma_update(None, "foreign_keys", false).unwrap();
-        let old_outbox_sequence: Option<i64> = conn
-            .query_row(
-                "SELECT seq FROM sqlite_sequence WHERE name='accounting_audit_outbox'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap();
-        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-        for table in [
-            "resource_owner_accounting_gate",
-            "resource_financial_operation",
-            "accounting_audit_outbox",
-        ] {
-            let sql: String = reference
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let temporary = format!("{table}_predecessor");
-            conn.execute_batch(&sql.replacen(table, &temporary, 1))
-                .unwrap();
-            let mut info = reference
-                .prepare(&format!("PRAGMA table_info({table})"))
-                .unwrap();
-            let columns = info
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-                .join(",");
-            conn.execute_batch(&format!("INSERT INTO {temporary}({columns}) SELECT {columns} FROM {table}; DROP TABLE {table}; ALTER TABLE {temporary} RENAME TO {table};")).unwrap();
-        }
-        let mut indices = reference.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ('resource_owner_accounting_gate', 'resource_financial_operation', 'accounting_audit_outbox') ORDER BY name").unwrap();
-        for sql in indices
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-        {
-            conn.execute_batch(&sql.unwrap()).unwrap();
-        }
-        if let Some(sequence) = old_outbox_sequence {
-            conn.execute(
-                "UPDATE sqlite_sequence SET seq=MAX(seq,?1) WHERE name='accounting_audit_outbox'",
-                [sequence],
-            )
-            .unwrap();
-        }
-        conn.execute_batch("PRAGMA user_version=7; COMMIT").unwrap();
-        conn.pragma_update(None, "foreign_keys", prior).unwrap();
-        assert_accounting_foreign_keys(conn).unwrap();
-        sqlite_schema::assert_complete_schema_sql(conn, &format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}"), Path::new("exact-test-v7")).unwrap();
-    }
 
-    fn j4_snapshot_existing_rows(
-        conn: &Connection,
-        reference: &Connection,
-    ) -> std::collections::BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
-        let mut tables = reference.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
-        let names = tables
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        let mut result = std::collections::BTreeMap::new();
-        for name in names {
-            let mut info = reference
-                .prepare(&format!("PRAGMA table_info({name})"))
-                .unwrap();
-            let columns = info
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            let ordering = (1..=columns.len())
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut select = conn
-                .prepare(&format!(
-                    "SELECT {} FROM {name} ORDER BY {ordering}",
-                    columns.join(",")
-                ))
-                .unwrap();
-            let rows = select
-                .query_map([], |row| {
-                    (0..columns.len())
-                        .map(|index| row.get::<_, rusqlite::types::Value>(index))
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            result.insert(name, rows);
-        }
-        result
-    }
 
-    #[test]
-    fn j4_exact_v7_nonempty_migration_preserves_money_and_original_anchor() {
-        let (dir, db) = setup();
-        birth(&db, EXEC, None, Some("1"));
-        assert_healthy_verify(&db);
-        for index in 0..3 {
-            let mut authority = bounded_resource_authority();
-            authority.stable_resource_id = format!("history-device-{index}");
-            let authority = authority.sealed().unwrap();
-            let (owner, gate) = open_resource_owner_gate_for_pid(&db, 101 + index);
-            let operation = digest_of(&format!("j4-historical-operation-{index}"));
-            let request = digest_of(&format!("j4-historical-request-{index}"));
-            db.reserve_resource_operation(ReserveResourceOperationArgs {
-                owner_gate_id: &gate,
-                operation_id: operation.as_str(),
-                request_digest: request.as_str(),
-                execution_budget_id: EXEC,
-                directive_budget_id: None,
-                root_chain_id: "root-chain",
-                audit_chain_root_id: "audit-chain",
-                thread_id: THREAD,
-                launch_generation: GENERATION,
-                owner_incarnation: &owner,
-                authority: &authority,
-                now_ms: NOW,
-            })
-            .unwrap();
-            if index == 0 {
-                db.issue_resource_operation(operation.as_str(), request.as_str(), NOW + 1)
-                    .unwrap();
-            }
-            if index == 1 {
-                db.release_unissued_resource_operation(
-                    operation.as_str(),
-                    request.as_str(),
-                    NOW + 1,
-                )
-                .unwrap();
-            }
-            if index == 2 {
-                db.fence_resource_owner_accounting_gate(
-                    &gate,
-                    "original unresolved owner",
-                    NOW + 1,
-                )
-                .unwrap();
-            }
-        }
-        assert_healthy_verify(&db);
-        let anchor = db.anchor.read_valid().unwrap();
-        let conn = db.lock_conn().unwrap();
-        j4_project_financial_tables_to_v7(&conn);
-        let reference = Connection::open_in_memory().unwrap();
-        reference.execute_batch(&format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}")).unwrap();
-        let before = j4_snapshot_existing_rows(&conn, &reference);
-        migrate_accounting_schema(&conn, Path::new("exact-v7-nonempty")).unwrap();
-        assert_eq!(j4_snapshot_existing_rows(&conn, &reference), before);
-        assert_current(&conn, Path::new("exact-v8-nonempty")).unwrap();
-        assert_accounting_foreign_keys(&conn).unwrap();
-        assert!(
-            conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
-                .unwrap()
-        );
-        drop(conn);
-        assert_eq!(db.anchor.read_valid().unwrap(), anchor);
-        drop(db);
-        let reopened = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
-        assert_healthy_verify(&reopened);
-        assert_eq!(reopened.anchor.read_valid().unwrap(), anchor);
-        assert_eq!(
-            j4_snapshot_existing_rows(&reopened.lock_conn().unwrap(), &reference),
-            before
-        );
-    }
 
     #[test]
     fn j4_original_sql_deadline_interrupts_vm_and_restores_handlers() {
         use lillux::time::{Duration, MonotonicDeadline};
         let (_dir, db) = setup();
-        db.lock_conn()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(37))
-            .unwrap();
         let expired = MonotonicDeadline::after(Duration::ZERO);
         assert!(db.with_conn_until(expired, |_| Ok(())).is_err());
-        // The original mutex remains held by this thread: deadline acquisition
-        // must refuse instead of blocking or minting a relative replacement.
-        let held = db.lock_conn().unwrap();
-        assert!(
-            db.with_conn_until(MonotonicDeadline::after(Duration::from_millis(2)), |_| Ok(
-                ()
-            ))
-            .is_err()
-        );
-        drop(held);
         let error = db.with_conn_until(MonotonicDeadline::after(Duration::from_millis(20)), |conn| {
             conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<10000000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).map_err(anyhow::Error::from)
         }).unwrap_err();
         assert!(error.to_string().contains("interrupt") || error.to_string().contains("expired"));
-        let conn = db.lock_conn().unwrap();
-        assert_eq!(
-            conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            37
-        );
-        // A subsequent VM run passes even though the old hook's deadline is
-        // expired: scope removed its exclusively owned progress callback.
-        assert_eq!(conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).unwrap(), 500500);
+        // A subsequent VM run passes even though the old deadline is expired:
+        // the scope restored the debit-only hook.
+        assert_eq!(sql(&db, |conn| conn.query_row("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000) SELECT sum(n) FROM seq", [], |row| row.get::<_, i64>(0)).unwrap()), 500500);
     }
 
     #[test]
@@ -17370,71 +15939,13 @@ mod tests {
             );
             assert_eq!(conn.query_row("SELECT SUM(held_usd_nanos) FROM resource_financial_debit WHERE operation_id=?1", [operation.as_str()], |row| row.get::<_, i64>(0)).unwrap(), expected_hold);
         };
-        exact(&db.lock_conn().unwrap());
+        sql(&db, |conn| exact(conn));
         drop(db);
-        let reopened = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let reopened = TestAccountingDb::open(dir.path()).unwrap();
         assert_healthy_verify(&reopened);
-        exact(&reopened.lock_conn().unwrap());
-    }
-    #[test]
-    fn j4_divergent_v7_refuses_before_write_and_preserves_fk_mode() {
-        let (_dir, db) = setup();
-        let conn = db.lock_conn().unwrap();
-        j4_project_financial_tables_to_v7(&conn);
-        conn.execute_batch(
-            "CREATE INDEX unowned_extra_index ON resource_financial_operation(state)",
-        )
-        .unwrap();
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        let error = migrate_accounting_schema(&conn, Path::new("divergent-v7")).unwrap_err();
-        assert!(error.to_string().contains("not exact"));
-        assert_eq!(version, 7);
-        assert_eq!(
-            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            7
-        );
-        assert!(
-            conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
-                .unwrap()
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name='unowned_extra_index'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
+        sql(&reopened, |conn| exact(conn));
     }
 
-    #[test]
-    fn j4_original_scope_refuses_sqlite_busy_without_renewed_wait() {
-        use lillux::time::{Duration, MonotonicDeadline};
-        let (_dir, db) = setup();
-        let other = Connection::open(&db.path).unwrap();
-        other.execute_batch("BEGIN IMMEDIATE").unwrap();
-        db.lock_conn()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(37))
-            .unwrap();
-        let result = db.with_conn_until(MonotonicDeadline::after(Duration::from_secs(1)), |conn| {
-            conn.execute_batch("BEGIN IMMEDIATE")
-                .map_err(anyhow::Error::from)
-        });
-        assert!(result.is_err());
-        other.execute_batch("ROLLBACK").unwrap();
-        let conn = db.lock_conn().unwrap();
-        assert!(conn.is_autocommit());
-        assert_eq!(
-            conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            37
-        );
-    }
     #[test]
     fn j4_null_precontact_owner_cannot_issue_or_use_generic_refund() {
         let (_dir, db) = setup();
@@ -17459,15 +15970,14 @@ mod tests {
             now_ms: NOW,
         })
         .unwrap();
-        {
-            let conn = db.lock_conn().unwrap();
+        sql(&db, |conn| {
             // Deliberately invalid retained envelope metadata tests refusal;
             // it is never used to construct a positive funding/admission proof.
             conn.execute("UPDATE resource_owner_accounting_gate SET owner_incarnation=NULL, owner_recovery_json=NULL,
                 state='precontact_reserved', original_reservation_id=?2, precontact_json='{}' WHERE owner_gate_id=?1",
                 rusqlite::params![gate, digest_of("j4-null-original").as_str()]).unwrap();
             conn.execute("UPDATE resource_financial_operation SET owner_incarnation=NULL WHERE operation_id=?1", [operation.as_str()]).unwrap();
-        }
+        });
         assert!(
             db.issue_resource_operation(operation.as_str(), request.as_str(), NOW + 1)
                 .is_err()
@@ -17476,25 +15986,26 @@ mod tests {
             db.release_unissued_resource_operation(operation.as_str(), request.as_str(), NOW + 1)
                 .is_err()
         );
-        let conn = db.lock_conn().unwrap();
-        assert_eq!(
-            conn.query_row(
-                "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
-                [operation.as_str()],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-            "reserved"
-        );
-        let held: i64 = conn
-            .query_row(
-                "SELECT held_usd_nanos FROM resource_financial_debit WHERE operation_id=?1",
-                [operation.as_str()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(held > 0);
-        assert!(validate_resource_financial_operations(&conn).is_err());
+        sql(&db, |conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                    [operation.as_str()],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "reserved"
+            );
+            let held: i64 = conn
+                .query_row(
+                    "SELECT held_usd_nanos FROM resource_financial_debit WHERE operation_id=?1",
+                    [operation.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(held > 0);
+            assert!(validate_resource_financial_operations(conn).is_err());
+        });
     }
 }
 

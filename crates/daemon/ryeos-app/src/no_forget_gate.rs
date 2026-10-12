@@ -322,6 +322,19 @@ fn reset_and_original_runtime_sources_hold_no_forget_or_leaking_wrapper() {
 }
 
 #[test]
+fn live_state_and_operational_opening_sources_hold_no_forget_or_leaking_wrapper() {
+    let state_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../state/ryeos-state/src");
+    let mut refused = Vec::new();
+    for relative in ["state_db/live_native.rs", "operational/live_native.rs"] {
+        let source = std::fs::read_to_string(state_src.join(relative)).expect("gated State source");
+        for violation in violations(&source) {
+            refused.push(format!("{relative}:{violation}"));
+        }
+    }
+    assert!(refused.is_empty(), "no-forget gate refused:\n{}", refused.join("\n"));
+}
+
+#[test]
 fn gate_walks_nested_reset_and_original_directories() {
     let root = tempfile::tempdir().unwrap();
     let src = root.path();

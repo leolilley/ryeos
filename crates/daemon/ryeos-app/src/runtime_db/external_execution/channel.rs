@@ -4924,11 +4924,47 @@ Ok(())
     }
 
     #[test]
-    fn first_release_rechecks_startup_after_waiting_for_the_writer_lock() {
+    fn contended_first_release_refuses_at_once_without_a_frame_and_succeeds_on_retry() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::contended_first_release_refuses_at_once_without_a_frame_and_succeeds_on_retry"
+        );
+        if lillux_sqlite::test_host::is_isolated_child(TEST) {
+            // The peer: another process holding the store's SQLite writer
+            // lock until its parent lets it go.
+            let path = std::path::PathBuf::from(lillux_sqlite::test_host::isolated_peer_argument());
+            let host = lillux_sqlite::test_host::TestNativeHost::acquire();
+            let root = std::sync::Arc::new(
+                lillux::PinnedDirectory::open(path.parent().unwrap()).unwrap().unwrap(),
+            );
+            let connection = match host.open_bound(
+                root,
+                path.file_name().unwrap(),
+                lillux_sqlite::OriginalNativeBoundMode::Existing,
+                lillux_sqlite::OriginalNativeDomain::NodeRuntime,
+            ) {
+                Ok(connection) => connection,
+                Err(failure) => {
+                    let error = failure.to_string();
+                    host.retire_open_failure(failure);
+                    panic!("peer Runtime open refused: {error}");
+                }
+            };
+            let held = connection.with_sql(|sql| {
+                sql.execute_batch("BEGIN IMMEDIATE")?;
+                lillux_sqlite::test_host::isolated_peer_ready();
+                sql.execute_batch("COMMIT")?;
+                Ok(())
+            });
+            host.close(connection);
+            held.unwrap();
+            lillux_sqlite::test_host::isolated_peer_outcome("held the writer lock");
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
-        let db = RuntimeDb::open(&path).unwrap();
-        let (reservation, _, _, binding, owner, supervisor) = pending_channel_with_startup(
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        let (_, _, _, binding, owner, supervisor) = pending_channel_with_startup(
             &db,
             "startup-lock",
             "startup-lock",
@@ -4939,39 +4975,44 @@ Ok(())
         );
         db.register_external_execution_channel(&binding).unwrap();
         ready(&db, &binding, &supervisor);
-        let lock = rusqlite::Connection::open(&path).unwrap();
-        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        // The harness intentionally holds the actual SQLite writer while the
-        // ordinary owner attempts admission. Ready already exists in budget.
-        let (sent, received) = std::sync::mpsc::channel();
-        let live_deadline =
-            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(250));
-        let worker = std::thread::spawn(move || {
-            sent.send(()).unwrap();
-            db.admit_external_ready_and_author_release(
-                &binding.placement_thread_id,
-                &owner,
-                live_deadline,
-            )
-        });
-        received.recv().unwrap();
-        lillux::time::sleep(live_deadline.remaining() + lillux::time::Duration::from_millis(1));
-        reservation.startup_deadline().unwrap();
-        lock.execute_batch("COMMIT").unwrap();
-        let error = worker
-            .join()
-            .unwrap()
+        let owner_frames = |db: &crate::runtime_db::RuntimeDb| -> i64 {
+            db.conn.with_sql(|connection| Ok(connection.query_row(
+                "SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'",
+                [], |row| row.get(0),
+            )?)).unwrap()
+        };
+        // Another process holds the writer lock. A native connection never
+        // waits for it: the first release refuses at once, under a live cap
+        // far beyond the attempt, rather than at its deadline.
+        let peer = lillux_sqlite::test_host::spawn_isolated_peer(TEST, path.to_str().unwrap());
+        let contended = db.admit_external_ready_and_author_release(
+            &binding.placement_thread_id,
+            &owner,
+            test_startup_deadline(),
+        );
+        assert_eq!(peer.finish(), "held the writer lock");
+        let error = contended
             .err()
-            .expect("deadline expiring behind the writer lock must refuse release");
+            .expect("a first release behind another writer must refuse");
         assert!(
-            error.to_string().contains("startup live deadline"),
+            error.chain().any(|cause| cause
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(|sql| sql.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy))),
             "{error:#}"
         );
-        let count: i64 = lock.query_row(
-            "SELECT COUNT(*) FROM external_execution_frame WHERE direction='owner_to_supervisor'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(owner_frames(&*db), 0);
+        // The refusal latched nothing: once the holder is gone, the same
+        // owner authors its one first release.
+        let release = db
+            .admit_external_ready_and_author_release(
+                &binding.placement_thread_id,
+                &owner,
+                test_startup_deadline(),
+            )
+            .unwrap()
+            .expect("the retried first release is authored");
+        assert!(matches!(release.frame().payload, ExecutionChannelPayload::Release));
+        assert_eq!(owner_frames(&*db), 1);
     }
 
     #[test]
@@ -6223,7 +6264,7 @@ Ok(())
         };
 
         let cas_root = tempfile::tempdir().unwrap();
-        let state = ryeos_state::StateDb::open(
+        let state = ryeos_state::test_support::TestState::open(
             cas_root.path(),
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )
@@ -6600,7 +6641,7 @@ Ok(())
         drop(authority);
         drop(state);
         drop(db);
-        RuntimeDb::open(&path).unwrap();
+        drop(crate::runtime_db::test_native::TestRuntime::open(&path));
     }
 
     #[test]
@@ -7371,7 +7412,7 @@ Ok(())
         assert!(
             duplicate_error
                 .to_string()
-                .contains("runtime-applied observation was already retained"),
+                .contains("external native observation was already retained"),
             "{duplicate_error:#}"
         );
         db.conn.with_sql(|connection| Ok(validate_channels(connection)?)).unwrap();

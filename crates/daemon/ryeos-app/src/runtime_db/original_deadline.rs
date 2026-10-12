@@ -1,44 +1,8 @@
 //! Original RuntimeDb connection scope, owned only under StateStore's guard.
 //! No schema/epoch change, connection replacement, timeout renewal or worker.
 use super::*;
-use lillux::time::{Duration, MonotonicDeadline};
+use lillux::time::MonotonicDeadline;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-struct OriginalDeadlineScope<'a> {
-    db: &'a RuntimeDb,
-    connection: &'a Connection,
-    process_attachment_admission_open: &'a AtomicBool,
-    process_attachment_admission_closed: &'a tokio::sync::Notify,
-    prior_busy_milliseconds: u64,
-    installed: bool,
-}
-
-impl OriginalDeadlineScope<'_> {
-    fn restore(&mut self) -> Result<()> {
-        if !self.installed {
-            return Ok(());
-        }
-        self.installed = false;
-        self.connection.progress_handler(0, None::<fn() -> bool>);
-        let result = self
-            .connection
-            .busy_timeout(Duration::from_millis(self.prior_busy_milliseconds));
-        self.db.original_deadline_active.set(false);
-        if let Err(error) = result {
-            self.process_attachment_admission_open
-                .store(false, Ordering::Release);
-            // SAME existing owner signal; no StateStore/registry re-lock.
-            self.process_attachment_admission_closed.notify_waiters();
-            return Err(error).context("restore ORIGINAL RuntimeDb deadline scope");
-        }
-        Ok(())
-    }
-}
-impl Drop for OriginalDeadlineScope<'_> {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
-}
 
 // The lower native scope restores its accounting hook before this outer
 // notification guard runs, including unwinding. No second connection owner.
@@ -81,114 +45,154 @@ impl RuntimeDb {
         if self.original_deadline_active.get() {
             bail!("original RuntimeDb deadline scope cannot nest or renew");
         }
-        if let RuntimeConnection::Live(live) = &self.conn {
-            live.owner().require_original_process()?;
-            self.original_deadline_active.set(true);
-            let _notification = NativeDeadlineNotification {
-                db: self,
-                owner: live.owner(),
-                admission: process_attachment_admission_open,
-                closed: process_attachment_admission_closed,
-            };
-            return live.with_deadline(deadline, |_| operation(self));
-        }
-        if let RuntimeConnection::OriginalMutation { owner, schema_reference: _ } = &self.conn {
-            owner.require_original_process()?;
-            self.original_deadline_active.set(true);
-            let _notification = NativeDeadlineNotification {
-                db: self,
-                owner,
-                admission: process_attachment_admission_open,
-                closed: process_attachment_admission_closed,
-            };
-            // The native owner combines the original debit with expiry and
-            // restores its own hook. Never install the ordinary hook on it.
-            return owner.with_sql_deadline(deadline, |_| operation(self));
-        }
-        self.conn.with_mutable_sql(|connection| {
-            let prior: i64 = connection
-                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
-            let prior_busy_milliseconds =
-                u64::try_from(prior).context("RuntimeDb busy timeout is negative")?;
-            connection.busy_timeout(Duration::ZERO)?;
-            connection
-                .progress_handler(256, Some(move || deadline.has_elapsed()));
-            self.original_deadline_active.set(true);
-            let mut scope = OriginalDeadlineScope {
-                db: self,
-                connection,
-                process_attachment_admission_open,
-                process_attachment_admission_closed,
-                prior_busy_milliseconds,
-                installed: true,
-            };
-            let result = if deadline.has_elapsed() {
-                Err(anyhow!(
-                    "original RuntimeDb deadline expired before operation"
-                ))
-            } else {
-                operation(self)
-            };
-            let result = result.and_then(|value| {
-                if deadline.has_elapsed() { bail!("original RuntimeDb operation completed after its expiry; commit outcome may be uncertain"); }
-                Ok(value)
-            });
-            let restored = scope.restore();
-            match (result, restored) {
-                (Ok(value), Ok(())) => Ok(value),
-                (Err(error), Ok(())) => Err(error),
-                (Ok(_), Err(error)) => Err(error),
-                (Err(error), Err(restore)) => {
-                    Err(error.context(format!("RuntimeDb restoration refused: {restore:#}")))
-                }
+        match &self.conn {
+            RuntimeConnection::Live(live) => {
+                live.owner().require_original_process()?;
+                self.original_deadline_active.set(true);
+                let _notification = NativeDeadlineNotification {
+                    db: self,
+                    owner: live.owner(),
+                    admission: process_attachment_admission_open,
+                    closed: process_attachment_admission_closed,
+                };
+                live.with_deadline(deadline, |_| operation(self))
             }
-        })
+            RuntimeConnection::OriginalMutation { owner, schema_reference: _ } => {
+                owner.require_original_process()?;
+                self.original_deadline_active.set(true);
+                let _notification = NativeDeadlineNotification {
+                    db: self,
+                    owner,
+                    admission: process_attachment_admission_open,
+                    closed: process_attachment_admission_closed,
+                };
+                // The native owner combines the original debit with expiry and
+                // restores its own hook. Never install the ordinary hook on it.
+                owner.with_sql_deadline(deadline, |_| operation(self))
+            }
+            // A read-only inspection owner serves no mutation, so it owns no
+            // original deadline scope.
+            RuntimeConnection::OriginalInspection { owner: _, factory: _, schema_reference: _ } => {
+                bail!("inspection RuntimeDb owns no original deadline scope")
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn original_runtime_sql_expiry_interrupts_work_and_restores_actual_connection() {
-        let db = RuntimeDb::new_in_memory().unwrap();
-        db.conn.with_mutable_sql(|connection| {
-            connection.busy_timeout(Duration::from_millis(37))?;
-            Ok(())
-        }).unwrap();
-        let admission = AtomicBool::new(true);
-        let closed = tokio::sync::Notify::new();
-        let original = MonotonicDeadline::after(Duration::from_millis(10));
-        let result = db.with_original_deadline(original, &admission, &closed, |db| {
+    use lillux::time::Duration;
+    const UNBOUNDED_SUM: &str = "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT SUM(x) FROM n";
+
+    fn run_until_interrupted(
+        db: &RuntimeDb,
+        admission: &AtomicBool,
+        closed: &tokio::sync::Notify,
+    ) -> MonotonicDeadline {
+        let window = MonotonicDeadline::after(Duration::from_millis(10));
+        let result = db.with_original_deadline(window, admission, closed, |db| {
             db.conn.with_sql(|connection| {
-                let sum: i64 = connection.query_row("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT SUM(x) FROM n", [], |row| row.get(0))?;
-                Ok(sum)
+                Ok(connection.query_row(UNBOUNDED_SUM, [], |row| row.get::<_, i64>(0))?)
             })
         });
+        // The step hook interrupts the work once the window elapses.
         assert!(result.is_err());
-        assert!(original.has_elapsed());
+        assert!(window.has_elapsed());
         assert!(!db.original_deadline_active.get());
+        window
+    }
+
+    #[test]
+    fn live_runtime_sql_expiry_interrupts_work_and_leaves_the_connection_usable() {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let admission = AtomicBool::new(true);
+        let closed = tokio::sync::Notify::new();
+        run_until_interrupted(&db, &admission, &closed);
+        // The elapsed window ended only its own operation: the live owner
+        // keeps serving ordinary SQL and later windows.
         assert_eq!(
-            db.conn.with_sql(|connection| {
-                Ok(connection.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?)
-            }).unwrap(),
-            37
-        );
-        assert_eq!(
-            db.conn.with_sql(|connection| {
-                Ok(connection.query_row("SELECT 7", [], |row| row.get::<_, i64>(0))?)
-            }).unwrap(),
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.query_row("SELECT 7", [], |row| row.get::<_, i64>(0))?)
+                })
+                .unwrap(),
             7
+        );
+        let later = MonotonicDeadline::after(Duration::from_secs(2));
+        let value = db
+            .with_original_deadline(later, &admission, &closed, |db| {
+                db.conn.with_sql(|connection| {
+                    Ok(connection.query_row("SELECT 8", [], |row| row.get::<_, i64>(0))?)
+                })
+            })
+            .unwrap();
+        assert_eq!(value, 8);
+        // Expiry is not a refused hook restoration, so attachment admission
+        // stays open.
+        assert!(admission.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn mutation_runtime_sql_expiry_interrupts_work_and_anchors_the_connection() {
+        use crate::runtime_db::test_native::{open_live, open_original_mutation, retire};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.sqlite3");
+        let host = lillux_sqlite::test_host::TestNativeHost::acquire();
+        // A current store, created and closed by the live owner first.
+        retire(&host, open_live(&host, &path));
+        let root = std::sync::Arc::new(
+            lillux::PinnedDirectory::open(directory.path()).unwrap().unwrap(),
+        );
+        let namespace = root.lock_exclusive().unwrap();
+        let db = open_original_mutation(&host, &root, &namespace, &path);
+        let admission = AtomicBool::new(true);
+        let closed = tokio::sync::Notify::new();
+        run_until_interrupted(&db, &admission, &closed);
+        // The offline mutation owner keeps the elapsed expiry as its anchor:
+        // no later scope renews it, so the connection serves no further SQL.
+        let refused = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT 7", [], |row| row.get::<_, i64>(0))?)
+            })
+            .unwrap_err();
+        assert!(format!("{refused:#}").contains("no renewal"), "{refused:#}");
+        assert!(admission.load(Ordering::Acquire));
+        retire(&host, db);
+    }
+    #[test]
+    fn live_runtime_sql_stays_usable_after_a_completed_window_elapses() {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let admission = AtomicBool::new(true);
+        let closed = tokio::sync::Notify::new();
+        let window = MonotonicDeadline::after(Duration::from_millis(50));
+        let value = db
+            .with_original_deadline(window, &admission, &closed, |db| {
+                db.conn.with_sql(|connection| {
+                    Ok(connection.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?)
+                })
+            })
+            .unwrap();
+        assert_eq!(value, 1);
+        while !window.has_elapsed() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // One launch window bounds only its own operation: the daemon's
+        // single Runtime connection serves ordinary SQL after it elapses.
+        assert_eq!(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.query_row("SELECT 2", [], |row| row.get::<_, i64>(0))?)
+                })
+                .unwrap(),
+            2
         );
         assert!(admission.load(Ordering::Acquire));
     }
     #[test]
     fn original_runtime_sql_scope_unwind_restores_busy_and_progress_owners() {
-        let db = RuntimeDb::new_in_memory().unwrap();
-        db.conn.with_mutable_sql(|connection| {
-            connection.busy_timeout(Duration::from_millis(19))?;
-            Ok(())
-        }).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let admission = AtomicBool::new(true);
         let closed = tokio::sync::Notify::new();
         let original = MonotonicDeadline::after(Duration::from_secs(2));
@@ -199,12 +203,8 @@ mod tests {
         }));
         assert!(result.is_err());
         assert!(!db.original_deadline_active.get());
-        assert_eq!(
-            db.conn.with_sql(|connection| {
-                Ok(connection.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?)
-            }).unwrap(),
-            19
-        );
+        // The unwound scope restored the connection's own hooks: ordinary SQL
+        // runs again under the connection's live deadline.
         assert_eq!(
             db.conn.with_sql(|connection| {
                 Ok(connection.query_row("SELECT 3", [], |row| row.get::<_, i64>(0))?)
@@ -215,7 +215,7 @@ mod tests {
     }
     #[test]
     fn original_runtime_sql_scope_refuses_nested_clock_replacement() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let admission = AtomicBool::new(true);
         let closed = tokio::sync::Notify::new();
         let original = MonotonicDeadline::after(Duration::from_secs(2));

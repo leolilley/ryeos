@@ -1267,7 +1267,7 @@ mod tests {
     #[test]
     fn import_objects_staged_records_attribution() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(tmp.path(), test_trust_store()).unwrap();
 
         let data = b"{\"kind\":\"test\",\"value\":42}";
         let hash = lillux::sha256_hex(data);
@@ -1476,11 +1476,9 @@ mod tests {
     /// H6: finalize_import signs a local chain head ref and catches up projection.
     #[test]
     fn finalize_import_signs_local_ref() {
-        use crate::StateDb;
-
         let tmp = tempfile::tempdir().unwrap();
         let runtime_state_dir = tmp.path();
-        let db = StateDb::open(runtime_state_dir, test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(runtime_state_dir, test_trust_store()).unwrap();
         let signer = TestSigner::default();
 
         let cas_root = db.cas_root();

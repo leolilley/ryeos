@@ -1476,12 +1476,22 @@ mod directory_source_tests {
     fn actual_source_cas_authority_refuses_foreign_original_guard() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let first_state = crate::state::test_support::build(first.path()).unwrap();
-        let second_state = crate::state::test_support::build(second.path()).unwrap();
+        // A thread holds one test Store at a time. The foreign node's
+        // descriptor-pinned authority outlives its Store, so that node is
+        // opened, pinned and closed before the actual node opens.
+        let foreign = {
+            let (_second_state_owner, second_state) =
+                crate::state::test_support::build(second.path()).unwrap();
+            second_state.state_store.pinned_state_authority().unwrap()
+        };
+        let (_first_state_owner, first_state) =
+            crate::state::test_support::build(first.path()).unwrap();
         let actual = first_state.state_store.pinned_state_authority().unwrap();
-        let foreign = second_state.state_store.pinned_state_authority().unwrap();
         let same_guard = actual.acquire_shared_guard().unwrap();
         actual.ensure_guard(&same_guard).unwrap();
+        // A thread nests shared guards of one runtime only, so release the
+        // actual guard before taking the foreign one.
+        drop(same_guard);
         let foreign_guard = foreign.acquire_shared_guard().unwrap();
         assert!(actual.ensure_guard(&foreign_guard).is_err());
         // Actual state/CAS authority control for the helper's pre-read gate.
@@ -1538,7 +1548,7 @@ mod retained_current_worker_source_controls {
     #[test]
     fn genuine_signed_source_reproduction_detects_dropped_carrier_owner_and_schema_substitution() {
         let root = tempfile::tempdir().unwrap();
-        let mut state = crate::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
         let mut fixture = super::temporary_source_fixture::admit_current_target(&mut state, b"{}").unwrap();
         let current = plan(&fixture.resolution, &state.engine);
         // Real signed kind/subject and actual CAS admission/recovery; plan is

@@ -2615,8 +2615,7 @@ mod tests {
         let head_hash = write_object(&cas_root, &head);
         write_signed_head(&refs_root, "T-root", &head_hash);
 
-        let proj_path = tmp.path().join("projection.db");
-        let proj = ProjectionDb::open(&proj_path).unwrap();
+        let proj = crate::test_support::TestProjection::open();
 
         let report = rebuild_projection(&proj, &cas_root, &refs_root, &test_trust_store()).unwrap();
         assert_eq!(report.chains_rebuilt, 1);
@@ -2664,8 +2663,7 @@ mod tests {
             write_signed_head(&refs_root, chain_id, &cs_hash);
         }
 
-        let proj_path = tmp.path().join("projection.db");
-        let proj = ProjectionDb::open(&proj_path).unwrap();
+        let proj = crate::test_support::TestProjection::open();
 
         let report = rebuild_projection(&proj, &cas_root, &refs_root, &test_trust_store()).unwrap();
         assert_eq!(report.chains_rebuilt, 2);
@@ -2738,8 +2736,7 @@ mod tests {
         )
         .is_err());
 
-        let proj_path = tmp.path().join("projection.db");
-        let proj = ProjectionDb::open(&proj_path).unwrap();
+        let proj = crate::test_support::TestProjection::open();
 
         let report = rebuild_projection(&proj, &cas_root, &refs_root, &test_trust_store()).unwrap();
         assert_eq!(report.chains_rebuilt, 1);
@@ -2762,7 +2759,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         std::fs::create_dir_all(&cas_root).unwrap();
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
+        let projection = crate::test_support::TestProjection::open();
 
         let snapshot = make_snapshot_json("T-root", "T-root", "created");
         let snapshot_hash = write_object(&cas_root, &snapshot);
@@ -2809,7 +2806,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         std::fs::create_dir_all(&cas_root).unwrap();
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
+        let projection = crate::test_support::TestProjection::open();
 
         let snapshot = make_snapshot_json("T-root", "T-root", "created");
         let snapshot_hash = write_object(&cas_root, &snapshot);
@@ -2850,7 +2847,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         std::fs::create_dir_all(&cas_root).unwrap();
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
+        let projection = crate::test_support::TestProjection::open();
 
         let snapshot = make_snapshot_json("T-root", "T-root", "created");
         let snapshot_hash = write_object(&cas_root, &snapshot);
@@ -2897,7 +2894,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         std::fs::create_dir_all(&cas_root).unwrap();
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
+        let projection = crate::test_support::TestProjection::open();
 
         let created = make_snapshot_json("T-root", "T-root", "created");
         let created_hash = write_object(&cas_root, &created);
@@ -2961,62 +2958,12 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
 
-        let proj_path = tmp.path().join("projection.db");
-        let proj = ProjectionDb::open(&proj_path).unwrap();
+        let proj = crate::test_support::TestProjection::open();
 
         let report = rebuild_projection(&proj, &cas_root, &refs_root, &test_trust_store()).unwrap();
         assert_eq!(report.chains_rebuilt, 0);
         assert_eq!(report.threads_restored, 0);
         assert_eq!(report.events_projected, 0);
-    }
-
-    #[test]
-    fn preverified_baseline_accepts_exact_manifest_without_progress_reset() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cas_root = tmp.path().join("objects");
-        let refs_root = tmp.path().join("refs");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        std::fs::create_dir_all(&refs_root).unwrap();
-        write_created_chain(&cas_root, &refs_root, "T-root", None);
-
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
-        let trust_store = test_trust_store();
-        let guard = crate::recovery::CasMutationGuard::acquire_exclusive(tmp.path()).unwrap();
-        let observer = RecordingRecoveryObserver::default();
-        let (report, baseline) = rebuild_projection_with_verified_baseline(
-            &projection,
-            &cas_root,
-            &refs_root,
-            &trust_store,
-            Some(&observer),
-        )
-        .unwrap();
-        assert_eq!(report.chains_rebuilt, 1);
-        let updates_before_verification = observer.updates.lock().unwrap().len();
-
-        let (verification, fingerprints) = verify_preverified_projection(
-            &projection,
-            &cas_root,
-            &refs_root,
-            &trust_store,
-            &baseline,
-            &guard,
-            Some(&observer),
-        )
-        .unwrap();
-
-        assert_eq!(verification.signed_heads_verified, 1);
-        assert_eq!(verification.projection_cursors_verified, 1);
-        assert_eq!(
-            verification.projection_tables_verified,
-            HEAD_DERIVED_PROJECTION_TABLES.len()
-        );
-        assert_eq!(fingerprints.len(), HEAD_DERIVED_PROJECTION_TABLES.len());
-        assert_eq!(
-            observer.updates.lock().unwrap().len(),
-            updates_before_verification,
-            "internal expected-row rederivation must not publish a second rebuild cycle"
-        );
     }
 
     #[test]
@@ -3028,7 +2975,7 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let original_hash = write_created_chain(&cas_root, &refs_root, "T-root", None);
 
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
+        let projection = crate::test_support::TestProjection::open();
         let trust_store = test_trust_store();
         let guard = crate::recovery::CasMutationGuard::acquire_exclusive(tmp.path()).unwrap();
         let (_, baseline) = rebuild_projection_with_verified_baseline(
@@ -3084,7 +3031,7 @@ mod tests {
 
     #[test]
     fn sqlite_verification_watcher_returns_canonical_cancellation() {
-        let projection = ProjectionDb::open_transient().unwrap();
+        let projection = crate::test_support::TestProjection::open();
         let observer = CancelAfterInitialCheck::default();
 
         let error = with_projection_sqlite_cancellation(&projection, Some(&observer), || {
@@ -3105,7 +3052,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("cas");
-        let projection = ProjectionDb::open(&tmp.path().join("projection.db")).unwrap();
+        let projection = crate::test_support::TestProjection::open();
         let older = NewEvent::new("T-root", "T-root", crate::event_types::THREAD_FACET_SET)
             .chain_seq(1)
             .thread_seq(1)
@@ -3179,8 +3126,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let cas_root = tempdir.path().join("cas");
         let refs_root = tempdir.path().join("refs");
-        let proj_path = tempdir.path().join("projection.db");
-        let proj = ProjectionDb::open(&proj_path).unwrap();
+        let proj = crate::test_support::TestProjection::open();
 
         // Empty rebuild — still should emit the span
         let (_, spans) = trace_test::capture_traces(|| {
@@ -3263,6 +3209,41 @@ mod tests {
             }
             let (issued, recorded) = host.ticket_census();
             assert_eq!(issued as usize, recorded);
+        }
+
+        /// The expected projection is rederived on a ticket of the original
+        /// State context, so this acceptance runs on the native fixture.
+        #[test]
+        fn preverified_baseline_accepts_exact_manifest_without_progress_reset() {
+            let host = TestNativeHost::acquire();
+            let mut fixture = fixture(&host);
+            let subject = open_subject(&host);
+            let cas = lillux::CasStore::new(fixture.cas_root.clone());
+            let heads = RebuildHeads::Path(&fixture.refs_root);
+            let observer = RecordingRecoveryObserver::default();
+            let (report, baseline) = rebuild_projection_with_verified_baseline_inner(
+                &subject, &cas, heads, &fixture.trust, Some(&observer),
+            )
+            .unwrap();
+            assert_eq!(report.chains_rebuilt, 1);
+            let updates_before_verification = observer.updates.lock().unwrap().len();
+            let (verification, fingerprints) = verify_preverified_projection_inner(
+                &subject, &cas, heads, &fixture.trust, &baseline, Some(&observer),
+                Some(&mut fixture.context),
+            )
+            .unwrap();
+            assert_eq!(verification.signed_heads_verified, 1);
+            assert_eq!(verification.projection_cursors_verified, 1);
+            assert_eq!(verification.projection_tables_verified, HEAD_DERIVED_PROJECTION_TABLES.len());
+            assert_eq!(fingerprints.len(), HEAD_DERIVED_PROJECTION_TABLES.len());
+            assert_eq!(
+                observer.updates.lock().unwrap().len(),
+                updates_before_verification,
+                "internal expected-row rederivation must not publish a second rebuild cycle"
+            );
+            let Fixture { _tmp, cas_root, refs_root, trust, context, _lease, _namespace } = fixture;
+            drop((cas_root, refs_root, trust));
+            finish(&host, subject, context);
         }
 
         #[test]

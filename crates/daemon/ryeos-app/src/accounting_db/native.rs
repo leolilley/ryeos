@@ -14,7 +14,7 @@ use lillux_sqlite::{
     OriginalNativeOutsideConnectionParts, OriginalNativeOutsideCustodyFailure,
     OriginalNativeTerminal, OriginalNativeTransientInputs,
 };
-use std::sync::TryLockError;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use super::*;
 
@@ -70,6 +70,23 @@ pub struct AccountingNativeOutsideSources {
     pub connection: Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
     pub reference: Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
     pub unused_reference: Option<ManuallyDrop<OriginalNativeTransientInputs>>,
+}
+
+/// A scope that ended in refusal with its transaction still open leaves the
+/// live connection unusable for service. Close it in place now, in cleanup
+/// mode, which rolls the open transaction back; a refused close keeps its
+/// owner for the ordinary close retry.
+fn close_if_transaction_retained(state: &mut LedgerNativeState) {
+    let previous = std::mem::replace(&mut state.connection, LedgerConnection::CheckedOut);
+    state.connection = match previous {
+        LedgerConnection::Live(owner) if owner.transaction_retained() => match owner.close() {
+            Ok(closed) => {
+                LedgerConnection::Terminal(OriginalNativeConnectionTerminal::Closed(closed))
+            }
+            Err(failure) => LedgerConnection::Closing(failure),
+        },
+        other => other,
+    };
 }
 
 impl AccountingNativeLedger {
@@ -168,11 +185,13 @@ impl AccountingNativeLedger {
         &self,
         operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
     ) -> Result<T> {
-        let state = self.lock_state()?;
-        match &state.connection {
+        let mut state = self.lock_state()?;
+        let result = match &state.connection {
             LedgerConnection::Live(owner) => owner.with_sql(operation),
             _ => bail!("accounting ledger SQL admission is closed"),
-        }
+        };
+        close_if_transaction_retained(&mut state);
+        result
     }
 
     /// Ledger SQL bounded by one original funding deadline, including the
@@ -186,7 +205,7 @@ impl AccountingNativeLedger {
             self.process == std::process::id(),
             "inherited accounting ledger owner"
         );
-        let state = loop {
+        let mut state = loop {
             if deadline.has_elapsed() {
                 bail!("original funding deadline expired waiting for ledger");
             }
@@ -198,10 +217,12 @@ impl AccountingNativeLedger {
                 }
             }
         };
-        match &state.connection {
+        let result = match &state.connection {
             LedgerConnection::Live(owner) => owner.with_sql_until(deadline, operation),
             _ => bail!("accounting ledger SQL admission is closed"),
-        }
+        };
+        close_if_transaction_retained(&mut state);
+        result
     }
 
     /// Opening-time SQL checked against the closed reference's schema
@@ -210,22 +231,26 @@ impl AccountingNativeLedger {
         &self,
         operation: impl for<'c> FnOnce(&'c Connection, &sqlite_schema::SchemaSqlDefinition) -> Result<T>,
     ) -> Result<T> {
-        let state = self.lock_state()?;
-        let factory = state
-            .factory
-            .as_ref()
-            .context("accounting ledger factory transferred")?;
-        let LedgerReference::Closed(reference) = &state.reference else {
-            bail!("accounting schema reference is not an actual closed reference");
-        };
-        reference.require_original_closed(
-            factory,
-            OriginalNativeDomain::NodeAccountingSchemaReference,
-        )?;
-        let LedgerConnection::Live(owner) = &state.connection else {
-            bail!("accounting ledger SQL admission is closed");
-        };
-        owner.with_sql(|conn| operation(conn, reference.definition()))
+        let mut state = self.lock_state()?;
+        let result = (|| {
+            let factory = state
+                .factory
+                .as_ref()
+                .context("accounting ledger factory transferred")?;
+            let LedgerReference::Closed(reference) = &state.reference else {
+                bail!("accounting schema reference is not an actual closed reference");
+            };
+            reference.require_original_closed(
+                factory,
+                OriginalNativeDomain::NodeAccountingSchemaReference,
+            )?;
+            let LedgerConnection::Live(owner) = &state.connection else {
+                bail!("accounting ledger SQL admission is closed");
+            };
+            owner.with_sql(|conn| operation(conn, reference.definition()))
+        })();
+        close_if_transaction_retained(&mut state);
+        result
     }
 
     /// Whether SQL admission has ended. A never-opened or failed owner is
@@ -351,6 +376,55 @@ impl AccountingNativeLedger {
             }
             LedgerReference::Unused(_) => {}
             _ => bail!("accounting schema reference is not at a closed native phase"),
+        }
+        Ok(terminals)
+    }
+
+    /// End a closed ledger owner in process, yielding its native census for
+    /// an in-process host: the connection and schema-reference terminals.
+    /// The owner must be the sole alias and at a closed native phase; any
+    /// refusal returns it unchanged.
+    pub(crate) fn into_census(
+        self: Arc<Self>,
+        factory: &Arc<OriginalNativeFactory>,
+    ) -> std::result::Result<Vec<OriginalNativeConnectionTerminal>, (Arc<Self>, anyhow::Error)> {
+        if let Err(error) = self.native_terminals(factory) {
+            return Err((self, error));
+        }
+        let owner = match Arc::try_unwrap(self) {
+            Ok(owner) => owner,
+            Err(shared) => {
+                return Err((shared, anyhow::anyhow!("accounting ledger still has aliases")));
+            }
+        };
+        let Self { process: _, state } = owner;
+        let LedgerNativeState { factory: _, connection, reference } = ManuallyDrop::into_inner(state)
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut terminals = Vec::with_capacity(2);
+        // The phases were checked by `native_terminals` above.
+        match connection {
+            LedgerConnection::Terminal(terminal) => {
+                if !matches!(&terminal, OriginalNativeConnectionTerminal::Released(receipt)
+                    if receipt.native_ticket().is_none())
+                {
+                    terminals.push(terminal);
+                }
+            }
+            other => drop(other),
+        }
+        match reference {
+            LedgerReference::Closed(reference) => terminals.push(reference.terminal().clone()),
+            LedgerReference::Released(released) => {
+                if let Ok(Some(terminal)) = released.terminal(factory) {
+                    if !matches!(terminal, OriginalNativeConnectionTerminal::Released(receipt)
+                        if receipt.native_ticket().is_none())
+                    {
+                        terminals.push(terminal.clone());
+                    }
+                }
+            }
+            other => drop(other),
         }
         Ok(terminals)
     }

@@ -540,7 +540,7 @@ mod tests {
             ScopedProducerProcessKey::new(format!("scoped-{}", "a".repeat(64)), owner.clone())
                 .unwrap();
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},

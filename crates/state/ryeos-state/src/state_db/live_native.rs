@@ -1328,7 +1328,7 @@ impl LiveRecoveryPhysicalRegistrations {
 /// the registry becomes their sole owner before descriptor preparation
 /// requires unique custody. Refusal keeps the alias for retry.
 fn retire_parent_recovery_owner(
-    recovery: &mut std::mem::ManuallyDrop<RecoveryStore>,
+    recovery: &mut Option<RecoveryStore>,
     consumed: &mut bool,
     registrations: &LiveRecoveryPhysicalRegistrations,
     registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
@@ -1339,10 +1339,9 @@ fn retire_parent_recovery_owner(
     }
     let quote = quote_live_state_parent_recovery_owner_retirement(registry)?;
     registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-    registrations.require_registered(&recovery.borrow_original_directory_custody(), registry)?;
-    // SAFETY: `consumed` is set in the same step, and every later reader
-    // checks it before touching the moved-out shell.
-    let owner = unsafe { std::mem::ManuallyDrop::take(recovery) };
+    let retained = recovery.as_ref().context("State parent recovery owner absent before retirement")?;
+    registrations.require_registered(&retained.borrow_original_directory_custody(), registry)?;
+    let owner = recovery.take().context("State parent recovery owner absent before retirement")?;
     drop(owner.into_original_directory_custody());
     *consumed = true;
     Ok(())
@@ -1360,7 +1359,8 @@ pub(crate) struct LiveStatePhysicalParent {
     // registration cannot discard these or stand in for their terminal join.
     _host: std::mem::ManuallyDrop<Option<LiveStateNativeHost>>,
     retired_host: Option<RetiredLiveStateHostAliases>,
-    _recovery: std::mem::ManuallyDrop<RecoveryStore>,
+    // Taken by name when the parent's recovery alias retires.
+    _recovery: Option<RecoveryStore>,
     recovery_owner_consumed: bool,
     recovery_registrations: LiveRecoveryPhysicalRegistrations,
     _trust: std::mem::ManuallyDrop<Arc<TrustStore>>,
@@ -1457,7 +1457,7 @@ impl LiveStatePhysicalParent {
             roots: roots.map(|root| Some(Arc::new(root))),
             registrations: std::array::from_fn(|_| None),
             registry_identity: None, retired_root_sources_consumed: false,
-            _host: std::mem::ManuallyDrop::new(Some(host)), retired_host: None, _recovery: std::mem::ManuallyDrop::new(_recovery),
+            _host: std::mem::ManuallyDrop::new(Some(host)), retired_host: None, _recovery: Some(_recovery),
             recovery_owner_consumed: false, recovery_registrations: LiveRecoveryPhysicalRegistrations::empty(),
             _trust: std::mem::ManuallyDrop::new(_trust), _join_link: std::mem::ManuallyDrop::new(outside_join) }
     }
@@ -1489,7 +1489,8 @@ impl LiveStatePhysicalParent {
             anyhow::ensure!(self.process == std::process::id(),
                 "foreign State parent after completed-stage validation debit");
             self.require_registered(registry)?;
-            return unsafe { self.recovery_registrations.register(&self._recovery, registry, prepay) };
+            let recovery = self._recovery.as_ref().context("State parent recovery owner already retired")?;
+            return unsafe { self.recovery_registrations.register(recovery, registry, prepay) };
         }
         let additional_sources = usize::from(self.registrations[0].is_none() && self.runtime.is_some())
             + (0..4).filter(|slot| {
@@ -1529,7 +1530,8 @@ impl LiveStatePhysicalParent {
             }
         }
         self.require_registered(registry)?;
-        unsafe { self.recovery_registrations.register(&self._recovery, registry, prepay) }
+        let recovery = self._recovery.as_ref().context("State parent recovery owner already retired")?;
+        unsafe { self.recovery_registrations.register(recovery, registry, prepay) }
     }
     pub(crate) fn require_registered(&self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry) -> anyhow::Result<()> {
@@ -1749,37 +1751,92 @@ impl OriginalNativeDestinationAuthority for LiveStateNativeOwner {
 }
 
 pub(super) struct LiveStateOpenCustody {
-    pub(super) original: Option<Arc<LiveStateNativeOwner>>,
+    pub(super) original: Arc<LiveStateNativeOwner>,
     pub(super) operational: Option<OperationalDb>,
     pub(super) projection_context: Option<OriginalProjectionBuildContext>,
 }
 impl LiveStateOpenCustody {
     pub(super) fn fail(self, error: anyhow::Error) -> anyhow::Error {
-        if self.original.is_some() {
-            anyhow::Error::new(LiveStateDatabaseOpenFailure {
-                error,
-                factory: Arc::clone(self.original.as_ref().expect("actual startup owner").factory()),
-                _custody: Mutex::new(self),
-            })
-        } else {
-            error
-        }
+        anyhow::Error::new(LiveStateDatabaseOpenFailure {
+            error,
+            factory: Arc::clone(self.original.factory()),
+            _custody: Mutex::new(self),
+        })
     }
 }
 impl Drop for LiveStateOpenCustody {
     fn drop(&mut self) {
-        if self.original.is_some()
-            && (self.operational.is_some() || self.projection_context.is_some()) {
+        if self.operational.is_some() || self.projection_context.is_some() {
             // Projection context can retain schema terminals, generation
             // leases and publication custody even without an Operational
-            // wrapper. None may disappear through a partial-start unwind.
-            // This retention fallback is not a completed recovery route.
-            std::mem::forget(self.operational.take());
-            std::mem::forget(self.original.take());
-            std::mem::forget(self.projection_context.take());
+            // wrapper. None may disappear through a partial-start unwind or a
+            // discarded open failure: native handles may still be live, so
+            // the namespace exclusion and roots must outlive them. The owners
+            // move whole into the process-lifetime abandoned-opening registry.
+            // This is retention, not a completed recovery route.
+            retain_abandoned_live_opening(AbandonedLiveOpening::State(AbandonedLiveStateOpening {
+                _projection_context: self.projection_context.take(),
+                _operational: self.operational.take(),
+                _original: Arc::clone(&self.original),
+            }));
         }
     }
 }
+
+/// The owners of a live State opening discarded without settlement.
+pub(crate) struct AbandonedLiveStateOpening {
+    _projection_context: Option<OriginalProjectionBuildContext>,
+    _operational: Option<OperationalDb>,
+    _original: Arc<LiveStateNativeOwner>,
+}
+
+/// One live opening discarded without settlement through `close_retained`.
+pub(crate) enum AbandonedLiveOpening {
+    State(AbandonedLiveStateOpening),
+    Operational(Box<crate::operational::live_native::AbandonedLiveOperationalOpening>),
+}
+
+/// Process-lifetime retention of live openings discarded without settlement.
+/// Their native handles may still be live, so every owner, including the
+/// namespace exclusion and roots, stays reachable here until the process
+/// exits. Nothing is ever removed from this list.
+static ABANDONED_LIVE_OPENINGS: Mutex<Vec<AbandonedLiveOpening>> = Mutex::new(Vec::new());
+
+pub(crate) fn retain_abandoned_live_opening(opening: AbandonedLiveOpening) {
+    ABANDONED_LIVE_OPENINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(opening);
+}
+
+/// Count of live openings this process retains because they were discarded
+/// without settlement. Any nonzero count means native custody and its
+/// namespace exclusion stay held until the process exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AbandonedLiveOpenings {
+    pub state: usize,
+    pub operational: usize,
+}
+
+/// Report the abandoned live openings this process retains.
+pub fn abandoned_live_openings() -> AbandonedLiveOpenings {
+    let retained = ABANDONED_LIVE_OPENINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut report = AbandonedLiveOpenings::default();
+    for opening in retained.iter() {
+        match opening {
+            AbandonedLiveOpening::State(_) => report.state += 1,
+            AbandonedLiveOpening::Operational(_) => report.operational += 1,
+        }
+    }
+    report
+}
+
+/// A refused live State opening. It retains every partial owner; settle it
+/// through [`Self::close_retained`]. Discarding it moves the owners into the
+/// process-lifetime abandoned-opening registry.
+#[must_use = "settle a refused live State opening through close_retained"]
 pub struct LiveStateDatabaseOpenFailure {
     error: anyhow::Error,
     factory: Arc<OriginalNativeFactory>,
@@ -2546,6 +2603,62 @@ impl ReleasedLiveStateStartup {
         for terminal in &terminals { terminal.require_original(factory)?; }
         Ok(terminals)
     }
+    /// End a failed-start State whose sources never left it, yielding its
+    /// native census for a host that settles in process: every connection
+    /// terminal and every closed generation lease. The roots, recovery and
+    /// trust end with this call; the terminals keep their own destination
+    /// owners until the host's census ends. A State whose sources began an
+    /// outside handoff, or whose census refuses, is returned whole.
+    pub fn into_census(self, factory: &Arc<OriginalNativeFactory>)
+        -> std::result::Result<super::LiveStateCensus, (Self, anyhow::Error)> {
+        let collected = (|| -> anyhow::Result<super::LiveStateCensus> {
+            factory.require_original_process()?;
+            anyhow::ensure!(Arc::ptr_eq(self.progress.original.factory(), factory),
+                "failed-start State census selected a foreign factory");
+            let progress = &self.progress;
+            anyhow::ensure!(self.destination_join.get().is_none() && self.destination_inputs.is_empty()
+                && self.projection_files.is_empty() && self.projection_refusals.is_empty()
+                && self.schema_definitions.is_empty() && !self.projection_leases_retired
+                && progress.operational_outside.is_none(),
+                "failed-start State began an outside source handoff");
+            anyhow::ensure!(progress.operational.is_none() && progress.operational_failure.is_none()
+                && progress.projection_failure.is_none() && progress.schema_failure.is_none(),
+                "failed-start State close is incomplete");
+            let terminals = self.native_terminals(factory)?;
+            // SAFETY: a failed start published no service or generation
+            // consumer, and the census above proved every SQL owner closed.
+            let leases = unsafe { self.generation_lease_terminals(factory) }?;
+            let owners = self.generation_registry_snapshot()?;
+            Ok(super::LiveStateCensus { terminals, leases,
+                lease_retirement: super::GenerationLeaseRetirement::new(owners), prior_refusal: None })
+        })();
+        let mut census = match collected {
+            Ok(census) => census,
+            Err(error) => return Err((self, error)),
+        };
+        let Self { schema_pending, schema_definitions, projection_leases_retired: _, projection_files,
+            projection_native, projection_refusals, destination_inputs, destination_join, progress } = self;
+        // Each vector is either checked empty above or carries terminals the
+        // census now also holds.
+        drop((std::mem::ManuallyDrop::into_inner(schema_pending),
+            std::mem::ManuallyDrop::into_inner(schema_definitions),
+            std::mem::ManuallyDrop::into_inner(projection_files),
+            std::mem::ManuallyDrop::into_inner(projection_native),
+            std::mem::ManuallyDrop::into_inner(projection_refusals),
+            std::mem::ManuallyDrop::into_inner(destination_inputs), destination_join));
+        let StartupCloseProgress { original, context, operational, operational_failure, operational_closed,
+            operational_outside, projection_failure, projection_released, schema_failure, schema_released,
+            schema_admission_custody, publication_custody, lease_setup_custody, prior_refusal } =
+            std::mem::ManuallyDrop::into_inner(progress);
+        // Owners first, then the State parent that holds the roots and the
+        // namespace exclusion.
+        drop((operational, operational_failure, operational_closed, operational_outside,
+            projection_failure, projection_released, schema_failure, schema_released));
+        drop((schema_admission_custody, publication_custody, lease_setup_custody, context));
+        drop(original);
+        census.prior_refusal = prior_refusal;
+        Ok(census)
+    }
     pub fn prior_refusal(&self) -> Option<&anyhow::Error> { self.progress.prior_refusal.as_ref() }
 }
 enum StartupRecoveryCustody {
@@ -2569,7 +2682,9 @@ impl LiveStateDatabaseOpenFailure {
         }
         let Self { error, factory: _, _custody } = self;
         let mut custody = _custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = custody.original.take().expect("typed live startup retains its original owner");
+        // The custody ends below with both service owners moved out, so its
+        // own retention runs no abandonment; this owner continues the close.
+        let original = Arc::clone(&custody.original);
         let mut progress = StartupCloseProgress { original, context: custody.projection_context.take(),
             operational: custody.operational.take(), operational_failure: None, operational_closed: None, operational_outside: None,
             projection_failure: None, projection_released: None, schema_failure: None,
@@ -2810,6 +2925,7 @@ impl LiveStatePhysicalParent {
         anyhow::ensure!(self.process == std::process::id(), "foreign State parent parts at exhaustion");
         require_retired_root_receipt_registry(self.registry_identity.as_ref(), registry)?;
         anyhow::ensure!(self.retired_root_sources_consumed && self.recovery_owner_consumed
+            && self._recovery.is_none()
             && self.registrations.iter().all(Option::is_none)
             && self.runtime.is_none() && self.namespace.is_none()
             && self.roots.iter().all(Option::is_none)
@@ -2819,8 +2935,7 @@ impl LiveStatePhysicalParent {
     }
 
     /// Infallible consumption after `require_exhausted`. The RecoveryStore
-    /// was moved out by host-alias retirement; its emptied shell is not
-    /// dropped again.
+    /// was already taken by host-alias retirement, so its slot is empty.
     pub(crate) fn exhaust(self) {
         let Self { process: _, runtime, namespace, roots, registrations, registry_identity: _,
             retired_root_sources_consumed: _, _host, retired_host, _recovery,
@@ -2831,7 +2946,7 @@ impl LiveStatePhysicalParent {
         drop(registrations);
         drop(std::mem::ManuallyDrop::into_inner(_host));
         drop(retired_host);
-        let _moved_recovery_shell = _recovery;
+        drop(_recovery);
         drop(recovery_registrations);
         drop(std::mem::ManuallyDrop::into_inner(_trust));
         drop(std::mem::ManuallyDrop::into_inner(_join_link));
@@ -2938,11 +3053,11 @@ mod recovery_owner_tests {
     fn parent_recovery_alias_must_end_before_descriptor_preparation() {
         let temporary = tempfile::tempdir().unwrap();
         let recovery = RecoveryStore::from_runtime_state_dir(temporary.path()).unwrap();
-        let mut recovery = std::mem::ManuallyDrop::new(recovery);
+        let mut recovery = Some(recovery);
         let mut consumed = false;
         let mut registrations = LiveRecoveryPhysicalRegistrations::empty();
         let mut registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
-        unsafe { registrations.register(&recovery, &mut registry, &|_, _| Ok(())) }.unwrap();
+        unsafe { registrations.register(recovery.as_ref().unwrap(), &mut registry, &|_, _| Ok(())) }.unwrap();
         unsafe { registry.seal_inventory() }.unwrap();
 
         let refused = unsafe { registry.prepare_descriptor_owners(&|_, _| Ok(())) }

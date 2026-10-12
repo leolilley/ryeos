@@ -347,46 +347,48 @@ mod tests {
 
     #[test]
     fn native_publication_requires_exact_applied_frame_even_without_fixture() {
-        let conn = Connection::open_in_memory().unwrap();
-        // This isolated predicate tests Applied ordering; the source reader
-        // separately authenticates the original signed frame and Q owner.
-        conn.execute_batch(
-            "CREATE TABLE external_execution_frame(
-            binding_digest TEXT,frame_digest TEXT,direction TEXT,application TEXT)",
-        )
-        .unwrap();
-        let binding = "a".repeat(64);
-        let frame = "b".repeat(64);
-        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
-        conn.execute(
-            "INSERT INTO external_execution_frame VALUES(?1,?2,'supervisor_to_owner','pending')",
-            params![&binding, &frame],
-        )
-        .unwrap();
-        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
-        conn.execute(
-            "UPDATE external_execution_frame SET application='claimed'",
-            [],
-        )
-        .unwrap();
-        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
-        conn.execute(
-            "UPDATE external_execution_frame SET application='applied'",
-            [],
-        )
-        .unwrap();
-        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred).unwrap();
-        require_applied_native_frame(&tx, &binding, &frame).unwrap();
-        assert!(require_applied_native_frame(&tx, &"c".repeat(64), &frame).is_err());
-        assert!(require_applied_native_frame(&tx, &binding, &"d".repeat(64)).is_err());
-        assert!(!tx.is_autocommit());
-        tx.rollback().unwrap();
-        conn.execute(
-            "UPDATE external_execution_frame SET direction='owner_to_supervisor'",
-            [],
-        )
-        .unwrap();
-        assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+        crate::runtime_db::test_native::with_transient(|conn| {
+            // This isolated predicate tests Applied ordering; the source reader
+            // separately authenticates the original signed frame and Q owner.
+            conn.execute_batch(
+                "CREATE TABLE external_execution_frame(
+                binding_digest TEXT,frame_digest TEXT,direction TEXT,application TEXT)",
+            )
+            .unwrap();
+            let binding = "a".repeat(64);
+            let frame = "b".repeat(64);
+            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            conn.execute(
+                "INSERT INTO external_execution_frame VALUES(?1,?2,'supervisor_to_owner','pending')",
+                params![&binding, &frame],
+            )
+            .unwrap();
+            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            conn.execute(
+                "UPDATE external_execution_frame SET application='claimed'",
+                [],
+            )
+            .unwrap();
+            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            conn.execute(
+                "UPDATE external_execution_frame SET application='applied'",
+                [],
+            )
+            .unwrap();
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred).unwrap();
+            require_applied_native_frame(&tx, &binding, &frame).unwrap();
+            assert!(require_applied_native_frame(&tx, &"c".repeat(64), &frame).is_err());
+            assert!(require_applied_native_frame(&tx, &binding, &"d".repeat(64)).is_err());
+            assert!(!tx.is_autocommit());
+            tx.rollback().unwrap();
+            conn.execute(
+                "UPDATE external_execution_frame SET direction='owner_to_supervisor'",
+                [],
+            )
+            .unwrap();
+            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            Ok(())
+        });
     }
 }
 

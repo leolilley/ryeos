@@ -1848,45 +1848,47 @@ mod tests {
 
     #[test]
     fn exact_response_bytes_cannot_be_replaced_after_a_possible_upload() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE external_execution_allocation (placement_thread_id TEXT PRIMARY KEY);",
-        )
-        .unwrap();
-        conn.execute_batch(JOURNAL_SQL).unwrap();
-        conn.execute(
-            "INSERT INTO external_execution_allocation VALUES('placement')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO external_execution_relay_transfer VALUES(
-                'placement','attach',0,'controller_to_guest','/relay/attach.response.json',
-                '{}','reserved',0,NULL,NULL,?1,1,1)",
-            [b"{}".as_slice()],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE external_execution_relay_transfer
-             SET phase='upload_possible',updated_at_ms=2 WHERE placement_thread_id='placement'",
-            [],
-        )
-        .unwrap();
-        assert!(
-            conn.execute(
-                "UPDATE external_execution_relay_transfer SET canonical_bytes=?1
-                 WHERE placement_thread_id='placement'",
-                [b"{\"different\":true}".as_slice()],
+        crate::runtime_db::test_native::with_transient(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE external_execution_allocation (placement_thread_id TEXT PRIMARY KEY);",
             )
-            .is_err()
-        );
-        assert!(
+            .unwrap();
+            conn.execute_batch(JOURNAL_SQL).unwrap();
             conn.execute(
-                "UPDATE external_execution_relay_transfer SET phase='reserved'
-                 WHERE placement_thread_id='placement'",
+                "INSERT INTO external_execution_allocation VALUES('placement')",
                 [],
             )
-            .is_err()
-        );
+            .unwrap();
+            conn.execute(
+                "INSERT INTO external_execution_relay_transfer VALUES(
+                    'placement','attach',0,'controller_to_guest','/relay/attach.response.json',
+                    '{}','reserved',0,NULL,NULL,?1,1,1)",
+                [b"{}".as_slice()],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE external_execution_relay_transfer
+                 SET phase='upload_possible',updated_at_ms=2 WHERE placement_thread_id='placement'",
+                [],
+            )
+            .unwrap();
+            assert!(
+                conn.execute(
+                    "UPDATE external_execution_relay_transfer SET canonical_bytes=?1
+                     WHERE placement_thread_id='placement'",
+                    [b"{\"different\":true}".as_slice()],
+                )
+                .is_err()
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE external_execution_relay_transfer SET phase='reserved'
+                     WHERE placement_thread_id='placement'",
+                    [],
+                )
+                .is_err()
+            );
+            Ok(())
+        });
     }
 }

@@ -79,8 +79,10 @@ impl LiveRuntimeConnection {
             active: &self.scope_active,
             owner: &self.owner,
         };
+        // Per-operation: an elapsed window ends only this operation, never
+        // the daemon's single Runtime connection.
         self.owner
-            .with_sql_deadline(self.deadline.min(deadline), operation)
+            .with_sql_until(self.deadline.min(deadline), operation)
     }
 }
 
@@ -148,11 +150,11 @@ impl RuntimeDb {
                     && owner.bound_main_identity()? == (observed.containing_device, observed.inode),
                 "live Runtime differs from SAME acquired Bound keeper"
             );
-            owner.with_sql_deadline(deadline, |connection| {
+            owner.with_sql_until(deadline, |connection| {
                 connection.execute_batch("PRAGMA foreign_keys=ON;")?;
                 if created {
                     connection.execute_batch("PRAGMA journal_mode=WAL;")?;
-                    initialize_current_runtime_schema(connection, path, Some(schema_reference.definition()))?;
+                    initialize_current_runtime_schema(connection, path, schema_reference.definition())?;
                 }
                 let epoch = runtime_operator_schema_epoch(connection, path)?;
                 if epoch != RUNTIME_OPERATOR_SCHEMA_EPOCH {
@@ -165,7 +167,7 @@ impl RuntimeDb {
                         path.display()
                     ));
                 }
-                validate_current_runtime_store(connection, path, Some(schema_reference.definition()))?;
+                validate_current_runtime_store(connection, path, schema_reference.definition())?;
                 let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
                 ensure!(integrity == "ok", "live Runtime integrity refused: {integrity}");
                 let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -202,11 +204,181 @@ impl RuntimeDb {
             open_mode: RuntimeDbOpenMode::Current,
             _directory: Some(directory),
             _directory_lock: Some(namespace),
-            _database_file: None,
-            _wal_file: None,
-            _shm_file: None,
             _inspection_copy: None,
             _inspection_sql: None,
         })
     }
+}
+
+impl RuntimeDb {
+    /// Every chain whose Runtime rows still pin live execution, by the same
+    /// recovery-pin predicate as [`RuntimeDb::chain_has_live_state`]: chains
+    /// named by a `thread_runtime` row or a `runtime_action_intent` row.
+    pub(crate) fn chains_with_live_execution(&self) -> Result<Vec<String>> {
+        let chains = self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT chain_root_id FROM thread_runtime
+                 UNION SELECT chain_root_id FROM runtime_action_intent
+                 ORDER BY 1",
+            )?;
+            let chains = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(chains)
+        })?;
+        let mut live = Vec::new();
+        for chain in chains {
+            if self.chain_has_live_state(&chain)? {
+                live.push(chain);
+            }
+        }
+        Ok(live)
+    }
+}
+
+/// Read, on a stopped node's native host, every chain whose Runtime rows
+/// still pin live execution. The established current-schema Runtime store at
+/// `path` opens on the host's tickets, is read, and closes; every terminal
+/// reaches `retain`. A store at another schema epoch refuses at open. Any
+/// owner a release or the census refuses is carried in the returned error.
+///
+/// # Safety
+/// The caller holds the exclusive node StateLock and `namespace` for the
+/// whole call, and `factory` and `destination` come from one host funded
+/// under that same exclusion.
+pub(crate) unsafe fn offline_live_execution_chains(
+    path: &Path,
+    root: Arc<lillux::PinnedDirectory>,
+    namespace: lillux::PinnedDirectoryLock,
+    factory: &Arc<OriginalNativeFactory>,
+    destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+    deadline: MonotonicDeadline,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> Result<Vec<String>> {
+    use ryeos_state::operational::CarriedOwners;
+    let name = path.file_name().context("Runtime database path has no basename")?;
+    // SAFETY: the caller's funded host issues this ticket under its locks.
+    let reference_inputs = unsafe {
+        lillux_sqlite::OriginalNativeTransientInputs::issued(
+            OriginalNativeDomain::NodeRuntimeSchemaReference,
+            destination.clone(),
+        )
+    }?;
+    let reference = match sqlite_schema::prepare_native_schema_sql_reference(
+        Arc::clone(factory),
+        reference_inputs,
+        OriginalNativeDomain::NodeRuntimeSchemaReference,
+        &runtime_schema_sql(),
+    ) {
+        Ok(reference) => reference,
+        Err(failure) => {
+            return Err(ryeos_state::operational::release_schema_reference_failure(
+                factory, failure, retain, "Runtime",
+            ));
+        }
+    };
+    // SAFETY: the caller's funded host issues this ticket under its locks;
+    // the fixed Runtime role and the existing-only mode are chosen here.
+    let issued = unsafe {
+        OriginalNativeBoundInputs::issued(
+            Arc::clone(&root),
+            name,
+            lillux_sqlite::OriginalNativeBoundMode::Existing,
+            OriginalNativeDomain::NodeRuntime,
+            destination,
+            None,
+        )
+    };
+    let inputs = match issued {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            // The closed reference's terminal joins the census before the
+            // refusal returns.
+            let (_definition, terminal) = reference.into_original_parts();
+            return Err(match retain(terminal) {
+                Ok(()) => error,
+                Err((terminal, reason)) => CarriedOwners::carry(
+                    error.context(format!("Runtime schema reference terminal not retained: {reason:#}")),
+                    terminal,
+                ),
+            });
+        }
+    };
+    let db = match RuntimeDb::open_live_with_namespace_authority(
+        path,
+        root,
+        namespace,
+        Arc::clone(factory),
+        inputs,
+        deadline,
+        reference,
+    ) {
+        Ok(db) => db,
+        Err(failure) => {
+            let original = anyhow!("open Runtime store for live-work inspection: {failure:#}");
+            return Err(match failure.retry_close() {
+                Ok(released) => match released.native_terminals(factory) {
+                    Ok(terminals) => match retain_all(terminals, retain) {
+                        // Its terminals are in the census; the released owner
+                        // ends here with its roots and unused inputs.
+                        Ok(()) => {
+                            drop(released);
+                            original
+                        }
+                        Err((refused, reasons)) => CarriedOwners::carry(
+                            original.context(format!("Runtime terminal not retained: {reasons}")),
+                            (released, refused),
+                        ),
+                    },
+                    Err(refusal) => CarriedOwners::carry(
+                        original.context(format!("released Runtime census refused: {refusal:#}")),
+                        released,
+                    ),
+                },
+                Err(failure) => CarriedOwners::carry(
+                    original.context("refused Runtime acquisition release retained"),
+                    failure,
+                ),
+            });
+        }
+    };
+    let chains = db.chains_with_live_execution();
+    let closed = match db.close_original_runtime(Arc::clone(factory)) {
+        Ok(closed) => closed,
+        Err(failure) => {
+            let error = anyhow!("close Runtime store after live-work inspection: {failure:#}");
+            return Err(CarriedOwners::carry(error, failure));
+        }
+    };
+    let terminals = match closed.native_terminals() {
+        Ok(terminals) => terminals,
+        Err(refusal) => {
+            return Err(CarriedOwners::carry(refusal.context("closed Runtime census refused"), closed));
+        }
+    };
+    if let Err((refused, reasons)) = retain_all(terminals, retain) {
+        return Err(CarriedOwners::carry(
+            anyhow!("Runtime terminal not retained: {reasons}"),
+            (closed, refused),
+        ));
+    }
+    // Its terminals are in the census; the closed facade ends here.
+    drop(closed);
+    chains
+}
+
+/// Hand every terminal to the census; return the refused ones with reasons.
+fn retain_all(
+    terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> std::result::Result<(), (Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, String)> {
+    let mut refused = Vec::new();
+    let mut reasons = Vec::new();
+    for terminal in terminals {
+        if let Err((terminal, reason)) = retain(terminal) {
+            refused.push(terminal);
+            reasons.push(format!("{reason:#}"));
+        }
+    }
+    if refused.is_empty() { Ok(()) } else { Err((refused, reasons.join("; "))) }
 }

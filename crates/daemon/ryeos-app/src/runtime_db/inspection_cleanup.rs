@@ -4,8 +4,7 @@
 //! Empty-root removal uses the original preserved guard and retained phases.
 
 use super::{
-    RuntimeInspectionRelease, SqliteInspectionAcquisitionReleased, SqliteInspectionClosed,
-    SqliteInspectionCopyLease,
+    RuntimeInspectionRelease, SqliteInspectionClosed, SqliteInspectionCopyLease,
 };
 use anyhow::{Context, Result, ensure};
 use lillux::secure_fs::PlannedQuarantineStage;
@@ -36,14 +35,12 @@ thread_local! {
 #[derive(Clone)]
 enum TerminalOwner {
     Closed(Arc<SqliteInspectionClosed>),
-    Acquisition(Arc<SqliteInspectionAcquisitionReleased>),
     Runtime(Arc<RuntimeInspectionRelease>),
 }
 impl TerminalOwner {
     fn context(&self) -> (&Arc<SqliteInspectionCopyLease>, &std::ffi::OsStr) {
         match self {
             Self::Closed(owner) => (&owner.lease, &owner.database_name),
-            Self::Acquisition(owner) => (&owner.lease, &owner.database_name),
             Self::Runtime(owner) => match owner.as_ref() {
                 RuntimeInspectionRelease::Closed(owner) => (&owner.lease, &owner.database_name),
                 RuntimeInspectionRelease::Acquisition(owner) => {
@@ -72,7 +69,6 @@ impl TerminalOwner {
         }
         match self {
             Self::Closed(owner) => bind!(owner),
-            Self::Acquisition(owner) => bind!(owner),
             Self::Runtime(owner) => match owner.as_ref() {
                 RuntimeInspectionRelease::Closed(owner) => bind!(owner),
                 RuntimeInspectionRelease::Acquisition(owner) => bind!(owner),
@@ -86,7 +82,6 @@ impl TerminalOwner {
     ) -> Result<Arc<lillux_sqlite::SqliteInspectionDisposalAuthority>> {
         match self {
             Self::Closed(owner) => owner.proof.authorize_disposal(receipt, body),
-            Self::Acquisition(owner) => owner.proof.authorize_disposal(receipt, body),
             Self::Runtime(owner) => match owner.as_ref() {
                 RuntimeInspectionRelease::Closed(owner) => {
                     owner.proof.authorize_disposal(receipt, body)
@@ -100,7 +95,6 @@ impl TerminalOwner {
     fn require_original(&self) -> Result<()> {
         match self {
             Self::Closed(owner) => owner.require_original(),
-            Self::Acquisition(owner) => owner.require_original(),
             Self::Runtime(owner) => match owner.as_ref() {
                 RuntimeInspectionRelease::Closed(owner) => owner.require_original(),
                 RuntimeInspectionRelease::Acquisition(owner) => owner.require_original(),
@@ -334,11 +328,6 @@ impl InspectionCopyCleanup {
     }
     pub(crate) fn for_closed(owner: Arc<SqliteInspectionClosed>) -> Result<Arc<Self>> {
         Self::issue(TerminalOwner::Closed(owner))
-    }
-    pub(crate) fn for_acquisition(
-        owner: Arc<SqliteInspectionAcquisitionReleased>,
-    ) -> Result<Arc<Self>> {
-        Self::issue(TerminalOwner::Acquisition(owner))
     }
     pub(crate) fn for_runtime(owner: Arc<RuntimeInspectionRelease>) -> Result<Arc<Self>> {
         Self::issue(TerminalOwner::Runtime(owner))
@@ -695,34 +684,31 @@ impl InspectionCopyCleanup {
 #[cfg(all(test, target_os = "linux"))]
 mod controls {
     use super::*;
-    use crate::runtime_db::RuntimeDb;
 
-    #[test]
-    fn actual_closed_copy_body_disposal_retains_same_progress_and_charged_pins() {
-        for inject in [0, 1, 2] {
+    /// Dispose the body of a real closed scheduler copy inspection, with
+    /// `inject` selecting no fault (0), a lost acknowledgement after the first
+    /// role (1) or after the root (2). Its claim's native host ends only with
+    /// the process, so each case runs in its own isolated child.
+    fn closed_copy_body_disposal(test: &str, inject: u8) {
+        if !lillux_sqlite::test_host::is_isolated_child(test) {
+            let outcome = lillux_sqlite::test_host::run_isolated(test);
+            assert_eq!(outcome, "closed copy body disposed with its charged pins");
+            return;
+        }
+        {
             let tmp = tempfile::tempdir().unwrap();
-            let source_path = tmp.path().join("runtime.sqlite3");
-            drop(RuntimeDb::open(&source_path).unwrap());
+            let source_path = tmp.path().join("scheduler.sqlite3");
+            // The closed evidence this cleanup owner disposes: a readonly
+            // native open and close of the copy through its issued SQL work.
+            let (source, namespace, state_lock, work, closed, retained) =
+                crate::execution_history_reset::fixture_closed_scheduler_inspection(
+                    tmp.path(),
+                    "CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(5);",
+                );
             let source_bytes = std::fs::read(&source_path).unwrap();
-            let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-            let namespace = source.lock_exclusive().unwrap();
-            let (_state_lock, work) = crate::execution_history_reset::fixture_inspection_copy_work(
-                &source,
-                &namespace,
-                &source_path,
-            );
-            let db = RuntimeDb::open_owned_history_reset_inspection(
-                &source_path,
-                source.try_clone().unwrap(),
-                namespace.clone(),
-                work.clone(),
-            )
-            .unwrap();
-            let (closed, reference) = db.close_owned_inspection().unwrap();
-            assert!(reference.is_none(), "a stock inspection carries no native reference");
             let root = closed.lease.directory().unwrap();
             let main = work
-                .retained_destination_role(root, std::ffi::OsStr::new("runtime.sqlite3"))
+                .retained_destination_role(root, std::ffi::OsStr::new("scheduler.sqlite3"))
                 .unwrap()
                 .unwrap();
             let owner = InspectionCopyCleanup::for_closed(closed.clone()).unwrap();
@@ -735,7 +721,7 @@ mod controls {
                 let error = owner.dispose_namespace().unwrap_err();
                 assert!(format!("{error:#}").contains("after original first-role removal"));
                 assert!(
-                    root.entry_no_follow(std::ffi::OsStr::new("runtime.sqlite3"))
+                    root.entry_no_follow(std::ffi::OsStr::new("scheduler.sqlite3"))
                         .unwrap()
                         .is_none()
                 );
@@ -760,7 +746,7 @@ mod controls {
                 assert!(!InspectionCopyCleanup::retryable_failure(&refusal));
                 assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign obligation");
                 assert!(
-                    root.entry_no_follow(std::ffi::OsStr::new("runtime.sqlite3"))
+                    root.entry_no_follow(std::ffi::OsStr::new("scheduler.sqlite3"))
                         .unwrap()
                         .is_some()
                 );
@@ -822,6 +808,34 @@ mod controls {
                 std::fs::read(replacement).unwrap(),
                 b"replacement obligation"
             );
+            lillux_sqlite::test_host::end_isolated_process(
+                (owner, disposal, main, closed, work, retained, state_lock, namespace, source, tmp),
+                "closed copy body disposed with its charged pins",
+            )
         }
+    }
+
+    #[test]
+    fn actual_closed_copy_body_disposal_retains_same_progress_and_charged_pins() {
+        closed_copy_body_disposal(
+            concat!(module_path!(), "::actual_closed_copy_body_disposal_retains_same_progress_and_charged_pins"),
+            0,
+        );
+    }
+
+    #[test]
+    fn closed_copy_disposal_resumes_after_first_role_acknowledgement_loss() {
+        closed_copy_body_disposal(
+            concat!(module_path!(), "::closed_copy_disposal_resumes_after_first_role_acknowledgement_loss"),
+            1,
+        );
+    }
+
+    #[test]
+    fn closed_copy_disposal_resumes_after_root_acknowledgement_loss() {
+        closed_copy_body_disposal(
+            concat!(module_path!(), "::closed_copy_disposal_resumes_after_root_acknowledgement_loss"),
+            2,
+        );
     }
 }

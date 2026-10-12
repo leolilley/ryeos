@@ -13,7 +13,6 @@ pub const STATE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("st
 pub mod admission;
 pub mod bundle_events;
 pub mod bundle_outbox;
-pub mod bundle_projection;
 pub mod capability;
 pub mod chain;
 pub mod event_types;
@@ -29,6 +28,7 @@ pub mod object_closure;
 pub mod objects;
 pub mod operational;
 mod pending_publication;
+pub mod private_cas;
 pub mod project_discovery;
 pub mod project_materialization;
 pub mod project_observation;
@@ -45,7 +45,7 @@ pub mod source_verification;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod verify;
 
@@ -58,9 +58,6 @@ pub use bundle_outbox::{
     BundleOutboxMessage, claim_bundle_outbox_messages, enqueue_bundle_outbox_message,
     ensure_bundle_outbox_schema, get_bundle_outbox_message, mark_bundle_outbox_delivered,
     mark_bundle_outbox_failed,
-};
-pub use bundle_projection::{
-    BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
 };
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use external_content::{

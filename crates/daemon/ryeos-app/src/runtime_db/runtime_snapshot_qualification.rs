@@ -342,7 +342,7 @@ pub(crate) mod tests {
     // Shared retained testimony fixture. All snapshot/prerequisite transitions use
     // their real journal APIs; this does not supply a compiler admission token.
     pub(crate) fn retained_owner_measurement_fixture() -> (
-        RuntimeDb,
+        crate::runtime_db::test_native::TestRuntime,
         RuntimeSnapshotIntent,
         RuntimeSnapshotLocator,
         RuntimeSnapshotReadinessObservation,
@@ -351,7 +351,7 @@ pub(crate) mod tests {
         RestoredVerifierAttemptIntent,
         RestoredVerifierAdapterObservation,
     ) {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, locator, readiness, intent, occurrence, verifier, observation) =
             populate_retained_owner_measurement_fixture(&db);
         (

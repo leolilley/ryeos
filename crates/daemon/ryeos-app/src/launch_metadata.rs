@@ -53,67 +53,11 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
     Ok(())
 }
 
-/// Version tag for the JSON payload persisted into
-/// `runtime_db.thread_runtime.launch_metadata`. Bump when a
-/// breaking shape change ships; readers MUST decode loudly so a
-/// schema mismatch surfaces in logs rather than silently disabling
-/// downstream behaviors (see `runtime_db::get_runtime_info`).
-// Exact durable launch metadata contract. Changes to any embedded authority
-// shape require a new epoch so startup rejects the old store before nested
-// deserialization can reinterpret (or partially decode) that authority.
-// v15 carries the pinned COW base/current project-authority pair.
-// v18 carries the retained-current-HEAD principal/project/base destination.
-// v19 carries the path-free outer exact-program projection and its exact
-// resolved ref-binding identities through the embedded sealed invocation.
-// v20 carries the exact runtime-state bootstrap selected for a machine
-// continuation, so live launch and crash recovery cannot disagree about
-// whether the managed runtime consumes a predecessor checkpoint or cold-starts
-// after an authority above the runtime has restored its state.
-// v21 embeds the exact optional ingress-authenticated handler authority. Its
-// absence is durable and may never be normalized into verified callback
-// authority during recovery.
-// v22 carries the flat captured node-policy provenance contract. v23 binds
-// remote adoption to the exact target-node operator grant generation. v24
-// carries admitted-launch capsule v20, which distinguishes standalone command
-// bytes from an executable member overlaid into its complete realization.
-// v25 carries admitted-launch capsule v21 and its required kind-projected
-// per-execution network ceiling.
-// v26 carries required filesystem/network ceilings in direct and managed
-// plans, intersected before admission, and explicit realization mount roots
-// in admitted capsule v22. Predecessor authority is never reinterpreted.
-// Predecessor authority remains opaque history rather than being interpreted
-// as current launch authority.
-// v27 combines that source-local authority with sealed scheduled fires and
-// independent candidate evaluation/integration in capsule 23/request 16.
-// v28 carries explicit fixed-parent live confinement and namespace-scoped
-// symlink semantics in capsule v24. Older live authority stays opaque history.
-// v29 combines the current adapter protocol's explicit node-owned proc
-// surface with capsule 25/request 18 and retained content-target ceilings.
-// Classify prior launch evidence before decoding its nested authority.
-// v30 carries the strict isolation-adapter v7 provenance enum. Classify old
-// envelopes before decoding nested protocol authority; never alias v6 to v7.
-// v31 binds sealed node-network input digests in isolation provenance. Retain
-// predecessor launch records as opaque history, never decode with empty inputs.
-// v32 combines qualified process-scope guarantees and strict adapter v8
-// nested-sandbox provenance in the same unlanded containment cut.
-// Earlier launch classes are opaque history, never assumed scope-capable.
-// v33 retains explicit workload invocation bindings and v2 grant/wire authority.
-// An old mandatory-client declaration is not an implicit CLI binding.
-// The parallel environment-product branch allocated its own v31-v34 shapes:
-// v31 requires the exact invocation product selector map in ResumeContext.
-// Classify old envelopes before decoding nested protocol authority; never
-// synthesize an empty selector map for predecessor persisted launches.
-// v32 retains the daemon-selected durable-effect authority for an awaited
-// managed root so terminal recovery never reconstructs a grant from caller
-// input or the current wrapper definition.
-// v33 requires typed root/dependency selection lists and complete selected
-// verifier testimony. Earlier selector objects are not launch authority.
-// v34 retains source-bearing product selections; receipts are not semantic identity.
-// v35 combines source-bearing product selections and exact invocation/scope
-// authority. Both separately checkpointed branch shapes remain opaque history.
-// v36 requires site-qualified stable identity for pinned project generations.
-// Predecessor `local:<path>` pins remain opaque history and cannot authorize
-// candidate return or cross-site continuation under the current contract.
+/// Exact durable launch metadata contract persisted into
+/// `runtime_db.thread_runtime.launch_metadata`. Any change to an embedded
+/// authority shape bumps it; a stored record of any other version is refused
+/// before its nested authority is decoded, and the execution-history reset
+/// discards it.
 pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 36;
 
 /// Per-thread daemon-owned state directory.

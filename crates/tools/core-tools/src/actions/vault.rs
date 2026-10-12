@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-pub use ryeos_vault::dotenv::read_dotenv_overlay;
 pub use ryeos_vault::paths::{
     default_sealed_store_path, default_vault_public_key_path, default_vault_secret_key_path,
 };

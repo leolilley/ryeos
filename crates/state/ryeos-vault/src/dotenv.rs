@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
 use crate::policy::is_blocked_name;
 
-/// Read `.env` overlay files, returning ONLY the keys in `wanted`.
+/// Read one project `.env` overlay through an already descriptor-pinned
+/// root, returning ONLY the keys in `wanted`. `.env` must be a direct regular
+/// child; links and special files fail closed.
 ///
 /// Lines for keys the caller did not ask for are ignored entirely — including
 /// blocked control names (`RYEOSD_URL`, `PATH`, …), invalid names, and
@@ -18,32 +20,7 @@ use crate::policy::is_blocked_name;
 /// (`validate_spawn_secret_name` / `validate_secret_name`) to exclude every
 /// blocked name, so a wanted key can never be a blocked name and no blocked key
 /// can ever be returned. The blocked-name check below is unreachable
-/// defense-in-depth.
-///
-/// Later `search_dirs` override earlier ones on collision (operator first,
-/// project second). Empty `wanted` ⇒ no files are read.
-pub fn read_dotenv_overlay(
-    search_dirs: &[PathBuf],
-    wanted: &HashSet<String>,
-) -> Result<HashMap<String, String>> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    if wanted.is_empty() {
-        return Ok(out);
-    }
-    for dir in search_dirs {
-        let path = dir.join(".env");
-        if !path.exists() {
-            continue;
-        }
-        let content =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        parse_dotenv_text(&content, &path, wanted, &mut out)?;
-    }
-    Ok(out)
-}
-
-/// Read one project overlay through an already descriptor-pinned root.
-/// `.env` must be a direct regular child; links and special files fail closed.
+/// defense-in-depth. Empty `wanted` ⇒ the file is not read.
 pub fn read_dotenv_overlay_pinned(
     root: &lillux::secure_fs::PinnedDirectory,
     wanted: &HashSet<String>,
@@ -139,6 +116,11 @@ mod tests {
         keys.iter().map(|s| s.to_string()).collect()
     }
 
+    fn read_overlay(dir: &Path, wanted: &HashSet<String>) -> Result<HashMap<String, String>> {
+        let root = lillux::secure_fs::PinnedDirectory::open(dir)?.expect("overlay root present");
+        read_dotenv_overlay_pinned(&root, wanted)
+    }
+
     #[test]
     fn ignores_unrelated_blocked_invalid_and_malformed_lines() {
         let tmp = tempfile::tempdir().unwrap();
@@ -155,7 +137,7 @@ mod tests {
         // Only MY_SECRET is wanted; every unrelated line (blocked, invalid,
         // malformed) is ignored rather than failing the resolution.
         let map =
-            read_dotenv_overlay(&[tmp.path().to_path_buf()], &wanted(&["MY_SECRET"])).unwrap();
+            read_overlay(tmp.path(), &wanted(&["MY_SECRET"])).unwrap();
         assert_eq!(map.get("MY_SECRET").map(String::as_str), Some("ok"));
         assert!(!map.contains_key("RYEOSD_URL"));
         assert!(!map.contains_key("PATH"));
@@ -166,7 +148,7 @@ mod tests {
     fn empty_wanted_reads_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "RYEOSD_URL=x\n").unwrap();
-        let map = read_dotenv_overlay(&[tmp.path().to_path_buf()], &wanted(&[])).unwrap();
+        let map = read_overlay(tmp.path(), &wanted(&[])).unwrap();
         assert!(map.is_empty());
     }
 
@@ -176,25 +158,11 @@ mod tests {
         // A bare wanted key with no `=` is a likely typo — surface it.
         std::fs::write(tmp.path().join(".env"), "MY_SECRET\n").unwrap();
         let err =
-            read_dotenv_overlay(&[tmp.path().to_path_buf()], &wanted(&["MY_SECRET"])).unwrap_err();
+            read_overlay(tmp.path(), &wanted(&["MY_SECRET"])).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("MY_SECRET") && msg.contains("malformed"),
             "got: {msg}"
         );
-    }
-
-    #[test]
-    fn later_dir_overrides_earlier_for_wanted_key() {
-        let a = tempfile::tempdir().unwrap();
-        let b = tempfile::tempdir().unwrap();
-        std::fs::write(a.path().join(".env"), "MY_SECRET=from_a\n").unwrap();
-        std::fs::write(b.path().join(".env"), "MY_SECRET=from_b\n").unwrap();
-        let map = read_dotenv_overlay(
-            &[a.path().to_path_buf(), b.path().to_path_buf()],
-            &wanted(&["MY_SECRET"]),
-        )
-        .unwrap();
-        assert_eq!(map.get("MY_SECRET").map(String::as_str), Some("from_b"));
     }
 }

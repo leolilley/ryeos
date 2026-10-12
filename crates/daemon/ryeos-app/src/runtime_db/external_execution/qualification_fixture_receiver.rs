@@ -513,8 +513,7 @@ pub(super) fn validate_receivers(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn receiver_fixture() -> (Connection, QualificationFixtureReceiverRecord) {
-        let conn = Connection::open_in_memory().unwrap();
+    fn receiver_fixture(conn: &Connection) -> QualificationFixtureReceiverRecord {
         // Only the foreign source columns read by this table's actual guards;
         // this fixture tests custody transitions, not an admitted Q launch.
         conn.execute_batch("CREATE TABLE external_execution_channel(placement_thread_id TEXT,binding_digest TEXT);
@@ -558,101 +557,110 @@ mod tests {
             ],
         )
         .unwrap();
-        (conn, record)
+        record
     }
 
     #[test]
     fn receiver_stage_intent_is_exact_reused_and_survives_unverified_prefix() {
-        let (conn, record) = receiver_fixture();
-        assert!(
-            read_record(&conn, &record.placement_thread_id)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(bind_stage_record(&conn, &record).unwrap(), record);
-        assert_eq!(
-            read_record(&conn, &record.placement_thread_id).unwrap(),
-            Some(record.clone())
-        );
-        // An interrupted CAS import leaves the original named stage reserved;
-        // a new caller's empty stage never replaces it.
-        let mut retry = record.clone();
-        retry.stage_id = "upload-new-empty".into();
-        assert_eq!(bind_stage_record(&conn, &retry).unwrap(), record);
-        retry.reference.blob_hash = "1".repeat(64);
-        assert!(bind_stage_record(&conn, &retry).is_err());
-        assert!(
-            conn.execute(
-                "UPDATE external_qualification_fixture_receiver SET stage_id='upload-substituted'",
-                []
-            )
-            .is_err()
-        );
-        assert!(
-            conn.execute(
-                "UPDATE external_qualification_fixture_receiver SET verified_at_ms=NULL",
-                []
-            )
-            .is_err()
-        );
-        assert!(
-            conn.execute("DELETE FROM external_qualification_fixture_receiver", [])
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let record = receiver_fixture(conn);
+            assert!(
+                read_record(&conn, &record.placement_thread_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(bind_stage_record(&conn, &record).unwrap(), record);
+            assert_eq!(
+                read_record(&conn, &record.placement_thread_id).unwrap(),
+                Some(record.clone())
+            );
+            // An interrupted CAS import leaves the original named stage reserved;
+            // a new caller's empty stage never replaces it.
+            let mut retry = record.clone();
+            retry.stage_id = "upload-new-empty".into();
+            assert_eq!(bind_stage_record(&conn, &retry).unwrap(), record);
+            retry.reference.blob_hash = "1".repeat(64);
+            assert!(bind_stage_record(&conn, &retry).is_err());
+            assert!(
+                conn.execute(
+                    "UPDATE external_qualification_fixture_receiver SET stage_id='upload-substituted'",
+                    []
+                )
                 .is_err()
-        );
-        conn.execute(
-            "UPDATE external_qualification_fixture_receiver SET verified_at_ms=123",
-            [],
-        )
-        .unwrap();
-        let verified = read_record(&conn, &record.placement_thread_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(verified.verified_at_ms, Some(123));
-        assert!(same_intent(&record, &verified)); // another verifier committed first
-        let mut changed = record.clone();
-        changed.stage_id = "upload-other".into();
-        assert!(!same_intent(&changed, &verified));
-        changed = record.clone();
-        changed.settlement_frame_digest = "9".repeat(64);
-        assert!(!same_intent(&changed, &verified));
-        assert!(
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE external_qualification_fixture_receiver SET verified_at_ms=NULL",
+                    []
+                )
+                .is_err()
+            );
+            assert!(
+                conn.execute("DELETE FROM external_qualification_fixture_receiver", [])
+                    .is_err()
+            );
             conn.execute(
-                "UPDATE external_qualification_fixture_receiver SET verified_at_ms=124",
-                []
+                "UPDATE external_qualification_fixture_receiver SET verified_at_ms=123",
+                [],
             )
-            .is_err()
-        );
-        assert_eq!(bind_stage_record(&conn, &record).unwrap(), verified);
+            .unwrap();
+            let verified = read_record(&conn, &record.placement_thread_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(verified.verified_at_ms, Some(123));
+            assert!(same_intent(&record, &verified)); // another verifier committed first
+            let mut changed = record.clone();
+            changed.stage_id = "upload-other".into();
+            assert!(!same_intent(&changed, &verified));
+            changed = record.clone();
+            changed.settlement_frame_digest = "9".repeat(64);
+            assert!(!same_intent(&changed, &verified));
+            assert!(
+                conn.execute(
+                    "UPDATE external_qualification_fixture_receiver SET verified_at_ms=124",
+                    []
+                )
+                .is_err()
+            );
+            assert_eq!(bind_stage_record(&conn, &record).unwrap(), verified);
+            Ok(())
+        });
     }
 
     #[test]
     fn cold_receiver_discovery_preserves_pending_frame_crash_prefix() {
-        let (conn, record) = receiver_fixture();
-        // Signed transport may have committed its pending native frame before
-        // the completion ACK or EOF application arrives. No receiver intent
-        // means no normal-ready joins may be demanded during cold discovery.
-        assert!(receiver_validation_placements(&conn).unwrap().is_empty());
-        conn.execute(
-            "UPDATE external_execution_frame SET application='claimed'",
-            [],
-        )
-        .unwrap();
-        assert!(receiver_validation_placements(&conn).unwrap().is_empty());
-        bind_stage_record(&conn, &record).unwrap();
-        assert_eq!(
-            receiver_validation_placements(&conn).unwrap(),
-            vec![record.placement_thread_id]
-        );
-        let (conn, record) = receiver_fixture();
-        conn.execute(
-            "UPDATE external_execution_frame SET application='applied'",
-            [],
-        )
-        .unwrap();
-        assert_eq!(
-            receiver_validation_placements(&conn).unwrap(),
-            vec![record.placement_thread_id]
-        );
-        // Applied-without-intent is discovered for rejection by full validation.
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let record = receiver_fixture(conn);
+            // Signed transport may have committed its pending native frame before
+            // the completion ACK or EOF application arrives. No receiver intent
+            // means no normal-ready joins may be demanded during cold discovery.
+            assert!(receiver_validation_placements(&conn).unwrap().is_empty());
+            conn.execute(
+                "UPDATE external_execution_frame SET application='claimed'",
+                [],
+            )
+            .unwrap();
+            assert!(receiver_validation_placements(&conn).unwrap().is_empty());
+            bind_stage_record(&conn, &record).unwrap();
+            assert_eq!(
+                receiver_validation_placements(&conn).unwrap(),
+                vec![record.placement_thread_id]
+            );
+            Ok(())
+        });
+        crate::runtime_db::test_native::with_transient(|conn| {
+            let record = receiver_fixture(conn);
+            conn.execute(
+                "UPDATE external_execution_frame SET application='applied'",
+                [],
+            )
+            .unwrap();
+            assert_eq!(
+                receiver_validation_placements(&conn).unwrap(),
+                vec![record.placement_thread_id]
+            );
+            // Applied-without-intent is discovered for rejection by full validation.
+            Ok(())
+        });
     }
 }

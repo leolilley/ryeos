@@ -13,7 +13,7 @@ pub fn quote_operational_schema_sources(current: usize, incoming: usize) -> Resu
     let total = current.checked_add(incoming)
         .context("live Operational schema source quote overflow")?;
     anyhow::ensure!(total <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES,
-        "Operational schema source quote exceeds its four fixed DDL owners");
+        "Operational schema source quote exceeds its one fixed DDL owner");
     let bytes = total.checked_mul(std::mem::size_of::<LiveOperationalSchemaSource>())
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<()>>()))
         .context("live Operational schema source storage quote overflow")?;
@@ -64,7 +64,7 @@ pub fn quote_operational_live_metadata_retirement(
 ) -> Result<OutsideWork> {
     anyhow::ensure!(schema_capacity <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
         && reference_capacity <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES,
-        "Operational metadata retirement exceeds its four fixed schema owners");
+        "Operational metadata retirement exceeds its one fixed schema owner");
     let initialization_steps = if has_initialization { 3 } else { 0 };
     let steps = u64::try_from(schema_capacity)?.checked_mul(4)
         .and_then(|steps| steps.checked_add(u64::try_from(reference_capacity).ok()?))
@@ -305,7 +305,7 @@ pub fn quote_operational_packet_sources(current: usize, incoming: usize) -> Resu
     let total = current.checked_add(incoming)
         .context("live Operational packet source quote overflow")?;
     anyhow::ensure!(total <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-        "Operational packet quote exceeds four schema sources plus one main source");
+        "Operational packet quote exceeds one schema source plus one main source");
     let bytes = total.checked_mul(std::mem::size_of::<lillux_sqlite::OriginalNativeOutsideConnectionCustody>())
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<()>>()))
         .context("live Operational packet storage quote overflow")?;
@@ -319,7 +319,7 @@ pub fn quote_operational_main_packet(current: usize) -> Result<OutsideWork> {
     let total = current.checked_add(1)
         .context("live Operational main packet source quote overflow")?;
     anyhow::ensure!(total <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-        "Operational main packet quote exceeds four schema sources plus one main source");
+        "Operational main packet quote exceeds one schema source plus one main source");
     let bytes = total.checked_mul(std::mem::size_of::<lillux_sqlite::OriginalNativeOutsideConnectionCustody>())
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<()>>()))
         .context("live Operational main packet storage quote overflow")?;
@@ -452,7 +452,7 @@ impl ClosedOriginalOperational {
         anyhow::ensure!(count <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
             && live.schema_sources.len().checked_add(count).is_some_and(|total|
                 total <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES),
-            "Operational schema source collection exceeds its four fixed DDL owners");
+            "Operational schema source collection exceeds its one fixed DDL owner");
         if count == 0 { return Ok(()); }
         let quote = quote_operational_schema_sources(live.schema_sources.len(), count)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
@@ -761,10 +761,10 @@ impl OutsideOriginalOperationalCustody {
             .context("live Operational schema receipt count overflow")?;
         anyhow::ensure!(live.schema_sources.len() <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
             && count <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES,
-            "Operational schema packet sources exceed their four fixed DDL owners");
+            "Operational schema packet sources exceed their one fixed DDL owner");
         anyhow::ensure!(self.sql_custody.len().checked_add(count).is_some_and(|total|
             total <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES),
-            "Operational packet collection exceeds four schema sources plus one main source");
+            "Operational packet collection exceeds one schema source plus one main source");
         if count == 0 { return Ok(()); }
         let quote = quote_operational_packet_sources(self.sql_custody.len(), count)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
@@ -881,7 +881,7 @@ impl OutsideOriginalOperationalCustody {
                 "Operational live schema native handoff incomplete");
         }
         anyhow::ensure!(self.sql_custody.len() <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
-            "Operational packet vector exceeds four schema sources plus one main source");
+            "Operational packet vector exceeds one schema source plus one main source");
         Ok(std::mem::take(&mut self.sql_custody))
     }
     /// # Safety
@@ -1156,11 +1156,8 @@ impl OriginalOperationalFailure {
 // against the native terminal after close, without another SQL admission.
 fn require_no_duplicate_keepers(db: &OperationalDb) -> Result<()> {
     anyhow::ensure!(
-        db._database_file.is_none()
-            && db._wal_file.is_none()
-            && db._shm_file.is_none()
-            && (db._initialization_marker.is_none()
-                || matches!(&db.conn, OperationalConnection::Live(_))),
+        db._initialization_marker.is_none()
+            || matches!(&db.conn, OperationalConnection::Live(_)),
         "original Operational owner has duplicated protocol keepers"
     );
     Ok(())
@@ -1218,7 +1215,6 @@ fn advance_close(
                             "live Operational close changed original purpose/factory"
                         );
                     }
-                    _ => anyhow::bail!("Operational close requires actual admitted native owner"),
                 }
                 require_no_duplicate_keepers(&db)
             })();
@@ -1244,7 +1240,6 @@ fn advance_close(
                     });
                     live.owner
                 }
-                _ => unreachable!("actual native Operational owner checked before transfer"),
             };
             owner
                 .close()
@@ -1388,9 +1383,6 @@ impl PreparedReplayIndexReset {
                 path,
                 _runtime_directory: directory,
                 _directory_lock: context.namespace.clone(),
-                _database_file: None,
-                _wal_file: None,
-                _shm_file: None,
                 _initialization_marker: None,
             });
             let Custody::Operational(db) = &custody else {
@@ -1553,19 +1545,20 @@ mod outside_quote_tests {
 
     #[test]
     fn operational_owner_quotes_cover_bounded_source_vectors() {
-        let schema = quote_operational_schema_sources(1, 2).unwrap();
+        let schema = quote_operational_schema_sources(0, 1).unwrap();
         assert_eq!(schema.bytes,
-            (3 * std::mem::size_of::<LiveOperationalSchemaSource>()
+            (std::mem::size_of::<LiveOperationalSchemaSource>()
                 + std::mem::size_of::<Vec<()>>()) as u64);
-        assert_eq!(schema.steps, 12);
-        assert!(quote_operational_schema_sources(4, 1).is_err());
+        assert_eq!(schema.steps, 8);
+        assert!(quote_operational_schema_sources(1, 1).is_err());
 
-        let packets = quote_operational_packet_sources(2, 1).unwrap();
+        let packets = quote_operational_packet_sources(1, 1).unwrap();
         assert_eq!(packets.bytes,
-            (3 * std::mem::size_of::<OriginalNativeOutsideConnectionCustody>()
+            (2 * std::mem::size_of::<OriginalNativeOutsideConnectionCustody>()
                 + std::mem::size_of::<Vec<()>>()) as u64);
         assert_eq!(packets.steps, 12);
-        assert_eq!(quote_operational_main_packet(2).unwrap().steps, 8);
+        assert!(quote_operational_packet_sources(2, 1).is_err());
+        assert_eq!(quote_operational_main_packet(1).unwrap().steps, 8);
         assert!(quote_operational_main_packet(usize::MAX).is_err());
 
         let owner = quote_operational_marker_owner().unwrap();
@@ -1579,9 +1572,9 @@ mod outside_quote_tests {
     #[test]
     fn live_metadata_retirement_quote_covers_fixed_schema_and_initialization_owners() {
         assert_eq!(quote_operational_live_metadata_retirement(0, 0, false).unwrap().steps, 12);
-        assert_eq!(quote_operational_live_metadata_retirement(4, 4, true).unwrap().steps, 35);
-        assert_eq!(quote_operational_live_metadata_retirement(4, 4, true).unwrap().bytes, 0);
-        assert!(quote_operational_live_metadata_retirement(5, 0, false).is_err());
+        assert_eq!(quote_operational_live_metadata_retirement(1, 1, true).unwrap().steps, 20);
+        assert_eq!(quote_operational_live_metadata_retirement(1, 1, true).unwrap().bytes, 0);
+        assert!(quote_operational_live_metadata_retirement(2, 0, false).is_err());
         assert_eq!(quote_operational_initialization_retirement().unwrap(), OutsideWork {
             bytes: 0,
             steps: 8,

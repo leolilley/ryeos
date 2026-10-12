@@ -1493,7 +1493,7 @@ mod tests {
         ExecutionProcessIdentity,
     ) {
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
@@ -1505,7 +1505,7 @@ mod tests {
         }))
         .unwrap();
         let mut planned = serde_json::to_value(&recovery).unwrap();
-        planned["version"] = 2.into();
+        planned["version"] = 3.into();
         planned["backend"]
             .as_object_mut()
             .unwrap()
@@ -1662,7 +1662,7 @@ mod tests {
 
     #[test]
     fn duplicate_changed_and_wrong_owner_never_reopen_attempt() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         assert!(db.reserve_scoped_child_attempt(&initial).is_err());
         seed_owner(&db, &initial.owner);
@@ -1752,7 +1752,7 @@ mod tests {
     fn scoped_input_pending_blocks_later_contact_and_delivered_replays_exactly() {
         use ryeos_state::external_content::products::producer_recipe::ProducerStdinSource;
 
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2026,7 +2026,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -2052,7 +2052,7 @@ mod tests {
         db.complete_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
             .unwrap();
         drop(db);
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -2121,7 +2121,7 @@ mod tests {
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
         }
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = db
             .get_scoped_child_attempt(&initial.attempt_id)
             .unwrap()
@@ -2171,7 +2171,7 @@ mod tests {
 
     #[test]
     fn exact_abort_retirement_fences_later_natural_observation() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2252,7 +2252,7 @@ mod tests {
             db.record_bound_scoped_child_death(&initial.attempt_id, &recovery)
                 .unwrap();
         }
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = db
             .get_scoped_child_attempt(&initial.attempt_id)
             .unwrap()
@@ -2283,7 +2283,7 @@ mod tests {
 
     #[test]
     fn natural_empty_is_distinct_from_cleanup_and_bound_to_exact_scope() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2391,7 +2391,7 @@ mod tests {
 
     #[test]
     fn unbound_attempt_requires_exact_discard_and_retires_without_process_claim() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2450,7 +2450,7 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.conn.with_sql(|connection| Ok(connection.execute("UPDATE scoped_child_attempt SET recipe_digest='not-a-digest' WHERE attempt_id=?1", [&initial.attempt_id])?)).unwrap();
         }
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]
@@ -2478,7 +2478,7 @@ mod tests {
                 params![initial.attempt_id, encoded],
             )?)).unwrap();
         }
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]
@@ -2508,7 +2508,7 @@ mod tests {
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
         }
-        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             reopened
                 .get_scoped_child_attempt(&initial.attempt_id)
@@ -2519,7 +2519,6 @@ mod tests {
         );
         drop(reopened);
 
-        let conn = rusqlite::Connection::open(&path).unwrap();
         // Reopening validates the retained row's shape, not the signed
         // recipe. The live pre-contact path already checked these hashes
         // against signed bytes; that authority cannot be reconstructed from
@@ -2530,22 +2529,24 @@ mod tests {
             "A".repeat(64),
         );
         let encoded = lillux::canonical_json(&serde_json::to_value(noncanonical).unwrap()).unwrap();
-        conn.execute(
-            "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
-            params![initial.attempt_id, encoded],
-        )
-        .unwrap();
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.execute(
+                "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+                params![initial.attempt_id, encoded],
+            )?)
+        });
+        crate::runtime_db::test_native::live_open_refusal(&path);
 
         let mut legacy = evidence;
         legacy.schema = 1;
         let encoded = lillux::canonical_json(&serde_json::to_value(legacy).unwrap()).unwrap();
-        conn.execute(
-            "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
-            params![initial.attempt_id, encoded],
-        )
-        .unwrap();
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.execute(
+                "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+                params![initial.attempt_id, encoded],
+            )?)
+        });
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]
@@ -2584,21 +2585,22 @@ mod tests {
                 )?))
                 .unwrap();
         }
-        let error = RuntimeDb::open_existing_current(&path).err().unwrap();
-        let message = format!("{error:#}");
+        let message = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             message.contains("explicit no-backcompat reset"),
             "{message}"
         );
-        assert!(message.contains("stored schema_epoch=70"), "{message}");
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let retained: String = conn
-            .query_row(
+        assert!(
+            message.contains(&format!("stored schema_epoch={}", RUNTIME_OPERATOR_SCHEMA_EPOCH - 1)),
+            "{message}"
+        );
+        let retained: String = crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.query_row(
                 "SELECT mount_preparation_evidence FROM scoped_child_attempt WHERE attempt_id=?1",
                 [&initial.attempt_id],
                 |row| row.get(0),
-            )
-            .unwrap();
+            )?)
+        });
         assert_eq!(retained, former_bytes);
     }
 
@@ -2634,13 +2636,13 @@ mod tests {
                 seed_owner(&db, &second.owner);
                 assert!(db.reserve_scoped_child_attempt(&second).is_err());
             }
-            assert!(RuntimeDb::open_existing_current(&path).is_err());
+            crate::runtime_db::test_native::live_open_refusal(&path);
         }
     }
 
     #[test]
     fn unbound_retirement_cannot_carry_natural_empty_claim() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, _, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2664,7 +2666,7 @@ mod tests {
 
     #[test]
     fn retiring_one_scoped_child_preserves_shared_host_lifetime_fence() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (first, _, _) = fixture();
         let mut second = first.clone();
         second.attempt_id = "producer-two".to_owned();
@@ -2702,7 +2704,7 @@ mod tests {
 
     #[test]
     fn ended_old_lifetime_cannot_be_replaced_while_attempt_is_unsettled() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (first, _, _) = fixture();
         seed_owner(&db, &first.owner);
         db.reserve_scoped_child_attempt(&first).unwrap();

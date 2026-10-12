@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn create_claim_is_one_shot_and_uncertain_result_never_recontacts() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         let reserved = db.reserve_snapshot_bootstrap(&intent).unwrap();
         assert_eq!(reserved.phase, SnapshotBootstrapPhase::Reserved);
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn bound_occurrence_is_retained_and_cannot_be_switched() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         db.reserve_snapshot_bootstrap(&intent).unwrap();
         db.claim_snapshot_bootstrap_attempt(&intent.operation_id)
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn phase_cannot_reopen_contact_and_occurrence_is_unique_across_intended_groups() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let first = intent();
         db.reserve_snapshot_bootstrap(&first).unwrap();
         db.claim_snapshot_bootstrap_attempt(&first.operation_id)
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn occurrence_after_local_deadline_is_cleanup_only_even_if_adapter_flag_is_false() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         db.reserve_snapshot_bootstrap(&intent).unwrap();
         db.claim_snapshot_bootstrap_attempt(&intent.operation_id)
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn mismatched_creation_attributes_retain_cleanup_target_without_upload_authority() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let intent = intent();
         db.reserve_snapshot_bootstrap(&intent).unwrap();
         db.claim_snapshot_bootstrap_attempt(&intent.operation_id)

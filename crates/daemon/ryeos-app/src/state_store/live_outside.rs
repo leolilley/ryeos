@@ -3054,7 +3054,7 @@ mod destination_retry_tests {
     #[test]
     fn packet_progress_uses_exact_producer_owned_limits() {
         assert_eq!(MAX_RUNTIME_PACKET_SOURCES, 2);
-        assert_eq!(MAX_OPERATIONAL_PACKET_SOURCES, 5);
+        assert_eq!(MAX_OPERATIONAL_PACKET_SOURCES, 2);
         assert_eq!(MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, 2);
         assert_eq!(MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES, 2);
         assert_eq!(
@@ -3068,8 +3068,8 @@ mod destination_retry_tests {
         assert!(require_packet_count_within_source_bound(5, OriginalPacketSourceKind::Scheduler).is_err());
         assert!(require_packet_count_within_source_bound(2, OriginalPacketSourceKind::Runtime).is_ok());
         assert!(require_packet_count_within_source_bound(3, OriginalPacketSourceKind::Runtime).is_err());
-        assert!(require_packet_count_within_source_bound(5, OriginalPacketSourceKind::Operational).is_ok());
-        assert!(require_packet_count_within_source_bound(6, OriginalPacketSourceKind::Operational).is_err());
+        assert!(require_packet_count_within_source_bound(2, OriginalPacketSourceKind::Operational).is_ok());
+        assert!(require_packet_count_within_source_bound(3, OriginalPacketSourceKind::Operational).is_err());
         assert_eq!(quote_retired_packet_bound_roots(0).unwrap().steps, 0);
         assert_eq!(quote_retired_packet_bound_roots(MAX_SELECTED_PACKET_SOURCES).unwrap().steps,
             18 * u64::try_from(MAX_SELECTED_PACKET_SOURCES).unwrap());

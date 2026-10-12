@@ -58,7 +58,17 @@ impl NeverBornResourceFundingReceipt {
         state: &Arc<StateStore>,
         original: &runtime_db::ProcessResourceReservationRecord,
     ) -> Result<()> {
-        if !Arc::ptr_eq(&self.state_store, state) {
+        self.matches_original_of(&Arc::downgrade(state), original)
+    }
+
+    /// [`Self::matches_original`] against the identity of a Store owner:
+    /// every owner but the Store that minted the receipt is refused.
+    fn matches_original_of(
+        self,
+        state: &std::sync::Weak<StateStore>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        if !std::ptr::eq(Arc::as_ptr(&self.state_store), state.as_ptr()) {
             bail!("no-birth funding receipt belongs to another StateStore owner");
         }
         let custody =
@@ -111,7 +121,7 @@ pub use live_outside::{LiveStateStoreOutsideCustody, LiveStateStoreOutsideSource
     quote_destination_retries, quote_packet_parts, quote_packet_metadata_pin_retirements,
     quote_retired_packet_metadata_pin_receipts, quote_retired_packet_source_parts};
 mod live_close;
-pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure};
+pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure, StateStoreCensus};
 mod live_native;
 pub use live_native::{
     LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure,
@@ -128,6 +138,8 @@ pub use live_native::{
     quote_store_root_registration_handoff,
 };
 mod scoped_child;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
 
 use projection_access::committed_value;
 
@@ -136,6 +148,157 @@ use projection_access::committed_value;
 /// remaining package is abandoned; never retain its bootstrap secret across
 /// daemon restart. Refuse unexpected shapes rather than sweeping unrelated
 /// state or following a replaced path.
+/// Hand every terminal to an in-process census; return the refused ones
+/// with their reasons.
+fn retain_all_terminals(
+    terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> std::result::Result<(), (Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, String)> {
+    let mut refused = Vec::new();
+    let mut reasons = Vec::new();
+    for terminal in terminals {
+        if let Err((terminal, reason)) = retain(terminal) {
+            refused.push(terminal);
+            reasons.push(format!("{reason:#}"));
+        }
+    }
+    if refused.is_empty() { Ok(()) } else { Err((refused, reasons.join("; "))) }
+}
+
+/// Close an in-process Runtime store into its host's census. A refusal
+/// carries the remaining owners.
+fn close_runtime_into(
+    runtime: runtime_db::RuntimeDb,
+    factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> Result<()> {
+    use ryeos_state::operational::CarriedOwners;
+    let closed = match runtime.close_original_runtime(Arc::clone(factory)) {
+        Ok(closed) => closed,
+        Err(failure) => {
+            let error = anyhow!("close in-process Runtime store: {failure:#}");
+            return Err(CarriedOwners::carry(error, failure));
+        }
+    };
+    let terminals = match closed.native_terminals() {
+        Ok(terminals) => terminals,
+        Err(refusal) => {
+            return Err(CarriedOwners::carry(refusal.context("closed Runtime census refused"), closed));
+        }
+    };
+    if let Err((refused, reasons)) = retain_all_terminals(terminals, retain) {
+        return Err(CarriedOwners::carry(
+            anyhow!("Runtime terminal not retained: {reasons}"),
+            (closed, refused),
+        ));
+    }
+    // Its terminals are in the census; the closed facade ends here.
+    drop(closed);
+    Ok(())
+}
+
+/// Records one closed projection generation lease in an in-process host's
+/// census; a refusal hands it back with the reason.
+pub type RetainLease<'a> = &'a dyn Fn(Arc<lillux_sqlite::ClosedOriginalProjectionLease>)
+    -> std::result::Result<(), (Arc<lillux_sqlite::ClosedOriginalProjectionLease>, anyhow::Error)>;
+
+/// Hands a closed State's generation lease owners to an in-process host,
+/// which retires them against its finished native backend before release.
+pub type RetireLeasesAfterBackend<'a> = &'a dyn Fn(ryeos_state::state_db::GenerationLeaseRetirement);
+
+/// Settle a closed in-process State's census: every terminal reaches
+/// `retain`, every lease `retain_lease` and the lease owners
+/// `retire_after`; a recorded earlier refusal is an error. A State refused
+/// before close is carried whole; a refusal that already carries its owners
+/// passes through.
+fn retain_state_census(
+    closed: std::result::Result<ryeos_state::state_db::LiveStateCensus, (Option<StateDb>, anyhow::Error)>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+    retain_lease: RetainLease<'_>,
+    retire_after: RetireLeasesAfterBackend<'_>,
+    what: &str,
+) -> Result<()> {
+    use ryeos_state::operational::CarriedOwners;
+    let census = match closed {
+        Ok(census) => census,
+        Err((Some(state), refusal)) => {
+            return Err(CarriedOwners::carry(refusal.context(format!("close {what}")), state));
+        }
+        Err((None, refusal)) => return Err(refusal.context(format!("close {what}"))),
+    };
+    let ryeos_state::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+    retire_after(lease_retirement);
+    let mut refused_leases = Vec::new();
+    let mut reasons = Vec::new();
+    for lease in leases {
+        if let Err((lease, reason)) = retain_lease(lease) {
+            refused_leases.push(lease);
+            reasons.push(format!("{reason:#}"));
+        }
+    }
+    let refused_terminals = match retain_all_terminals(terminals, retain) {
+        Ok(()) => Vec::new(),
+        Err((refused, terminal_reasons)) => {
+            reasons.push(terminal_reasons);
+            refused
+        }
+    };
+    if !reasons.is_empty() {
+        return Err(CarriedOwners::carry(
+            anyhow!("{what} census not retained: {}", reasons.join("; ")),
+            (refused_terminals, refused_leases),
+        ));
+    }
+    match prior_refusal {
+        Some(prior) => Err(prior.context(format!("{what} recorded an earlier refusal"))),
+        None => Ok(()),
+    }
+}
+
+/// One durable process attachment as it was committed: the exact identity
+/// and the cancellation policy of its launch. Read without SQL by a stop
+/// whose service SQL is refused.
+#[derive(Debug, Clone)]
+pub struct AttachedProcess {
+    pub thread_id: String,
+    /// `None` only for a durable attachment row that carries no identity;
+    /// such an attachment can never be proved dead from memory.
+    pub process_identity: Option<crate::process::ExecutionProcessIdentity>,
+    pub cancellation_mode: Option<ryeos_engine::contracts::CancellationMode>,
+}
+
+/// Rebuild the attachment records from durable runtime rows.
+fn attached_processes_from_runtime(
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<BTreeMap<String, AttachedProcess>> {
+    let mut attached = BTreeMap::new();
+    for thread_id in runtime_db.list_attached_thread_ids()? {
+        let (process_identity, cancellation_mode) = match runtime_db.get_runtime_info(&thread_id)? {
+            Some(runtime) => (
+                runtime.process_identity,
+                runtime.launch_metadata.and_then(|metadata| metadata.cancellation_mode),
+            ),
+            None => (None, None),
+        };
+        attached.insert(
+            thread_id.clone(),
+            AttachedProcess { thread_id, process_identity, cancellation_mode },
+        );
+    }
+    Ok(attached)
+}
+
+/// Rebuild the live dedicated worker records from durable runtime rows.
+fn live_workers_from_runtime(
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<BTreeMap<String, runtime_db::WorkerProcessRecord>> {
+    Ok(runtime_db
+        .live_worker_processes()?
+        .into_iter()
+        .map(|record| (record.worker_instance_id.clone(), record))
+        .collect())
+}
+
 fn discard_abandoned_external_guest_packages(
     runtime_state: &lillux::PinnedDirectory,
 ) -> Result<()> {
@@ -1645,10 +1808,6 @@ struct StateStoreGuard<'a> {
 /// let permit = ryeos_app::state_store::SelectedMutationPermit::default();
 /// ```
 /// ```compile_fail
-/// let db = ryeos_app::runtime_db::RuntimeDb::new_in_memory().unwrap();
-/// db.release_thread_launch_claim("thread", "claim").unwrap();
-/// ```
-/// ```compile_fail
 /// let authority = ryeos_app::execution_history_reset::OfflineResetAuthority::default();
 /// ```
 pub(crate) struct SelectedMutationPermit<'guard, 'store> {
@@ -1930,8 +2089,15 @@ pub struct StateStore {
     /// store mutex prevents periodic recovery and shutdown audits from scanning
     /// the accumulated runtime table while blocking unrelated chain commits.
     /// Attach and clear update it at the same existing StateStore linearization
-    /// points as the durable row.
-    attached_thread_ids: Mutex<BTreeSet<String>>,
+    /// points as the durable row. Each entry keeps the exact identity and
+    /// cancellation policy committed with it, so a stop whose service SQL is
+    /// refused can still prove the process dead without reading the database.
+    attached_processes: Mutex<BTreeMap<String, AttachedProcess>>,
+    /// Dedicated worker processes recorded live in durable runtime state,
+    /// keyed by worker instance. Inserted after the durable attach commits and
+    /// removed after the settle or fence commits, so it never claims a process
+    /// the durable rows do not; it may briefly hold one already settled.
+    live_workers: Mutex<BTreeMap<String, runtime_db::WorkerProcessRecord>>,
     /// Shared across all AppState clones; metadata owns no native resources.
     /// Active-owner data lives inside Inner under the same Store mutex.
     selected_invocations:
@@ -4848,143 +5014,6 @@ impl StateStore {
             .ok_or_else(|| anyhow!("this StateStore has no destructive thread-runtime authority"))
     }
 
-    /// Open production state with the trust authority used to verify every
-    /// authoritative chain head during baseline rebuild and journal replay.
-    pub fn new_with_head_trust(
-        app_root: PathBuf,
-        runtime_state_dir: PathBuf,
-        runtime_db_path: PathBuf,
-        signer: Arc<dyn Signer>,
-        write_barrier: WriteBarrier,
-        head_trust: Arc<ryeos_state::refs::TrustStore>,
-    ) -> Result<Self> {
-        Self::open(
-            app_root,
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            head_trust,
-            BundleAdmissionTrust::unbound(),
-            None,
-            None,
-        )
-    }
-
-    /// Strict standalone verification store. Only established on-disk
-    /// authoritative/projection state is opened; runtime scaffolding is
-    /// in-memory and every mutation API is rejected at its common permit gate.
-    pub fn new_for_projection_verification(
-        runtime_state_dir: PathBuf,
-        signer: Arc<dyn Signer>,
-        write_barrier: WriteBarrier,
-        head_trust: Arc<ryeos_state::refs::TrustStore>,
-    ) -> Result<Self> {
-        let projection_health = Arc::new(ThreadProjectionHealth::default());
-        let state_db = StateDb::open_for_projection_verification(&runtime_state_dir, head_trust)?;
-        let runtime_db = runtime_db::RuntimeDb::new_in_memory()?;
-        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
-        let state_authority = state_db.pinned_authority()?;
-        Ok(Self {
-            live_native_open: None,
-            state_authority,
-            bundle_admission_trust: BundleAdmissionTrust::unbound(),
-            thread_runtime_authority: None,
-            inner: Mutex::new(Inner {
-                state_db,
-                runtime_db,
-                signer,
-                active_launch_owners: HashSet::new(),
-            }),
-            projection_health,
-            read_only: true,
-            allow_projection_rebuild: false,
-            write_barrier,
-            process_attachment_admission_open: AtomicBool::new(true),
-            process_attachment_admission_closed: tokio::sync::Notify::new(),
-            attached_thread_ids: Mutex::new(BTreeSet::new()),
-            selected_invocations: Mutex::new(
-                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
-            ),
-            launch_task_abort_handles: Mutex::new(HashMap::new()),
-            active_in_process_handlers: Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Offline projection-rebuild control store. Opens the authoritative roots,
-    /// durable recovery journal, and persisted RuntimeDb liveness state, but
-    /// deliberately does not read a generation pointer, replay a transition,
-    /// or build a baseline. The verified service invocation owns that one
-    /// explicit rebuild; all unrelated mutation APIs remain fail-closed.
-    pub fn new_for_projection_rebuild(
-        app_root: PathBuf,
-        runtime_state_dir: PathBuf,
-        runtime_db_path: PathBuf,
-        signer: Arc<dyn Signer>,
-        write_barrier: WriteBarrier,
-        head_trust: Arc<ryeos_state::refs::TrustStore>,
-    ) -> Result<Self> {
-        let projection_health = Arc::new(ThreadProjectionHealth::default());
-        let runtime_state_authority = lillux::PinnedDirectory::open(&runtime_state_dir)?
-            .ok_or_else(|| anyhow!("runtime state directory is absent"))?;
-        let thread_runtime_authority =
-            ThreadRuntimeAuthority::capture(&app_root, &runtime_state_authority, false)?;
-        let runtime_db = runtime_db::RuntimeDb::open_existing_current(&runtime_db_path)?;
-        let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
-        let state_db = StateDb::open_for_projection_rebuild(&runtime_state_dir, head_trust)?;
-        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
-        let state_authority = state_db.pinned_authority()?;
-        Ok(Self {
-            live_native_open: None,
-            state_authority,
-            bundle_admission_trust: BundleAdmissionTrust::unbound(),
-            thread_runtime_authority: Some(thread_runtime_authority),
-            inner: Mutex::new(Inner {
-                state_db,
-                runtime_db,
-                signer,
-                active_launch_owners: HashSet::new(),
-            }),
-            projection_health,
-            read_only: true,
-            allow_projection_rebuild: true,
-            write_barrier,
-            process_attachment_admission_open: AtomicBool::new(true),
-            process_attachment_admission_closed: tokio::sync::Notify::new(),
-            attached_thread_ids: Mutex::new(attached_thread_ids),
-            selected_invocations: Mutex::new(
-                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
-            ),
-            launch_task_abort_handles: Mutex::new(HashMap::new()),
-            active_in_process_handlers: Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Open production state with trusted head verification plus observable,
-    /// cancellable projection recovery. The observer is called from the
-    /// blocking open task and must remain non-blocking.
-    pub fn new_with_head_trust_and_recovery_observer(
-        app_root: PathBuf,
-        runtime_state_dir: PathBuf,
-        runtime_db_path: PathBuf,
-        signer: Arc<dyn Signer>,
-        write_barrier: WriteBarrier,
-        head_trust: Arc<ryeos_state::refs::TrustStore>,
-        recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
-    ) -> Result<Self> {
-        Self::open(
-            app_root,
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            head_trust,
-            BundleAdmissionTrust::unbound(),
-            Some(recovery_observer),
-            None,
-        )
-    }
-
     /// Production startup under its actual prepaid factory and node exclusion.
     /// The StateStore opening owner admits Runtime in the original namespace.
     /// # Safety
@@ -5012,7 +5041,370 @@ impl StateStore {
             Arc::clone(&signer), Arc::clone(&head_trust), deadline,
         )?;
         Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
-            write_barrier, head_trust, bundle_admission_trust, Some(recovery_observer), Some(original))
+            write_barrier, head_trust, bundle_admission_trust, Some(recovery_observer), original)
+    }
+
+    /// Offline projection-rebuild control store on an in-process native host,
+    /// in the stopped-node maintenance shape: the caller holds the runtime
+    /// namespace lock. The authority roots and recovery journal open with a
+    /// transient projection on a host ticket, and the established Runtime
+    /// store opens existing-only on another, for liveness. Nothing is
+    /// selected, replayed or rebuilt by opening; every unrelated mutation API
+    /// stays fail-closed. Close it with
+    /// [`StateStore::close_projection_rebuild_native`].
+    /// # Safety
+    /// The caller holds the exclusive node StateLock and `namespace`, the
+    /// exclusive lock of `runtime_state_directory`, for the Store's whole
+    /// life; `factory` and `destination` come from one in-process host the
+    /// caller funded under that exclusion, and `destination` revalidates it on
+    /// every native boundary. `retain` records terminals in that host's census.
+    pub unsafe fn new_for_projection_rebuild_native(
+        app_root: PathBuf,
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: lillux::PinnedDirectoryLock,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+    ) -> Result<Self> {
+        let state_factory = Arc::clone(factory);
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            Self::open_offline_native_store(
+                app_root, runtime_state_directory, namespace, runtime_db_path, signer,
+                write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, true,
+                move |directory, namespace| {
+                    // SAFETY: the caller holds the StateLock and `namespace`,
+                    // the host was funded under that exclusion, and the lease
+                    // authority admits only this host's factory.
+                    unsafe {
+                        StateDb::open_offline_native_for_rebuild(
+                            directory, namespace, head_trust, &state_factory, lease_authority,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /// Strict standalone verification store on an in-process native host, in
+    /// the stopped-node maintenance shape: the caller holds the runtime
+    /// namespace lock. Only the established selected projection generation
+    /// opens, read-only, on host tickets; the established Runtime store opens
+    /// existing-only for the same liveness reads the live node makes, and
+    /// every mutation API is rejected at its common permit gate. Close it
+    /// with [`StateStore::close_offline_native_control`].
+    /// # Safety
+    /// As [`StateStore::new_for_projection_rebuild_native`]; `lease_authority`
+    /// must admit only `factory`'s generation leases.
+    pub unsafe fn new_for_projection_verification_native(
+        app_root: PathBuf,
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: lillux::PinnedDirectoryLock,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+    ) -> Result<Self> {
+        let state_factory = Arc::clone(factory);
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            Self::open_offline_native_store(
+                app_root, runtime_state_directory, namespace, runtime_db_path, signer,
+                write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, false,
+                move |directory, namespace| {
+                    // SAFETY: the caller holds the StateLock and `namespace`;
+                    // the lease authority admits only this host's factory.
+                    unsafe {
+                        StateDb::open_offline_native_verification(
+                            directory, namespace, head_trust, &state_factory, lease_authority,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /// The shared body of the stopped-node native control stores: Runtime
+    /// opens existing-only for liveness, and `open_state` opens the State
+    /// side on the same host under the same held `namespace`.
+    /// # Safety
+    /// As [`StateStore::new_for_projection_rebuild_native`].
+    unsafe fn open_offline_native_store(
+        app_root: PathBuf,
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: lillux::PinnedDirectoryLock,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+        allow_projection_rebuild: bool,
+        open_state: impl FnOnce(lillux::PinnedDirectory, &lillux::PinnedDirectoryLock) -> Result<StateDb>,
+    ) -> Result<Self> {
+        use ryeos_state::operational::CarriedOwners;
+        namespace.ensure_protects(&runtime_state_directory)?;
+        let thread_runtime_authority =
+            ThreadRuntimeAuthority::capture(&app_root, &runtime_state_directory, false)?;
+        let root = Arc::new(runtime_state_directory.try_clone()?);
+        anyhow::ensure!(
+            runtime_db_path.parent() == Some(root.path()),
+            "native rebuild Runtime database must belong to the locked State namespace"
+        );
+        let name = runtime_db_path.file_name().context("Runtime database path has no basename")?;
+        // SAFETY: the caller's funded host issues these tickets under the
+        // exclusion this function's contract requires; the fixed Runtime role
+        // and the existing-only mode are chosen here.
+        let reference_inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+                destination.clone(),
+            )
+        }?;
+        let reference = match ryeos_state::sqlite_schema::prepare_native_schema_sql_reference(
+            Arc::clone(factory),
+            reference_inputs,
+            lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+            &runtime_db::runtime_schema_sql(),
+        ) {
+            Ok(reference) => reference,
+            Err(failure) => {
+                return Err(ryeos_state::operational::release_schema_reference_failure(
+                    factory, failure, retain, "Runtime",
+                ));
+            }
+        };
+        // SAFETY: as above.
+        let issued = unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                Arc::clone(&root),
+                name,
+                lillux_sqlite::OriginalNativeBoundMode::Existing,
+                lillux_sqlite::OriginalNativeDomain::NodeRuntime,
+                destination.clone(),
+                None,
+            )
+        };
+        let inputs = match issued {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                // The closed reference's terminal joins the census before the
+                // refusal returns.
+                let (_definition, terminal) = reference.into_original_parts();
+                return Err(match retain(terminal) {
+                    Ok(()) => error,
+                    Err((terminal, reason)) => CarriedOwners::carry(
+                        error.context(format!("Runtime schema reference terminal not retained: {reason:#}")),
+                        terminal,
+                    ),
+                });
+            }
+        };
+        let runtime_db = match runtime_db::RuntimeDb::open_live_with_namespace_authority(
+            &runtime_db_path,
+            Arc::clone(&root),
+            namespace.clone(),
+            Arc::clone(factory),
+            inputs,
+            deadline,
+            reference,
+        ) {
+            Ok(db) => db,
+            Err(failure) => {
+                let original = anyhow!("open Runtime store for projection rebuild: {failure:#}");
+                return Err(match failure.retry_close() {
+                    Ok(released) => match released.native_terminals(factory) {
+                        Ok(terminals) => match retain_all_terminals(terminals, retain) {
+                            Ok(()) => {
+                                drop(released);
+                                original
+                            }
+                            Err((refused, reasons)) => CarriedOwners::carry(
+                                original.context(format!("Runtime terminal not retained: {reasons}")),
+                                (released, refused),
+                            ),
+                        },
+                        Err(refusal) => CarriedOwners::carry(
+                            original.context(format!("released Runtime census refused: {refusal:#}")),
+                            released,
+                        ),
+                    },
+                    Err(failure) => CarriedOwners::carry(
+                        original.context("refused Runtime acquisition release retained"),
+                        failure,
+                    ),
+                });
+            }
+        };
+        drop(destination);
+        let opened = (|| -> Result<_> {
+            let attached_processes = attached_processes_from_runtime(&runtime_db)?;
+            let live_workers = live_workers_from_runtime(&runtime_db)?;
+            let state_db = open_state(runtime_state_directory, &namespace)?;
+            Ok((attached_processes, live_workers, state_db))
+        })();
+        let (attached_processes, live_workers, state_db) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                return Err(match close_runtime_into(runtime_db, factory, retain) {
+                    Ok(()) => error,
+                    Err(close) => close.context(format!("projection rebuild open refused: {error:#}")),
+                });
+            }
+        };
+        let projection_health = Arc::new(ThreadProjectionHealth::default());
+        let state_authority = match state_db.pinned_authority() {
+            Ok(authority) => authority,
+            Err(error) => {
+                let closed = if allow_projection_rebuild {
+                    state_db.close_offline_native(factory)
+                } else {
+                    state_db.close_verification_native(factory)
+                };
+                let state = retain_state_census(closed, retain, retain_lease, retire_after, "refused control-store State");
+                let runtime = close_runtime_into(runtime_db, factory, retain);
+                return Err(match state.and(runtime) {
+                    Ok(()) => error,
+                    Err(close) => close.context(format!("projection rebuild open refused: {error:#}")),
+                });
+            }
+        };
+        Ok(Self {
+            live_native_open: None,
+            state_authority,
+            bundle_admission_trust: BundleAdmissionTrust::unbound(),
+            thread_runtime_authority: Some(thread_runtime_authority),
+            inner: Mutex::new(Inner {
+                state_db,
+                runtime_db,
+                signer,
+                active_launch_owners: HashSet::new(),
+            }),
+            projection_health,
+            read_only: true,
+            allow_projection_rebuild,
+            write_barrier,
+            process_attachment_admission_open: AtomicBool::new(true),
+            process_attachment_admission_closed: tokio::sync::Notify::new(),
+            attached_processes: Mutex::new(attached_processes),
+            live_workers: Mutex::new(live_workers),
+            selected_invocations: Mutex::new(
+                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
+            ),
+            launch_task_abort_handles: Mutex::new(HashMap::new()),
+            active_in_process_handlers: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Close a Store opened by [`StateStore::new_for_projection_rebuild_native`]
+    /// or [`StateStore::new_for_projection_verification_native`] into its
+    /// host's census: every State and Runtime terminal reaches `retain` and
+    /// every closed generation lease reaches `retain_lease`. The Store must be
+    /// the sole alias. A refusal carries every remaining owner.
+    pub fn close_offline_native_control(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+    ) -> Result<()> {
+        use ryeos_state::operational::CarriedOwners;
+        let store = match Arc::try_unwrap(self) {
+            Ok(store) => store,
+            Err(shared) => {
+                return Err(CarriedOwners::carry(
+                    anyhow!("projection rebuild Store still has service owners"),
+                    shared,
+                ));
+            }
+        };
+        if store.live_native_open.is_some() || !store.read_only {
+            return Err(CarriedOwners::carry(
+                anyhow!("Store was not opened as a native stopped-node control store"),
+                store,
+            ));
+        }
+        let StateStore { live_native_open, state_authority, bundle_admission_trust,
+            thread_runtime_authority, inner, projection_health, read_only: _,
+            allow_projection_rebuild, write_barrier, process_attachment_admission_open: _,
+            process_attachment_admission_closed, attached_processes, live_workers,
+            selected_invocations, launch_task_abort_handles, active_in_process_handlers } = store;
+        let Inner { state_db, runtime_db, signer, active_launch_owners } =
+            inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // In-memory registries, admission and bookkeeping own no descriptor.
+        drop((live_native_open, bundle_admission_trust, projection_health, write_barrier,
+            process_attachment_admission_closed, attached_processes, live_workers,
+            selected_invocations, launch_task_abort_handles, active_in_process_handlers,
+            signer, active_launch_owners));
+        let closed = if allow_projection_rebuild {
+            state_db.close_offline_native(factory)
+        } else {
+            state_db.close_verification_native(factory)
+        };
+        let state = retain_state_census(closed, retain, retain_lease, retire_after, "control-store State");
+        let runtime = close_runtime_into(runtime_db, factory, retain);
+        // The pinned authority roots and the thread-runtime authority end
+        // after both databases closed.
+        drop((state_authority, thread_runtime_authority));
+        state.and(runtime)
+    }
+
+    /// A Store opened through the native gate on an in-process host: Runtime,
+    /// State, Operational and the projection each on a ticket of `factory`,
+    /// exactly as a live node opens them, without the node finalizer. Close
+    /// it with [`StateStore::close_in_process_census`] into that host's census.
+    /// # Safety
+    /// `factory` must be the admitted factory of an in-process host this
+    /// caller owns and finishes, `lease_authority` must admit only that
+    /// factory's generation leases, and `exclusion` must be the exclusion of
+    /// this exact App root, held for the Store's whole life.
+    pub unsafe fn new_in_process_native(
+        app_root: PathBuf,
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Self> {
+        let original = live_native::LiveStateOpen::capture(
+            &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
+            Arc::clone(&signer), Arc::clone(&head_trust), deadline,
+        )?;
+        Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
+            write_barrier, head_trust, BundleAdmissionTrust::unbound(), None, original)
+    }
+
+    /// Close a Store opened by [`StateStore::new_in_process_native`] into its
+    /// native census: every connection terminal and closed generation lease,
+    /// for the in-process host to record before it finishes its backend. The
+    /// usual close audit applies; a refusal retains the whole close custody.
+    pub fn close_in_process_census(
+        self: Arc<Self>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> std::result::Result<StateStoreCensus, LiveStateStoreCloseFailure> {
+        self.close_live(Arc::clone(&factory))?.into_census(factory)
     }
 
     fn open(
@@ -5024,17 +5416,9 @@ impl StateStore {
         head_trust: Arc<ryeos_state::refs::TrustStore>,
         bundle_admission_trust: BundleAdmissionTrust,
         recovery_observer: Option<Arc<dyn ryeos_state::ProjectionRecoveryObserver>>,
-        live: Option<Arc<live_native::LiveStateOpen>>,
+        live: Arc<live_native::LiveStateOpen>,
     ) -> Result<Self> {
-        let (runtime_state_directory, runtime_state_lock) = match &live {
-            Some(original) => (original.directory()?, original.namespace()),
-            None => {
-                let directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
-                    .context("failed to establish no-follow runtime_state_dir")?;
-                let lock = directory.lock_exclusive().context("lock runtime-state namespace")?;
-                (directory, lock)
-            }
-        };
+        let (runtime_state_directory, runtime_state_lock) = (live.directory()?, live.namespace());
         discard_abandoned_external_guest_packages(&runtime_state_directory)
             .context("discard abandoned secret-bearing guest packages")?;
         discard_abandoned_runtime_snapshot_staging(&runtime_state_directory)
@@ -5048,59 +5432,26 @@ impl StateStore {
 
         let projection_health = Arc::new(ThreadProjectionHealth::default());
         // Runtime state must be readable before projection recovery can decide
-        // whether a headless Set's replaceable rows are safe to discard.
-        let runtime_db_parent_path = runtime_db_path.parent().unwrap_or_else(|| Path::new("."));
-        let runtime_db_parent = lillux::PinnedDirectory::open_or_create(runtime_db_parent_path)
-            .context("pin runtime database namespace")?;
+        // whether a headless Set's replaceable rows are safe to discard. The
+        // opening owner already bound the Runtime path to its State namespace.
+        let _ = runtime_db_path;
         // Establish the real outside checkout before schema/native Runtime
         // acquisition, so early failures reach the same startup recovery owner.
-        let mut custody = live_native::StateOpenCustody { original: live, runtime: None, state: None };
-        let runtime_db = if let Some(original) = &custody.original {
-            match original.open_runtime() {
-                Ok(runtime) => runtime,
-                Err(error) => return Err(custody.fail(error)),
-            }
-        } else if runtime_state_directory.is_same_directory(&runtime_db_parent)? {
-            runtime_db::RuntimeDb::open_with_namespace_authority(
-                &runtime_db_path,
-                runtime_db_parent,
-                runtime_state_lock.clone(),
-            )?
-        } else {
-            runtime_db::RuntimeDb::open(&runtime_db_path)?
+        let mut custody = live_native::StateOpenCustody { original: Some(live), runtime: None, state: None };
+        let opened_runtime = custody.original.as_ref().expect("actual Store opening owner").open_runtime();
+        let runtime_db = match opened_runtime {
+            Ok(runtime) => runtime,
+            Err(error) => return Err(custody.fail(error)),
         };
         custody.runtime = Some(runtime_db);
         // Launch claims are durable owner evidence. They must survive process
         // restart so reconciliation can revoke the exact abandoned claim after
         // proving its attached process identity dead (or classify a genuinely
         // pre-attach window). Never erase ownership history wholesale here.
-        let state_db = if let Some(original) = &custody.original {
-            original.open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
+        let state_db = custody.original.as_ref().expect("actual Store opening owner")
+            .open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
                 head_trust, recovery_observer, custody.runtime.as_ref().expect("acquired Runtime owner"))
-        } else { match recovery_observer {
-            Some(recovery_observer) => {
-                StateDb::open_with_recovery_observer_runtime_liveness_and_namespace_authority(
-                    &runtime_state_dir,
-                    runtime_state_directory,
-                    runtime_state_lock,
-                    projection_health.clone(),
-                    head_trust,
-                    recovery_observer,
-                    custody.runtime.as_ref().expect("acquired Runtime owner"),
-                )
-            }
-            None => {
-                StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
-                    &runtime_state_dir,
-                    runtime_state_directory,
-                    runtime_state_lock,
-                    projection_health.clone(),
-                    head_trust,
-                    custody.runtime.as_ref().expect("acquired Runtime owner"),
-                )
-            }
-        } }
-        .map_err(with_execution_schema_cutover_hint);
+            .map_err(with_execution_schema_cutover_hint);
         let state_db = match state_db {
             Ok(state_db) => state_db,
             Err(error) => return Err(custody.fail(error)),
@@ -5114,10 +5465,11 @@ impl StateStore {
             ensure_current_external_content_bindings(state_db)?;
             projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
             let state_authority = state_db.pinned_authority()?;
-            let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
-            Ok((state_authority, attached_thread_ids))
+            let attached_processes = attached_processes_from_runtime(runtime_db)?;
+            let live_workers = live_workers_from_runtime(runtime_db)?;
+            Ok((state_authority, attached_processes, live_workers))
         })();
-        let (state_authority, attached_thread_ids) = match completed {
+        let (state_authority, attached_processes, live_workers) = match completed {
             Ok(completed) => completed,
             Err(error) => return Err(custody.fail(error)),
         };
@@ -5143,7 +5495,8 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
-            attached_thread_ids: Mutex::new(attached_thread_ids),
+            attached_processes: Mutex::new(attached_processes),
+            live_workers: Mutex::new(live_workers),
             selected_invocations: Mutex::new(
                 crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
             ),
@@ -7126,7 +7479,10 @@ impl StateStore {
             &record.placement_thread_id,
             &session.workspace_id,
         )?;
-        g.runtime_db.attach_worker_process(record)
+        g.runtime_db.attach_worker_process(record)?;
+        self.live_worker_registry()
+            .insert(record.worker_instance_id.clone(), record.clone());
+        Ok(())
     }
 
     /// Same pooled attachment under the actual original launch window.
@@ -7815,7 +8171,21 @@ impl StateStore {
             placement_thread_id,
             boot_epoch,
             cleanup_state,
-        )
+        )?;
+        self.forget_live_worker(worker_instance_id, boot_epoch);
+        Ok(())
+    }
+
+    /// Drop the in-memory live record of one exact worker epoch after its
+    /// durable settle or fence committed.
+    fn forget_live_worker(&self, worker_instance_id: &str, boot_epoch: u64) {
+        let mut workers = self.live_worker_registry();
+        if workers
+            .get(worker_instance_id)
+            .is_some_and(|record| record.boot_epoch == boot_epoch)
+        {
+            workers.remove(worker_instance_id);
+        }
     }
 
     pub fn complete_worker_binding(
@@ -7844,7 +8214,9 @@ impl StateStore {
             boot_epoch,
             cleanup_state,
             terminal_reason,
-        )
+        )?;
+        self.forget_live_worker(worker_instance_id, boot_epoch);
+        Ok(())
     }
 
     pub fn terminalize_dedicated_session(
@@ -9367,13 +9739,51 @@ impl StateStore {
         )
     }
 
-    fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.attached_thread_ids.lock().unwrap_or_else(|poisoned| {
+    fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, AttachedProcess>> {
+        self.attached_processes.lock().unwrap_or_else(|poisoned| {
             tracing::error!(
                 "attached process registry mutex was poisoned; retaining its derived state"
             );
             poisoned.into_inner()
         })
+    }
+
+    fn live_worker_registry(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<String, runtime_db::WorkerProcessRecord>> {
+        self.live_workers.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("live worker registry mutex was poisoned; retaining its derived state");
+            poisoned.into_inner()
+        })
+    }
+
+    /// The in-memory attachment records, read without SQL.
+    pub fn attached_process_snapshot(&self) -> Vec<AttachedProcess> {
+        self.attached_process_registry().values().cloned().collect()
+    }
+
+    /// Drop the in-memory attachment records of processes a stop proved dead
+    /// without writing their rows, each only while it still holds exactly
+    /// the proved identity. The durable rows stay attached for next-start
+    /// recovery; the live Store's close then sees no live attachment.
+    pub fn forget_proven_dead_attachments(
+        &self,
+        proved: &BTreeMap<String, crate::process::ExecutionProcessIdentity>,
+    ) {
+        let mut attached = self.attached_process_registry();
+        for (thread_id, identity) in proved {
+            if attached
+                .get(thread_id)
+                .is_some_and(|record| record.process_identity.as_ref() == Some(identity))
+            {
+                attached.remove(thread_id);
+            }
+        }
+    }
+
+    /// The in-memory live dedicated worker records, read without SQL.
+    pub fn live_worker_snapshot(&self) -> Vec<runtime_db::WorkerProcessRecord> {
+        self.live_worker_registry().values().cloned().collect()
     }
 
     /// Check occupancy under this exact Store guard, then retain only the
@@ -9383,7 +9793,7 @@ impl StateStore {
         g: &'guard StateStoreGuard<'store>,
         operation: SelectedMutationOperation<'guard>,
     ) -> Result<SelectedMutationPermit<'guard, 'store>> {
-        if !std::ptr::eq(g.store_mutex, &self.inner) {
+        if !self.owns_store_mutex(g.store_mutex) {
             bail!("selected mutation requires this SAME StateStore guard");
         }
         let selected = self
@@ -9410,8 +9820,14 @@ impl StateStore {
         })
     }
 
+    /// Whether `store_mutex` is this Store's own mutex. A guard of any other
+    /// Store mints no selected permit and admits no selected cleanup.
+    fn owns_store_mutex(&self, store_mutex: *const Mutex<Inner>) -> bool {
+        std::ptr::eq(store_mutex, &self.inner)
+    }
+
     fn require_selected_bulk_exclusion(&self, g: &StateStoreGuard<'_>) -> Result<()> {
-        if !std::ptr::eq(g.store_mutex, &self.inner) {
+        if !self.owns_store_mutex(g.store_mutex) {
             bail!("selected cleanup requires this SAME StateStore guard");
         }
         let selected = self
@@ -9447,11 +9863,7 @@ impl StateStore {
     /// signed chain members plus any auxiliary rows attributed to the same
     /// chain, so its exact affected thread-id set is owned by RuntimeDb.
     fn refresh_attached_process_registry_locked(&self, g: &Inner) -> Result<()> {
-        let attached = g
-            .runtime_db
-            .list_attached_thread_ids()?
-            .into_iter()
-            .collect();
+        let attached = attached_processes_from_runtime(&g.runtime_db)?;
         *self.attached_process_registry() = attached;
         Ok(())
     }
@@ -9623,6 +10035,18 @@ impl StateStore {
             bail!("test projection mutation found no exact thread {thread_id}");
         }
         Ok(())
+    }
+
+    /// Run raw SQL on this Store's own live Runtime connection, so recovery
+    /// tests can forge crash-window rows that no public transition produces.
+    /// A second connection to the Runtime file is refused by the native host.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_runtime_sql_for_test<T>(
+        &self,
+        operation: impl for<'connection> FnOnce(&'connection rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
+        let g = self.lock()?;
+        g.runtime_db.with_sql_for_test(operation)
     }
 
     /// Remove only projected events while retaining authoritative CAS, used to
@@ -16676,6 +17100,22 @@ impl StateStore {
             }))
     }
 
+    /// Local qualification Worker rows that a previous daemon generation left
+    /// `Attached`, as (placement, exact process identity). Start recovery
+    /// proves each group dead and then settles exactly that row.
+    pub fn prior_generation_attached_qualification_workers(
+        &self,
+    ) -> Result<Vec<(String, crate::process::ExecutionProcessIdentity)>> {
+        let records = self
+            .lock()?
+            .runtime_db
+            .attached_qualification_worker_processes(runtime_db::daemon_generation_id())?;
+        Ok(records
+            .into_iter()
+            .map(|record| (record.placement_thread_id, record.process_identity))
+            .collect())
+    }
+
     pub(crate) fn qualification_worker_process(
         &self,
         placement: &str,
@@ -19553,8 +19993,14 @@ impl StateStore {
             g.runtime_db
                 .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
         }?;
-        self.attached_process_registry()
-            .insert(thread_id.to_string());
+        self.attached_process_registry().insert(
+            thread_id.to_string(),
+            AttachedProcess {
+                thread_id: thread_id.to_string(),
+                process_identity: Some(process_identity.clone()),
+                cancellation_mode: launch_metadata.cancellation_mode,
+            },
+        );
         Ok(())
     }
 
@@ -19875,7 +20321,7 @@ impl StateStore {
 
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
         let attached = self.attached_process_registry();
-        Ok(attached.iter().cloned().collect())
+        Ok(attached.keys().cloned().collect())
     }
 
     pub fn in_process_handler_reservations_after(
@@ -23231,6 +23677,7 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_native::TestStateStore;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use std::io::Write as _;
     use tempfile::tempdir;
@@ -23694,14 +24141,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                app_root.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&app_root, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -23922,7 +24362,8 @@ mod tests {
 
     #[test]
     fn original_state_store_mutex_deadline_refuses_while_actual_guard_remains_held() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let original_guard = store.inner.lock().unwrap();
         let original =
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40));
@@ -23959,26 +24400,17 @@ mod tests {
         assert!(store.lock().is_ok());
     }
 
-    fn test_store() -> StateStore {
+    fn test_store() -> TestStateStore {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
-        let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
             identity.fingerprint().to_string(),
             *identity.verifying_key(),
         );
-        StateStore::new_with_head_trust(
-            tmp.clone(),
-            runtime_state_dir.clone(),
-            runtime_state_dir.join("runtime.sqlite3"),
-            signer,
-            WriteBarrier::new(),
-            Arc::new(head_trust),
-        )
-        .expect("state store")
+        TestStateStore::open(&tmp, signer, Arc::new(head_trust)).expect("state store")
     }
 
     #[test]
@@ -24137,7 +24569,7 @@ mod tests {
     fn selected_fence_fixture(
         phase: crate::selected_invocation_bookkeeping::SelectedFixturePhase,
         refused: bool,
-    ) -> (StateStore, runtime_db::LaunchClaim) {
+    ) -> (TestStateStore, runtime_db::LaunchClaim) {
         let store = test_store();
         let thread = "T-selected-fence";
         store
@@ -24336,23 +24768,21 @@ mod tests {
     #[test]
     fn selected_live_permit_refuses_wrong_store_db_target_and_operation() {
         let store = test_store();
-        let other = test_store();
+        // One Store is live per process, so the other Store is its identity
+        // alone: an address that is not this Store's mutex. The other Runtime
+        // is a real store opened beside it on the same test host.
+        let other_root = tempdir().unwrap();
+        let other_db = test_native::with_store_host(|host| {
+            runtime_db::test_native::open_live(host, &other_root.path().join("runtime.sqlite3"))
+        });
         let g = store.lock().unwrap();
-        let other_g = other.lock().unwrap();
-        assert!(
-            store
-                .selected_mutation_permit(
-                    &other_g,
-                    SelectedMutationOperation::Release("T", "claim")
-                )
-                .is_err()
-        );
+        assert!(store.owns_store_mutex(g.store_mutex));
+        assert!(!store.owns_store_mutex(std::ptr::null()));
         let permit = store
             .selected_mutation_permit(&g, SelectedMutationOperation::Release("T", "claim"))
             .unwrap();
         assert!(
-            other_g
-                .runtime_db
+            other_db
                 .release_thread_launch_claim(&permit, "T", "claim")
                 .is_err()
         );
@@ -24371,10 +24801,24 @@ mod tests {
                 .release_thread_launch_claim(&permit, "T", "claim")
                 .unwrap()
         );
+        drop(permit);
+        drop(g);
+        test_native::with_store_host(|host| runtime_db::test_native::retire(host, other_db));
     }
 
     #[test]
     fn selected_registry_poison_refuses_without_durable_claim_change() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::selected_registry_poison_refuses_without_durable_claim_change"
+        );
+        // A poisoned registry refuses the store's close, so its native owners
+        // end only with the process: the scenario runs in a child.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "poisoned registry kept the durable claim");
+            return;
+        }
         let store = test_store();
         let thread = "T-selected-poison";
         store
@@ -24395,15 +24839,22 @@ mod tests {
                 .release_thread_launch_claim(thread, &claim.claim_id)
                 .is_err()
         );
-        let g = store.lock().unwrap();
-        assert_eq!(
-            g.runtime_db
-                .get_launch_claim(thread)
-                .unwrap()
-                .unwrap()
-                .claim_id,
-            claim.claim_id
-        );
+        {
+            let g = store.lock().unwrap();
+            assert_eq!(
+                g.runtime_db
+                    .get_launch_claim(thread)
+                    .unwrap()
+                    .unwrap()
+                    .claim_id,
+                claim.claim_id
+            );
+        }
+        let host = crate::state_store::test_native::take_shared_host();
+        lillux_sqlite::test_host::end_isolated_process(
+            (claim, store, host),
+            "poisoned registry kept the durable claim",
+        )
     }
 
     #[test]
@@ -24691,7 +25142,8 @@ mod tests {
     #[test]
     fn selected_metadata_is_shared_and_ack_requires_actual_claim_and_active_owner() {
         use crate::selected_invocation_bookkeeping::SelectedBorrowReturn;
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let same_store = Arc::clone(&store);
         let generation = store.register_selected_bookkeeping_generation().unwrap();
         let thread = "T-selected-ack";
@@ -24733,6 +25185,10 @@ mod tests {
             store.ack_selected_borrow_return(&borrower).unwrap(),
             SelectedBorrowReturn::AlreadyReturned
         );
+        // One Store is live per process: the first closes before the other
+        // opens, and the borrower is plain data that outlives its Store.
+        drop((store, same_store));
+        store_owner.close().unwrap();
         let other = test_store();
         other.register_selected_bookkeeping_generation().unwrap();
         assert!(other.ack_selected_borrow_return(&borrower).is_err());
@@ -25411,6 +25867,8 @@ mod tests {
             reservation
         );
 
+        // One Store is live per process: close the first before the second.
+        store.close().unwrap();
         let reserved_store = test_store();
         let reserved = direct_owner_test_reservation(&reserved_store);
         {
@@ -25438,7 +25896,7 @@ mod tests {
         );
     }
 
-    fn workspace_binding_fixture() -> (StateStore, runtime_db::RuntimeWorkspaceBinding) {
+    fn workspace_binding_fixture() -> (TestStateStore, runtime_db::RuntimeWorkspaceBinding) {
         let store = test_store();
         let root = "T-workspace-root";
         store
@@ -25796,6 +26254,8 @@ mod tests {
         assert!(store.has_retained_workspace_quarantine(root).unwrap());
         assert_eq!(store.thread_workspace_binding(root).unwrap(), Some(binding));
 
+        // One Store is live per process: close the first before the second.
+        store.close().unwrap();
         let (settled, binding) = workspace_binding_fixture();
         let identity = attach_workspace_test_process(&settled, &binding);
         assert!(
@@ -26794,14 +27254,7 @@ mod tests {
             identity.fingerprint().to_string(),
             *identity.verifying_key(),
         );
-        let store = StateStore::new_with_head_trust(
-            tmp.path().to_path_buf(),
-            runtime_state_dir.clone(),
-            runtime_state_dir.join("runtime.sqlite3"),
-            signer.clone(),
-            WriteBarrier::new(),
-            Arc::new(head_trust),
-        )
+        let store = TestStateStore::open(tmp.path(), signer.clone(), Arc::new(head_trust))
         .expect("state store");
         let authority = store.pinned_state_authority().expect("state authority");
         let guard = authority.acquire_shared_guard().expect("CAS guard");
@@ -27077,6 +27530,9 @@ mod tests {
             response
         );
 
+        // One Store is live per process: each branch closes its Store before
+        // the next opens.
+        adoption_store.close().unwrap();
         let abort_store = test_store();
         let abort_operation = handoff_test_operation(
             crate::worker_handoff::WorkerHandoffJobRole::Target,
@@ -27105,6 +27561,7 @@ mod tests {
                 .is_some()
         );
 
+        abort_store.close().unwrap();
         let completion_store = test_store();
         let completion_operation = handoff_test_operation(
             crate::worker_handoff::WorkerHandoffJobRole::Target,
@@ -27274,7 +27731,8 @@ mod tests {
 
     #[test]
     fn concurrent_target_branch_publishers_cannot_overwrite_each_other() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let operation = handoff_test_operation(
             crate::worker_handoff::WorkerHandoffJobRole::Target,
             "concurrent-branch",
@@ -27568,14 +28026,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -27632,14 +28083,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -27706,14 +28150,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -27919,7 +28356,7 @@ mod tests {
             *identity.verifying_key(),
         );
         let trust = Arc::new(trust);
-        let state = StateDb::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
+        let state = ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
         let authority = state.pinned_authority().unwrap();
         let guard = authority.acquire_exclusive_guard(true).unwrap();
         let active = ryeos_state::objects::ExternalContentBinding::active(
@@ -27959,27 +28396,18 @@ mod tests {
         drop(authority);
         drop(state);
 
-        let error = StateStore::new_with_head_trust(
-            tmp.path().to_path_buf(),
-            runtime_state_dir.clone(),
-            runtime_state_dir.join("runtime.sqlite3"),
-            signer,
-            WriteBarrier::new(),
-            trust,
-        )
-        .err()
-        .expect("predecessor binding head must refuse startup");
+        let refusal = TestStateStore::open_refusal(tmp.path(), signer, trust);
         assert!(
-            error
-                .to_string()
-                .contains("ryeos node reset external-content-bindings")
+            refusal.contains("ryeos node reset external-content-bindings"),
+            "{refusal}"
         );
     }
 
     #[test]
     fn daemon_bundle_event_append_serializes_concurrent_writers_at_current_head() {
         const WRITERS: usize = 12;
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let start = Arc::new(std::sync::Barrier::new(WRITERS));
         let writers = (0..WRITERS)
             .map(|index| {
@@ -28616,7 +29044,8 @@ mod tests {
 
     #[test]
     fn launch_cancel_and_authoritative_root_bind_have_one_atomic_winner() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let launch_id = store
             .reserve_launch_planning("T-bind-race", "fp:owner")
             .expect("reserve planning");
@@ -28792,7 +29221,8 @@ mod tests {
 
     #[test]
     fn launch_cancel_and_authoritative_continuation_bind_have_one_atomic_winner() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let source_thread_id = "T-continuation-bind-race-source";
         let successor_thread_id = "T-continuation-bind-race-successor";
         let mut source = thread_record(source_thread_id, source_thread_id);
@@ -28884,7 +29314,8 @@ mod tests {
 
     #[test]
     fn direct_attachment_fork_waits_for_state_store_descriptor_scope() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let guard = store.lock().expect("hold state store");
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -30002,20 +30433,21 @@ mod tests {
         let host =
             serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
         let planned = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
+                "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
                 "parent": {"containing_device": 1, "inode": 2},
                 "name": format!("resource-{coordinate}")}
         });
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
-        bound["version"] = 4.into();
+        bound["version"] = 5.into();
         bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         (
@@ -30116,6 +30548,8 @@ mod tests {
             "first possible commit must never be followed by automatic rollback"
         );
 
+        // One Store is live per process: close the first before the second.
+        store.close().unwrap();
         let store = test_store();
         let (original, reservation) =
             scratch_reservation_fixture(&store, "scratch-lost-reserve-ack");
@@ -30263,6 +30697,9 @@ mod tests {
                 .physical_state,
             ProcessCustodyPhysicalState::Retained
         );
+        // One Store is live per process: close the first before the second.
+        drop(original);
+        store.close().unwrap();
 
         // The SAME actual-scratch owner also refuses rollback once the real
         // one-shot stored spawn-intent transition has committed. No subprocess
@@ -30492,14 +30929,7 @@ mod tests {
         let trust = Arc::new(trust);
         let runtime = root.path().join(".ai/state");
         let open = || {
-            StateStore::new_with_head_trust(
-                root.path().to_owned(),
-                runtime.clone(),
-                runtime.join("runtime.sqlite3"),
-                signer.clone(),
-                WriteBarrier::new(),
-                trust.clone(),
-            )
+            TestStateStore::open(root.path(), signer.clone(), trust.clone())
             .unwrap()
         };
         let store = open();
@@ -30573,7 +31003,8 @@ mod tests {
 
     #[test]
     fn shutdown_closure_serializes_resource_reservation_and_scope_binding() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let (reservation, _) = process_resource_reservation_fixture("reserve-race");
         let guard = store.lock().unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -30601,7 +31032,11 @@ mod tests {
         );
         assert!(store.process_resource_reservations().unwrap().is_empty());
 
-        let store = Arc::new(test_store());
+        // One Store is live per process: close the first before the second.
+        drop(store);
+        store_owner.close().unwrap();
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let (reservation, recovery) = process_resource_reservation_fixture("bind-race");
         store.reserve_process_resource_launch(&reservation).unwrap();
         let guard = store.lock().unwrap();
@@ -31263,6 +31698,8 @@ mod tests {
             terminal_before
         );
 
+        // One Store is live per process: close the first before the second.
+        terminal_store.close().unwrap();
         let attached_store = test_store();
         let attached_id = "T-launch-audit-attached";
         attached_store
@@ -31366,7 +31803,8 @@ mod tests {
 
     #[test]
     fn attached_process_listing_does_not_wait_for_the_global_store_lock() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let thread_id = "T-attached-process-registry";
         store
             .create_thread_for_test(&thread_record(thread_id, thread_id))
@@ -31481,14 +31919,7 @@ mod tests {
         );
         let head_trust = Arc::new(head_trust);
         let open_store = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_db_path.clone(),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&head_trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&head_trust))
             .expect("state store")
         };
 
@@ -31939,7 +32370,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn j4_no_birth_funding_receipt_requires_same_actual_original_scratch_owner() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-funding");
         store
             .reserve_process_resource_launch_with_scratch(&original, &scratch)
@@ -31967,8 +32399,8 @@ mod tests {
     #[test]
     fn j4_no_birth_funding_receipt_refuses_other_state_and_changed_original() {
         for foreign_state in [false, true] {
-            let store = Arc::new(test_store());
-            let other = Arc::new(test_store());
+            let store_owner = test_store();
+            let store = Arc::clone(store_owner.store());
             let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-foreign");
             store
                 .reserve_process_resource_launch_with_scratch(&original, &scratch)
@@ -31980,18 +32412,24 @@ mod tests {
             if !foreign_state {
                 changed.owner_coordinate.push_str("-changed");
             }
-            assert!(
-                receipt
-                    .matches_original(if foreign_state { &other } else { &store }, &changed)
-                    .is_err()
-            );
+            // One Store is live per process, so the other Store is its
+            // identity alone: an owner that is not the minting Store.
+            let refused = if foreign_state {
+                receipt.matches_original_of(&std::sync::Weak::new(), &changed)
+            } else {
+                receipt.matches_original(&store, &changed)
+            };
+            assert!(refused.is_err());
+            drop(store);
+            store_owner.close().unwrap();
         }
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn j4_spawn_intent_cannot_mint_no_birth_funding_receipt() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let (scratch, original) = scratch_reservation_fixture(&store, "j4-contacted-no-refund");
         store
             .reserve_process_resource_launch_with_scratch(&original, &scratch)

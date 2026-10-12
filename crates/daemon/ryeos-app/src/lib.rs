@@ -107,6 +107,7 @@ pub mod source_closure_admission;
 pub mod standalone_audit;
 pub mod state;
 pub mod state_store;
+pub mod standalone_native;
 pub mod stream_envelope;
 pub mod temp_dir_guard;
 pub mod thread_lifecycle;
@@ -116,3 +117,22 @@ pub mod write_barrier;
 
 // Original bearer custody only; opaque admission is issued separately.
 pub use callback_token::{DedicatedWorkerCredentialTransport, SelectedDedicatedWorkerAdmission};
+
+/// Native-gate test builders for other crates' tests: the Runtime store, the
+/// node State and, through the State, its Operational store, each opened the
+/// way a live node opens it and closed into a test host's census.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::runtime_db::test_native::{
+        TestRuntime, live_open_refusal as runtime_live_open_refusal, open_live as open_live_runtime,
+        read_existing as read_existing_runtime, retire as retire_runtime, seed_node,
+    };
+    pub use crate::state_store::test_native::{
+        TEST_STATE_STORE_ENVELOPE, TestAccountingDb, TestStateStore, with_store_host,
+    };
+    pub use ryeos_state::test_support::{
+        TEST_STATE_ENVELOPE, TestState, live_state_open_refusal, open_live_state,
+        open_live_state_with_repair_sink, release_shared_test_host, retire_live_state, seed_node_state,
+        settle_refused_open, shared_test_host,
+    };
+}

@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn app_and_lifecycle_share_one_participant_until_shutdown_withdrawal() {
         let root = tempfile::TempDir::new().unwrap();
-        let state = crate::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = crate::state::test_support::build(root.path()).unwrap();
         assert!(state.scheduler().is_none());
         let participant: Arc<dyn SchedulerParticipant> = Arc::new(ObservationOnly);
         state

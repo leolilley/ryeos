@@ -638,6 +638,12 @@ pub mod budget_test_support {
         pub callback_token: String,
         pub thread_auth_token: String,
         pub thread_id: String,
+        /// Owner of the accounting ledger behind `state`; it closes after
+        /// the application and context drop their aliases.
+        pub accounting_owner: crate::state_store::test_native::TestAccountingDb,
+        /// Owner of the Store behind `state`. Fields drop in declaration
+        /// order, so the application and context drop before it closes.
+        pub store_owner: crate::state_store::test_native::TestStateStore,
     }
 
     pub fn build(
@@ -654,7 +660,7 @@ pub mod budget_test_support {
         callback_ttl: lillux::time::Duration,
         spend_limit: Option<ryeos_accounting::UsdNanos>,
     ) -> anyhow::Result<Fixture> {
-        let mut state = crate::state::test_support::build(root)?;
+        let (store_owner, mut state) = crate::state::test_support::build(root)?;
         let thread_id = "T-original-budget-fixture";
         let operator =
             ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
@@ -667,9 +673,10 @@ pub mod budget_test_support {
             Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
             None,
         );
-        let accounting = Arc::new(crate::accounting_db::AccountingDb::open_default(
+        let accounting_owner = crate::state_store::test_native::TestAccountingDb::open(
             &root.join("budget-fixture-ledger"),
-        )?);
+        )?;
+        let accounting = accounting_owner.shared();
         accounting.create_execution_account_prepared(
             "B-original-fixture",
             thread_id,
@@ -867,6 +874,8 @@ pub mod budget_test_support {
             callback_token: cap.token,
             thread_auth_token: auth.token,
             thread_id: thread_id.into(),
+            accounting_owner,
+            store_owner,
         })
     }
 
