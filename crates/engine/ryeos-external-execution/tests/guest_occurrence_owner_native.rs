@@ -94,7 +94,7 @@ fn supervisor_bootstrap(
         },
     };
     ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
             schema: 2,
             network_inputs,
@@ -136,6 +136,14 @@ fn supervisor_bootstrap(
         post_execution_timeout_seconds: 120,
         candidate_export_max_bytes: 512 * 1024,
         channel_max_bytes: 1024 * 1024,
+        native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
     }
     .canonical_bytes()
 }
@@ -209,8 +217,11 @@ fn run(
     // /var/tmp is deliberately read-only.
     let state_path = fixture_path.join("state");
     std::fs::create_dir(&state_path)?;
-    let db = ryeos_state::StateDb::open(&state_path, Arc::new(ryeos_state::TrustStore::new()))?;
+    let db = ryeos_state::test_support::TestState::open(&state_path, Arc::new(ryeos_state::TrustStore::new()))?;
     let authority = db.pinned_authority()?;
+    // Only the pinned authority is needed; close the native test host before
+    // the probe enters namespaces or starts subprocesses.
+    db.close()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let policy = ProjectSnapshotPolicy::new(

@@ -134,7 +134,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         )
         .unwrap();
     ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
             schema: 2,
             network_inputs:
@@ -189,6 +189,14 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         post_execution_timeout_seconds: 30,
         candidate_export_max_bytes: 1024 * 1024,
         channel_max_bytes: 2 * 1024 * 1024,
+        native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
     }
 }
 
@@ -346,6 +354,9 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     let outer = state.create_child(OsStr::new("outer"), 0o700).unwrap();
     let guest = state.create_child(OsStr::new("guest"), 0o700).unwrap();
     let retained_bootstrap = serde_json::from_slice(&admitted.canonical_bytes().unwrap()).unwrap();
+    // The journals live on this thread's shared native test host, which is
+    // released before the supervisor executable is spawned.
+    let host = ryeos_state::test_support::shared_test_host();
     let prepared = PreparedExternalSupervisorJournal::create(
         outer,
         retained_bootstrap,
@@ -356,6 +367,9 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
         )
         .unwrap(),
         lillux::crypto::generate_signing_key(),
+        host.factory(),
+        host.destination(),
+        &ryeos_state::external_execution::native_journal::testing::census(&host),
     )
     .unwrap();
     let store_identity = prepared.store_identity().clone();
@@ -387,7 +401,7 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     };
     let attached = prepared.record_binding(binding.clone()).unwrap();
     let authority_root = tempfile::tempdir().unwrap();
-    let authority_db = ryeos_state::StateDb::open(
+    let authority_db = ryeos_state::test_support::TestState::open(
         authority_root.path(),
         std::sync::Arc::new(ryeos_state::TrustStore::new()),
     )
@@ -395,8 +409,15 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     let authority = authority_db.pinned_authority().unwrap();
     drop(authority_db);
     let launch_digest = "7".repeat(64);
-    let reservation =
-        PreparedGuestJournal::reserve(guest, &authority, &launch_digest, binding).unwrap();
+    let reservation = PreparedGuestJournal::reserve(
+        guest,
+        &authority,
+        &launch_digest,
+        binding,
+        host.factory(),
+        host.destination(),
+    )
+    .unwrap();
     let launch = attached
         .begin_launch(
             reservation.store_identity().clone(),
@@ -406,13 +427,15 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
         )
         .unwrap();
     let _expected_binding_digest = launch.binding().digest().unwrap();
-    drop(launch);
+    ryeos_state::external_execution::native_journal::testing::retire(&host, launch.close());
     drop(reservation);
+    ryeos_state::test_support::release_shared_test_host(host);
 
     let anchor = serde_json::json!({
         "schema": 1,
         "state_root_identity": state.identity().unwrap(),
         "outer_store_identity": store_identity,
+        "native_journal": admitted.native_journal,
     });
     let anchor = lillux::canonical_json(&anchor).unwrap().into_bytes();
     state

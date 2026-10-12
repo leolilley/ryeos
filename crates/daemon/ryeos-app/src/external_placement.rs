@@ -2066,6 +2066,7 @@ pub(crate) fn preflight_external_qualification_program(
     state: &AppState,
     program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
     purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    journal_funding: crate::external_supervisor_native::SupervisorJournalFunding,
 ) -> Result<RetainedExternalExecutionBinding> {
     program.validate_against_purpose(purpose)?;
     let matched = state
@@ -2144,6 +2145,10 @@ pub(crate) fn preflight_external_qualification_program(
         &AdmittedExternalExecutionProgram::QualificationStructuredSession(program.clone()),
     )?;
     require_guest_package_artifact_floor(&contract, backend.as_ref())?;
+    // A new occurrence's supervisor journals must be funded for its whole
+    // lifetime before any provider contact. A qualification reservation
+    // carries the contract timeout, the value its activation later checks.
+    journal_funding.require(state.node_policy.as_ref(), &contract, contract.timeout_seconds)?;
     binding.retained_generation()
 }
 
@@ -2154,7 +2159,12 @@ pub fn preflight_external_qualification_guest(
     state: &AppState,
     root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
 ) -> Result<()> {
-    preflight_external_qualification_program(state, root.program(), root.purpose())?;
+    preflight_external_qualification_program(
+        state,
+        root.program(),
+        root.purpose(),
+        crate::external_supervisor_native::SupervisorJournalFunding::New,
+    )?;
     Ok(())
 }
 
@@ -4148,6 +4158,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                Arc::clone(&self.state.node_policy),
+            ),
             record,
         })
     }
@@ -4219,6 +4232,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                Arc::clone(&self.state.node_policy),
+            ),
             record,
         })
     }
@@ -4331,6 +4347,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                Arc::clone(&self.state.node_policy),
+            ),
             record,
         })
     }
@@ -4435,6 +4454,13 @@ impl<'a> ExternalPlacementOwner<'a> {
         )?;
         if existing.is_none() {
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
+            // Fund the exact execution timeout the reservation below carries
+            // and the supervisor activation later checks.
+            crate::external_supervisor_native::external_supervisor_journal_quota(
+                self.state.node_policy.as_ref(),
+                &contract,
+                u32::try_from(program.projection().timeout_seconds)?,
+            )?;
         }
         let authority_generation = ryeos_state::objects::canonical_value_digest(
             &serde_json::json!({
@@ -4544,6 +4570,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             program: generic_program,
             guest_inputs: None,
             qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                Arc::clone(&self.state.node_policy),
+            ),
             record,
         })
     }
@@ -4715,6 +4744,11 @@ impl<'a> ExternalPlacementOwner<'a> {
         };
         if existing.is_none() {
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
+            crate::external_supervisor_native::external_supervisor_journal_quota(
+                self.state.node_policy.as_ref(),
+                &contract,
+                contract.timeout_seconds,
+            )?;
         }
         let contact_gate = self
             .state
@@ -4843,8 +4877,25 @@ impl<'a> ExternalPlacementOwner<'a> {
             program: AdmittedExternalExecutionProgram::StructuredSession(program.clone()),
             guest_inputs: None,
             qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                Arc::clone(&self.state.node_policy),
+            ),
             record,
         })
+    }
+}
+
+/// A qualification startup funds new supervisor journals until its supervisor
+/// activation is retained; recovering a retained activation keeps the envelope
+/// sealed at activation.
+fn qualification_start_journal_funding(
+    phase: ExternalAllocationPhase,
+    activation_exists: bool,
+) -> crate::external_supervisor_native::SupervisorJournalFunding {
+    if phase == ExternalAllocationPhase::Bound && activation_exists {
+        crate::external_supervisor_native::SupervisorJournalFunding::Retained
+    } else {
+        crate::external_supervisor_native::SupervisorJournalFunding::New
     }
 }
 
@@ -4998,6 +5049,7 @@ impl ExternalQualificationStart<'_> {
                 self.state,
                 self.root.program(),
                 self.root.purpose(),
+                qualification_start_journal_funding(prepared.record.phase, activation_exists),
             )?;
             ensure!(
                 binding.digest() == prepared.record.reservation.binding_hash
@@ -5149,7 +5201,12 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         .controller_lifetime
         .ensure_protects_app_root(&state.config.app_root)?;
     let snapshot_hash = validate_qualification_guest_input_authority(state, &root, &guest_inputs)?;
-    let binding = preflight_external_qualification_program(state, root.program(), root.purpose())?;
+    let binding = preflight_external_qualification_program(
+        state,
+        root.program(),
+        root.purpose(),
+        crate::external_supervisor_native::SupervisorJournalFunding::New,
+    )?;
     let contract = binding.backend_contract();
     let qualified = state
         .state_store
@@ -6505,6 +6562,7 @@ pub(crate) struct PreparedExternalPlacement {
     program: AdmittedExternalExecutionProgram,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
     qualification_activation: Option<QualificationActivationAdmission>,
+    native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource,
     record: ExternalAllocationRecord,
 }
 
@@ -6684,6 +6742,7 @@ impl PreparedExternalPlacement {
                         program: self.program,
                         guest_inputs: self.guest_inputs,
                         qualification_activation: self.qualification_activation,
+                        native_journal: self.native_journal,
                         _controller_lifetime: self.controller_lifetime,
                         record,
                     },
@@ -6730,6 +6789,7 @@ pub(crate) struct ExternalPlacementReconciliation {
     program: AdmittedExternalExecutionProgram,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
     qualification_activation: Option<QualificationActivationAdmission>,
+    native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource,
     // Reconciliation and termination are provider mutations/observations too;
     // they must not overlap a replacement controller generation.
     _controller_lifetime: Arc<StateLockLease>,
@@ -7002,11 +7062,17 @@ impl ExternalPlacementReconciliation {
                 !deadline.has_elapsed(),
                 "external startup live deadline expired before activation intent"
             );
+            // Seal the journal envelope and resolve the package parent before
+            // consuming guest input authority, so a policy or store refusal
+            // leaves that authority with its owner.
+            let native_journal = self
+                .native_journal
+                .envelope(&self.contract, current.reservation.timeout_seconds)?;
+            let package_parent = self.state_store.external_guest_package_parent()?;
             let guest_inputs = self
                 .guest_inputs
                 .take()
                 .context("first supervisor activation has no exact guest input authority")?;
-            let package_parent = self.state_store.external_guest_package_parent()?;
             let (intent, mut activation) = supervisor_activation(
                 &self.contract,
                 &current.reservation,
@@ -7017,6 +7083,7 @@ impl ExternalPlacementReconciliation {
                 self.backend.as_ref(),
                 &package_parent,
                 deadline,
+                native_journal,
             )?;
             if activation.import_authorization.is_some() {
                 let assignment = self.state_store.author_external_guest_assignment(
@@ -7357,6 +7424,7 @@ fn supervisor_activation(
     backend: &dyn ExternalPlacementBackend,
     package_parent: &lillux::PinnedDirectory,
     deadline: lillux::time::MonotonicDeadline,
+    native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope,
 ) -> Result<(
     ExternalSupervisorActivationIntent,
     ExternalSupervisorActivation,
@@ -7387,7 +7455,7 @@ fn supervisor_activation(
     );
     let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
         schema: match &contract.controller_transport {
-            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => 7,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => match program.execution_mode() {
                 ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {} => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
                 ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} => ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
@@ -7416,6 +7484,7 @@ fn supervisor_activation(
         post_execution_timeout_seconds,
         candidate_export_max_bytes: contract.max_export_bytes.min(channel_max_bytes),
         channel_max_bytes,
+        native_journal,
     };
     bootstrap.validate()?;
     let activation_request_digest =
@@ -8485,7 +8554,7 @@ pub mod test_support {
         )?;
 
         let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: controller.into(),
             tls_root_certificates_der_base64,
             placement_thread_id,
@@ -8506,6 +8575,17 @@ pub mod test_support {
             post_execution_timeout_seconds,
             candidate_export_max_bytes: contract.max_export_bytes.min(channel_max_bytes),
             channel_max_bytes,
+            // The signed profiles' `external-supervisor-journal` values. This
+            // module also builds under the `test-support` feature, where the
+            // `cfg(test)` envelope helper does not exist.
+            native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
         };
         bootstrap.validate()?;
         Ok(bootstrap)
@@ -9226,10 +9306,12 @@ mod tests {
         access.decode(zeroize::Zeroizing::new(value)).unwrap()
     }
 
+    /// The Runtime store opens through the native test gate; the returned
+    /// owner dereferences to it and closes it when dropped.
     fn lifecycle_fixture(
         path: &std::path::Path,
     ) -> (
-        crate::runtime_db::RuntimeDb,
+        crate::runtime_db::test_native::TestRuntime,
         ExternalAllocationReservation,
         RetainedExternalExecutionBinding,
     ) {
@@ -9237,7 +9319,7 @@ mod tests {
             DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession,
             WorkspaceBinding, WorkspaceState,
         };
-        let db = crate::runtime_db::RuntimeDb::open(path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(path);
         db.create_credential_profile(NewCredentialProfile {
             profile_id: "P-one",
             owner_principal: "fp:operator",
@@ -9325,6 +9407,7 @@ mod tests {
     }
 
     fn placement_store_fixture() -> (
+        crate::state_store::test_native::TestStateStore,
         Arc<crate::state_store::StateStore>,
         ExternalAllocationReservation,
         RetainedExternalExecutionBinding,
@@ -9337,6 +9420,7 @@ mod tests {
     fn placement_store_fixture_with_startup(
         startup_ms: i64,
     ) -> (
+        crate::state_store::test_native::TestStateStore,
         Arc<crate::state_store::StateStore>,
         ExternalAllocationReservation,
         RetainedExternalExecutionBinding,
@@ -9345,27 +9429,17 @@ mod tests {
     ) {
         let root = tempfile::tempdir().unwrap().keep();
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&root);
-        let controller = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
-        let controller_lifetime = Arc::new(controller.retain());
-        drop(controller);
-        let state_dir = root.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let store = Arc::new(
-            crate::state_store::StateStore::new_with_head_trust(
-                root,
-                state_dir.clone(),
-                state_dir.join("runtime.sqlite3"),
-                signer,
-                crate::write_barrier::WriteBarrier::new(),
-                Arc::new(trust),
-            )
-            .unwrap(),
-        );
+        // The owner holds this root's operator lock; the controller lifetime
+        // is a lease on that same lock.
+        let store_owner = crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust)).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
+        let store = Arc::clone(store_owner.store());
         let binding = RetainedExternalExecutionBinding::test_fixture();
         let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
@@ -9394,12 +9468,12 @@ mod tests {
         store
             .install_external_placement_test_fixture(&reservation, &binding)
             .unwrap();
-        (store, reservation, binding, controller_lifetime, lock_path)
+        (store_owner, store, reservation, binding, controller_lifetime, lock_path)
     }
 
     #[test]
     fn guest_assignment_is_signed_by_retained_node_for_only_the_bound_occurrence() {
-        let (store, reservation, binding, _lifetime, lock_path) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, _lifetime, lock_path) = placement_store_fixture();
         assert!(matches!(
             store
                 .claim_external_allocation_contact("T-one", &reservation.request_digest)
@@ -9437,6 +9511,7 @@ mod tests {
             &FaultBackend::new(),
             &package_parent,
             reservation.startup_deadline().unwrap(),
+            crate::external_supervisor_native::test_supervisor_journal_envelope(),
         )
         .unwrap();
         let signed = store
@@ -9491,10 +9566,13 @@ mod tests {
     #[test]
     fn normal_direct_settlement_does_not_admit_absent_or_session_allocations() {
         // Storage-only negative admission test, not a real born direct launch.
-        let (store, reservation, _, _lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, _, lifetime, _) = placement_store_fixture();
         let app_root = tempfile::tempdir().unwrap();
-        let mut state = crate::state::test_support::build(app_root.path()).unwrap();
-        state.state_store = store.clone();
+        // One test Store per thread: compose the application over the
+        // fixture's Store instead of opening another.
+        let state =
+            crate::state::test_support::build_with_store(app_root.path(), store.clone(), lifetime)
+                .unwrap();
         assert!(advance_external_direct_settlement(&state, "absent").is_err());
         assert!(!preserves_external_direct_settlement(&state, "absent").unwrap());
         assert!(
@@ -9528,7 +9606,7 @@ mod tests {
     }
 
     fn replacement_controller_fence_fixture(contacted: bool) {
-        let (predecessor, reservation, _, predecessor_lifetime, lock_path) =
+        let (predecessor_owner, predecessor, reservation, _, predecessor_lifetime, lock_path) =
             placement_store_fixture();
         assert_eq!(
             predecessor
@@ -9551,11 +9629,16 @@ mod tests {
         }
         drop(predecessor);
         drop(predecessor_lifetime);
+        drop(predecessor_owner);
 
-        let (reopened, _replacement_lifetime) = reopen_placement_store(&lock_path);
+        let (_reopened_owner, reopened, replacement_lifetime) = reopen_placement_store(&lock_path);
         let app_root = tempfile::tempdir().unwrap();
-        let mut replacement = crate::state::test_support::build(app_root.path()).unwrap();
-        replacement.state_store = reopened.clone();
+        let replacement = crate::state::test_support::build_with_store(
+            app_root.path(),
+            reopened.clone(),
+            replacement_lifetime.clone(),
+        )
+        .unwrap();
 
         assert_eq!(
             fence_external_candidates_after_controller_restart(&replacement).unwrap(),
@@ -9589,30 +9672,19 @@ mod tests {
 
     fn reopen_placement_store(
         lock_path: &std::path::Path,
-    ) -> (Arc<crate::state_store::StateStore>, Arc<StateLockLease>) {
+    ) -> (crate::state_store::test_native::TestStateStore, Arc<crate::state_store::StateStore>, Arc<StateLockLease>) {
         let root = lock_path.ancestors().nth(3).unwrap().to_path_buf();
         assert_eq!(ryeos_node_runtime::state_lock::default_lock_path(&root), lock_path);
-        let controller = ryeos_node_runtime::state_lock::StateLock::acquire(lock_path).unwrap();
-        let replacement_lifetime = Arc::new(controller.retain());
         let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state_dir = root.join(".ai/state");
-        let reopened = Arc::new(
-            crate::state_store::StateStore::new_with_head_trust(
-                root,
-                state_dir.clone(),
-                state_dir.join("runtime.sqlite3"),
-                signer,
-                crate::write_barrier::WriteBarrier::new(),
-                Arc::new(trust),
-            )
-            .unwrap(),
-        );
-        (reopened, replacement_lifetime)
+        let reopened_owner = crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust)).unwrap();
+        let replacement_lifetime = reopened_owner.controller_lifetime();
+        let reopened = Arc::clone(reopened_owner.store());
+        (reopened_owner, reopened, replacement_lifetime)
     }
 
     #[test]
@@ -9627,12 +9699,13 @@ mod tests {
 
     #[test]
     fn reopened_reserved_allocation_refuses_impossible_package_before_contact() {
-        let (predecessor, reservation, binding, predecessor_lifetime, lock_path) =
+        let (predecessor_owner, predecessor, reservation, binding, predecessor_lifetime, lock_path) =
             placement_store_fixture();
         drop(predecessor);
         drop(predecessor_lifetime);
+        drop(predecessor_owner);
 
-        let (reopened, replacement_lifetime) = reopen_placement_store(&lock_path);
+        let (_reopened_owner, reopened, replacement_lifetime) = reopen_placement_store(&lock_path);
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let mut prepared = prepared_fixture(
@@ -9666,7 +9739,7 @@ mod tests {
 
     #[test]
     fn replacement_controller_reconciles_original_allocation_without_duplicate_contact() {
-        let (predecessor, reservation, binding, predecessor_lifetime, lock_path) =
+        let (predecessor_owner, predecessor, reservation, binding, predecessor_lifetime, lock_path) =
             placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let decision = prepared_fixture(
@@ -9686,11 +9759,16 @@ mod tests {
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
         drop(predecessor);
         drop(predecessor_lifetime);
+        drop(predecessor_owner);
 
-        let (reopened, replacement_lifetime) = reopen_placement_store(&lock_path);
+        let (_reopened_owner, reopened, replacement_lifetime) = reopen_placement_store(&lock_path);
         let app_root = tempfile::tempdir().unwrap();
-        let mut replacement = crate::state::test_support::build(app_root.path()).unwrap();
-        replacement.state_store = reopened.clone();
+        let replacement = crate::state::test_support::build_with_store(
+            app_root.path(),
+            reopened.clone(),
+            replacement_lifetime.clone(),
+        )
+        .unwrap();
         assert_eq!(
             fence_external_candidates_after_controller_restart(&replacement).unwrap(),
             1
@@ -9784,6 +9862,9 @@ mod tests {
             program: AdmittedExternalExecutionProgram::StructuredSession(program()),
             guest_inputs: None,
             qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Fixed(
+                crate::external_supervisor_native::test_supervisor_journal_envelope(),
+            ),
             record: store
                 .external_allocation(&reservation.placement_thread_id)
                 .unwrap()
@@ -10207,7 +10288,7 @@ mod tests {
     #[test]
     fn lifecycle_capabilities_do_not_allow_stronger_allocation_settlement() {
         for resolution in ["bound", "no_occurrence", "pending"] {
-            let (store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
             let backend = Arc::new(FaultBackend {
                 capabilities: BTreeSet::from([LifecycleCapability::ExactTerminalObservation]),
                 reconciled_allocation: resolution,
@@ -10272,7 +10353,7 @@ mod tests {
     #[test]
     fn lifecycle_capabilities_do_not_allow_stronger_activation_settlement() {
         for resolution in ["started", "not_started", "pending"] {
-            let (store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
             let mut capabilities = all_lifecycle_capabilities();
             capabilities.remove(&LifecycleCapability::ExactActivationReconciliation);
             let backend = Arc::new(FaultBackend {
@@ -10377,7 +10458,7 @@ mod tests {
     #[test]
     fn lifecycle_capabilities_do_not_allow_stronger_terminal_settlement() {
         for resolution in ["terminal", "pending"] {
-            let (store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
             let mut capabilities = all_lifecycle_capabilities();
             capabilities.remove(&LifecycleCapability::ExactTerminalObservation);
             let backend = Arc::new(FaultBackend {
@@ -10879,13 +10960,23 @@ mod tests {
             )
             .err()
             .unwrap();
-        for error in [connector, provider, backend] {
+        // Connector and provider qualification read the signed session
+        // artifacts, which a direct-command binding has none of; the backend
+        // refuses the structured-session program itself.
+        for error in [connector, provider] {
             assert!(
                 error
                     .to_string()
-                    .contains("cannot authorize a structured session")
+                    .contains("external direct command has no session artifact selection"),
+                "{error:#}"
             );
         }
+        assert!(
+            backend
+                .to_string()
+                .contains("cannot authorize a structured session"),
+            "{backend:#}"
+        );
     }
 
     #[test]
@@ -11337,6 +11428,7 @@ mod tests {
             &FaultBackend::new(),
             &package_parent,
             reservation.startup_deadline().unwrap(),
+            crate::external_supervisor_native::test_supervisor_journal_envelope(),
         )
         .unwrap();
         let ticket = GuestImportTicket {
@@ -11456,7 +11548,7 @@ mod tests {
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
         drop(db);
 
-        let db = crate::runtime_db::RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.claim_external_allocation_contact("T-one", &reservation.request_digest)
                 .unwrap(),
@@ -11504,6 +11596,7 @@ mod tests {
             &backend,
             &package_parent,
             reservation.startup_deadline().unwrap(),
+            crate::external_supervisor_native::test_supervisor_journal_envelope(),
         )
         .unwrap();
         assert!(
@@ -11526,7 +11619,7 @@ mod tests {
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
         drop(db);
 
-        let db = crate::runtime_db::RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             !db.begin_external_supervisor_activation("T-one", &activation_intent)
                 .unwrap()
@@ -11580,7 +11673,7 @@ mod tests {
         assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 1);
         drop(db);
 
-        let db = crate::runtime_db::RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
         let ExternalTerminationResolution::Terminal {
             provider_observation_digest,
@@ -11613,7 +11706,7 @@ mod tests {
 
     #[test]
     fn composed_permit_and_reconciliation_preserve_one_mutation_each() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
@@ -11741,7 +11834,7 @@ mod tests {
 
     #[test]
     fn unresolved_activation_can_terminate_its_exact_occurrence_without_retry() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::with_reconciled_activation("pending"));
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
@@ -11819,8 +11912,12 @@ mod tests {
         assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
 
         let app_root = tempfile::tempdir().unwrap();
-        let mut state = crate::state::test_support::build(app_root.path()).unwrap();
-        state.state_store = store.clone();
+        let state = crate::state::test_support::build_with_store(
+            app_root.path(),
+            store.clone(),
+            controller_lifetime.clone(),
+        )
+        .unwrap();
         request_external_candidate_cleanup(&state, &reservation.placement_thread_id).unwrap();
         assert_eq!(
             store
@@ -11867,7 +11964,7 @@ mod tests {
 
     #[test]
     fn replacement_controller_fences_uncertain_activation_and_reconciles_exact_occurrence() {
-        let (predecessor, reservation, binding, predecessor_lifetime, lock_path) =
+        let (predecessor_owner, predecessor, reservation, binding, predecessor_lifetime, lock_path) =
             placement_store_fixture();
         let backend = Arc::new(FaultBackend::with_reconciled_activation("pending"));
         let gate = Arc::new(AtomicBool::new(false));
@@ -11925,11 +12022,16 @@ mod tests {
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
         drop(predecessor);
         drop(predecessor_lifetime);
+        drop(predecessor_owner);
 
-        let (replacement_store, replacement_lifetime) = reopen_placement_store(&lock_path);
+        let (_replacement_store_owner, replacement_store, replacement_lifetime) = reopen_placement_store(&lock_path);
         let app_root = tempfile::tempdir().unwrap();
-        let mut replacement = crate::state::test_support::build(app_root.path()).unwrap();
-        replacement.state_store = replacement_store.clone();
+        let replacement = crate::state::test_support::build_with_store(
+            app_root.path(),
+            replacement_store.clone(),
+            replacement_lifetime.clone(),
+        )
+        .unwrap();
         assert_eq!(
             fence_external_candidates_after_controller_restart(&replacement).unwrap(),
             1
@@ -11979,7 +12081,7 @@ mod tests {
 
     #[test]
     fn expired_live_startup_cap_never_claims_or_contacts_a_wall_valid_allocation() {
-        let (store, reservation, binding, lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         reservation.startup_deadline().unwrap();
@@ -12025,7 +12127,7 @@ mod tests {
             // Use the normal fixture admission budget. Lateness is injected
             // only after provider entry through its explicit observation seam;
             // setup speed must not decide whether contact happens at all.
-            let (store, reservation, binding, lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, lifetime, _) = placement_store_fixture();
             let backend = Arc::new(FaultBackend {
                 late_allocation: !late_activation,
                 late_activation,
@@ -12123,7 +12225,7 @@ mod tests {
 
     #[test]
     fn bounded_start_driver_never_repeats_an_ambiguous_mutation() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
@@ -12207,7 +12309,7 @@ mod tests {
                 ExternalCandidateStartProgress::CleanupRequired,
             ),
         ] {
-            let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
             let backend = Arc::new(FaultBackend::with_reconciled_activation(resolution));
             let gate = Arc::new(AtomicBool::new(false));
             let guest_root = tempfile::tempdir().unwrap();
@@ -12285,7 +12387,7 @@ mod tests {
         activation_resolution: &'static str,
         before_channel: ExternalCandidateStartProgress,
     ) {
-        let (store, reservation, retained, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, retained, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::with_reconciled_activation(
             activation_resolution,
         ));
@@ -12470,7 +12572,7 @@ mod tests {
 
     #[test]
     fn cleanup_classification_is_derived_only_from_durable_external_state() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         assert_eq!(
             classify_external_start_cleanup(&store, "T-one"),
             ExternalCandidateStartCleanup::Proved
@@ -12479,30 +12581,21 @@ mod tests {
             store.external_allocation("T-one").unwrap().unwrap().phase,
             ExternalAllocationPhase::NoContact
         );
+        // One test Store per thread: close the first node before the second.
+        drop(store);
+        drop(controller_lifetime);
+        drop(store_owner);
 
         let root = tempfile::tempdir().unwrap().keep();
-        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&root);
-        let controller = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
-        let lifetime = Arc::new(controller.retain());
-        drop(controller);
-        let state_dir = root.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let contacted = Arc::new(
-            crate::state_store::StateStore::new_with_head_trust(
-                root,
-                state_dir.clone(),
-                state_dir.join("runtime.sqlite3"),
-                signer,
-                crate::write_barrier::WriteBarrier::new(),
-                Arc::new(trust),
-            )
-            .unwrap(),
-        );
+        let contacted_owner = crate::state_store::test_native::TestStateStore::open(&root, signer, Arc::new(trust)).unwrap();
+        let lifetime = contacted_owner.controller_lifetime();
+        let contacted = Arc::clone(contacted_owner.store());
         contacted
             .install_external_placement_test_fixture(&reservation, &binding)
             .unwrap();
@@ -12532,13 +12625,11 @@ mod tests {
                 .phase,
             ExternalAllocationPhase::ContactPending
         );
-
-        drop(controller_lifetime);
     }
 
     #[test]
     fn allocation_reconciliation_refuses_an_active_contact_lease_without_contact() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let ExternalPlacementContactDecision::Contact(permit) = prepared_fixture(
@@ -12585,7 +12676,7 @@ mod tests {
     #[test]
     fn allocation_reconciliation_releases_lease_after_each_authoritative_resolution() {
         for resolution in ["bound", "pending", "no_occurrence"] {
-            let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+            let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
             let backend = Arc::new(FaultBackend {
                 reconciled_allocation: resolution,
                 ..FaultBackend::new()
@@ -12656,7 +12747,7 @@ mod tests {
 
     #[test]
     fn active_contact_permit_blocks_negative_reconciliation_settlement() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         let decision = prepared_fixture(
@@ -12708,7 +12799,7 @@ mod tests {
 
     #[test]
     fn active_supervisor_contact_blocks_termination_mutation() {
-        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let (_store_owner, store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
         let backend = Arc::new(FaultBackend::new());
         let gate = Arc::new(AtomicBool::new(false));
         assert!(matches!(
@@ -12752,7 +12843,7 @@ mod tests {
 
     #[test]
     fn contact_permit_keeps_replacement_controller_excluded() {
-        let (store, reservation, binding, controller_lifetime, lock_path) =
+        let (store_owner, store, reservation, binding, controller_lifetime, lock_path) =
             placement_store_fixture();
         let gate = Arc::new(AtomicBool::new(false));
         let decision = prepared_fixture(
@@ -12770,13 +12861,105 @@ mod tests {
         };
 
         // Simulate the composition root dropping its primary guard after a
-        // bounded runtime shutdown. The in-flight permit is now the only
-        // holder and must still exclude the replacement controller.
+        // bounded runtime shutdown. The in-flight permit must now be the only
+        // holder of that controller lifetime. A native Store also retains its
+        // own lease on the operator lock for as long as it is open, and the
+        // permit keeps the Store open, so the OS lock alone cannot show which
+        // holder excludes the replacement. Track the controller lease itself.
+        let controller = Arc::downgrade(&controller_lifetime);
         drop(controller_lifetime);
+        assert!(
+            controller.upgrade().is_some(),
+            "the contact permit released the controller lifetime it must retain"
+        );
         assert!(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).is_err());
 
         drop(permit);
+        assert!(
+            controller.upgrade().is_none(),
+            "a holder other than the contact permit retained the controller lifetime"
+        );
+        // The Store's own lease ends when its owner closes it.
+        drop(store_owner);
         ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path)
             .expect("replacement remained excluded after the contact permit stopped");
+    }
+
+    #[test]
+    fn policy_change_after_supervisor_activation_does_not_block_recovery() {
+        use crate::external_supervisor_native::{
+            EXTERNAL_SUPERVISOR_JOURNAL_CLASS, SupervisorJournalFunding,
+            test_supervisor_journal_envelope,
+        };
+        use ryeos_node_runtime::node_policy::NodePolicySnapshot;
+        use ryeos_scheduler_contract::{NodeMaintenancePolicy, OfflineNativeQuota};
+
+        let policy = |operation_millis: Option<u64>| {
+            let envelope = test_supervisor_journal_envelope();
+            let offline_native = operation_millis
+                .map(|millis| {
+                    (
+                        EXTERNAL_SUPERVISOR_JOURNAL_CLASS.to_owned(),
+                        OfflineNativeQuota {
+                            max_native_storage_bytes: envelope.storage_bytes,
+                            max_native_allocator_steps: envelope.allocator_steps,
+                            max_native_connections: envelope.connections,
+                            max_operation_millis: millis,
+                            max_cleanup_millis: envelope.cleanup_millis,
+                            max_cleanup_steps: envelope.cleanup_steps,
+                        },
+                    )
+                })
+                .into_iter()
+                .collect();
+            NodePolicySnapshot::from_test_records(vec![Arc::new(NodeMaintenancePolicy {
+                schema: 1,
+                schedules: Vec::new(),
+                offline_reset: None,
+                offline_native,
+            })])
+        };
+        let contract = InstalledExternalExecutionBinding::test_fixture().backend_contract();
+        let lifetime = crate::external_supervisor_native::external_supervisor_occurrence_lifetime_ms(
+            &contract,
+            contract.timeout_seconds,
+        )
+        .unwrap();
+        let at_activation = policy(Some(lifetime));
+        let shrunk = policy(Some(lifetime - 1));
+        let revoked = policy(None);
+
+        // The policy in force at first contact and first activation funds the
+        // occurrence.
+        for (phase, activation_exists) in [
+            (ExternalAllocationPhase::Reserved, false),
+            (ExternalAllocationPhase::Bound, false),
+        ] {
+            let funding = qualification_start_journal_funding(phase, activation_exists);
+            assert_eq!(funding, SupervisorJournalFunding::New);
+            funding
+                .require(&at_activation, &contract, contract.timeout_seconds)
+                .unwrap();
+            assert!(
+                funding
+                    .require(&shrunk, &contract, contract.timeout_seconds)
+                    .is_err()
+            );
+            assert!(
+                funding
+                    .require(&revoked, &contract, contract.timeout_seconds)
+                    .is_err()
+            );
+        }
+
+        // Once the activation is retained, a narrowed or revoked policy no
+        // longer reaches its recovery: the sealed envelope stays its funding.
+        let funding = qualification_start_journal_funding(ExternalAllocationPhase::Bound, true);
+        assert_eq!(funding, SupervisorJournalFunding::Retained);
+        for changed in [&shrunk, &revoked] {
+            funding
+                .require(changed, &contract, contract.timeout_seconds)
+                .unwrap();
+        }
     }
 }

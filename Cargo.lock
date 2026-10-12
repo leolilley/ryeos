@@ -3086,6 +3086,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "lillux",
+ "lillux-sqlite",
  "rustls",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",

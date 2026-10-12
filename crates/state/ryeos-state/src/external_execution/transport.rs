@@ -21,8 +21,9 @@ pub const MAX_OCCURRENCE_ID_BYTES: usize = 512;
 pub const EXTERNAL_CHANNEL_ROUTE_CONTRACT: &str = "ryeos.external-channel.http-json.v1";
 pub const EXTERNAL_CHANNEL_RELAY_CONTRACT: &str = "ryeos.external-channel.controller-file-relay.v1";
 pub const EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA: u32 = 1;
-pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 8;
-pub const EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA: u32 = 9;
+pub const EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA: u32 = 8;
+pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 9;
+pub const EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA: u32 = 10;
 pub const EXTERNAL_CHANNEL_ATTACH_PATH: &str = "/external-execution/channel/attach";
 pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/exchange";
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
@@ -436,6 +437,41 @@ pub struct ExternalSupervisorBootstrap {
     /// authenticated framing and transfer encoding overhead.
     pub candidate_export_max_bytes: u64,
     pub channel_max_bytes: u64,
+    /// The signed `external-supervisor-journal` envelope that funds the
+    /// supervisor's in-process native host for its journal.
+    pub native_journal: ExternalSupervisorNativeEnvelope,
+}
+
+/// Native envelope of the protected supervisor's journal host, copied from
+/// the node's signed maintenance policy class `external-supervisor-journal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSupervisorNativeEnvelope {
+    pub storage_bytes: u64,
+    pub allocator_steps: u64,
+    pub connections: u32,
+    pub operation_millis: u64,
+    pub cleanup_millis: u64,
+    pub cleanup_steps: u64,
+}
+
+impl ExternalSupervisorNativeEnvelope {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.storage_bytes > 0
+                && self.allocator_steps > 0
+                && self.connections > 0
+                && self.operation_millis > 0
+                && self.cleanup_millis > 0
+                && self.cleanup_steps > 0,
+            "external supervisor native journal envelope has a zero bound"
+        );
+        ensure!(
+            self.cleanup_steps < self.allocator_steps,
+            "external supervisor native journal cleanup steps must be below its allocator steps"
+        );
+        Ok(())
+    }
 }
 
 impl ExternalSupervisorBootstrap {
@@ -443,7 +479,7 @@ impl ExternalSupervisorBootstrap {
         ensure!(
             self.schema
                 == match &self.controller {
-                    ExternalControllerTransportSelection::HttpJson(_) => 7,
+                    ExternalControllerTransportSelection::HttpJson(_) => EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
                     ExternalControllerTransportSelection::ControllerFileRelay(_) => match self
                         .candidate_program
                         .execution_mode()
@@ -455,6 +491,7 @@ impl ExternalSupervisorBootstrap {
                 },
             "unsupported external supervisor bootstrap schema for selected transport"
         );
+        self.native_journal.validate()?;
         self.controller.validate()?;
         match &self.controller {
             ExternalControllerTransportSelection::HttpJson(http) => ensure!(
@@ -1196,7 +1233,7 @@ mod tests {
             )
             .unwrap();
         ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: controller(&roots).into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
@@ -1230,6 +1267,14 @@ mod tests {
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: crate::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 16 * 1024 * 1024,
+                allocator_steps: 1_000_000_000,
+                connections: 8,
+                operation_millis: 60_000,
+                cleanup_millis: 60_000,
+                cleanup_steps: 400_000,
+            },
         }
     }
 

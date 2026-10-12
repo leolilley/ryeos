@@ -8,20 +8,26 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+use lillux_sqlite::{
+    OriginalNativeBoundMode, OriginalNativeConnection, OriginalNativeConnectionTerminal,
+    OriginalNativeDestinationAuthority, OriginalNativeDomain, OriginalNativeFactory,
 };
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::export::{ValidatedCandidateRetention, validated_retained_candidate_root_sets};
 use super::journal::{self, ApplicationClaim, JournalOwner};
+use super::native_journal::{self, NativeJournalConnection};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
     ExecutionChannelPayload, ExternalExecutionMode, NativeNamespaceExit,
     NativeQualificationScopeSettlement, NativeQualificationScopeSettlementObservation,
     NativeWriterExclusionMechanism, SignedExecutionFrame,
 };
+use crate::operational::RetainTerminal;
+use crate::sqlite_schema::SchemaSqlDefinition;
 use crate::{
     DurableCasPublicationKey, DurableCasUploadStage, DurableExternalCandidateReceipt,
     PinnedStateAuthority,
@@ -254,10 +260,16 @@ fn retained_launcher_occurrence_digest(conn: &Connection, binding_digest: &str) 
 }
 
 struct GuestStore {
-    conn: Connection,
-    directory: lillux::PinnedDirectory,
+    conn: NativeJournalConnection,
+    /// Complete schema SQL of this binding's mode, captured from a closed
+    /// native reference whose terminal is already in the host's census.
+    schema_reference: SchemaSqlDefinition,
+    directory: Arc<lillux::PinnedDirectory>,
     _lifetime_lock: lillux::PinnedDirectoryLock,
-    database_file: File,
+    /// The reservation's own descriptor on the main inode. It is closed only
+    /// after the connection closed: closing another descriptor on that inode
+    /// earlier would drop the locks SQLite holds on it.
+    reservation_pin: Option<File>,
     bootstrap_digest: String,
     state_runtime_identity_json: String,
     binding: ExecutionChannelBinding,
@@ -296,6 +308,8 @@ pub struct ReservedGuestJournal {
     state_runtime_identity_json: String,
     binding: ExecutionChannelBinding,
     store_identity: GuestJournalStoreIdentity,
+    factory: Arc<OriginalNativeFactory>,
+    destination: Arc<dyn OriginalNativeDestinationAuthority>,
 }
 
 /// Launch intent joined durably to one exact held process and inherited local
@@ -539,63 +553,122 @@ impl ReservedGuestJournal {
 
     /// Initialize the already-anchored exact inode. This can be consumed only
     /// by the process that reserved it; recovery never reopens this authority.
-    pub fn initialize(self) -> Result<PreparedGuestJournal> {
-        ensure_same_file(&self.directory, &self.database_file)?;
+    /// The reserved main is still zero-length, so the native `Existing` open
+    /// stages it into WAL before its first write, and the bound main inode
+    /// must be the one the reservation pinned and anchored. The schema
+    /// reference closes into `retain` before the journal's connection opens.
+    pub fn initialize(self, retain: RetainTerminal<'_>) -> Result<PreparedGuestJournal> {
+        let Self {
+            directory,
+            lifetime_lock,
+            database_file,
+            bootstrap_digest,
+            state_runtime_identity_json,
+            binding,
+            store_identity,
+            factory,
+            destination,
+        } = self;
+        ensure_reserved_file(&directory, &database_file)?;
         ensure!(
-            lillux::observe_open_regular_file(&self.database_file)?.size() == 0,
+            lillux::observe_open_regular_file(&database_file)?.size() == 0,
             "reserved external guest database is not empty"
         );
         ensure!(
-            self.directory.entry_names()? == [OsString::from(DATABASE_NAME)],
+            directory.entry_names()? == [OsString::from(DATABASE_NAME)],
             "reserved external guest directory gained an ambient entry"
         );
-        let conn = open_exact(&self.directory, &self.database_file)?;
-        configure(&conn)?;
-        conn.execute_batch(&complete_schema(self.binding.execution_mode))?;
-        conn.pragma_update(None, "application_id", APPLICATION_ID)?;
-        conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
-        let binding_digest = self.binding.digest()?;
-        let binding_json = lillux::canonical_json(&serde_json::to_value(&self.binding)?)?;
-        let directory_identity_json =
-            lillux::canonical_json(&serde_json::to_value(self.directory.identity()?)?)?;
-        let database_identity_json = lillux::canonical_json(&serde_json::to_value(
-            self.store_identity.database_identity,
-        )?)?;
-        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO external_guest_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,'launch_intent')",
-            params![
-                SCHEMA_EPOCH,
-                &self.bootstrap_digest,
-                &binding_digest,
-                &self.store_identity.journal_nonce,
-                &directory_identity_json,
-                &database_identity_json,
-                &self.state_runtime_identity_json
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
-            params![
-                &self.binding.placement_thread_id,
-                self.binding.digest()?,
-                &binding_json
-            ],
-        )?;
-        tx.commit()?;
-        self.database_file.sync_all()?;
-        self.directory.sync()?;
+        let reserved = lillux::pinned_regular_file_identity(&database_file)?;
+        ensure!(
+            reserved == store_identity.database_identity,
+            "reserved external guest database changed its anchored inode"
+        );
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the whole capture; the reserving caller's factory and
+        // destination come from the process's one funded native host.
+        let schema_reference = unsafe {
+            native_journal::capture_schema_reference(
+                OriginalNativeDomain::ExternalGuestJournalSchemaReference,
+                &complete_schema(binding.execution_mode),
+                &factory,
+                Arc::clone(&destination),
+                retain,
+            )
+        }?;
+        let directory = Arc::new(directory);
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the connection's whole life; the reserving caller's factory and
+        // destination come from the process's one funded native host.
+        let conn = NativeJournalConnection::Live(unsafe {
+            open_native(
+                Arc::clone(&directory),
+                OriginalNativeBoundMode::Existing,
+                OriginalNativeDomain::ExternalGuestJournal,
+                &factory,
+                destination,
+            )
+        }?);
+        let initialized = (|| -> Result<()> {
+            ensure!(
+                conn.main_identity()? == reserved,
+                "external guest native keeper bound an inode other than the reservation"
+            );
+            let binding_digest = binding.digest()?;
+            let binding_json = lillux::canonical_json(&serde_json::to_value(&binding)?)?;
+            let directory_identity_json =
+                lillux::canonical_json(&serde_json::to_value(directory.identity()?)?)?;
+            let database_identity_json =
+                lillux::canonical_json(&serde_json::to_value(store_identity.database_identity)?)?;
+            conn.with_sql(|conn| {
+                configure(conn)?;
+                // Configuring reads the store, which creates its WAL
+                // sidecars; their directory entries become durable before
+                // the first commit appends to `-wal`.
+                directory.sync()?;
+                conn.execute_batch(&complete_schema(binding.execution_mode))?;
+                conn.pragma_update(None, "application_id", APPLICATION_ID)?;
+                conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                tx.execute(
+                    "INSERT INTO external_guest_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,'launch_intent')",
+                    params![
+                        SCHEMA_EPOCH,
+                        &bootstrap_digest,
+                        &binding_digest,
+                        &store_identity.journal_nonce,
+                        &directory_identity_json,
+                        &database_identity_json,
+                        &state_runtime_identity_json
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
+                    params![&binding.placement_thread_id, &binding_digest, &binding_json],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = initialized {
+            let error = conn.refuse(error);
+            drop((lifetime_lock, database_file));
+            return Err(error);
+        }
         let store = GuestStore {
             conn,
-            directory: self.directory,
-            _lifetime_lock: self.lifetime_lock,
-            database_file: self.database_file,
-            bootstrap_digest: self.bootstrap_digest,
-            state_runtime_identity_json: self.state_runtime_identity_json,
-            binding: self.binding,
-            store_identity: self.store_identity,
+            schema_reference,
+            directory,
+            _lifetime_lock: lifetime_lock,
+            reservation_pin: Some(database_file),
+            bootstrap_digest,
+            state_runtime_identity_json,
+            binding,
+            store_identity,
         };
-        store.validate()?;
+        if let Err(error) = store.validate() {
+            return Err(store.refuse(error));
+        }
         Ok(PreparedGuestJournal(store))
     }
 }
@@ -613,22 +686,48 @@ impl PreparedGuestJournal {
         &self.0.bootstrap_digest
     }
 
+    /// Reserve and initialize in one step; the schema reference closes into
+    /// `retain` before the journal's connection opens.
     pub fn create(
         directory: lillux::PinnedDirectory,
         authority: &PinnedStateAuthority,
         bootstrap_digest: &str,
         binding: ExecutionChannelBinding,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
     ) -> Result<Self> {
-        Self::reserve(directory, authority, bootstrap_digest, binding)?.initialize()
+        Self::reserve(
+            directory,
+            authority,
+            bootstrap_digest,
+            binding,
+            factory,
+            destination,
+        )?
+        .initialize(retain)
+    }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
     }
 
     /// Reserve the exact empty database inode so an independent outer owner
     /// can durably retain [`GuestJournalStoreIdentity`] before launch intent.
+    /// The native factory and destination are kept for [`ReservedGuestJournal::initialize`];
+    /// no ticket is taken until then.
     pub fn reserve(
         directory: lillux::PinnedDirectory,
         authority: &PinnedStateAuthority,
         bootstrap_digest: &str,
         binding: ExecutionChannelBinding,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
     ) -> Result<ReservedGuestJournal> {
         hash(bootstrap_digest, "external bootstrap digest")?;
         binding.validate()?;
@@ -670,73 +769,109 @@ impl PreparedGuestJournal {
             state_runtime_identity_json,
             binding,
             store_identity,
+            factory: Arc::clone(factory),
+            destination,
         })
     }
 
-    /// Persist one exact held launcher occurrence before releasing it.
+    /// Persist one exact held launcher occurrence before releasing it. A
+    /// refusal consumes this stage: its connection closes and the terminal
+    /// rides the returned error.
     pub fn bind_launcher(self, evidence: LauncherOccurrenceEvidence) -> Result<BoundGuestJournal> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        tx.execute(
-            "INSERT INTO external_guest_launcher_occurrence VALUES(?1,?2,?3,?4)",
-            params![
-                self.0.binding.digest()?,
-                lillux::canonical_json(&serde_json::to_value(evidence.process_identity)?)?,
-                evidence.launcher_artifact_digest,
-                evidence.channel_challenge_digest
-            ],
-        )?;
-        let changed = tx.execute(
-            "UPDATE external_guest_meta SET lifecycle='launcher_bound'
-             WHERE singleton=1 AND lifecycle='launch_intent'",
-            [],
-        )?;
-        ensure!(changed == 1, "external guest launch intent is not fresh");
-        tx.commit()?;
-        self.0.database_file.sync_all()?;
-        self.0.validate()?;
-        Ok(BoundGuestJournal(self.0))
+        let bound = (|| -> Result<()> {
+            self.0.require_database_identity()?;
+            self.0.conn.with_sql(|conn| {
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                self.0.owner().require_owner(&tx, &self.0.binding)?;
+                tx.execute(
+                    "INSERT INTO external_guest_launcher_occurrence VALUES(?1,?2,?3,?4)",
+                    params![
+                        self.0.binding.digest()?,
+                        lillux::canonical_json(&serde_json::to_value(evidence.process_identity)?)?,
+                        evidence.launcher_artifact_digest,
+                        evidence.channel_challenge_digest
+                    ],
+                )?;
+                let changed = tx.execute(
+                    "UPDATE external_guest_meta SET lifecycle='launcher_bound'
+                     WHERE singleton=1 AND lifecycle='launch_intent'",
+                    [],
+                )?;
+                ensure!(changed == 1, "external guest launch intent is not fresh");
+                tx.commit()?;
+                Ok(())
+            })?;
+            self.0.validate()
+        })();
+        match bound {
+            Ok(()) => Ok(BoundGuestJournal(self.0)),
+            Err(error) => Err(self.0.refuse(error)),
+        }
     }
 }
 
 impl BoundGuestJournal {
     /// Persist readiness only after the live executor has authenticated the
     /// exact held occurrence over its inherited deadline-bounded channel.
+    /// A refusal consumes this stage: its connection closes and the terminal
+    /// rides the returned error.
     pub fn mark_launcher_ready(
         self,
         ready: AuthenticatedLauncherReady,
     ) -> Result<LiveGuestJournal> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        tx.execute(
-            "INSERT INTO external_guest_launcher_ready VALUES(?1,?2)",
-            params![self.0.binding.digest()?, ready.handshake_transcript_digest],
-        )?;
-        let changed = tx.execute(
-            "UPDATE external_guest_meta SET lifecycle='ready'
-             WHERE singleton=1 AND lifecycle='launcher_bound'",
-            [],
-        )?;
-        ensure!(
-            changed == 1,
-            "external guest launcher occurrence is not bound"
-        );
-        tx.commit()?;
-        self.0.database_file.sync_all()?;
-        self.0.validate()?;
-        Ok(LiveGuestJournal(self.0))
+        let marked = (|| -> Result<()> {
+            self.0.require_database_identity()?;
+            self.0.conn.with_sql(|conn| {
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                self.0.owner().require_owner(&tx, &self.0.binding)?;
+                tx.execute(
+                    "INSERT INTO external_guest_launcher_ready VALUES(?1,?2)",
+                    params![self.0.binding.digest()?, ready.handshake_transcript_digest],
+                )?;
+                let changed = tx.execute(
+                    "UPDATE external_guest_meta SET lifecycle='ready'
+                     WHERE singleton=1 AND lifecycle='launcher_bound'",
+                    [],
+                )?;
+                ensure!(
+                    changed == 1,
+                    "external guest launcher occurrence is not bound"
+                );
+                tx.commit()?;
+                Ok(())
+            })?;
+            self.0.validate()
+        })();
+        match marked {
+            Ok(()) => Ok(LiveGuestJournal(self.0)),
+            Err(error) => Err(self.0.refuse(error)),
+        }
+    }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
     }
 }
 
 impl RecoveredGuestJournal {
+    /// Reopen the retained guest journal under its outer anchor. Its schema
+    /// reference closes into `retain` before the journal's own connection
+    /// opens. A refusal raised after the native open carries the closed
+    /// terminal in its error.
     pub fn open(
         directory: lillux::PinnedDirectory,
         authority: &PinnedStateAuthority,
         store_identity: &GuestJournalStoreIdentity,
         bootstrap_digest: &str,
         binding: &ExecutionChannelBinding,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
     ) -> Result<Self> {
         let store = GuestStore::open_existing(
             directory,
@@ -744,9 +879,23 @@ impl RecoveredGuestJournal {
             store_identity,
             bootstrap_digest,
             binding,
+            factory,
+            destination,
+            retain,
         )?;
-        store.validate_retained_content(authority)?;
+        if let Err(error) = store.validate_retained_content(authority) {
+            return Err(store.refuse(error));
+        }
         Ok(Self(store))
+    }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
     }
 
     pub fn binding(&self) -> &ExecutionChannelBinding {
@@ -773,27 +922,39 @@ impl RecoveredGuestJournal {
 }
 
 impl LiveGuestJournal {
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
+    }
+
     /// Read immutable occurrence and readiness testimony under the same
     /// pinned journal and live owner. Process and channel corroboration
     /// belongs to the executor; these records alone do not prove execution.
     pub fn retained_launcher_ready(&self) -> Result<RetainedLauncherReady> {
         self.0.validate()?;
         let binding_digest = self.0.binding.digest()?;
-        let lifecycle: String = self.0.conn.query_row(
-            "SELECT lifecycle FROM external_guest_meta WHERE singleton=1 AND binding_digest=?1",
-            [&binding_digest],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            lifecycle == "ready",
-            "launcher observation lacks authenticated readiness"
-        );
-        let occurrence = retained_launcher_occurrence(&self.0.conn, &binding_digest)?;
+        let (occurrence, handshake_transcript_digest) = self.0.conn.with_sql(|conn| {
+            let lifecycle: String = conn.query_row(
+                "SELECT lifecycle FROM external_guest_meta WHERE singleton=1 AND binding_digest=?1",
+                [&binding_digest],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                lifecycle == "ready",
+                "launcher observation lacks authenticated readiness"
+            );
+            let occurrence = retained_launcher_occurrence(conn, &binding_digest)?;
+            let handshake_transcript_digest: String = conn.query_row(
+                "SELECT handshake_transcript_digest FROM external_guest_launcher_ready WHERE binding_digest=?1",
+                [&binding_digest], |row| row.get(0),
+            )?;
+            Ok((occurrence, handshake_transcript_digest))
+        })?;
         let occurrence_digest = occurrence.digest()?;
-        let handshake_transcript_digest: String = self.0.conn.query_row(
-            "SELECT handshake_transcript_digest FROM external_guest_launcher_ready WHERE binding_digest=?1",
-            [&binding_digest], |row| row.get(0),
-        )?;
         hash(
             &handshake_transcript_digest,
             "observed launcher handshake transcript",
@@ -811,18 +972,18 @@ impl LiveGuestJournal {
     }
 
     pub fn has_applied_release(&self) -> Result<bool> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        self.0
-            .conn
-            .query_row(
+        self.0.require_database_identity()?;
+        let binding_digest = self.0.binding.digest()?;
+        self.0.conn.with_sql(|conn| {
+            Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                AND application='applied'
                AND json_extract(frame_json,'$.frame.payload.kind')='release')",
-                [self.0.binding.digest()?],
+                [binding_digest],
                 |row| row.get(0),
-            )
-            .map_err(Into::into)
+            )?)
+        })
     }
 
     /// Retain the sole exact native pre-exec observation after a completed
@@ -849,65 +1010,66 @@ impl LiveGuestJournal {
                 && receipt.post_release_mount_view.mount_count > 0,
             "guest applied runtime receipt lacks native controls"
         );
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let binding_digest = self.0.binding.digest()?;
         let receipt_json = lillux::canonical_json(&serde_json::to_value(receipt)?)?;
         let receipt_digest = lillux::sha256_hex(receipt_json.as_bytes());
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        ensure!(
-            retained_launcher_occurrence_digest(&tx, &binding_digest)?
-                == launcher_occurrence_digest,
-            "guest applied runtime changed exact launcher occurrence"
-        );
-        let release_applied: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-               AND application='applied'
-               AND json_extract(frame_json,'$.frame.payload.kind')='release')",
-            [&binding_digest],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            release_applied,
-            "guest applied runtime precedes durable release"
-        );
-        let previous: Option<(String, String, String, String)> = tx
-            .query_row(
-                "SELECT launcher_occurrence_digest,candidate_program_digest,
-                        receipt_digest,receipt_json
-                 FROM external_guest_runtime_applied WHERE binding_digest=?1",
-                [&binding_digest],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if let Some(previous) = previous {
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
             ensure!(
-                previous
-                    == (
-                        launcher_occurrence_digest.to_owned(),
-                        self.0.binding.candidate_program_digest.clone(),
-                        receipt_digest,
-                        receipt_json,
-                    ),
-                "guest applied runtime differs from retained native evidence"
+                retained_launcher_occurrence_digest(&tx, &binding_digest)?
+                    == launcher_occurrence_digest,
+                "guest applied runtime changed exact launcher occurrence"
             );
+            let release_applied: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND application='applied'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='release')",
+                [&binding_digest],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                release_applied,
+                "guest applied runtime precedes durable release"
+            );
+            let previous: Option<(String, String, String, String)> = tx
+                .query_row(
+                    "SELECT launcher_occurrence_digest,candidate_program_digest,
+                            receipt_digest,receipt_json
+                     FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                    [&binding_digest],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            if let Some(previous) = previous {
+                ensure!(
+                    previous
+                        == (
+                            launcher_occurrence_digest.to_owned(),
+                            self.0.binding.candidate_program_digest.clone(),
+                            receipt_digest,
+                            receipt_json,
+                        ),
+                    "guest applied runtime differs from retained native evidence"
+                );
+                tx.commit()?;
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO external_guest_runtime_applied VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    binding_digest,
+                    launcher_occurrence_digest,
+                    self.0.binding.candidate_program_digest,
+                    receipt_digest,
+                    receipt_json,
+                ],
+            )?;
             tx.commit()?;
-            return Ok(false);
-        }
-        tx.execute(
-            "INSERT INTO external_guest_runtime_applied VALUES(?1,?2,?3,?4,?5)",
-            params![
-                binding_digest,
-                launcher_occurrence_digest,
-                self.0.binding.candidate_program_digest,
-                receipt_digest,
-                receipt_json,
-            ],
-        )?;
-        tx.commit()?;
-        self.0.database_file.sync_all()?;
-        Ok(true)
+            Ok(true)
+        })
     }
 
     /// Project only the already-committed native occurrence row into one
@@ -917,63 +1079,65 @@ impl LiveGuestJournal {
         &self,
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let binding_digest = self.0.binding.digest()?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let (occurrence, program, receipt_json): (String, String, String) = tx.query_row(
-            "SELECT launcher_occurrence_digest,candidate_program_digest,receipt_json
-             FROM external_guest_runtime_applied WHERE binding_digest=?1",
-            [&binding_digest],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        ensure!(
-            occurrence == retained_launcher_occurrence_digest(&tx, &binding_digest)?
-                && program == self.0.binding.candidate_program_digest,
-            "runtime-applied projection lost its native occurrence"
-        );
-        let payload = ExecutionChannelPayload::RuntimeApplied {
-            launcher_occurrence_digest: occurrence,
-            candidate_program_digest: program,
-            receipt: serde_json::from_str(&receipt_json)?,
-        };
-        let mut statement = tx.prepare(
-            "SELECT frame_json FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
-             LIMIT 2",
-        )?;
-        let existing = statement
-            .query_map([&binding_digest], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
-        ensure!(
-            existing.len() <= 1,
-            "guest authored duplicate runtime-applied frames"
-        );
-        if let Some(wire) = existing.into_iter().next() {
-            let frame = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
-                &self.0.binding,
-                self.0.binding.issued_at_ms,
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let (occurrence, program, receipt_json): (String, String, String) = tx.query_row(
+                "SELECT launcher_occurrence_digest,candidate_program_digest,receipt_json
+                 FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             ensure!(
-                frame.frame().payload == payload,
-                "guest runtime-applied frame differs from retained native row"
+                occurrence == retained_launcher_occurrence_digest(&tx, &binding_digest)?
+                    && program == self.0.binding.candidate_program_digest,
+                "runtime-applied projection lost its native occurrence"
             );
+            let payload = ExecutionChannelPayload::RuntimeApplied {
+                launcher_occurrence_digest: occurrence,
+                candidate_program_digest: program,
+                receipt: serde_json::from_str(&receipt_json)?,
+            };
+            let mut statement = tx.prepare(
+                "SELECT frame_json FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
+                 LIMIT 2",
+            )?;
+            let existing = statement
+                .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            ensure!(
+                existing.len() <= 1,
+                "guest authored duplicate runtime-applied frames"
+            );
+            if let Some(wire) = existing.into_iter().next() {
+                let frame = SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &self.0.binding,
+                    self.0.binding.issued_at_ms,
+                )?;
+                ensure!(
+                    frame.frame().payload == payload,
+                    "guest runtime-applied frame differs from retained native row"
+                );
+                tx.commit()?;
+                return Ok(None);
+            }
+            let frame = journal::author_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                signing_key,
+                payload,
+            )?;
             tx.commit()?;
-            return Ok(None);
-        }
-        let frame = journal::author_frame(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::SupervisorToOwner,
-            signing_key,
-            payload,
-        )?;
-        tx.commit()?;
-        Ok(Some(frame))
+            Ok(Some(frame))
+        })
     }
 
     /// Retain the one Q namespace reap reported by the authenticated held
@@ -1021,7 +1185,7 @@ impl LiveGuestJournal {
             return Ok(retained);
         }
         let guard = authority.acquire_shared_guard()?;
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         ensure!(
             matches!(
                 self.0.binding.execution_mode,
@@ -1036,132 +1200,134 @@ impl LiveGuestJournal {
             anyhow::bail!("native qualification settlement has no completion command")
         };
         let binding_digest = self.0.binding.digest()?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        ensure!(
-            !journal::revoked(&tx, &binding_digest)?
-                && completion.frame().binding_digest == binding_digest
-                && completion.frame().direction == ChannelDirection::OwnerToSupervisor
-                && retained_launcher_occurrence_digest(&tx, &binding_digest)?
-                    == launcher_occurrence_digest,
-            "native qualification settlement changed its live launcher authority"
-        );
-        let (applied_occurrence, receipt_digest): (String, String) = tx.query_row(
-            "SELECT launcher_occurrence_digest,receipt_digest
-             FROM external_guest_runtime_applied WHERE binding_digest=?1",
-            [&binding_digest],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let application: String = tx.query_row(
-            "SELECT application FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-               AND frame_digest=?2
-               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'",
-            params![&binding_digest, completion.digest()],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            applied_occurrence == launcher_occurrence_digest && application == "claimed",
-            "native qualification settlement lacks its applied runtime and claimed command"
-        );
-        let observation = NativeQualificationScopeSettlementObservation {
-            schema: 1,
-            binding_digest: binding_digest.clone(),
-            launcher_occurrence_digest: applied_occurrence,
-            applied_runtime_receipt_digest: receipt_digest,
-            completion_frame_digest: completion.digest().to_owned(),
-            completion_request_digest: completion_request_digest.clone(),
-            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
-            exit,
-        };
-        observation.validate(&self.0.binding)?;
-        let (fixture_capture, fixture_content, stage_id) = match (program.fixture(), capture) {
-            (None, None) => (None, None, None),
-            (Some(fixture), Some((bytes, blob_hash, mode))) => {
-                use crate::objects::qualification_fixture::{
-                    Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
-                    QFixtureCaptureReference, q_fixture_contract_digest,
-                };
-                ensure!(
-                    bytes.len() as u64 <= fixture.max_bytes && bytes.len() as u64 <= 65536,
-                    "native Q fixture bytes exceed their bound"
-                );
-                let metadata = QFixtureCaptureMetadata {
-                    kind: Q_FIXTURE_CAPTURE_KIND.into(),
-                    schema: Q_FIXTURE_CAPTURE_SCHEMA,
-                    fixture_contract_digest: q_fixture_contract_digest(fixture)?,
-                    native_settlement: observation.clone(),
-                    blob_hash: blob_hash.into(),
-                    size_bytes: bytes.len() as u64,
-                    normalized_mode: mode,
-                };
-                let reference = QFixtureCaptureReference {
-                    metadata_hash: metadata.digest()?,
-                    blob_hash: blob_hash.into(),
-                    size_bytes: bytes.len() as u64,
-                };
-                reference.verify_for(&metadata, fixture, &self.0.binding, &observation, bytes)?;
-                let content =
-                    crate::objects::qualification_fixture::QFixtureCaptureContent::from_bytes(
-                        metadata.clone(),
-                        bytes,
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            ensure!(
+                !journal::revoked(&tx, &binding_digest)?
+                    && completion.frame().binding_digest == binding_digest
+                    && completion.frame().direction == ChannelDirection::OwnerToSupervisor
+                    && retained_launcher_occurrence_digest(&tx, &binding_digest)?
+                        == launcher_occurrence_digest,
+                "native qualification settlement changed its live launcher authority"
+            );
+            let (applied_occurrence, receipt_digest): (String, String) = tx.query_row(
+                "SELECT launcher_occurrence_digest,receipt_digest
+                 FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let application: String = tx.query_row(
+                "SELECT application FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND frame_digest=?2
+                   AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete'",
+                params![&binding_digest, completion.digest()],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                applied_occurrence == launcher_occurrence_digest && application == "claimed",
+                "native qualification settlement lacks its applied runtime and claimed command"
+            );
+            let observation = NativeQualificationScopeSettlementObservation {
+                schema: 1,
+                binding_digest: binding_digest.clone(),
+                launcher_occurrence_digest: applied_occurrence,
+                applied_runtime_receipt_digest: receipt_digest,
+                completion_frame_digest: completion.digest().to_owned(),
+                completion_request_digest: completion_request_digest.clone(),
+                mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                exit,
+            };
+            observation.validate(&self.0.binding)?;
+            let (fixture_capture, fixture_content, stage_id) = match (program.fixture(), capture) {
+                (None, None) => (None, None, None),
+                (Some(fixture), Some((bytes, blob_hash, mode))) => {
+                    use crate::objects::qualification_fixture::{
+                        Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
+                        QFixtureCaptureReference, q_fixture_contract_digest,
+                    };
+                    ensure!(
+                        bytes.len() as u64 <= fixture.max_bytes && bytes.len() as u64 <= 65536,
+                        "native Q fixture bytes exceed their bound"
+                    );
+                    let metadata = QFixtureCaptureMetadata {
+                        kind: Q_FIXTURE_CAPTURE_KIND.into(),
+                        schema: Q_FIXTURE_CAPTURE_SCHEMA,
+                        fixture_contract_digest: q_fixture_contract_digest(fixture)?,
+                        native_settlement: observation.clone(),
+                        blob_hash: blob_hash.into(),
+                        size_bytes: bytes.len() as u64,
+                        normalized_mode: mode,
+                    };
+                    let reference = QFixtureCaptureReference {
+                        metadata_hash: metadata.digest()?,
+                        blob_hash: blob_hash.into(),
+                        size_bytes: bytes.len() as u64,
+                    };
+                    reference.verify_for(&metadata, fixture, &self.0.binding, &observation, bytes)?;
+                    let content =
+                        crate::objects::qualification_fixture::QFixtureCaptureContent::from_bytes(
+                            metadata.clone(),
+                            bytes,
+                        )?;
+                    let key = DurableCasPublicationKey::qualification_fixture_occurrence(
+                        &binding_digest,
+                        completion.digest(),
                     )?;
-                let key = DurableCasPublicationKey::qualification_fixture_occurrence(
+                    let mut stage = authority
+                        .require_recovery()?
+                        .begin_durable_cas_upload_admitted(
+                            &guard,
+                            &self.0.bootstrap_digest,
+                            "qualification-fixture",
+                            &key,
+                            None,
+                        )?;
+                    let cas = authority.cas_store()?;
+                    ensure!(
+                        stage.store_blob(&guard, &cas, bytes)? == reference.blob_hash
+                            && stage.store_object(&guard, &cas, &metadata.to_value()?)?
+                                == reference.metadata_hash,
+                        "Q fixture CAS write changed its exact identity"
+                    );
+                    let receipt = stage.retain_qualification_fixture(&guard, &reference)?;
+                    (Some(reference), Some(content), Some(receipt.staging_id))
+                }
+                _ => anyhow::bail!("native Q fixture presence differs from admitted program"),
+            };
+            let observation = NativeQualificationScopeSettlement {
+                schema: 3,
+                observation,
+                fixture_capture,
+                fixture_content,
+            };
+            observation.validate(&self.0.binding)?;
+            let json = lillux::canonical_json(&serde_json::to_value(&observation)?)?;
+            let program_json = lillux::canonical_json(&serde_json::to_value(program)?)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO external_guest_qualification_settlement VALUES(?1,?2,?3,?4,?5)",
+                params![
                     &binding_digest,
                     completion.digest(),
-                )?;
-                let mut stage = authority
-                    .require_recovery()?
-                    .begin_durable_cas_upload_admitted(
-                        &guard,
-                        &self.0.bootstrap_digest,
-                        "qualification-fixture",
-                        &key,
-                        None,
-                    )?;
-                let cas = authority.cas_store()?;
-                ensure!(
-                    stage.store_blob(&guard, &cas, bytes)? == reference.blob_hash
-                        && stage.store_object(&guard, &cas, &metadata.to_value()?)?
-                            == reference.metadata_hash,
-                    "Q fixture CAS write changed its exact identity"
-                );
-                let receipt = stage.retain_qualification_fixture(&guard, &reference)?;
-                (Some(reference), Some(content), Some(receipt.staging_id))
-            }
-            _ => anyhow::bail!("native Q fixture presence differs from admitted program"),
-        };
-        let observation = NativeQualificationScopeSettlement {
-            schema: 3,
-            observation,
-            fixture_capture,
-            fixture_content,
-        };
-        observation.validate(&self.0.binding)?;
-        let json = lillux::canonical_json(&serde_json::to_value(&observation)?)?;
-        let program_json = lillux::canonical_json(&serde_json::to_value(program)?)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO external_guest_qualification_settlement VALUES(?1,?2,?3,?4,?5)",
-            params![
-                &binding_digest,
-                completion.digest(),
-                &json,
-                &program_json,
-                &stage_id
-            ],
-        )?;
-        let retained: (String, String, Option<String>) = tx.query_row(
-            "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement
-             WHERE binding_digest=?1 AND completion_frame_digest=?2",
-            params![&binding_digest, completion.digest()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        ensure!(
-            retained == (json, program_json, stage_id),
-            "native qualification settlement changed its durable row or CAS custody"
-        );
-        tx.commit()?;
-        Ok(observation)
+                    &json,
+                    &program_json,
+                    &stage_id
+                ],
+            )?;
+            let retained: (String, String, Option<String>) = tx.query_row(
+                "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement
+                 WHERE binding_digest=?1 AND completion_frame_digest=?2",
+                params![&binding_digest, completion.digest()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(
+                retained == (json, program_json, stage_id),
+                "native qualification settlement changed its durable row or CAS custody"
+            );
+            tx.commit()?;
+            Ok(observation)
+        })
     }
 
     pub fn qualification_scope_settlement_for_completion(
@@ -1173,7 +1339,7 @@ impl LiveGuestJournal {
         require_q_program(program, &self.0.binding)?;
         self.0.validate()?;
         self.0.validate_retained_content(authority)?;
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         ensure!(
             matches!(
                 self.0.binding.execution_mode,
@@ -1181,9 +1347,8 @@ impl LiveGuestJournal {
             ),
             "native qualification settlement requires Q mode"
         );
-        let raw: Option<String> = self
-            .0
-            .conn
+        self.0.conn.with_sql(|conn| {
+        let raw: Option<String> = conn
             .query_row(
                 "SELECT observation_json FROM external_guest_qualification_settlement
              WHERE binding_digest=?1 AND completion_frame_digest=?2",
@@ -1192,14 +1357,14 @@ impl LiveGuestJournal {
             )
             .optional()?;
         raw.map(|raw| {
-            let retained_program: String = self.0.conn.query_row(
+            let retained_program: String = conn.query_row(
                 "SELECT program_json FROM external_guest_qualification_settlement WHERE binding_digest=?1 AND completion_frame_digest=?2",
                 params![self.0.binding.digest()?, completion.digest()], |row| row.get(0))?;
             ensure!(retained_program == lillux::canonical_json(&serde_json::to_value(program)?)?, "Q settlement reader changed admitted program");
             let observation: NativeQualificationScopeSettlement =
                 serde_json::from_str(&raw)?;
             observation.validate(&self.0.binding)?;
-            let (occurrence, receipt_digest): (String, String) = self.0.conn.query_row(
+            let (occurrence, receipt_digest): (String, String) = conn.query_row(
                 "SELECT launcher_occurrence_digest,receipt_digest
                  FROM external_guest_runtime_applied WHERE binding_digest=?1",
                 [self.0.binding.digest()?],
@@ -1212,7 +1377,7 @@ impl LiveGuestJournal {
                     && observation.observation.applied_runtime_receipt_digest == receipt_digest
                     && occurrence
                         == retained_launcher_occurrence_digest(
-                            &self.0.conn,
+                            conn,
                             &self.0.binding.digest()?,
                         )?
                     && matches!(&completion.frame().payload,
@@ -1223,6 +1388,7 @@ impl LiveGuestJournal {
             Ok(observation)
         })
         .transpose()
+        })
     }
 
     pub fn reconcile_qualification_scope_settlement_application(
@@ -1233,20 +1399,22 @@ impl LiveGuestJournal {
     ) -> Result<GuestApplicationAck> {
         self.qualification_scope_settlement_for_completion(authority, program, completion)?
             .context("claimed qualification completion has no native settlement row")?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        journal::finish_application(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::OwnerToSupervisor,
-            completion.frame().sequence,
-            completion.digest(),
-        )?;
-        tx.commit()?;
-        Ok(GuestApplicationAck {
-            direction: ChannelDirection::OwnerToSupervisor,
-            sequence: completion.frame().sequence,
-            frame_digest: completion.digest().to_owned(),
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            journal::finish_application(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                completion.frame().sequence,
+                completion.digest(),
+            )?;
+            tx.commit()?;
+            Ok(GuestApplicationAck {
+                direction: ChannelDirection::OwnerToSupervisor,
+                sequence: completion.frame().sequence,
+                frame_digest: completion.digest().to_owned(),
+            })
         })
     }
 
@@ -1261,62 +1429,64 @@ impl LiveGuestJournal {
         let observation = self
             .qualification_scope_settlement_for_completion(authority, program, completion)?
             .context("qualification scope frame has no native settlement row")?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let applied: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-               AND frame_digest=?2 AND application='applied'
-               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete')",
-            params![self.0.binding.digest()?, completion.digest()],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            applied,
-            "qualification native frame precedes applied completion"
-        );
-        let payload = ExecutionChannelPayload::QualificationScopeSettled { observation };
-        let mut statement = tx.prepare(
-            "SELECT frame_json FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-               AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled'
-             LIMIT 2",
-        )?;
-        let frames = statement
-            .query_map([self.0.binding.digest()?], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
-        ensure!(
-            frames.len() <= 1,
-            "qualification native settlement has duplicate frames"
-        );
-        if let Some(wire) = frames.into_iter().next() {
-            let frame = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
-                &self.0.binding,
-                self.0.binding.issued_at_ms,
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let applied: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND frame_digest=?2 AND application='applied'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='qualification_complete')",
+                params![self.0.binding.digest()?, completion.digest()],
+                |row| row.get(0),
             )?;
             ensure!(
-                frame.frame().payload == payload,
-                "qualification native frame changed its durable settlement row"
+                applied,
+                "qualification native frame precedes applied completion"
             );
+            let payload = ExecutionChannelPayload::QualificationScopeSettled { observation };
+            let mut statement = tx.prepare(
+                "SELECT frame_json FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled'
+                 LIMIT 2",
+            )?;
+            let frames = statement
+                .query_map([self.0.binding.digest()?], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            ensure!(
+                frames.len() <= 1,
+                "qualification native settlement has duplicate frames"
+            );
+            if let Some(wire) = frames.into_iter().next() {
+                let frame = SignedExecutionFrame::decode_and_verify(
+                    wire.as_bytes(),
+                    &self.0.binding,
+                    self.0.binding.issued_at_ms,
+                )?;
+                ensure!(
+                    frame.frame().payload == payload,
+                    "qualification native frame changed its durable settlement row"
+                );
+                tx.commit()?;
+                return Ok(None);
+            }
+            ensure!(
+                !journal::revoked(&tx, &self.0.binding.digest()?)?,
+                "revoked qualification execution cannot gain normal native settlement"
+            );
+            let frame = journal::author_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                signing_key,
+                payload,
+            )?;
             tx.commit()?;
-            return Ok(None);
-        }
-        ensure!(
-            !journal::revoked(&tx, &self.0.binding.digest()?)?,
-            "revoked qualification execution cannot gain normal native settlement"
-        );
-        let frame = journal::author_frame(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::SupervisorToOwner,
-            signing_key,
-            payload,
-        )?;
-        tx.commit()?;
-        Ok(Some(frame))
+            Ok(Some(frame))
+        })
     }
 
     pub fn native_capture_for_quiesce(
@@ -1324,15 +1494,16 @@ impl LiveGuestJournal {
         quiesce_frame_digest: &str,
     ) -> Result<Option<DurableNativeCandidateCapture>> {
         hash(quiesce_frame_digest, "quiesce frame digest")?;
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        self.0
-            .conn
+        self.0.require_database_identity()?;
+        let binding_digest = self.0.binding.digest()?;
+        self.0.conn.with_sql(|conn| {
+            Ok(conn
             .query_row(
                 "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
                         snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
                  FROM external_guest_native_capture
                  WHERE binding_digest=?1 AND quiesce_frame_digest=?2",
-                params![self.0.binding.digest()?, quiesce_frame_digest],
+                params![binding_digest, quiesce_frame_digest],
                 |row| {
                     Ok(DurableNativeCandidateCapture {
                         quiesce_frame_digest: row.get(0)?,
@@ -1345,55 +1516,52 @@ impl LiveGuestJournal {
                     })
                 },
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?)
+        })
     }
 
     /// Whether this exact guest has durably retained a complete sealed export.
     /// Transport position is intentionally irrelevant: chunks may still be
     /// draining after native writer exclusion and CAS retention completed.
     pub fn has_retained_export(&self) -> Result<bool> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        self.0
-            .owner()
-            .require_owner(&self.0.conn, &self.0.binding)?;
-        self.0
-            .conn
-            .query_row(
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            self.0.owner().require_owner(conn, &self.0.binding)?;
+            Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_guest_export_retention
                  WHERE binding_digest=?1)",
                 params![self.0.binding.digest()?],
                 |row| row.get(0),
-            )
-            .map_err(Into::into)
+            )?)
+        })
     }
 
     pub fn supervisor_export_for_capture(
         &self,
         capture: &DurableNativeCandidateCapture,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let wire: Option<String> = self
-            .0
-            .conn
-            .query_row(
-                "SELECT frame_json FROM external_execution_frame
+        self.0.require_database_identity()?;
+        let wire: Option<String> = self.0.conn.with_sql(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT frame_json FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                  AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
                  AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?2
                  AND json_extract(frame_json,'$.frame.payload.candidate_output_capture_hash') IS ?3
                  AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?4
                  AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?5",
-                params![
-                    self.0.binding.digest()?,
-                    capture.snapshot_hash,
-                    capture.output_capture_hash,
-                    capture.completion_request_digest,
-                    capture.writer_exclusion_evidence_hash
-                ],
-                |row| row.get(0),
-            )
-            .optional()?;
+                    params![
+                        self.0.binding.digest()?,
+                        capture.snapshot_hash,
+                        capture.output_capture_hash,
+                        capture.completion_request_digest,
+                        capture.writer_exclusion_evidence_hash
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })?;
         wire.map(|wire| {
             SignedExecutionFrame::decode_and_verify(
                 wire.as_bytes(),
@@ -1408,7 +1576,7 @@ impl LiveGuestJournal {
         &self,
         capture: &DurableNativeCandidateCapture,
     ) -> Result<GuestApplicationAck> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let retained = self
             .native_capture_for_quiesce(&capture.quiesce_frame_digest)?
             .context("native capture reconciliation has no durable evidence")?;
@@ -1416,46 +1584,48 @@ impl LiveGuestJournal {
             retained == *capture,
             "native capture reconciliation changed durable evidence"
         );
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let (sequence, wire): (i64, String) = tx.query_row(
-            "SELECT sequence,frame_json FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-             AND frame_digest=?2
-             AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
-            params![self.0.binding.digest()?, capture.quiesce_frame_digest],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let frame = SignedExecutionFrame::decode_and_verify(
-            wire.as_bytes(),
-            &self.0.binding,
-            self.0.binding.issued_at_ms,
-        )?;
-        ensure!(
-            matches!(
-                &frame.frame().payload,
-                ExecutionChannelPayload::Quiesce { completion_request_digest }
-                    if completion_request_digest == &capture.completion_request_digest
-            ),
-            "native capture reconciliation changed completion authority"
-        );
-        journal::finish_application(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::OwnerToSupervisor,
-            u64::try_from(sequence)?,
-            &capture.quiesce_frame_digest,
-        )?;
-        tx.commit()?;
-        Ok(GuestApplicationAck {
-            direction: ChannelDirection::OwnerToSupervisor,
-            sequence: u64::try_from(sequence)?,
-            frame_digest: capture.quiesce_frame_digest.clone(),
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let (sequence, wire): (i64, String) = tx.query_row(
+                "SELECT sequence,frame_json FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                 AND frame_digest=?2
+                 AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
+                params![self.0.binding.digest()?, capture.quiesce_frame_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &self.0.binding,
+                self.0.binding.issued_at_ms,
+            )?;
+            ensure!(
+                matches!(
+                    &frame.frame().payload,
+                    ExecutionChannelPayload::Quiesce { completion_request_digest }
+                        if completion_request_digest == &capture.completion_request_digest
+                ),
+                "native capture reconciliation changed completion authority"
+            );
+            journal::finish_application(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                u64::try_from(sequence)?,
+                &capture.quiesce_frame_digest,
+            )?;
+            tx.commit()?;
+            Ok(GuestApplicationAck {
+                direction: ChannelDirection::OwnerToSupervisor,
+                sequence: u64::try_from(sequence)?,
+                frame_digest: capture.quiesce_frame_digest.clone(),
+            })
         })
     }
 
     pub fn record_frame(&self, wire: &[u8]) -> Result<bool> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let verified = SignedExecutionFrame::decode_and_verify(
             wire,
             &self.0.binding,
@@ -1471,22 +1641,24 @@ impl LiveGuestJournal {
                 )),
             };
         }
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let result = journal::append_frame(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            wire,
-        )?;
-        tx.commit()?;
-        Ok(result)
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let result = journal::append_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                wire,
+            )?;
+            tx.commit()?;
+            Ok(result)
+        })
     }
 
     /// Retain, reconcile and complete one controller acknowledgement as an
     /// atomic no-effect application. This must be used only for received
     /// acknowledgements; locally authored frames remain pending remote proof.
     pub fn record_owner_acknowledgement(&self, wire: &[u8]) -> Result<bool> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let verified = SignedExecutionFrame::decode_and_verify(
             wire,
             &self.0.binding,
@@ -1500,23 +1672,25 @@ impl LiveGuestJournal {
                 ),
             "guest acknowledgement ingress requires an owner acknowledgement"
         );
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let inserted = journal::append_frame(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            wire,
-        )?;
-        journal::apply_received_acknowledgement(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            verified.frame().direction,
-            verified.frame().sequence,
-            verified.digest(),
-        )?;
-        tx.commit()?;
-        Ok(inserted)
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let inserted = journal::append_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                wire,
+            )?;
+            journal::apply_received_acknowledgement(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                verified.frame().direction,
+                verified.frame().sequence,
+                verified.digest(),
+            )?;
+            tx.commit()?;
+            Ok(inserted)
+        })
     }
 
     /// Author one exact supervisor observation from the retained directional
@@ -1536,18 +1710,20 @@ impl LiveGuestJournal {
             ),
             "native projection requires its exact retained row authoring path"
         );
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let verified = journal::author_frame(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::SupervisorToOwner,
-            signing_key,
-            payload,
-        )?;
-        tx.commit()?;
-        Ok(verified)
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let verified = journal::author_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                signing_key,
+                payload,
+            )?;
+            tx.commit()?;
+            Ok(verified)
+        })
     }
 
     /// Author one ordered supervisor batch atomically. Candidate export uses
@@ -1558,33 +1734,35 @@ impl LiveGuestJournal {
         signing_key: &lillux::crypto::SigningKey,
         payloads: impl IntoIterator<Item = ExecutionChannelPayload>,
     ) -> Result<Vec<AuthenticatedExecutionFrame>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let mut frames = Vec::new();
-        for payload in payloads {
-            ensure!(
-                !matches!(
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let mut frames = Vec::new();
+            for payload in payloads {
+                ensure!(
+                    !matches!(
+                        payload,
+                        ExecutionChannelPayload::RuntimeApplied { .. }
+                            | ExecutionChannelPayload::QualificationScopeSettled { .. }
+                    ),
+                    "native projection requires its exact retained row authoring path"
+                );
+                frames.push(journal::author_frame(
+                    &tx,
+                    &self.0.owner(),
+                    &self.0.binding.placement_thread_id,
+                    ChannelDirection::SupervisorToOwner,
+                    signing_key,
                     payload,
-                    ExecutionChannelPayload::RuntimeApplied { .. }
-                        | ExecutionChannelPayload::QualificationScopeSettled { .. }
-                ),
-                "native projection requires its exact retained row authoring path"
+                )?);
+            }
+            ensure!(
+                !frames.is_empty(),
+                "external supervisor frame batch is empty"
             );
-            frames.push(journal::author_frame(
-                &tx,
-                &self.0.owner(),
-                &self.0.binding.placement_thread_id,
-                ChannelDirection::SupervisorToOwner,
-                signing_key,
-                payload,
-            )?);
-        }
-        ensure!(
-            !frames.is_empty(),
-            "external supervisor frame batch is empty"
-        );
-        tx.commit()?;
-        Ok(frames)
+            tx.commit()?;
+            Ok(frames)
+        })
     }
 
     /// Recover or author a signed supervisor acknowledgement of the peer
@@ -1598,69 +1776,71 @@ impl LiveGuestJournal {
         peer_sequence: u64,
         peer_digest: &str,
     ) -> Result<Option<AuthenticatedExecutionFrame>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let binding_digest = self.0.binding.digest()?;
-        let contiguous: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-               AND sequence=?2 AND frame_digest=?3)",
-            params![binding_digest, i64::try_from(peer_sequence)?, peer_digest],
-            |row| row.get(0),
-        )?;
-        let frame = if contiguous {
-            journal::ensure_application_acknowledgement(
-                &tx,
-                &self.0.owner(),
-                &self.0.binding.placement_thread_id,
-                ChannelDirection::SupervisorToOwner,
-                peer_sequence,
-                peer_digest,
-                signing_key,
-                true,
-            )?
-        } else {
-            let terminal: (String, String, String) = tx.query_row(
-                "SELECT r.frame_digest,r.frame_json,t.application
-                 FROM external_execution_revocation r
-                 JOIN external_guest_terminal_application t
-                   ON t.binding_digest=r.binding_digest
-                  AND t.frame_digest=r.frame_digest
-                 WHERE r.binding_digest=?1",
-                [&binding_digest],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let binding_digest = self.0.binding.digest()?;
+            let contiguous: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND sequence=?2 AND frame_digest=?3)",
+                params![binding_digest, i64::try_from(peer_sequence)?, peer_digest],
+                |row| row.get(0),
             )?;
-            let retained = SignedExecutionFrame::decode_and_verify(
-                terminal.1.as_bytes(),
-                &self.0.binding,
-                self.0.binding.issued_at_ms,
-            )?;
-            ensure!(
-                terminal.0 == peer_digest
-                    && retained.digest() == peer_digest
-                    && retained.frame().sequence == peer_sequence
-                    && retained.frame().direction == ChannelDirection::OwnerToSupervisor
-                    && matches!(retained.frame().payload, ExecutionChannelPayload::Cancel),
-                "guest terminal acknowledgement changed sticky revocation"
-            );
-            let application = match terminal.2.as_str() {
-                "claimed" => crate::external_execution::ExecutionFrameApplication::Claimed,
-                "applied" => crate::external_execution::ExecutionFrameApplication::Applied,
-                _ => anyhow::bail!("guest terminal application has an invalid state"),
+            let frame = if contiguous {
+                journal::ensure_application_acknowledgement(
+                    &tx,
+                    &self.0.owner(),
+                    &self.0.binding.placement_thread_id,
+                    ChannelDirection::SupervisorToOwner,
+                    peer_sequence,
+                    peer_digest,
+                    signing_key,
+                    true,
+                )?
+            } else {
+                let terminal: (String, String, String) = tx.query_row(
+                    "SELECT r.frame_digest,r.frame_json,t.application
+                     FROM external_execution_revocation r
+                     JOIN external_guest_terminal_application t
+                       ON t.binding_digest=r.binding_digest
+                      AND t.frame_digest=r.frame_digest
+                     WHERE r.binding_digest=?1",
+                    [&binding_digest],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                let retained = SignedExecutionFrame::decode_and_verify(
+                    terminal.1.as_bytes(),
+                    &self.0.binding,
+                    self.0.binding.issued_at_ms,
+                )?;
+                ensure!(
+                    terminal.0 == peer_digest
+                        && retained.digest() == peer_digest
+                        && retained.frame().sequence == peer_sequence
+                        && retained.frame().direction == ChannelDirection::OwnerToSupervisor
+                        && matches!(retained.frame().payload, ExecutionChannelPayload::Cancel),
+                    "guest terminal acknowledgement changed sticky revocation"
+                );
+                let application = match terminal.2.as_str() {
+                    "claimed" => crate::external_execution::ExecutionFrameApplication::Claimed,
+                    "applied" => crate::external_execution::ExecutionFrameApplication::Applied,
+                    _ => anyhow::bail!("guest terminal application has an invalid state"),
+                };
+                journal::ensure_application_acknowledgement_for_state(
+                    &tx,
+                    &self.0.owner(),
+                    &self.0.binding.placement_thread_id,
+                    ChannelDirection::SupervisorToOwner,
+                    peer_sequence,
+                    peer_digest,
+                    application,
+                    signing_key,
+                )?
             };
-            journal::ensure_application_acknowledgement_for_state(
-                &tx,
-                &self.0.owner(),
-                &self.0.binding.placement_thread_id,
-                ChannelDirection::SupervisorToOwner,
-                peer_sequence,
-                peer_digest,
-                application,
-                signing_key,
-            )?
-        };
-        tx.commit()?;
-        Ok(frame)
+            tx.commit()?;
+            Ok(frame)
+        })
     }
 
     pub fn pending_supervisor_transport_frames(
@@ -1668,15 +1848,17 @@ impl LiveGuestJournal {
         frame_limit: usize,
         byte_limit: usize,
     ) -> Result<Vec<journal::PendingExecutionFrame>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        journal::pending_transport_frames(
-            &self.0.conn,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::SupervisorToOwner,
-            frame_limit,
-            byte_limit,
-        )
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            journal::pending_transport_frames(
+                conn,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                frame_limit,
+                byte_limit,
+            )
+        })
     }
 
     pub fn pending_supervisor_transport_frames_after(
@@ -1685,16 +1867,18 @@ impl LiveGuestJournal {
         frame_limit: usize,
         byte_limit: usize,
     ) -> Result<Vec<journal::PendingExecutionFrame>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        journal::pending_transport_frames_after(
-            &self.0.conn,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::SupervisorToOwner,
-            after_sequence,
-            frame_limit,
-            byte_limit,
-        )
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            journal::pending_transport_frames_after(
+                conn,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                after_sequence,
+                frame_limit,
+                byte_limit,
+            )
+        })
     }
 
     pub fn claim(
@@ -1703,25 +1887,27 @@ impl LiveGuestJournal {
         sequence: u64,
         digest: &str,
     ) -> Result<GuestApplicationClaim> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        let result = journal::claim_application(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            direction,
-            sequence,
-            digest,
-        )?;
-        tx.commit()?;
-        Ok(match result {
-            ApplicationClaim::New(frame) => GuestApplicationClaim::New(GuestApplicationToken {
-                frame,
-                protocol_offset: 0,
-            }),
-            ApplicationClaim::AlreadyClaimed => GuestApplicationClaim::AlreadyClaimed,
-            ApplicationClaim::AlreadyApplied => GuestApplicationClaim::AlreadyApplied,
-            ApplicationClaim::Revoked => GuestApplicationClaim::Revoked,
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let result = journal::claim_application(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                direction,
+                sequence,
+                digest,
+            )?;
+            tx.commit()?;
+            Ok(match result {
+                ApplicationClaim::New(frame) => GuestApplicationClaim::New(GuestApplicationToken {
+                    frame,
+                    protocol_offset: 0,
+                }),
+                ApplicationClaim::AlreadyClaimed => GuestApplicationClaim::AlreadyClaimed,
+                ApplicationClaim::AlreadyApplied => GuestApplicationClaim::AlreadyApplied,
+                ApplicationClaim::Revoked => GuestApplicationClaim::Revoked,
+            })
         })
     }
 
@@ -1763,47 +1949,49 @@ impl LiveGuestJournal {
         &self,
         committed: &CommittedGuestRevocation,
     ) -> Result<GuestTerminalApplicationClaim> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let retained: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_revocation
-             WHERE binding_digest=?1 AND frame_digest=?2 AND frame_json=?3)",
-            params![
-                self.0.binding.digest()?,
-                committed.frame.digest(),
-                committed.frame.canonical()
-            ],
-            |row| row.get(0),
-        )?;
-        ensure!(retained, "guest cancellation lost its sticky authority");
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT application FROM external_guest_terminal_application
-                 WHERE binding_digest=?1 AND frame_digest=?2",
-                params![self.0.binding.digest()?, committed.frame.digest()],
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let retained: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_revocation
+                 WHERE binding_digest=?1 AND frame_digest=?2 AND frame_json=?3)",
+                params![
+                    self.0.binding.digest()?,
+                    committed.frame.digest(),
+                    committed.frame.canonical()
+                ],
                 |row| row.get(0),
-            )
-            .optional()?;
-        let claim = match existing.as_deref() {
-            Some("claimed") => GuestTerminalApplicationClaim::AlreadyClaimed,
-            Some("applied") => GuestTerminalApplicationClaim::AlreadyApplied,
-            Some(_) => anyhow::bail!("guest terminal application has an invalid state"),
-            None => {
-                tx.execute(
-                    "INSERT INTO external_guest_terminal_application VALUES(?1,?2,'claimed')",
+            )?;
+            ensure!(retained, "guest cancellation lost its sticky authority");
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT application FROM external_guest_terminal_application
+                     WHERE binding_digest=?1 AND frame_digest=?2",
                     params![self.0.binding.digest()?, committed.frame.digest()],
-                )?;
-                let frame = SignedExecutionFrame::decode_and_verify(
-                    &committed.wire,
-                    &self.0.binding,
-                    lillux::time::timestamp_millis(),
-                )?;
-                GuestTerminalApplicationClaim::New(GuestTerminalApplicationToken(frame))
-            }
-        };
-        tx.commit()?;
-        Ok(claim)
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let claim = match existing.as_deref() {
+                Some("claimed") => GuestTerminalApplicationClaim::AlreadyClaimed,
+                Some("applied") => GuestTerminalApplicationClaim::AlreadyApplied,
+                Some(_) => anyhow::bail!("guest terminal application has an invalid state"),
+                None => {
+                    tx.execute(
+                        "INSERT INTO external_guest_terminal_application VALUES(?1,?2,'claimed')",
+                        params![self.0.binding.digest()?, committed.frame.digest()],
+                    )?;
+                    let frame = SignedExecutionFrame::decode_and_verify(
+                        &committed.wire,
+                        &self.0.binding,
+                        lillux::time::timestamp_millis(),
+                    )?;
+                    GuestTerminalApplicationClaim::New(GuestTerminalApplicationToken(frame))
+                }
+            };
+            tx.commit()?;
+            Ok(claim)
+        })
     }
 
     pub fn apply_terminal_revocation<T>(
@@ -1811,56 +1999,62 @@ impl LiveGuestJournal {
         token: GuestTerminalApplicationToken,
         stop: impl FnOnce(&AuthenticatedExecutionFrame) -> Result<T>,
     ) -> Result<(T, PerformedGuestTerminalApplication)> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let state: String = tx.query_row(
-            "SELECT application FROM external_guest_terminal_application
-             WHERE binding_digest=?1 AND frame_digest=?2",
-            params![self.0.binding.digest()?, token.0.digest()],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            state == "claimed",
-            "guest terminal stop has no exact durable claim"
-        );
-        let value = stop(&token.0)?;
-        tx.commit()?;
-        Ok((value, PerformedGuestTerminalApplication(token.0)))
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let state: String = tx.query_row(
+                "SELECT application FROM external_guest_terminal_application
+                 WHERE binding_digest=?1 AND frame_digest=?2",
+                params![self.0.binding.digest()?, token.0.digest()],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                state == "claimed",
+                "guest terminal stop has no exact durable claim"
+            );
+            let value = stop(&token.0)?;
+            tx.commit()?;
+            Ok((value, PerformedGuestTerminalApplication(token.0)))
+        })
     }
 
     pub fn finish_terminal_revocation(
         &self,
         performed: PerformedGuestTerminalApplication,
     ) -> Result<GuestApplicationAck> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let frame = performed.0;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let changed = tx.execute(
-            "UPDATE external_guest_terminal_application SET application='applied'
-             WHERE binding_digest=?1 AND frame_digest=?2 AND application='claimed'",
-            params![self.0.binding.digest()?, frame.digest()],
-        )?;
-        ensure!(changed == 1, "guest terminal stop is not freshly performed");
-        tx.commit()?;
-        Ok(GuestApplicationAck {
-            direction: frame.frame().direction,
-            sequence: frame.frame().sequence,
-            frame_digest: frame.digest().to_owned(),
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let changed = tx.execute(
+                "UPDATE external_guest_terminal_application SET application='applied'
+                 WHERE binding_digest=?1 AND frame_digest=?2 AND application='claimed'",
+                params![self.0.binding.digest()?, frame.digest()],
+            )?;
+            ensure!(changed == 1, "guest terminal stop is not freshly performed");
+            tx.commit()?;
+            Ok(GuestApplicationAck {
+                direction: frame.frame().direction,
+                sequence: frame.frame().sequence,
+                frame_digest: frame.digest().to_owned(),
+            })
         })
     }
 
-    fn application_transaction(
+    /// Open the writer transaction that gates one claimed application. The
+    /// caller checked the database identity before entering its SQL scope.
+    fn application_transaction<'c>(
         &self,
+        conn: &'c Connection,
         frame: &AuthenticatedExecutionFrame,
-    ) -> Result<Transaction<'_>> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+    ) -> Result<Transaction<'c>> {
         ensure!(
             frame.frame().binding_digest == self.0.binding.digest()?,
             "guest application gate changed channel authority"
         );
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
         self.0.owner().require_owner(&tx, &self.0.binding)?;
         let application: String = tx.query_row(
             "SELECT application FROM external_execution_frame
@@ -1915,9 +2109,13 @@ impl LiveGuestJournal {
             ),
             "protocol bytes require bounded partial application"
         );
-        let tx = self.application_transaction(&token.frame)?;
-        let value = action(&token.frame)?;
-        tx.commit()?;
+        self.0.require_database_identity()?;
+        let value = self.0.conn.with_sql(|conn| {
+            let tx = self.application_transaction(conn, &token.frame)?;
+            let value = action(&token.frame)?;
+            tx.commit()?;
+            Ok(value)
+        })?;
         Ok((value, PerformedGuestApplication(token.frame)))
     }
 
@@ -1935,14 +2133,18 @@ impl LiveGuestJournal {
             token.protocol_offset < bytes.len(),
             "protocol application has no remaining bytes"
         );
-        let tx = self.application_transaction(&token.frame)?;
-        let written = action(&token.frame, &bytes[token.protocol_offset..])?;
-        ensure!(
-            written > 0 && written <= bytes.len() - token.protocol_offset,
-            "protocol application reported an invalid bounded write"
-        );
+        self.0.require_database_identity()?;
+        let written = self.0.conn.with_sql(|conn| {
+            let tx = self.application_transaction(conn, &token.frame)?;
+            let written = action(&token.frame, &bytes[token.protocol_offset..])?;
+            ensure!(
+                written > 0 && written <= bytes.len() - token.protocol_offset,
+                "protocol application reported an invalid bounded write"
+            );
+            tx.commit()?;
+            Ok(written)
+        })?;
         token.protocol_offset += written;
-        tx.commit()?;
         if token.protocol_offset == bytes.len() {
             Ok(GuestProtocolApplication::Performed(
                 PerformedGuestApplication(token.frame),
@@ -1953,22 +2155,24 @@ impl LiveGuestJournal {
     }
 
     pub fn finish(&self, performed: PerformedGuestApplication) -> Result<GuestApplicationAck> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         let frame = performed.0;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        journal::finish_application(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            frame.frame().direction,
-            frame.frame().sequence,
-            frame.digest(),
-        )?;
-        tx.commit()?;
-        Ok(GuestApplicationAck {
-            direction: frame.frame().direction,
-            sequence: frame.frame().sequence,
-            frame_digest: frame.digest().to_owned(),
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            journal::finish_application(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                frame.frame().direction,
+                frame.frame().sequence,
+                frame.digest(),
+            )?;
+            tx.commit()?;
+            Ok(GuestApplicationAck {
+                direction: frame.frame().direction,
+                sequence: frame.frame().sequence,
+                frame_digest: frame.digest().to_owned(),
+            })
         })
     }
 
@@ -1982,7 +2186,7 @@ impl LiveGuestJournal {
         occurrence_digest: &str,
         occurrence_stage: &mut DurableCasUploadStage,
     ) -> Result<DurableExternalCandidateReceipt> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         hash(occurrence_digest, "external launcher occurrence digest")?;
         let sealed_frame_digest = sealed.digest();
         hash(sealed_frame_digest, "sealed export frame digest")?;
@@ -2045,62 +2249,35 @@ impl LiveGuestJournal {
         } else {
             retained.retain_external_candidate_occurrence(authority, occurrence_stage)?
         };
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let matches_frame: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-             AND frame_digest=?2
-             AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
-             AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?3
-             AND json_extract(frame_json,'$.frame.payload.candidate_output_capture_hash') IS ?4
-             AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?5
-             AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?6)",
-            params![
-                content.channel_binding_digest(),
-                sealed_frame_digest,
-                content.snapshot_hash(),
-                content.output_capture_hash(),
-                content.completion_request_digest(),
-                content.claimed_writer_exclusion_evidence_hash()
-            ],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            matches_frame,
-            "guest retention has no exact sealed export frame"
-        );
-        let changed = tx.execute(
-            "INSERT OR IGNORE INTO external_guest_export_retention
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                content.channel_binding_digest(),
-                sealed_frame_digest,
-                occurrence_digest,
-                receipt.staging_id(),
-                content.snapshot_hash(),
-                content.output_capture_hash(),
-                content.completion_request_digest(),
-                content.claimed_writer_exclusion_evidence_hash()
-            ],
-        )?;
-        if changed == 0 {
-            self.0.owner().require_export_retention(
-                &tx,
-                &self.0.binding,
-                sealed_frame_digest,
-                content.snapshot_hash(),
-                content.output_capture_hash(),
-                content.completion_request_digest(),
-                content.claimed_writer_exclusion_evidence_hash(),
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let matches_frame: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                 AND frame_digest=?2
+                 AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
+                 AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?3
+                 AND json_extract(frame_json,'$.frame.payload.candidate_output_capture_hash') IS ?4
+                 AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?5
+                 AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?6)",
+                params![
+                    content.channel_binding_digest(),
+                    sealed_frame_digest,
+                    content.snapshot_hash(),
+                    content.output_capture_hash(),
+                    content.completion_request_digest(),
+                    content.claimed_writer_exclusion_evidence_hash()
+                ],
+                |row| row.get(0),
             )?;
-            let exact: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM external_guest_export_retention
-                 WHERE binding_digest=?1 AND sealed_frame_digest=?2
-                 AND occurrence_digest=?3 AND durable_receipt_id=?4
-                 AND snapshot_hash=?5 AND output_capture_hash IS ?6
-                 AND completion_request_digest=?7
-                 AND writer_exclusion_evidence_hash=?8)",
+            ensure!(
+                matches_frame,
+                "guest retention has no exact sealed export frame"
+            );
+            let changed = tx.execute(
+                "INSERT OR IGNORE INTO external_guest_export_retention
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     content.channel_binding_digest(),
                     sealed_frame_digest,
@@ -2111,15 +2288,44 @@ impl LiveGuestJournal {
                     content.completion_request_digest(),
                     content.claimed_writer_exclusion_evidence_hash()
                 ],
-                |row| row.get(0),
             )?;
-            ensure!(
-                exact,
-                "guest export retention conflicts with central receipt"
-            );
-        }
-        tx.commit()?;
-        Ok(receipt)
+            if changed == 0 {
+                self.0.owner().require_export_retention(
+                    &tx,
+                    &self.0.binding,
+                    sealed_frame_digest,
+                    content.snapshot_hash(),
+                    content.output_capture_hash(),
+                    content.completion_request_digest(),
+                    content.claimed_writer_exclusion_evidence_hash(),
+                )?;
+                let exact: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM external_guest_export_retention
+                     WHERE binding_digest=?1 AND sealed_frame_digest=?2
+                     AND occurrence_digest=?3 AND durable_receipt_id=?4
+                     AND snapshot_hash=?5 AND output_capture_hash IS ?6
+                     AND completion_request_digest=?7
+                     AND writer_exclusion_evidence_hash=?8)",
+                    params![
+                        content.channel_binding_digest(),
+                        sealed_frame_digest,
+                        occurrence_digest,
+                        receipt.staging_id(),
+                        content.snapshot_hash(),
+                        content.output_capture_hash(),
+                        content.completion_request_digest(),
+                        content.claimed_writer_exclusion_evidence_hash()
+                    ],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    exact,
+                    "guest export retention conflicts with central receipt"
+                );
+            }
+            tx.commit()?;
+            Ok(receipt)
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -2135,7 +2341,7 @@ impl LiveGuestJournal {
         quiesce: &AuthenticatedExecutionFrame,
         capture: &DurableNativeCandidateCapture,
     ) -> Result<()> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0.require_database_identity()?;
         for (value, label) in [
             (&capture.quiesce_frame_digest, "quiesce frame digest"),
             (&capture.occurrence_digest, "launcher occurrence digest"),
@@ -2203,41 +2409,23 @@ impl LiveGuestJournal {
                 && stage.protected_large_object_hashes().is_empty(),
             "native capture changed its exact durable occurrence roots"
         );
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
-        let application: String = tx.query_row(
-            "SELECT application FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-             AND frame_digest=?2
-             AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
-            params![self.0.binding.digest()?, capture.quiesce_frame_digest],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            matches!(application.as_str(), "claimed" | "applied"),
-            "native capture has no exact claimed quiesce application"
-        );
-        let changed = tx.execute(
-            "INSERT OR IGNORE INTO external_guest_native_capture VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                self.0.binding.digest()?,
-                capture.quiesce_frame_digest,
-                capture.occurrence_digest,
-                capture.durable_stage_id,
-                capture.snapshot_hash,
-                capture.output_capture_hash,
-                capture.completion_request_digest,
-                capture.writer_exclusion_evidence_hash
-            ],
-        )?;
-        if changed == 0 {
-            let exact: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM external_guest_native_capture
-                 WHERE binding_digest=?1 AND quiesce_frame_digest=?2
-                 AND occurrence_digest=?3 AND durable_stage_id=?4
-                 AND snapshot_hash=?5 AND output_capture_hash IS ?6
-                 AND completion_request_digest=?7
-                 AND writer_exclusion_evidence_hash=?8)",
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            self.0.owner().require_owner(&tx, &self.0.binding)?;
+            let application: String = tx.query_row(
+                "SELECT application FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                 AND frame_digest=?2
+                 AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
+                params![self.0.binding.digest()?, capture.quiesce_frame_digest],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                matches!(application.as_str(), "claimed" | "applied"),
+                "native capture has no exact claimed quiesce application"
+            );
+            let changed = tx.execute(
+                "INSERT OR IGNORE INTO external_guest_native_capture VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     self.0.binding.digest()?,
                     capture.quiesce_frame_digest,
@@ -2248,12 +2436,32 @@ impl LiveGuestJournal {
                     capture.completion_request_digest,
                     capture.writer_exclusion_evidence_hash
                 ],
-                |row| row.get(0),
             )?;
-            ensure!(exact, "native capture conflicts with its durable record");
-        }
-        tx.commit()?;
-        Ok(())
+            if changed == 0 {
+                let exact: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM external_guest_native_capture
+                     WHERE binding_digest=?1 AND quiesce_frame_digest=?2
+                     AND occurrence_digest=?3 AND durable_stage_id=?4
+                     AND snapshot_hash=?5 AND output_capture_hash IS ?6
+                     AND completion_request_digest=?7
+                     AND writer_exclusion_evidence_hash=?8)",
+                    params![
+                        self.0.binding.digest()?,
+                        capture.quiesce_frame_digest,
+                        capture.occurrence_digest,
+                        capture.durable_stage_id,
+                        capture.snapshot_hash,
+                        capture.output_capture_hash,
+                        capture.completion_request_digest,
+                        capture.writer_exclusion_evidence_hash
+                    ],
+                    |row| row.get(0),
+                )?;
+                ensure!(exact, "native capture conflicts with its durable record");
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 }
 
@@ -2264,6 +2472,9 @@ impl GuestStore {
         store_identity: &GuestJournalStoreIdentity,
         bootstrap_digest: &str,
         binding: &ExecutionChannelBinding,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
     ) -> Result<Self> {
         hash(bootstrap_digest, "external bootstrap digest")?;
         binding.validate()?;
@@ -2279,34 +2490,30 @@ impl GuestStore {
             .try_lock_exclusive()?
             .context("external guest directory still has a live owner")?;
         lifetime_lock.ensure_protects(&directory)?;
-        for name in directory.entry_names()? {
+        // WAL sidecars a crash left behind are admitted: the native keeper
+        // pins them and SQLite replays their committed frames. A rollback
+        // journal is refused.
+        native_journal::require_wal_entries(&directory, DATABASE_NAME, "external guest store")?;
+        {
+            // Metadata check before any SQLite effect: this descriptor is
+            // closed before the native keeper takes its own. A reserved inode
+            // that was never initialized is refused here, so recovery never
+            // stages or writes it.
+            let database_file = directory
+                .open_regular(OsStr::new(DATABASE_NAME), false)?
+                .context("external guest database is absent")?;
             ensure!(
-                name == OsStr::new(DATABASE_NAME) || name == journal_name(),
-                "external guest store has an ambient entry: {}",
-                directory.path().join(name).display()
+                lillux::matches_pinned_regular_file_identity(
+                    &database_file,
+                    store_identity.database_identity
+                )?,
+                "external guest database changed its outer inode identity"
+            );
+            ensure!(
+                lillux::observe_open_regular_file(&database_file)?.size() > 0,
+                "external guest database was reserved but never initialized"
             );
         }
-        for name in [wal_name(), shm_name()] {
-            ensure!(
-                directory.open_entry(&name, false)?.is_none(),
-                "external guest rollback journal store has an unexpected sidecar"
-            );
-        }
-        // A crash may leave an exact rollback journal. Pinning it before SQLite
-        // opens prevents a substituted special entry; SQLite may consume it.
-        let _rollback = directory.open_regular(&journal_name(), false)?;
-        let database_file = directory
-            .open_regular(OsStr::new(DATABASE_NAME), true)?
-            .context("external guest database is absent")?;
-        ensure!(
-            lillux::matches_pinned_regular_file_identity(
-                &database_file,
-                store_identity.database_identity
-            )?,
-            "external guest database changed its outer inode identity"
-        );
-        let conn = open_exact(&directory, &database_file)?;
-        configure(&conn)?;
         let state_runtime_identity_json = lillux::canonical_json(&serde_json::to_value(
             authority.runtime_directory().identity()?,
         )?)?;
@@ -2314,18 +2521,129 @@ impl GuestStore {
             store_identity.state_runtime_identity_json == state_runtime_identity_json,
             "external guest store changed receiver runtime authority"
         );
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the whole capture; the caller's factory and destination come
+        // from the process's one funded native host.
+        let schema_reference = unsafe {
+            native_journal::capture_schema_reference(
+                OriginalNativeDomain::ExternalGuestJournalSchemaReference,
+                &complete_schema(binding.execution_mode),
+                factory,
+                Arc::clone(&destination),
+                retain,
+            )
+        }?;
+        let directory = Arc::new(directory);
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the connection's whole life; the caller's factory and
+        // destination come from the process's one funded native host.
+        let conn = NativeJournalConnection::Live(unsafe {
+            open_native(
+                Arc::clone(&directory),
+                OriginalNativeBoundMode::Existing,
+                OriginalNativeDomain::ExternalGuestJournal,
+                factory,
+                destination,
+            )
+        }?);
+        let configured = (|| -> Result<()> {
+            ensure!(
+                conn.main_identity()? == store_identity.database_identity,
+                "external guest database changed its outer inode identity"
+            );
+            conn.with_sql(configure)?;
+            directory.sync()?;
+            Ok(())
+        })();
+        if let Err(error) = configured {
+            return Err(conn.refuse(error));
+        }
         let store = Self {
             conn,
+            schema_reference,
             directory,
             _lifetime_lock: lifetime_lock,
-            database_file,
+            reservation_pin: None,
             bootstrap_digest: bootstrap_digest.to_owned(),
             state_runtime_identity_json,
             binding: binding.clone(),
             store_identity: store_identity.clone(),
         };
-        store.validate()?;
+        if let Err(error) = store.validate() {
+            return Err(store.refuse(error));
+        }
         Ok(store)
+    }
+
+    /// The native keeper still binds the database name to the anchored inode.
+    fn require_database_identity(&self) -> Result<()> {
+        ensure!(
+            self.conn.main_identity()? == self.store_identity.database_identity,
+            "external guest database identity changed"
+        );
+        Ok(())
+    }
+
+    fn close(self) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        let Self {
+            conn,
+            schema_reference,
+            directory,
+            _lifetime_lock,
+            reservation_pin,
+            bootstrap_digest,
+            state_runtime_identity_json,
+            binding,
+            store_identity,
+        } = self;
+        // The reservation pin and the lifetime lock are released only after
+        // the connection closed.
+        match conn.close() {
+            Ok(terminal) => Ok(terminal),
+            Err((conn, error)) => Err((
+                Self {
+                    conn,
+                    schema_reference,
+                    directory,
+                    _lifetime_lock,
+                    reservation_pin,
+                    bootstrap_digest,
+                    state_runtime_identity_json,
+                    binding,
+                    store_identity,
+                },
+                error,
+            )),
+        }
+    }
+
+    /// Close this store because `error` refused it; the terminal, or the
+    /// refused close owner, rides the returned error. The reservation pin and
+    /// the lifetime lock are released only after the close.
+    fn refuse(self, error: anyhow::Error) -> anyhow::Error {
+        let Self {
+            conn,
+            schema_reference,
+            directory,
+            _lifetime_lock,
+            reservation_pin,
+            bootstrap_digest,
+            state_runtime_identity_json,
+            binding,
+            store_identity,
+        } = self;
+        let error = conn.refuse(error);
+        drop((
+            schema_reference,
+            directory,
+            _lifetime_lock,
+            reservation_pin,
+            bootstrap_digest,
+            state_runtime_identity_json,
+            binding,
+            store_identity,
+        ));
+        error
     }
 
     fn owner(&self) -> GuestOwner<'_> {
@@ -2335,29 +2653,26 @@ impl GuestStore {
     }
 
     fn validate(&self) -> Result<()> {
-        ensure_same_file(&self.directory, &self.database_file)?;
-        let app_id: i32 = self
-            .conn
-            .query_row("PRAGMA application_id", [], |row| row.get(0))?;
-        let epoch: i64 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        self.require_database_identity()?;
+        self.conn.with_sql(|conn| self.validate_sql(conn))
+    }
+
+    fn validate_sql(&self, conn: &Connection) -> Result<()> {
+        let app_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+        let epoch: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         ensure!(
             app_id == APPLICATION_ID && epoch == SCHEMA_EPOCH,
             "external guest database has predecessor or foreign identity"
         );
-        crate::sqlite_schema::assert_complete_schema_sql(
-            &self.conn,
-            &complete_schema(self.binding.execution_mode),
-            &self.directory.path().join(DATABASE_NAME),
-        )?;
-        self.owner().require_owner(&self.conn, &self.binding)?;
+        self.schema_reference
+            .require_matches(conn, &self.directory.path().join(DATABASE_NAME))?;
+        self.owner().require_owner(conn, &self.binding)?;
         let (retained_nonce, retained_directory, retained_database, retained_runtime): (
             String,
             String,
             String,
             String,
-        ) = self.conn.query_row(
+        ) = conn.query_row(
             "SELECT journal_nonce,directory_identity_json,database_identity_json,
                     state_runtime_identity_json
              FROM external_guest_meta WHERE singleton=1",
@@ -2381,17 +2696,17 @@ impl GuestStore {
             retained_runtime == self.state_runtime_identity_json,
             "external guest receiver CAS identity changed"
         );
-        let lifecycle: String = self.conn.query_row(
+        let lifecycle: String = conn.query_row(
             "SELECT lifecycle FROM external_guest_meta WHERE singleton=1",
             [],
             |row| row.get(0),
         )?;
-        let occurrence_count: i64 = self.conn.query_row(
+        let occurrence_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM external_guest_launcher_occurrence",
             [],
             |row| row.get(0),
         )?;
-        let ready_count: i64 = self.conn.query_row(
+        let ready_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM external_guest_launcher_ready",
             [],
             |row| row.get(0),
@@ -2403,8 +2718,7 @@ impl GuestStore {
             ),
             "external guest launcher lifecycle lost exact occurrence evidence"
         );
-        let applied: Option<(String, String, String, String)> = self
-            .conn
+        let applied: Option<(String, String, String, String)> = conn
             .query_row(
                 "SELECT launcher_occurrence_digest,candidate_program_digest,
                         receipt_digest,receipt_json
@@ -2416,7 +2730,7 @@ impl GuestStore {
         if let Some((occurrence, program, digest, receipt_json)) = &applied {
             let receipt: lillux::LinuxSandboxAppliedLaunchReceipt =
                 serde_json::from_str(&receipt_json)?;
-            let release_applied: bool = self.conn.query_row(
+            let release_applied: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                    AND application='applied'
@@ -2429,10 +2743,7 @@ impl GuestStore {
                     && ready_count == 1
                     && release_applied
                     && occurrence
-                        == &retained_launcher_occurrence_digest(
-                            &self.conn,
-                            &self.binding.digest()?,
-                        )?
+                        == &retained_launcher_occurrence_digest(conn, &self.binding.digest()?,)?
                     && program == &self.binding.candidate_program_digest
                     && digest == &lillux::sha256_hex(receipt_json.as_bytes())
                     && receipt_json == &lillux::canonical_json(&serde_json::to_value(&receipt)?)?
@@ -2447,7 +2758,7 @@ impl GuestStore {
                 "external guest applied runtime lost exact occurrence evidence"
             );
         }
-        let mut applied_frames = self.conn.prepare(
+        let mut applied_frames = conn.prepare(
             "SELECT frame_json FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
@@ -2484,8 +2795,7 @@ impl GuestStore {
             ExternalExecutionMode::QualificationStructuredSession {}
         ) {
             let binding_digest = self.binding.digest()?;
-            let retained: Option<(String, String)> = self
-                .conn
+            let retained: Option<(String, String)> = conn
                 .query_row(
                     "SELECT completion_frame_digest,observation_json
                  FROM external_guest_qualification_settlement WHERE binding_digest=?1",
@@ -2508,7 +2818,7 @@ impl GuestStore {
                         && observation.observation.applied_runtime_receipt_digest == receipt_digest,
                     "qualification settlement changed its native occurrence or applied runtime"
                 );
-                let (command_wire, application): (String, String) = self.conn.query_row(
+                let (command_wire, application): (String, String) = conn.query_row(
                     "SELECT frame_json,application FROM external_execution_frame
                      WHERE binding_digest=?1 AND direction='owner_to_supervisor'
                        AND frame_digest=?2
@@ -2528,7 +2838,7 @@ impl GuestStore {
                         && matches!(application.as_str(), "claimed" | "applied"),
                     "qualification settlement changed its initiating command"
                 );
-                let signed: Vec<String> = self.conn.prepare(
+                let signed: Vec<String> = conn.prepare(
                     "SELECT frame_json FROM external_execution_frame
                      WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                        AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled'
@@ -2555,7 +2865,7 @@ impl GuestStore {
                     );
                 }
             } else {
-                let signed: bool = self.conn.query_row(
+                let signed: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM external_execution_frame
                      WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                        AND json_extract(frame_json,'$.frame.payload.kind')='qualification_scope_settled')",
@@ -2564,11 +2874,20 @@ impl GuestStore {
                 ensure!(!signed, "qualification settlement frame has no native row");
             }
         }
-        journal::validate_channels(&self.conn, &self.owner())?;
+        journal::validate_channels(conn, &self.owner())?;
         Ok(())
     }
 
     fn validate_retained_content(&self, authority: &PinnedStateAuthority) -> Result<()> {
+        self.conn
+            .with_sql(|conn| self.validate_retained_content_sql(conn, authority))
+    }
+
+    fn validate_retained_content_sql(
+        &self,
+        conn: &Connection,
+        authority: &PinnedStateAuthority,
+    ) -> Result<()> {
         ensure!(
             self.state_runtime_identity_json
                 == lillux::canonical_json(&serde_json::to_value(
@@ -2577,10 +2896,19 @@ impl GuestStore {
             "external guest recovery changed receiver CAS authority"
         );
         let guard = authority.acquire_shared_guard()?;
-        let q_rows = self.conn.prepare(
-            "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement WHERE binding_digest=?1")?
-            .query_map([self.binding.digest()?], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,Option<String>>(2)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Only the qualification mode's schema declares the settlement table;
+        // every other mode's exact schema has none, so it retains no rows.
+        let q_rows = if matches!(
+            self.binding.execution_mode,
+            ExternalExecutionMode::QualificationStructuredSession {}
+        ) {
+            conn.prepare(
+                "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement WHERE binding_digest=?1")?
+                .query_map([self.binding.digest()?], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,Option<String>>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         for (raw, program_json, stage_id) in q_rows {
             use crate::objects::qualification_fixture::QFixtureCaptureMetadata;
             let settlement: NativeQualificationScopeSettlement = serde_json::from_str(&raw)?;
@@ -2659,7 +2987,7 @@ impl GuestStore {
                 }
             }
         }
-        let mut captures = self.conn.prepare(
+        let mut captures = conn.prepare(
             "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
                     snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
              FROM external_guest_native_capture ORDER BY binding_digest",
@@ -2680,8 +3008,7 @@ impl GuestStore {
         for (quiesce, occurrence, stage_id, snapshot, output_capture, completion, evidence) in
             captures
         {
-            let application: Option<String> = self
-                .conn
+            let application: Option<String> = conn
                 .query_row(
                     "SELECT application FROM external_execution_frame
                      WHERE binding_digest=?1 AND direction='owner_to_supervisor'
@@ -2723,7 +3050,7 @@ impl GuestStore {
                 "guest native capture changed its exact durable occurrence roots"
             );
         }
-        let mut rows = self.conn.prepare(
+        let mut rows = conn.prepare(
             "SELECT sealed_frame_digest,occurrence_digest,durable_receipt_id,
                     snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
              FROM external_guest_export_retention ORDER BY binding_digest",
@@ -2753,7 +3080,7 @@ impl GuestStore {
                 &completion,
                 &evidence,
             )?;
-            let matches_frame: bool = self.conn.query_row(
+            let matches_frame: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                  AND frame_digest=?2
@@ -2798,7 +3125,7 @@ impl GuestStore {
     }
 
     fn commit_terminal_revocation(&self, wire: &[u8]) -> Result<CommittedGuestRevocation> {
-        ensure_same_file(&self.directory, &self.database_file)?;
+        self.require_database_identity()?;
         let frame = SignedExecutionFrame::decode_and_verify(
             wire,
             &self.binding,
@@ -2809,14 +3136,17 @@ impl GuestStore {
                 && matches!(frame.frame().payload, ExecutionChannelPayload::Cancel),
             "external terminal revocation is not an owner cancellation"
         );
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let newly_recorded = journal::record_revocation(
-            &tx,
-            &self.owner(),
-            &self.binding.placement_thread_id,
-            wire,
-        )?;
-        tx.commit()?;
+        let newly_recorded = self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let newly_recorded = journal::record_revocation(
+                &tx,
+                &self.owner(),
+                &self.binding.placement_thread_id,
+                wire,
+            )?;
+            tx.commit()?;
+            Ok(newly_recorded)
+        })?;
         Ok(CommittedGuestRevocation {
             frame,
             wire: wire.to_vec(),
@@ -2828,28 +3158,20 @@ impl GuestStore {
         &self,
         committed: &CommittedGuestRevocation,
     ) -> RevocationAppendOutcome {
-        if let Err(error) = ensure_same_file(&self.directory, &self.database_file) {
+        if let Err(error) = self.require_database_identity() {
             return RevocationAppendOutcome::Blocked {
                 revocation_committed: true,
                 error,
             };
         }
-        let tx = match Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate) {
-            Ok(tx) => tx,
-            Err(error) => {
-                return RevocationAppendOutcome::Blocked {
-                    revocation_committed: true,
-                    error: error.into(),
-                };
-            }
-        };
-        let result = journal::append_frame(
-            &tx,
-            &self.owner(),
-            &self.binding.placement_thread_id,
-            &committed.wire,
-        )
-        .and_then(|appended| {
+        let result = self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let appended = journal::append_frame(
+                &tx,
+                &self.owner(),
+                &self.binding.placement_thread_id,
+                &committed.wire,
+            )?;
             tx.commit()?;
             Ok(appended)
         });
@@ -3066,30 +3388,41 @@ impl JournalOwner for GuestOwner<'_> {
     }
 }
 
+/// WAL, `synchronous=FULL` and foreign keys, each read back. The crash
+/// argument for this contract is in [`super::native_journal`].
 fn configure(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(lillux::time::Duration::from_secs(5))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    let mode: String = conn.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
-    ensure!(
-        mode == "delete",
-        "external guest journal mode is not rollback-delete"
-    );
-    Ok(())
+    native_journal::configure(conn, "external guest journal")
 }
 
-fn open_exact(directory: &lillux::PinnedDirectory, expected: &File) -> Result<Connection> {
-    let path = directory.descriptor_child_path(OsStr::new(DATABASE_NAME))?;
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("open protected external guest database {}", path.display()))?;
-    ensure_same_file(directory, expected)?;
-    Ok(conn)
+/// Open the guest database on one bound ticket of `factory`.
+///
+/// # Safety
+/// The caller holds the exclusive lifetime lock of `directory` for as long as
+/// the returned connection lives, and `factory` and `destination` come from
+/// the one native host funded for this supervisor process.
+unsafe fn open_native(
+    directory: Arc<lillux::PinnedDirectory>,
+    mode: OriginalNativeBoundMode,
+    domain: OriginalNativeDomain,
+    factory: &Arc<OriginalNativeFactory>,
+    destination: Arc<dyn OriginalNativeDestinationAuthority>,
+) -> Result<OriginalNativeConnection> {
+    // SAFETY: forwarded from this function's contract.
+    unsafe {
+        native_journal::open_bound(
+            directory,
+            OsStr::new(DATABASE_NAME),
+            mode,
+            domain,
+            factory,
+            destination,
+        )
+    }
 }
 
-fn ensure_same_file(directory: &lillux::PinnedDirectory, expected: &File) -> Result<()> {
+/// The reservation's pinned descriptor still names the database entry. Runs
+/// before any SQLite connection exists on that inode.
+fn ensure_reserved_file(directory: &lillux::PinnedDirectory, expected: &File) -> Result<()> {
     let current = directory
         .open_regular(OsStr::new(DATABASE_NAME), false)?
         .context("external guest database disappeared")?;
@@ -3100,30 +3433,23 @@ fn ensure_same_file(directory: &lillux::PinnedDirectory, expected: &File) -> Res
     Ok(())
 }
 
-fn wal_name() -> OsString {
-    OsString::from(format!("{DATABASE_NAME}-wal"))
-}
-
-fn shm_name() -> OsString {
-    OsString::from(format!("{DATABASE_NAME}-shm"))
-}
-
-fn journal_name() -> OsString {
-    OsString::from(format!("{DATABASE_NAME}-journal"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
 
     use super::*;
+    use crate::external_execution::native_journal::testing::{
+        census, refusal, retire, root as journal_root,
+    };
     use crate::external_execution::{
         ExecutionFrame, NativeNamespaceExit, NativeWriterExclusionMechanism,
         NativeWriterExclusionObservation, SignedExecutionFrame,
     };
     use crate::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
+    use crate::test_support::shared_test_host;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
+    use lillux_sqlite::test_host::TestNativeHost;
 
     fn binding() -> (ExecutionChannelBinding, SigningKey, SigningKey) {
         let owner = lillux::crypto::generate_signing_key();
@@ -3188,6 +3514,7 @@ mod tests {
     }
 
     fn live_store(
+        host: &TestNativeHost,
         root: &tempfile::TempDir,
         authority: &PinnedStateAuthority,
     ) -> (
@@ -3198,10 +3525,11 @@ mod tests {
         String,
         GuestJournalStoreIdentity,
     ) {
-        live_store_for_binding(root, authority, binding())
+        live_store_for_binding(host, root, authority, binding())
     }
 
     fn live_store_for_binding(
+        host: &TestNativeHost,
         root: &tempfile::TempDir,
         authority: &PinnedStateAuthority,
         (binding, owner, supervisor): (ExecutionChannelBinding, SigningKey, SigningKey),
@@ -3216,9 +3544,16 @@ mod tests {
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
         let bootstrap = "9".repeat(64);
-        let prepared =
-            PreparedGuestJournal::create(directory, authority, &bootstrap, binding.clone())
-                .unwrap();
+        let prepared = PreparedGuestJournal::create(
+            directory,
+            authority,
+            &bootstrap,
+            binding.clone(),
+            host.factory(),
+            host.destination(),
+            &census(&host),
+        )
+        .unwrap();
         let store_identity = prepared.store_identity().clone();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -3264,9 +3599,10 @@ mod tests {
 
     #[test]
     fn launcher_readiness_observation_reads_exact_immutable_live_journal() {
+        let host = shared_test_host();
         let (_state_root, authority) = state_authority();
         let root = tempfile::tempdir().unwrap();
-        let (live, binding, _, _, _, _) = live_store(&root, &authority);
+        let (live, binding, _, _, _, _) = live_store(&host, &root, &authority);
         let observed = live.retained_launcher_ready().unwrap();
         assert_eq!(observed.binding_digest(), binding.digest().unwrap());
         assert_eq!(observed.process_identity().target_pid, 100);
@@ -3276,36 +3612,98 @@ mod tests {
         assert_eq!(observed.handshake_transcript_digest(), "5".repeat(64));
         assert_eq!(
             observed.occurrence_digest(),
-            retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap()
+            live.0
+                .conn
+                .with_sql(|conn| retained_launcher_occurrence_digest(
+                    conn,
+                    &binding.digest().unwrap()
+                ))
+                .unwrap()
         );
         assert!(
             live.0
                 .conn
-                .execute(
-                    "UPDATE external_guest_launcher_ready SET handshake_transcript_digest=?1",
-                    [&"8".repeat(64)],
-                )
-                .is_err()
+                .with_sql(|conn| Ok(conn
+                    .execute(
+                        "UPDATE external_guest_launcher_ready SET handshake_transcript_digest=?1",
+                        [&"8".repeat(64)],
+                    )
+                    .is_err()))
+                .unwrap()
         );
         assert!(
             live.0
                 .conn
-                .execute("DELETE FROM external_guest_launcher_occurrence", [],)
-                .is_err()
+                .with_sql(|conn| Ok(conn
+                    .execute("DELETE FROM external_guest_launcher_occurrence", [],)
+                    .is_err()))
+                .unwrap()
         );
         assert_eq!(
             live.retained_launcher_ready().unwrap().occurrence_digest(),
             observed.occurrence_digest()
         );
+        retire(&host, live.close());
     }
 
     fn state_authority() -> (tempfile::TempDir, PinnedStateAuthority) {
         let root = tempfile::tempdir().unwrap();
-        let db = crate::StateDb::open(root.path(), std::sync::Arc::new(crate::TrustStore::new()))
-            .unwrap();
+        let db = crate::test_support::TestState::open(
+            root.path(),
+            std::sync::Arc::new(crate::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         drop(db);
         (root, authority)
+    }
+
+    fn recover(
+        host: &TestNativeHost,
+        directory: lillux::PinnedDirectory,
+        authority: &PinnedStateAuthority,
+        store_identity: &GuestJournalStoreIdentity,
+        bootstrap_digest: &str,
+        binding: &ExecutionChannelBinding,
+    ) -> Result<RecoveredGuestJournal> {
+        RecoveredGuestJournal::open(
+            directory,
+            authority,
+            store_identity,
+            bootstrap_digest,
+            binding,
+            host.factory(),
+            host.destination(),
+            &census(&host),
+        )
+    }
+
+    /// Reopen, validate and close the retained journal; a refusal settles
+    /// into the census and returns its text as the error.
+    fn recover_checked(
+        host: &TestNativeHost,
+        root: &std::path::Path,
+        authority: &PinnedStateAuthority,
+        store_identity: &GuestJournalStoreIdentity,
+        bootstrap_digest: &str,
+        binding: &ExecutionChannelBinding,
+    ) -> Result<()> {
+        let directory = lillux::PinnedDirectory::open(root)?
+            .ok_or_else(|| anyhow::anyhow!("guest journal root absent"))?;
+        let recovered = match recover(
+            host,
+            directory,
+            authority,
+            store_identity,
+            bootstrap_digest,
+            binding,
+        ) {
+            Ok(recovered) => recovered,
+            Err(error) => anyhow::bail!(refusal(host, Err::<(), _>(error))),
+        };
+        let checked = recovered.validate();
+        retire(host, recovered.close());
+        checked
     }
 
     fn qualification_fixture_program()
@@ -3351,6 +3749,7 @@ mod tests {
 
     #[test]
     fn qualification_fixture_custody_survives_interrupted_completion_and_cold_reopen() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let program = qualification_fixture_program();
@@ -3360,9 +3759,12 @@ mod tests {
         binding.candidate_program_digest = program.digest().unwrap();
         binding.validate().unwrap();
         let (live, binding, owner, supervisor, bootstrap, store_identity) =
-            live_store_for_binding(&root, &authority, (binding, owner, supervisor));
-        let occurrence =
-            retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap();
+            live_store_for_binding(&host, &root, &authority, (binding, owner, supervisor));
+        let occurrence = live
+            .0
+            .conn
+            .with_sql(|conn| retained_launcher_occurrence_digest(conn, &binding.digest().unwrap()))
+            .unwrap();
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -3485,11 +3887,11 @@ mod tests {
             )
             .unwrap();
         let row = || {
-            live.0.conn.query_row(
+            live.0.conn.with_sql(|conn| Ok(conn.query_row(
             "SELECT observation_json,program_json,durable_stage_id FROM external_guest_qualification_settlement WHERE binding_digest=?1",
             [binding.digest().unwrap()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-        ).unwrap()
+        )?)).unwrap()
         };
         let original_row = row();
         let reference = settlement.fixture_capture.as_ref().unwrap();
@@ -3625,17 +4027,16 @@ mod tests {
             .is_none()
         );
         assert_eq!(row(), original_row);
-        drop(live);
-        let reopen = || -> Result<()> {
-            let directory = lillux::PinnedDirectory::open(root.path())?.unwrap();
-            RecoveredGuestJournal::open(
-                directory,
+        retire(&host, live.close());
+        let reopen = || {
+            recover_checked(
+                &host,
+                root.path(),
                 &authority,
                 &store_identity,
                 &bootstrap,
                 &binding,
-            )?
-            .validate()
+            )
         };
         reopen().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -3667,12 +4068,16 @@ mod tests {
 
     #[test]
     fn applied_runtime_requires_released_exact_occurrence_and_reopens_immutably() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, supervisor, bootstrap, store_identity) =
-            live_store(&root, &authority);
-        let occurrence =
-            retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap();
+            live_store(&host, &root, &authority);
+        let occurrence = live
+            .0
+            .conn
+            .with_sql(|conn| retained_launcher_occurrence_digest(conn, &binding.digest().unwrap()))
+            .unwrap();
         let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
             owned_child_pid: 101,
             namespace_pid: 1,
@@ -3756,11 +4161,17 @@ mod tests {
             "UPDATE external_guest_runtime_applied SET receipt_digest='other'",
             "DELETE FROM external_guest_runtime_applied",
         ] {
-            assert!(live.0.conn.execute(statement, []).is_err());
+            assert!(
+                live.0
+                    .conn
+                    .with_sql(|conn| Ok(conn.execute(statement, []).is_err()))
+                    .unwrap()
+            );
         }
         live.validate().unwrap();
-        drop(live);
-        let recovered = RecoveredGuestJournal::open(
+        retire(&host, live.close());
+        let recovered = recover(
+            &host,
             lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
             &authority,
             &store_identity,
@@ -3769,28 +4180,32 @@ mod tests {
         )
         .unwrap();
         recovered.validate().unwrap();
+        retire(&host, recovered.close());
     }
 
     #[test]
     fn fresh_intent_is_single_owner_and_reopen_is_recovery_only() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, _owner, _supervisor, bootstrap, store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let competing = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
-        assert!(
-            RecoveredGuestJournal::open(
+        refusal(
+            &host,
+            recover(
+                &host,
                 competing,
                 &authority,
                 &store_identity,
                 &bootstrap,
-                &binding
-            )
-            .is_err()
+                &binding,
+            ),
         );
         live.validate().unwrap();
-        drop(live);
-        let recovered = RecoveredGuestJournal::open(
+        retire(&host, live.close());
+        let recovered = recover(
+            &host,
             lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
             &authority,
             &store_identity,
@@ -3803,81 +4218,109 @@ mod tests {
             recovered.binding().digest().unwrap(),
             binding.digest().unwrap()
         );
-        drop(recovered);
+        retire(&host, recovered.close());
         let (_other_state_root, other_authority) = state_authority();
-        assert!(
-            RecoveredGuestJournal::open(
+        refusal(
+            &host,
+            recover(
+                &host,
                 lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
                 &other_authority,
                 &store_identity,
                 &bootstrap,
                 &binding,
-            )
-            .is_err()
+            ),
         );
-        assert!(
-            RecoveredGuestJournal::open(
+        refusal(
+            &host,
+            recover(
+                &host,
                 lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
                 &authority,
                 &store_identity,
                 &"8".repeat(64),
                 &binding,
-            )
-            .is_err()
+            ),
         );
     }
 
     #[test]
     fn outer_owner_can_anchor_exact_guest_inode_before_initialization() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
         let (_state_root, authority) = state_authority();
         let (binding, _owner, _supervisor) = binding();
         let bootstrap = "9".repeat(64);
-        let reserved =
-            PreparedGuestJournal::reserve(directory, &authority, &bootstrap, binding.clone())
-                .unwrap();
+        let reserved = PreparedGuestJournal::reserve(
+            directory,
+            &authority,
+            &bootstrap,
+            binding.clone(),
+            host.factory(),
+            host.destination(),
+        )
+        .unwrap();
         let outer_anchor = reserved.store_identity().clone();
         outer_anchor.digest().unwrap();
         assert_eq!(reserved.bootstrap_digest(), bootstrap);
         assert_eq!(reserved.binding(), &binding);
-        let prepared = reserved.initialize().unwrap();
+        let prepared = reserved.initialize(&census(&host)).unwrap();
         assert_eq!(prepared.store_identity(), &outer_anchor);
         prepared.0.validate().unwrap();
+        retire(&host, prepared.close());
     }
 
     #[test]
     fn abandoned_guest_reservation_cannot_be_reinitialized_or_reopened_live() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
         let (_state_root, authority) = state_authority();
         let (binding, _owner, _supervisor) = binding();
         let bootstrap = "9".repeat(64);
-        let reserved =
-            PreparedGuestJournal::reserve(directory, &authority, &bootstrap, binding.clone())
-                .unwrap();
+        let reserved = PreparedGuestJournal::reserve(
+            directory,
+            &authority,
+            &bootstrap,
+            binding.clone(),
+            host.factory(),
+            host.destination(),
+        )
+        .unwrap();
         let outer_anchor = reserved.store_identity().clone();
         drop(reserved);
         let reopened = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
-        assert!(
+        refusal(
+            &host,
             PreparedGuestJournal::create(
                 reopened.try_clone().unwrap(),
                 &authority,
                 &bootstrap,
                 binding.clone(),
-            )
-            .is_err()
+                host.factory(),
+                host.destination(),
+                &census(&host),
+            ),
         );
-        assert!(
-            RecoveredGuestJournal::open(reopened, &authority, &outer_anchor, &bootstrap, &binding,)
-                .is_err()
+        refusal(
+            &host,
+            recover(
+                &host,
+                reopened,
+                &authority,
+                &outer_anchor,
+                &bootstrap,
+                &binding,
+            ),
         );
     }
 
     #[test]
     fn guest_reservation_refuses_mutation_and_competing_owner_before_initialization() {
+        let host = shared_test_host();
         enum Mutation {
             ReplaceInode,
             WriteBytes,
@@ -3885,6 +4328,7 @@ mod tests {
             CompetingOwner,
         }
 
+        let (_state_root, authority) = state_authority();
         for mutation in [
             Mutation::ReplaceInode,
             Mutation::WriteBytes,
@@ -3894,12 +4338,17 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
             directory.tighten_owner_private_directory().unwrap();
-            let (_state_root, authority) = state_authority();
             let (binding, _owner, _supervisor) = binding();
             let bootstrap = "9".repeat(64);
-            let reserved =
-                PreparedGuestJournal::reserve(directory, &authority, &bootstrap, binding.clone())
-                    .unwrap();
+            let reserved = PreparedGuestJournal::reserve(
+                directory,
+                &authority,
+                &bootstrap,
+                binding.clone(),
+                host.factory(),
+                host.destination(),
+            )
+            .unwrap();
 
             match mutation {
                 Mutation::ReplaceInode => {
@@ -3909,7 +4358,7 @@ mod tests {
                         .sync_all()
                         .unwrap();
                     std::fs::rename(replacement, root.path().join(DATABASE_NAME)).unwrap();
-                    assert!(reserved.initialize().is_err());
+                    refusal(&host, reserved.initialize(&census(&host)));
                 }
                 Mutation::WriteBytes => {
                     std::fs::OpenOptions::new()
@@ -3918,16 +4367,21 @@ mod tests {
                         .unwrap()
                         .write_all(b"not empty")
                         .unwrap();
-                    assert!(reserved.initialize().is_err());
+                    refusal(&host, reserved.initialize(&census(&host)));
                 }
                 Mutation::AmbientEntry => {
                     std::fs::File::create(root.path().join("ambient")).unwrap();
-                    assert!(reserved.initialize().is_err());
+                    refusal(&host, reserved.initialize(&census(&host)));
                 }
                 Mutation::CompetingOwner => {
                     let competing = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
                     let error = match PreparedGuestJournal::reserve(
-                        competing, &authority, &bootstrap, binding,
+                        competing,
+                        &authority,
+                        &bootstrap,
+                        binding,
+                        host.factory(),
+                        host.destination(),
                     ) {
                         Ok(_) => panic!("competing guest owner acquired reservation"),
                         Err(error) => format!("{error:#}"),
@@ -3936,7 +4390,7 @@ mod tests {
                         error.contains("external guest directory already has a live owner"),
                         "competing reservation failed at the wrong boundary: {error}"
                     );
-                    reserved.initialize().unwrap();
+                    retire(&host, reserved.initialize(&census(&host)).unwrap().close());
                 }
             }
         }
@@ -3944,10 +4398,11 @@ mod tests {
 
     #[test]
     fn sticky_revocation_wins_before_the_native_side_effect_gate() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -3987,14 +4442,16 @@ mod tests {
             cancel_digest
         );
         live.validate().unwrap();
+        retire(&host, live.close());
     }
 
     #[test]
     fn writer_gate_linearizes_a_second_connection_revocation() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -4020,22 +4477,44 @@ mod tests {
             1,
             ExecutionChannelPayload::Cancel,
         );
+        // A second connection on its own native ticket, opened before the
+        // gate so its open takes no ticket inside the gated SQL scope.
+        let second = match host.open_bound(
+            journal_root(root.path()),
+            OsStr::new(DATABASE_NAME),
+            OriginalNativeBoundMode::Existing,
+            OriginalNativeDomain::ExternalGuestJournal,
+        ) {
+            Ok(second) => second,
+            Err(failure) => {
+                let error = failure.to_string();
+                host.retire_open_failure(failure);
+                panic!("second guest connection refused: {error}")
+            }
+        };
         let (_, release_performed) = live
             .apply_once(release_token, |_| {
-                let conn = Connection::open(root.path().join(DATABASE_NAME))?;
-                conn.busy_timeout(std::time::Duration::ZERO)?;
-                let error =
-                    Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap_err();
-                assert!(
-                    matches!(
-                        error.sqlite_error_code(),
-                        Some(rusqlite::ErrorCode::DatabaseBusy)
-                    ),
-                    "revocation must deterministically observe the native-action writer gate"
-                );
-                Ok(())
+                second.with_sql(|conn| {
+                    let error = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+                        .unwrap_err();
+                    assert!(
+                        matches!(
+                            error.sqlite_error_code(),
+                            Some(rusqlite::ErrorCode::DatabaseBusy)
+                        ),
+                        "revocation must deterministically observe the native-action writer gate"
+                    );
+                    Ok(())
+                })
             })
             .unwrap();
+        // The journal's own connection is a live peer on the same inode, so
+        // the second connection's descriptors stay retained until that peer
+        // closes: its close is pending, and is retried after the journal's.
+        let second_pending = match second.close() {
+            Ok(_) => panic!("a second connection closed while its peer still held the inode"),
+            Err(pending) => pending,
+        };
         live.finish(release_performed).unwrap();
         assert!(live.record_frame(&cancel).unwrap());
         assert!(matches!(
@@ -4044,14 +4523,20 @@ mod tests {
             GuestApplicationClaim::New(_)
         ));
         live.validate().unwrap();
+        retire(&host, live.close());
+        match second_pending.retry() {
+            Ok(closed) => host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed)),
+            Err(failure) => panic!("second guest connection close retained: {failure}"),
+        }
     }
 
     #[test]
     fn supervisor_authoring_uses_retained_frontiers_and_exact_role_key() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -4141,14 +4626,16 @@ mod tests {
             } if peer_frame_digest == &owner_ack_digest
         ));
         live.validate().unwrap();
+        retire(&host, live.close());
     }
 
     #[test]
     fn supervisor_batch_budget_failure_retains_no_partial_prefix() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -4202,10 +4689,12 @@ mod tests {
             Some(ready_digest.as_str())
         );
         live.validate().unwrap();
+        retire(&host, live.close());
     }
 
     #[test]
     fn native_capture_is_rooted_and_reopen_validates_exact_quiesce_coordinates() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let cas = authority.cas_store().unwrap();
@@ -4244,9 +4733,16 @@ mod tests {
         let bootstrap = "9".repeat(64);
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
-        let prepared =
-            PreparedGuestJournal::create(directory, &authority, &bootstrap, binding.clone())
-                .unwrap();
+        let prepared = PreparedGuestJournal::create(
+            directory,
+            &authority,
+            &bootstrap,
+            binding.clone(),
+            host.factory(),
+            host.destination(),
+            &census(&host),
+        )
+        .unwrap();
         let store_identity = prepared.store_identity().clone();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
             lillux::ExactProcessIdentity {
@@ -4407,74 +4903,103 @@ mod tests {
                 .frame_digest(),
             capture.quiesce_frame_digest
         );
-        drop(live);
-        RecoveredGuestJournal::open(
-            lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
+        retire(&host, live.close());
+        recover_checked(
+            &host,
+            root.path(),
             &authority,
             &store_identity,
             &bootstrap,
             &binding,
         )
-        .unwrap()
-        .validate()
         .unwrap();
     }
 
     #[test]
     fn recovery_refuses_schema_drift_without_repair() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, _owner, _supervisor, bootstrap, store_identity) =
-            live_store(&root, &authority);
-        drop(live);
-        let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-        conn.execute_batch("CREATE TABLE ambient_drift(value TEXT);")
-            .unwrap();
-        drop(conn);
-        assert!(
-            RecoveredGuestJournal::open(
+            live_store(&host, &root, &authority);
+        retire(&host, live.close());
+        host.with_existing(
+            journal_root(root.path()),
+            OsStr::new(DATABASE_NAME),
+            OriginalNativeDomain::ExternalGuestJournal,
+            |conn| {
+                conn.execute_batch("CREATE TABLE ambient_drift(value TEXT);")?;
+                Ok(())
+            },
+        );
+        refusal(
+            &host,
+            recover(
+                &host,
                 lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
                 &authority,
                 &store_identity,
                 &bootstrap,
                 &binding,
-            )
-            .is_err()
+            ),
         );
     }
 
     #[test]
     fn recovery_refuses_a_byte_copy_replacement_database_inode() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, _owner, _supervisor, bootstrap, store_identity) =
-            live_store(&root, &authority);
-        drop(live);
+            live_store(&host, &root, &authority);
+        retire(&host, live.close());
         let database = root.path().join(DATABASE_NAME);
         let replacement = root.path().join("replacement.sqlite3");
         std::fs::copy(&database, &replacement).unwrap();
         std::fs::rename(&replacement, &database).unwrap();
-        assert!(
-            RecoveredGuestJournal::open(
+        let error = refusal(
+            &host,
+            recover(
+                &host,
                 lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
                 &authority,
                 &store_identity,
                 &bootstrap,
                 &binding,
-            )
-            .err()
-            .expect("replacement database must be refused")
-            .to_string()
-            .contains("outer inode identity")
+            ),
+        );
+        assert!(
+            error.contains("outer inode identity"),
+            "replacement database was not diagnosed: {error}"
         );
     }
 
     #[test]
     fn live_database_replacement_between_claim_and_effect_is_refused() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::live_database_replacement_between_claim_and_effect_is_refused"
+        );
+        // Replacing a live database poisons its native keeper, and no close
+        // settles a poisoned keeper. The scenario therefore runs in its own
+        // child process and ends with it; this process checks what it saw.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert!(
+                outcome.contains("bound database was replaced"),
+                "live replacement was not diagnosed: {outcome}"
+            );
+            assert!(
+                outcome.contains("external journal native close retained"),
+                "the poisoned journal's close was not refused: {outcome}"
+            );
+            return;
+        }
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
-        let (_state_root, authority) = state_authority();
+        let (state_root, authority) = state_authority();
         let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -4500,15 +5025,38 @@ mod tests {
         let replacement = root.path().join("replacement.sqlite3");
         std::fs::copy(&database, &replacement).unwrap();
         std::fs::rename(&replacement, &database).unwrap();
-        assert!(live.apply_once(token, |_| Ok(())).is_err());
+        let Err(error) = live.apply_once(token, |_| Ok(())) else {
+            panic!("an effect on a replaced live database was admitted")
+        };
+        let refusal = format!("{error:#}");
+        // Every ticket but the poisoned journal's reached the census.
+        let (issued, recorded) = host.ticket_census();
+        assert_eq!(
+            issued as usize,
+            recorded + 1,
+            "only the poisoned journal may remain outside the census"
+        );
+        // The poisoned keeper refuses its close, and the journal keeps it.
+        let (live, close) = match live.close() {
+            Ok(terminal) => {
+                host.retain_terminal(terminal);
+                panic!("a poisoned journal keeper closed");
+            }
+            Err(retained) => retained,
+        };
+        lillux_sqlite::test_host::end_isolated_process(
+            (live, authority, state_root, root, host),
+            &format!("refusal: {refusal}; close: {close:#}"),
+        )
     }
 
     #[test]
     fn partial_protocol_write_is_overtaken_by_sticky_cancellation() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (release, release_digest) = wire(
             &binding,
             &owner,
@@ -4573,14 +5121,16 @@ mod tests {
             .is_err()
         );
         assert_eq!(written, b"a");
+        retire(&host, live.close());
     }
 
     #[test]
     fn revocation_commit_survives_a_transcript_gap() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, supervisor, bootstrap, store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (cancel, cancel_digest) = wire(
             &binding,
             &owner,
@@ -4620,8 +5170,9 @@ mod tests {
                 application: crate::external_execution::ExecutionFrameApplication::Applied,
             } if peer_frame_digest == &cancel_digest
         ));
-        drop(live);
-        let recovered = RecoveredGuestJournal::open(
+        retire(&host, live.close());
+        let recovered = recover(
+            &host,
             lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
             &authority,
             &store_identity,
@@ -4638,14 +5189,16 @@ mod tests {
                 ..
             }
         ));
+        retire(&host, recovered.close());
     }
 
     #[test]
     fn terminal_stop_is_durably_one_shot() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (cancel, _) = wire(
             &binding,
             &owner,
@@ -4679,14 +5232,16 @@ mod tests {
             GuestTerminalApplicationClaim::AlreadyApplied
         ));
         assert_eq!(stops, 1);
+        retire(&host, live.close());
     }
 
     #[test]
     fn failed_terminal_stop_remains_claimed_unknown() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
         let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
-            live_store(&root, &authority);
+            live_store(&host, &root, &authority);
         let (cancel, _) = wire(
             &binding,
             &owner,
@@ -4710,5 +5265,6 @@ mod tests {
             live.claim_terminal_revocation(&committed).unwrap(),
             GuestTerminalApplicationClaim::AlreadyClaimed
         ));
+        retire(&host, live.close());
     }
 }

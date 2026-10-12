@@ -10,6 +10,7 @@ pub(crate) const SUPERVISOR_TEMP_PURPOSE: lillux::TempPurpose =
 
 pub mod entrypoint;
 mod http_transport;
+pub mod native_host;
 pub mod relay_transport;
 pub mod runtime;
 
@@ -423,7 +424,7 @@ mod tests {
             )
             .unwrap();
         ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller:
                 ryeos_state::external_execution::transport::ExternalControllerTransportContract {
                     schema: 2,
@@ -480,6 +481,14 @@ mod tests {
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
         }
     }
 
@@ -955,6 +964,8 @@ mod tests {
 
     #[test]
     fn lost_attach_response_retries_same_key_after_bootstrap_deadline() {
+        use ryeos_state::external_execution::native_journal::testing::{census, retire};
+        let host = ryeos_state::test_support::shared_test_host();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut bootstrap = bootstrap(
@@ -1009,6 +1020,9 @@ mod tests {
             bootstrap,
             captured_network_inputs,
             lillux::crypto::SigningKey::from_bytes(&[53; 32]),
+            host.factory(),
+            host.destination(),
+            &census(&host),
         )
         .unwrap();
         let store_identity = journal.store_identity().clone();
@@ -1021,7 +1035,7 @@ mod tests {
             )
             .is_err()
         );
-        drop(journal);
+        retire(&host, journal.close());
         std::thread::sleep(Duration::from_millis(150));
         let ExternalSupervisorJournalRecovery::Prepared(recovered) =
             ExternalSupervisorJournalRecovery::open(
@@ -1029,6 +1043,9 @@ mod tests {
                     .unwrap()
                     .unwrap(),
                 &store_identity,
+                host.factory(),
+                host.destination(),
+                &census(&host),
             )
             .unwrap()
         else {
@@ -1049,7 +1066,7 @@ mod tests {
             binding.supervisor_public_key,
             encode_channel_public_key(&recovered.supervisor_signing_key().verifying_key()).unwrap()
         );
-        recovered.record_binding(binding).unwrap();
+        retire(&host, recovered.record_binding(binding).unwrap().close());
         assert_eq!(server.join().unwrap(), 2);
     }
 

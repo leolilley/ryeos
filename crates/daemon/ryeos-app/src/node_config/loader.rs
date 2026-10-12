@@ -520,66 +520,13 @@ mod tests {
         let dir = system.path().join(".ai/node").join(SECTION_NAME);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("primary.yaml");
-        let controller_tls_roots = vec![base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"fixture controller TLS root",
-        )];
-        let settings_schema_digest = "3".repeat(64);
-        let settings = serde_json::json!({"region":"singapore", "plan":"standard"});
-        let settings_digest =
-            super::super::sections::external_execution::adapter_settings_digest(&settings).unwrap();
-        let mut body = serde_json::json!({"kind":"node", "schema":10,
-            "protocol":ryeos_state::external_execution::admission::PROTOCOL,
-            "workload": {
-                "kind":"structured_session",
-                "provider_declaration_id":"codex-hosted",
-                "provider_configuration_destination":"environments.toml",
-                "runtime_manifest_hash":"b".repeat(64),
-                "runtime_selection_identity":"c".repeat(64),
-                "configuration_adapter_artifact_hash":"2".repeat(64),
-                "configuration_adapter_artifact_bytes":4096,
-                "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
-                "connector_artifact_hash":"f".repeat(64),
-                "connector_artifact_bytes":4096
-            },
-            "backend":"qualified-backend", "account":"account-1",
-            "capacity_group":"candidate-workers",
-            "credential_generation":"a".repeat(64),
-            "settings_schema_digest":settings_schema_digest,
-            "settings_digest":settings_digest,
-            "settings":settings,
-            "backend_artifact_hash":"d".repeat(64),
-            "backend_artifact_bytes":4096,
-            "supervisor_artifact_hash":"1".repeat(64),
-            "supervisor_artifact_bytes":4096,
-            "launcher_artifact_hash":"e".repeat(64),
-            "launcher_artifact_bytes":4096,
-            "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
-            "storage_policy":"ephemeral_private_candidate_v1",
-            "cleanup_proof":"provider_terminal_occurrence_v1",
-            "controller_transport": {
-                "schema":2,
-                "https_origin":"https://controller.example:7443",
-                "route_contract":ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT,
-                "tls_root_bundle_digest":
-                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                        &controller_tls_roots,
-                    ).unwrap(),
-                "connect_timeout_ms":5000,
-                "request_timeout_ms":10000,
-                "maximum_response_bytes":1048576,
-                "network_inputs": {
-                    "resolver":{"source":"/etc/resolv.conf", "max_bytes":65536},
-                    "hosts":{"source":"/etc/hosts", "max_bytes":65536}
-                }
-            },
-            "controller_tls_root_certificates_der_base64":controller_tls_roots,
-            "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
-            "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
-            "max_workspace_bytes":1048576, "max_export_bytes":524288,
-            "max_transfer_bytes":2097152,
-            "max_guest_package_regular_bytes":1048576,
-            "max_guest_package_framed_bytes":2097152 });
+        // The current signed binding shape; the loader signs it as this
+        // node's own item.
+        let mut body = super::super::sections::external_execution::RetainedExternalExecutionBinding::test_fixture_document_value();
+        // Byte budgets whose admitted bounds the refusals below sit next to.
+        body["max_workspace_bytes"] = Value::from(1_048_576_u64);
+        body["max_export_bytes"] = Value::from(524_288_u64);
+        body["max_transfer_bytes"] = Value::from(2_097_152_u64);
         let write = |body: &Value| {
             fs::write(
                 &path,

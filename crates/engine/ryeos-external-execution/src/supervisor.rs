@@ -660,7 +660,7 @@ mod tests {
     fn complete_capture_replay_reuses_exact_receipt_without_second_native_capture() {
         let state_root = tempfile::tempdir().unwrap();
         let state =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+            ryeos_state::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
                 .unwrap();
         let authority = state.pinned_authority().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -741,6 +741,9 @@ mod tests {
             &authority,
             &bootstrap_digest,
             binding.clone(),
+            state.host().factory(),
+            state.host().destination(),
+            &ryeos_state::external_execution::native_journal::testing::census(state.host()),
         )
         .unwrap();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
@@ -954,5 +957,9 @@ mod tests {
         assert_eq!(launcher.captures, 1);
         assert_eq!(launcher.finish_acks.len(), 3);
         journal.validate().unwrap();
+        ryeos_state::external_execution::native_journal::testing::retire(
+            state.host(),
+            journal.close(),
+        );
     }
 }

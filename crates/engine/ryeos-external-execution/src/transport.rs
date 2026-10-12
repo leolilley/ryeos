@@ -194,21 +194,35 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     ExternalCandidateTransportDriver<R, T>
 {
     pub fn new(runtime: R, transport: T) -> Result<Self> {
-        let capture_retained = runtime.has_durable_capture()?;
-        let ready = runtime.ready_frame().as_bytes().to_vec();
-        let verified = SignedExecutionFrame::decode_and_verify(
-            &ready,
-            runtime.binding(),
-            lillux::time::timestamp_millis(),
-        )?;
-        ensure!(
-            verified.frame().direction == ChannelDirection::SupervisorToOwner
-                && matches!(
-                    verified.frame().payload,
-                    ExecutionChannelPayload::Ready { .. }
-                ),
-            "external control loop must start from its exact signed Ready frame"
-        );
+        Self::try_new(runtime, transport).map_err(|(_runtime, _transport, error)| error)
+    }
+
+    /// Start the control loop from the runtime's exact signed Ready frame. A
+    /// refusal hands the runtime and transport back unchanged, so the caller
+    /// can settle the owners they hold.
+    pub fn try_new(runtime: R, transport: T) -> std::result::Result<Self, (R, T, anyhow::Error)> {
+        let started = (|| -> Result<(bool, u64, Vec<u8>)> {
+            let capture_retained = runtime.has_durable_capture()?;
+            let ready = runtime.ready_frame().as_bytes().to_vec();
+            let verified = SignedExecutionFrame::decode_and_verify(
+                &ready,
+                runtime.binding(),
+                lillux::time::timestamp_millis(),
+            )?;
+            ensure!(
+                verified.frame().direction == ChannelDirection::SupervisorToOwner
+                    && matches!(
+                        verified.frame().payload,
+                        ExecutionChannelPayload::Ready { .. }
+                    ),
+                "external control loop must start from its exact signed Ready frame"
+            );
+            Ok((capture_retained, verified.frame().sequence, ready))
+        })();
+        let (capture_retained, ready_sequence, ready) = match started {
+            Ok(started) => started,
+            Err(error) => return Err((runtime, transport, error)),
+        };
         let maximum_response_bytes = usize::try_from(runtime.binding().max_bytes)
             .unwrap_or(usize::MAX)
             .min(1024 * 1024);
@@ -216,7 +230,7 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             .unwrap_or(usize::MAX)
             .min(16);
         let mut pending_supervisor = BTreeMap::new();
-        pending_supervisor.insert(verified.frame().sequence, ready);
+        pending_supervisor.insert(ready_sequence, ready);
         Ok(Self {
             runtime,
             transport,
@@ -1158,11 +1172,33 @@ mod tests {
         assert_eq!(sequences, [1, 2, 3, 4, 5, 5]);
     }
 
+    /// The fixture's live journal on this thread's shared native test host,
+    /// closed into that host's census when the fixture ends.
+    struct ClosingJournal {
+        journal: Option<LiveGuestJournal>,
+        close: Box<dyn Fn(LiveGuestJournal)>,
+    }
+
+    impl std::ops::Deref for ClosingJournal {
+        type Target = LiveGuestJournal;
+        fn deref(&self) -> &LiveGuestJournal {
+            self.journal.as_ref().expect("fixture journal open")
+        }
+    }
+
+    impl Drop for ClosingJournal {
+        fn drop(&mut self) {
+            if let Some(journal) = self.journal.take() {
+                (self.close)(journal);
+            }
+        }
+    }
+
     struct JournalFixtureRuntime {
         binding: ExecutionChannelBinding,
         supervisor_key: lillux::crypto::SigningKey,
         ready: String,
-        journal: LiveGuestJournal,
+        journal: ClosingJournal,
         owner_predecessor_digest: String,
         protocol_outputs: VecDeque<Vec<u8>>,
         capture_retained: bool,
@@ -1219,8 +1255,9 @@ mod tests {
             owner_key: &lillux::crypto::SigningKey,
             supervisor_key: lillux::crypto::SigningKey,
         ) -> Self {
+            let host = ryeos_state::test_support::shared_test_host();
             let state_root = tempfile::tempdir().unwrap();
-            let state = ryeos_state::StateDb::open(
+            let state = ryeos_state::test_support::TestState::open(
                 state_root.path(),
                 Arc::new(ryeos_state::TrustStore::new()),
             )
@@ -1237,6 +1274,9 @@ mod tests {
                 &authority,
                 &"9".repeat(64),
                 binding.clone(),
+                host.factory(),
+                host.destination(),
+                &ryeos_state::external_execution::native_journal::testing::census(&host),
             )
             .unwrap();
             let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
@@ -1354,7 +1394,15 @@ mod tests {
                 binding,
                 supervisor_key,
                 ready: ready.canonical().to_owned(),
-                journal,
+                journal: ClosingJournal {
+                    journal: Some(journal),
+                    close: Box::new(move |journal: LiveGuestJournal| {
+                        ryeos_state::external_execution::native_journal::testing::retire(
+                            &host,
+                            journal.close(),
+                        )
+                    }),
+                },
                 owner_predecessor_digest: quiesce.digest().to_owned(),
                 protocol_outputs: VecDeque::new(),
                 capture_retained: true,
@@ -1370,8 +1418,9 @@ mod tests {
             supervisor_key: lillux::crypto::SigningKey,
             output: Vec<u8>,
         ) -> Self {
+            let host = ryeos_state::test_support::shared_test_host();
             let state_root = tempfile::tempdir().unwrap();
-            let state = ryeos_state::StateDb::open(
+            let state = ryeos_state::test_support::TestState::open(
                 state_root.path(),
                 Arc::new(ryeos_state::TrustStore::new()),
             )
@@ -1388,6 +1437,9 @@ mod tests {
                 &authority,
                 &"5".repeat(64),
                 binding.clone(),
+                host.factory(),
+                host.destination(),
+                &ryeos_state::external_execution::native_journal::testing::census(&host),
             )
             .unwrap();
             let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
@@ -1448,7 +1500,15 @@ mod tests {
                 binding,
                 supervisor_key,
                 ready: ready.canonical().to_owned(),
-                journal,
+                journal: ClosingJournal {
+                    journal: Some(journal),
+                    close: Box::new(move |journal: LiveGuestJournal| {
+                        ryeos_state::external_execution::native_journal::testing::retire(
+                            &host,
+                            journal.close(),
+                        )
+                    }),
+                },
                 owner_predecessor_digest: release.digest().to_owned(),
                 protocol_outputs: VecDeque::from([output]),
                 capture_retained: false,

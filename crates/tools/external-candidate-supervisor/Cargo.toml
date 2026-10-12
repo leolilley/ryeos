@@ -14,8 +14,10 @@ test-support = []
 anyhow = { workspace = true }
 base64 = { workspace = true }
 lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
 url = { workspace = true }
 ryeos-http-transport = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ryeos-external-execution = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-state = { workspace = true }
@@ -23,6 +25,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

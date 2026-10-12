@@ -38,6 +38,14 @@ impl BoundedHttpClient {
                     .context("decode admitted external TLS root")
             })
             .collect::<Result<Vec<_>>>()?;
+        // Refuse an unusable admitted root before any request exists, so a
+        // malformed trust bundle can never reach the network path.
+        let mut roots = rustls::RootCertStore::empty();
+        for der in &tls_roots_der {
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der.as_slice()))
+                .context("parse admitted external TLS root certificate")?;
+        }
         Ok(Self {
             client: HttpClient::new(network),
             tls_roots_der,
@@ -73,11 +81,12 @@ impl BoundedHttpClient {
             cancellation: NetworkCancellation::default(),
         };
         let response = self.client.execute(request).map_err(|error| {
-            let message = error.to_string();
-            let cause = anyhow::anyhow!(message);
+            let cause = anyhow::anyhow!(error.to_string());
             match error.contact_state() {
                 ContactState::NoRequestSent => Failure::Fatal(cause),
-                ContactState::RequestMayHaveBeenSent => Failure::AmbiguousTransport(cause),
+                ContactState::RequestMayHaveBeenSent => {
+                    after_contact_failure(error.response_refused(), cause)
+                }
             }
         })?;
         collect_response(response, maximum_response_bytes)
@@ -96,13 +105,12 @@ fn collect_response(
     }
     let reserve = usize::try_from(maximum_response_bytes.min(64 * 1024)).unwrap_or(64 * 1024);
     let mut body = Vec::with_capacity(reserve);
-    response.body.read_to_end(&mut body).map_err(|error| {
-        Failure::AmbiguousTransport(
-            anyhow::Error::new(error).context("read external HTTP response"),
-        )
-    })?;
+    response
+        .body
+        .read_to_end(&mut body)
+        .map_err(body_read_failure)?;
     if body.len() as u128 > maximum_response_bytes as u128 {
-        return Err(Failure::AmbiguousTransport(anyhow::anyhow!(
+        return Err(Failure::Fatal(anyhow::anyhow!(
             "external response exceeds its bound"
         )));
     }
@@ -110,4 +118,54 @@ fn collect_response(
         status: response.status,
         body,
     })
+}
+
+fn body_read_failure(error: std::io::Error) -> Failure {
+    let refused = ryeos_http_transport::is_response_refusal(&error);
+    after_contact_failure(
+        refused,
+        anyhow::Error::new(error).context("read external HTTP response"),
+    )
+}
+
+/// Classify a failure after request bytes may have reached the controller.
+/// Only a response the transport received and refused (its status, framing,
+/// header or body bounds, or its parse) is a protocol refusal that repeating
+/// the exchange cannot cure. Every other failure, including request-side and
+/// TLS-record failures that share the invalid-data kind, truncation, reset,
+/// timeout and cancellation, leaves the controller's commit unknown and stays
+/// ambiguous.
+fn after_contact_failure(response_refused: bool, cause: anyhow::Error) -> Failure {
+    if response_refused {
+        Failure::Fatal(cause)
+    } else {
+        Failure::AmbiguousTransport(cause)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_data_without_a_response_refusal_stays_ambiguous() {
+        // A TLS-record failure such as a bad record MAC surfaces as plain
+        // invalid data on the body stream; the controller's commit is unknown.
+        let tls_record = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "received corrupt message of type ApplicationData",
+        );
+        assert!(matches!(
+            body_read_failure(tls_record),
+            Failure::AmbiguousTransport(_)
+        ));
+        assert!(matches!(
+            after_contact_failure(false, anyhow::anyhow!("invalid HTTP request state")),
+            Failure::AmbiguousTransport(_)
+        ));
+        assert!(matches!(
+            after_contact_failure(true, anyhow::anyhow!("invalid HTTP response headers")),
+            Failure::Fatal(_)
+        ));
+    }
 }

@@ -746,6 +746,13 @@ impl RetainedExternalExecutionBinding {
         Ok(())
     }
 
+    /// The fixture binding's document as JSON, for a loader test that signs
+    /// it as a node item.
+    #[cfg(test)]
+    pub(crate) fn test_fixture_document_value() -> Value {
+        serde_json::to_value(&Self::test_fixture().document).expect("fixture binding document")
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fixture() -> Self {
         use base64::{Engine as _, engine::general_purpose::STANDARD};

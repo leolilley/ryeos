@@ -7,14 +7,17 @@ use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_state::external_execution::guest_journal::AuthenticatedLauncherReady;
 use ryeos_state::external_execution::guest_journal::{
-    DurableNativeCandidateCapture, LauncherOccurrenceEvidence, PreparedGuestJournal,
+    DurableNativeCandidateCapture, LauncherOccurrenceEvidence, LiveGuestJournal,
+    PreparedGuestJournal,
 };
+use ryeos_state::external_execution::native_journal::settle_journal_refusal;
 use ryeos_state::external_execution::{
     AuthenticatedExecutionFrame, ExecutionChannelBinding, ExecutionChannelPayload,
     ExternalCommandOutputCommitment, ExternalCommandOutputStream, ExternalCommandTermination,
     ExternalCommandTerminationReason, ExternalExecutionMode, ExternalTargetExit,
     NativeNamespaceExit, SignedExecutionFrame,
 };
+use ryeos_state::operational::{CarriedOwners, RetainTerminal};
 use serde::{Deserialize, Serialize};
 
 use crate::backends::linux::NativeExternalCandidate;
@@ -509,34 +512,94 @@ impl LiveInheritedExternalCandidateSupervisor {
             .map(|frame| frame.wire().to_vec()))
     }
 
-    /// Authoritative local cleanup. Returning `Ok` proves the exact launcher
-    /// wrapper and all descendants owned by Lillux were reaped.
-    pub fn abort_and_reap(self) -> Result<()> {
-        match self
-            .launcher_process
-            .wait_for_natural_exit(lillux::time::Duration::from_millis(200))
-        {
-            Ok(settled) if settled.success => Ok(()),
-            Ok(settled) => anyhow::bail!(
-                "dedicated launcher exited before cleanup; exit={}; timed_out={}; stderr={:?}",
-                settled.exit_code,
-                settled.timed_out,
-                bounded_diagnostic_tail(&settled.stderr)
-            ),
-            Err(running) => {
-                let stderr = running.stderr_diagnostic_tail();
-                let cleanup = running.abort_and_reap_checked();
-                if stderr.is_some() {
-                    anyhow::bail!(
-                        "dedicated launcher reported stderr before cleanup; stderr={stderr:?}; cleanup={cleanup:?}"
-                    );
-                }
-                cleanup.map_err(anyhow::Error::msg)
+    /// Authoritative local cleanup. An `Ok` cleanup proves the exact launcher
+    /// wrapper and all descendants owned by Lillux were reaped. The live guest
+    /// journal is handed back on every outcome, so its owner can close it
+    /// into the native census.
+    pub fn abort_and_reap(self) -> (LiveGuestJournal, Result<()>) {
+        let Self {
+            supervisor,
+            launcher_process,
+            measured_launcher,
+            process_identity,
+            occurrence_digest,
+            authority,
+            supervisor_signing_key,
+            bootstrap_digest,
+            candidate_program,
+            ready_frame,
+            applied_runtime_recorded: _,
+            runtime_applied_frame_authored: _,
+            qualification_settled: _,
+        } = self;
+        let cleanup = reap_launcher(launcher_process);
+        // The launcher channel and the remaining authority end only after the
+        // launcher was reaped.
+        let (journal, client) = supervisor.into_parts();
+        drop((
+            client,
+            measured_launcher,
+            process_identity,
+            occurrence_digest,
+            authority,
+            supervisor_signing_key,
+            bootstrap_digest,
+            candidate_program,
+            ready_frame,
+        ));
+        (journal, cleanup)
+    }
+}
+
+fn reap_launcher(launcher_process: lillux::RunningProcess) -> Result<()> {
+    match launcher_process.wait_for_natural_exit(lillux::time::Duration::from_millis(200)) {
+        Ok(settled) if settled.success => Ok(()),
+        Ok(settled) => anyhow::bail!(
+            "dedicated launcher exited before cleanup; exit={}; timed_out={}; stderr={:?}",
+            settled.exit_code,
+            settled.timed_out,
+            bounded_diagnostic_tail(&settled.stderr)
+        ),
+        Err(running) => {
+            let stderr = running.stderr_diagnostic_tail();
+            let cleanup = running.abort_and_reap_checked();
+            if stderr.is_some() {
+                anyhow::bail!(
+                    "dedicated launcher reported stderr before cleanup; stderr={stderr:?}; cleanup={cleanup:?}"
+                );
             }
+            cleanup.map_err(anyhow::Error::msg)
         }
     }
 }
 
+/// Close a guest journal stage that `error` abandons and hand its terminal to
+/// `retain`. A close or a retention that is refused keeps its owner inside the
+/// returned error, which says so.
+fn refuse_with_journal<J, C>(
+    error: anyhow::Error,
+    closed: std::result::Result<C, (J, anyhow::Error)>,
+    retain: RetainTerminal<'_>,
+) -> anyhow::Error
+where
+    J: Send + 'static,
+    C: Send + 'static,
+{
+    let carried = match closed {
+        Ok(terminal) => CarriedOwners::carry(error, terminal),
+        Err((journal, close)) => CarriedOwners::carry(
+            error.context(format!(
+                "guest journal close refused; the journal is retained: {close:#}"
+            )),
+            journal,
+        ),
+    };
+    settle_journal_refusal(carried, retain)
+}
+
+/// Launch, bind and authenticate one dedicated launcher on `prepared_journal`.
+/// Every refusal closes the guest journal stage it abandons and settles that
+/// terminal through `retain` before the refusal is returned.
 pub fn launch_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     mut request: lillux::SubprocessRequest,
@@ -548,66 +611,104 @@ pub fn launch_external_candidate_supervisor(
     channel_env_name: &str,
     channel_target_fd: u32,
     deadline: lillux::time::MonotonicDeadline,
+    retain: RetainTerminal<'_>,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
-    ensure!(
-        prepared_journal.bootstrap_digest() == bootstrap_digest,
-        "launcher request changed guest bootstrap identity"
-    );
-    let binding = prepared_journal.binding().clone();
-    candidate_program.validate()?;
-    ensure!(
-        candidate_program.digest()? == binding.candidate_program_digest
-            && candidate_program.execution_mode() == binding.execution_mode
-            && candidate_program.runtime_manifest_hash()? == binding.supervisor_runtime_hash,
-        "live supervisor changed its originally admitted program"
-    );
-    let fixture_contract = match &candidate_program {
-        ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => program.fixture().cloned(),
-        _ => None,
+    let launch = (|| -> Result<_> {
+        ensure!(
+            prepared_journal.bootstrap_digest() == bootstrap_digest,
+            "launcher request changed guest bootstrap identity"
+        );
+        let binding = prepared_journal.binding().clone();
+        candidate_program.validate()?;
+        ensure!(
+            candidate_program.digest()? == binding.candidate_program_digest
+                && candidate_program.execution_mode() == binding.execution_mode
+                && candidate_program.runtime_manifest_hash()? == binding.supervisor_runtime_hash,
+            "live supervisor changed its originally admitted program"
+        );
+        let fixture_contract = match &candidate_program {
+            ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => program.fixture().cloned(),
+            _ => None,
+        };
+        let challenge = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
+        let challenge_digest = lillux::sha256_hex(challenge.as_bytes());
+        let (parent_channel, child_channel) =
+            lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
+        child_channel
+            .bind_to_subprocess_request(&mut request, channel_env_name, channel_target_fd)
+            .map_err(anyhow::Error::msg)?;
+        // The request now owns the only parent-side launch retention for the
+        // child endpoint. Keeping this construction handle alive would mask
+        // EOF when a launcher exits before authentication and strand the
+        // supervisor until its full execution deadline.
+        drop(child_channel);
+        // Capture and measurement cannot renew the original launch window.
+        // Refuse at the final reversible cut before creating any held process.
+        ensure!(
+            !deadline.has_elapsed(),
+            "launcher original deadline expired before held spawn"
+        );
+        // The open guest journal holds no fork-sensitive descriptor lease, so
+        // the held spawn's fork custody admits it. Its descriptors are
+        // close-on-exec: the held child keeps them only until its exec.
+        let pending =
+            lillux::spawn_awaiting_attachment_until(request, deadline).map_err(|failure| {
+                anyhow::anyhow!("dedicated launcher spawn failed: {}", failure.stderr)
+            })?;
+        Ok((
+            binding,
+            fixture_contract,
+            challenge,
+            challenge_digest,
+            parent_channel,
+            pending,
+        ))
+    })();
+    let (binding, fixture_contract, challenge, challenge_digest, parent_channel, pending) =
+        match launch {
+            Ok(launch) => launch,
+            Err(error) => return Err(refuse_with_journal(error, prepared_journal.close(), retain)),
+        };
+    let occurrence = (|| -> Result<_> {
+        let process_identity = pending
+            .exact_process_identity()
+            .map_err(anyhow::Error::msg)?;
+        let evidence = LauncherOccurrenceEvidence::from_held_launcher(
+            process_identity.clone(),
+            launcher_artifact_digest,
+            &challenge_digest,
+        )?;
+        let occurrence_digest = evidence.digest()?;
+        Ok((process_identity, evidence, occurrence_digest))
+    })();
+    let (process_identity, evidence, occurrence_digest) = match occurrence {
+        Ok(occurrence) => occurrence,
+        Err(error) => {
+            let cleanup = pending.abort_and_reap();
+            let error = error.context(format!(
+                "observe held launcher occurrence; held cleanup={cleanup:?}"
+            ));
+            return Err(refuse_with_journal(error, prepared_journal.close(), retain));
+        }
     };
-    let challenge = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
-    let challenge_digest = lillux::sha256_hex(challenge.as_bytes());
-    let (parent_channel, child_channel) =
-        lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
-    child_channel
-        .bind_to_subprocess_request(&mut request, channel_env_name, channel_target_fd)
-        .map_err(anyhow::Error::msg)?;
-    // The request now owns the only parent-side launch retention for the child
-    // endpoint. Keeping this construction handle alive would mask EOF when a
-    // launcher exits before authentication and strand the supervisor until
-    // its full execution deadline.
-    drop(child_channel);
-    // Capture and measurement cannot renew the original launch window.
-    // Refuse at the final reversible cut before creating any held process.
-    ensure!(
-        !deadline.has_elapsed(),
-        "launcher original deadline expired before held spawn"
-    );
-    let pending =
-        lillux::spawn_awaiting_attachment_until(request, deadline).map_err(|failure| {
-            anyhow::anyhow!("dedicated launcher spawn failed: {}", failure.stderr)
-        })?;
-    let process_identity = pending
-        .exact_process_identity()
-        .map_err(anyhow::Error::msg)?;
-    let evidence = LauncherOccurrenceEvidence::from_held_launcher(
-        process_identity.clone(),
-        launcher_artifact_digest,
-        &challenge_digest,
-    )?;
-    let occurrence_digest = evidence.digest()?;
     let bound_journal = match prepared_journal.bind_launcher(evidence) {
         Ok(bound) => bound,
         Err(error) => {
             let cleanup = pending.abort_and_reap();
-            return Err(error.context(format!(
+            // The refused stage already closed; its terminal rides `error`
+            // and is settled before any context is added around it.
+            return Err(settle_journal_refusal(error, retain).context(format!(
                 "persist exact launcher occurrence; held cleanup={cleanup:?}"
             )));
         }
     };
-    let running = pending
-        .release_after_attachment()
-        .map_err(|error| anyhow::anyhow!("release attached dedicated launcher: {error}"))?;
+    let running = match pending.release_after_attachment() {
+        Ok(running) => running,
+        Err(error) => {
+            let error = anyhow::anyhow!("release attached dedicated launcher: {error}");
+            return Err(refuse_with_journal(error, bound_journal.close(), retain));
+        }
+    };
     let (client, ready) = match InheritedExternalCandidateLauncherClient::authenticate(
         parent_channel,
         binding,
@@ -623,28 +724,29 @@ pub fn launch_external_candidate_supervisor(
             // window so its refusal reaches the bounded capture. Interrupting
             // immediately would race teardown and replace the actual cause
             // with our own observation-cancel diagnostic.
-            return match running.wait_for_natural_exit(lillux::time::Duration::from_secs(1)) {
-                Ok(settled) => Err(error.context(format!(
+            let error = match running.wait_for_natural_exit(lillux::time::Duration::from_secs(1)) {
+                Ok(settled) => error.context(format!(
                     "authenticate dedicated launcher; settled_exit={}; timed_out={}; stderr={:?}",
                     settled.exit_code,
                     settled.timed_out,
                     bounded_diagnostic_tail(&settled.stderr)
-                ))),
+                )),
                 Err(running) => {
                     let stderr = running.stderr_diagnostic_tail();
                     let cleanup = running.abort_and_reap_checked();
-                    Err(error.context(format!(
+                    error.context(format!(
                         "authenticate dedicated launcher; natural settlement absent; stderr={stderr:?}; cleanup={cleanup:?}"
-                    )))
+                    ))
                 }
             };
+            return Err(refuse_with_journal(error, bound_journal.close(), retain));
         }
     };
     let live_journal = match bound_journal.mark_launcher_ready(ready) {
         Ok(live) => live,
         Err(error) => {
             let cleanup = running.abort_and_reap_checked();
-            return Err(error.context(format!(
+            return Err(settle_journal_refusal(error, retain).context(format!(
                 "persist authenticated launcher readiness; cleanup={cleanup:?}"
             )));
         }
@@ -654,9 +756,12 @@ pub fn launch_external_candidate_supervisor(
         Ok(ready) => ready.canonical().to_owned(),
         Err(error) => {
             let cleanup = running.abort_and_reap_checked();
-            return Err(error.context(format!(
+            let error = error.context(format!(
                 "publish dedicated launcher readiness; cleanup={cleanup:?}"
-            )));
+            ));
+            let (live_journal, client) = supervisor.into_parts();
+            drop(client);
+            return Err(refuse_with_journal(error, live_journal.close(), retain));
         }
     };
     Ok(LiveInheritedExternalCandidateSupervisor {
@@ -687,15 +792,21 @@ fn bounded_diagnostic_tail(value: &str) -> String {
     format!("… (bounded stderr tail; earlier bytes omitted)\n{tail}")
 }
 
+/// Launch on a measured launcher request. Every refusal closes the guest
+/// journal stage it abandons and settles that terminal through `retain`.
 pub fn launch_prepared_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     prepared: PreparedExternalCandidateLauncherRequest,
     supervisor_signing_key: lillux::crypto::SigningKey,
     deadline: lillux::time::MonotonicDeadline,
+    retain: RetainTerminal<'_>,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
-    prepared
+    if let Err(error) = prepared
         .measured_launcher
-        .require_request(&prepared.request, prepared.measured_launcher.digest())?;
+        .require_request(&prepared.request, prepared.measured_launcher.digest())
+    {
+        return Err(refuse_with_journal(error, prepared_journal.close(), retain));
+    }
     let measured_launcher = prepared.measured_launcher;
     let mut live = launch_external_candidate_supervisor(
         prepared_journal,
@@ -708,6 +819,7 @@ pub fn launch_prepared_external_candidate_supervisor(
         "RYEOS_EXTERNAL_CANDIDATE_CONTROL_FD",
         LAUNCHER_CONTROL_FD,
         deadline,
+        retain,
     )?;
     live.measured_launcher = Some(measured_launcher);
     Ok(live)
