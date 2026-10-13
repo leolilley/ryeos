@@ -64,7 +64,7 @@ fn settle_on_host(host: &TestNativeHost, db: SchedulerDb) -> Result<()> {
     for terminal in db.retained_native_terminals()? {
         host.retain_terminal(terminal);
     }
-    db.release_settled_for_test().map_err(|(_db, error)| error)
+    db.release_settled_into_census().map_err(|(_db, error)| error)
 }
 
 /// Settle the one remaining handle of a shared store.

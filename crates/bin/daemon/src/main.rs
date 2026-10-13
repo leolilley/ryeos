@@ -30,6 +30,8 @@ use ryeosd::{bootstrap, reconcile, uds};
 
 #[cfg(feature = "scheduling")]
 mod maintenance_schedule;
+#[cfg(feature = "scheduling")]
+mod standalone_scheduler;
 mod startup;
 
 const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
@@ -7396,6 +7398,57 @@ async fn run_service_standalone(
         scoped_producer_processes: Arc::new(Default::default()),
         qualification_workspace_custody: Arc::new(Default::default()),
     };
+    // A projection rebuild recovers pending terminal-chain removals against
+    // scheduler fire pins. The stopped node has no scheduler service, so the
+    // rebuild opens the scheduler store on the same host as its Store and
+    // installs that owner as the lifecycle's scheduler participant; it is
+    // settled into the host's census after the service, before the Store.
+    #[cfg(feature = "scheduling")]
+    let standalone_scheduler = match standalone_state_access {
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
+            let host = standalone_native.as_ref().context("standalone native host absent")?;
+            let (runtime, _namespace) = standalone_namespace
+                .as_ref()
+                .context("projection rebuild namespace absent")?;
+            let scheduler = match standalone_scheduler::StoppedNodeScheduler::open(
+                host,
+                runtime,
+                &app_state.identity,
+            ) {
+                Ok(scheduler) => scheduler,
+                Err(error) => {
+                    drop(app_state);
+                    return Err(settle_standalone_setup_failure(
+                        standalone_native,
+                        standalone_state_access,
+                        state_store,
+                        error.context("open the stopped-node scheduler for projection rebuild"),
+                    ));
+                }
+            };
+            let participant: Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant> =
+                scheduler.clone();
+            if let Err(error) = app_state.install_scheduler_participant(participant) {
+                drop(app_state);
+                let error = match scheduler.settle(host) {
+                    Ok(()) => error,
+                    Err(settle) => ryeos_state::operational::CarriedOwners::carry(
+                        error.context(format!("stopped-node scheduler did not settle: {settle:#}")),
+                        settle,
+                    ),
+                };
+                return Err(settle_standalone_setup_failure(
+                    standalone_native,
+                    standalone_state_access,
+                    state_store,
+                    error,
+                ));
+            }
+            Some(scheduler)
+        }
+        ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting
+        | ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => None,
+    };
 
     let ctx = ExecutionContext {
         principal_fingerprint: standalone_principal,
@@ -7423,17 +7476,34 @@ async fn run_service_standalone(
         Some(standalone_handler_context),
     )
     .await;
-    // Every Store alias ends with the service state; a native Store then
-    // closes into its host's census and the host finishes.
+    // Every Store alias ends with the service state; the stopped-node
+    // scheduler and the native Store then close into their host's census and
+    // the host finishes. A scheduler refusal rides with the Store's result
+    // and keeps the owners it carries.
     drop(ctx);
     drop(app_state);
     if let Some(host) = standalone_native {
+        #[cfg(feature = "scheduling")]
+        let scheduler_settled = match standalone_scheduler {
+            Some(scheduler) => scheduler.settle(&host),
+            None => Ok(()),
+        };
+        #[cfg(not(feature = "scheduling"))]
+        let scheduler_settled: Result<()> = Ok(());
         let closed = match standalone_state_access {
             ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
             | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
                 host.close_control_store(state_store)
             }
             ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => host.close_store(state_store),
+        };
+        let closed = match (scheduler_settled, closed) {
+            (Ok(()), closed) => closed,
+            (Err(scheduler), Ok(())) => Err(scheduler),
+            (Err(scheduler), Err(store)) => Err(ryeos_state::operational::CarriedOwners::carry(
+                scheduler.context(format!("standalone native Store did not settle: {store:#}")),
+                store,
+            )),
         };
         let finished = finish_standalone_native(host);
         match (&outcome, closed, finished) {

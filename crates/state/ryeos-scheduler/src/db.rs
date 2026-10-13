@@ -1271,7 +1271,7 @@ impl SchedulerDbOpenFailure {
                 return Err((self, anyhow!("scheduler failure has no retained database custody")));
             }
         };
-        match db.release_settled_for_test() {
+        match db.release_settled_into_census() {
             Ok(()) => Ok(()),
             Err((db, error)) => {
                 self.custody = Some(OpenCustody::Database(db));
@@ -1297,13 +1297,14 @@ impl std::fmt::Display for SchedulerDbOpenFailure {
 impl std::error::Error for SchedulerDbOpenFailure {}
 
 impl SchedulerDb {
-    /// Test hosts only: consume a closed original store whose terminals the
-    /// host's census already holds, ending its factory alias, schema
-    /// reference and closed owner so the host can release its arena. A store
-    /// that is not closed, or not this process's original, comes back
-    /// unchanged with the refusal.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn release_settled_for_test(self) -> std::result::Result<(), (Self, anyhow::Error)> {
+    /// Consume a closed original store whose terminals an offline host's
+    /// census already holds, ending its factory alias, schema reference and
+    /// closed owner so the host can release its arena. This is the settlement
+    /// of a store opened on a process-scoped offline host (a test host or a
+    /// stopped-node maintenance host); a live node's store instead hands its
+    /// owners to the node finalizer. A store that is not closed, or not this
+    /// process's original, comes back unchanged with the refusal.
+    pub fn release_settled_into_census(self) -> std::result::Result<(), (Self, anyhow::Error)> {
         let checked = (|| -> Result<()> {
             self.require_process()?;
             let original = self.original.as_ref()
