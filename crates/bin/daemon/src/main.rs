@@ -926,6 +926,35 @@ impl DaemonSelectedComposition {
         self.retain_native_failure(anyhow::Error::new(EstablishedResidencyRefused(error)))
     }
 
+    /// A reservation refused before any account owner existed: the admission
+    /// interval, a signed envelope floor, or opening the capacity account.
+    /// Nothing was debited, mapped or issued, so there is no cleanup budget
+    /// or registry to retire the captured inputs through; they are the
+    /// ordinary owners a capture or loaded-startup refusal also closes, and
+    /// the sole remaining alias closes them here. A second alias would be an
+    /// owner this route does not know, so it is retained for the custody exit
+    /// instead of being closed under it.
+    fn refuse_before_account(
+        &mut self,
+        inputs: Arc<ryeos_node::native_capacity::LiveNativeCapacityInputs>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match Arc::try_unwrap(inputs) {
+            Ok(inputs) => {
+                drop(inputs);
+                error
+            }
+            Err(inputs) => {
+                let aliases = Arc::strong_count(&inputs);
+                self.native_inputs = Some(inputs);
+                error.context(format!(
+                    "native inputs still have {aliases} owners after a refusal before the account; \
+                     original custody retained"
+                ))
+            }
+        }
+    }
+
     fn prepare_live_native(
         &mut self,
         config: &Config,
@@ -949,13 +978,22 @@ impl DaemonSelectedComposition {
             &config.app_root, Arc::clone(&exclusion),
         )?;
         inputs.require_loaded_startup(identity, policy)?;
-        self.native_inputs = Some(Arc::clone(&inputs));
+        // The composition's alias of the captured inputs is retained only
+        // once a typed reservation owner holds the other reference: the
+        // settled chain takes it back by pointer identity and finalizes it
+        // through that owner's cleanup budget. A refusal before any account
+        // owner exists has no such chain, so the alias is settled here.
+        let alias = Arc::clone(&inputs);
         let reservation = match ryeos_node::native_capacity::LiveNativeCapacityReservation::reserve(inputs) {
-            Ok(reservation) => reservation,
+            Ok(reservation) => {
+                self.native_inputs = Some(alias);
+                reservation
+            }
             Err(error) => match error.downcast::<ryeos_node::native_capacity::LiveNativeCapacityReservationFailure>() {
                 Ok(failure) => {
                     // Only failures after an actual reservation checkout carry
                     // this affine owner. Quote/input refusals have no such owner.
+                    self.native_inputs = Some(alias);
                     self.native_reservation_close_failure = Some(failure);
                     // Describe the refusal only after its owner is retained.
                     let detail = self.native_reservation_close_failure.as_ref()
@@ -963,7 +1001,7 @@ impl DaemonSelectedComposition {
                         .unwrap_or_default();
                     anyhow::bail!("live native reservation refused; original recovery custody retained: {detail}");
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(self.refuse_before_account(alias, error)),
             }
         };
         self.native_reservation = Some(Arc::clone(&reservation));
@@ -7825,6 +7863,52 @@ mod selected_composition_tests {
         );
         // A refused debit writes nothing: no account or anchor record is
         // created or touched by the exit.
+        assert!(!capacity_namespace.exists());
+        drop(composition);
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
+        let _replacement = state_lock::StateLock::acquire(&lock_path).unwrap();
+    }
+
+    #[test]
+    fn floor_refusal_before_account_after_bootstrap_inhibits_restart_and_leaves_no_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut composition, attachment) = fixture(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        let lock_path = state_lock::default_lock_path(root.path());
+        let capacity_namespace = root.path().join(".ai/node/native-capacity");
+        // A signed envelope floor refused inside reserve, before any account
+        // owner exists: a plain error, exactly as prepare_live_native returns
+        // it once the sole input alias has been released. A floor of the
+        // signed envelope is a durable fact of this host and policy.
+        let refused = anyhow::anyhow!(
+            "rollover drain margin 1s is below the bounded normal-stop floor 30s"
+        );
+        assert!(lillux_sqlite::native_refusal_is_fact(&refused));
+        let detail = format!("{refused:#}");
+
+        // Bootstrap claimed its attempt, but the refusal preceded the debit,
+        // so no input alias, reservation or failure owner is retained and
+        // the native shutdown has nothing to settle.
+        composition.native_bootstrap_entered = true;
+        assert!(composition.native_inputs.is_none());
+        assert!(!composition.has_unresolved_custody());
+        composition.advance_native_shutdown_on_settlement_stack().unwrap();
+        assert!(!composition.has_unresolved_custody());
+        composition.record_exit("startup_failed", Some(&detail), Some(&refused));
+        assert!(!composition.has_unresolved_custody());
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert!(matches!(
+            lifecycle_marker::read(&state_dir),
+            Some(lifecycle_marker::LifecycleMarker::Exited { reason, .. }) if reason == "startup_failed"
+        ));
+        assert!(state_dir.join("restart-inhibited.json").is_file());
+        let inhibition = lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().unwrap();
+        assert_eq!(inhibition.reason, "startup_failed");
+        assert!(
+            inhibition.detail.as_deref().unwrap_or_default().contains("below the bounded normal-stop floor"),
+            "{inhibition:?}"
+        );
+        // Nothing was debited, so no account or anchor record exists.
         assert!(!capacity_namespace.exists());
         drop(composition);
         assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);

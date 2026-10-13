@@ -186,8 +186,11 @@ impl RetainedInput {
 impl LiveNativeCapacityInputs {
     /// Called from the real composition after signed bootstrap and before its
     /// first SQLite call. Capture has no signing, journal publication or native
-    /// SQLite effects. The composition must retain the returned owner before
-    /// initiating the separate irreversible account reservation.
+    /// SQLite effects. The composition keeps an alias of the returned owner
+    /// across the separate irreversible account reservation and retains it
+    /// once a typed reservation owner holds the other reference; a refusal
+    /// before any account owner exists releases the alias, as a refusal of
+    /// capture itself does, because nothing has been charged for it yet.
     pub fn capture(app_root: &Path, exclusion: Arc<StateLockLease>) -> Result<Arc<Self>> {
         // Authentication and preparation consume the same original interval.
         // Capture before path construction, input reads or owned policy work;

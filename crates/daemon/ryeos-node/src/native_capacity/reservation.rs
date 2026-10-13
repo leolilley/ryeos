@@ -2117,6 +2117,13 @@ impl LiveNativeCapacityReservation {
     /// Capture has already verified actual operator completion, policy,
     /// exclusions and the original clock. Retain this owner BEFORE its first
     /// irreversible publication. No public report or decoded grant is accepted.
+    ///
+    /// A refusal before the account owner exists (the admission interval, a
+    /// signed envelope floor, or opening the capacity account) is a plain
+    /// error: nothing was debited, mapped or issued, and this reference to
+    /// the inputs is released with it. Every later refusal carries the
+    /// typed owner that retains the account, inputs and every partial
+    /// publication for settlement.
     pub fn reserve(inputs: Arc<LiveNativeCapacityInputs>) -> Result<Arc<Self>> {
         inputs.require_original(false)?;
         let units = inputs.policy.incarnation.units;
