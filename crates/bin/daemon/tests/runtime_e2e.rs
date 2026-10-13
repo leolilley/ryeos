@@ -570,7 +570,7 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
             "e2e-direct-runtime",
             "e2e_kind",
             true,
-            "v2",
+            "v3",
             &fixture.publisher,
         )?;
         common::fast_fixture::register_fixture_bundle(
@@ -887,7 +887,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             "dup-runtime-a",
             "dup_kind",
             true,
-            "v2",
+            "v3",
             &fixture.publisher,
         )?;
         install_runtime(
@@ -895,7 +895,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             "dup-runtime-b",
             "dup_kind",
             true,
-            "v2",
+            "v3",
             &fixture.publisher,
         )?;
         common::fast_fixture::register_fixture_bundle(
@@ -1260,7 +1260,8 @@ async fn e2e_indirect_graph_records_graph_thread_profile() {
     let project = tempfile::tempdir().expect("project tempdir");
     let dir = project.path().join(".ai/graphs/p4");
     std::fs::create_dir_all(&dir).expect("create project graph dir");
-    let body = r#"category: "p4"
+    let body = r#"version: "1.0.0"
+category: "p4"
 description: "P4 B2 graph subject/runtime split pin"
 config:
   start: done
