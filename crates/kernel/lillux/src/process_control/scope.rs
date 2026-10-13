@@ -1283,6 +1283,12 @@ impl ProcessScopeConfiguration {
             bootstrap.configure_command(&mut command)?;
             cwd.configure_command_cwd(&mut command)
                 .map_err(|error| error.to_string())?;
+            // A host supervisor commonly runs this entry inside its own
+            // administrator-owned session and process group. The controller
+            // must lead its own: its exact identity names its group leader,
+            // and group termination must never reach the supervisor. Exec
+            // replaces this process, so the session placement carries over.
+            super::establish_own_process_session()?;
             Err(format!(
                 "exec unprivileged scope controller: {}",
                 command.exec()

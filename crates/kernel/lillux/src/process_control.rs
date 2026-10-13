@@ -740,6 +740,37 @@ pub fn prepare_process_group_controller() -> Result<(), String> {
     }
 }
 
+/// Make the calling process lead its own session and therefore its own
+/// process group, detaching it from whatever session and group launched it.
+/// Exact current-process identity names the caller's group leader, and group
+/// termination signals that whole group, so a process left in a launcher's
+/// group would capture a foreign leader and could signal the launcher too.
+///
+/// A process that already leads its session is unchanged. The kernel refuses
+/// a new session to a process that already leads its own group inside another
+/// session; that group is already exactly this process's, so it is accepted
+/// without detaching. Any other refusal fails closed.
+pub fn establish_own_process_session() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let pid = unsafe { libc::getpid() };
+        if unsafe { libc::getsid(0) } != pid && unsafe { libc::setsid() } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EPERM) || unsafe { libc::getpgrp() } != pid {
+                return Err(format!("place process in its own session: {error}"));
+            }
+        }
+        if unsafe { libc::getpgrp() } != pid {
+            return Err("process did not acquire its exact own process group".to_owned());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("process session placement is unavailable on this OS".to_owned())
+    }
+}
+
 /// Stop the exact process group and return only after every live member is
 /// descriptor-pinned and observably stopped. Signal delivery alone is not a
 /// filesystem-freeze barrier.
@@ -1424,6 +1455,77 @@ mod tests {
             }
             assert!(command.status().unwrap().success(), "{mode}");
             assert_eq!(unsafe { libc::getpgrp() }, caller_group);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_session_placement_leaves_the_launcher_group_and_is_idempotent() {
+        use std::os::unix::process::CommandExt;
+        const CHILD: &str = "LILLUX_TEST_OWN_SESSION_PLACEMENT";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let pid = std::process::id() as i32;
+            let launcher_group = std::env::var("LILLUX_TEST_LAUNCHER_GROUP")
+                .unwrap()
+                .parse::<i32>()
+                .unwrap();
+            match mode.as_str() {
+                "inherited" => {
+                    assert_eq!(unsafe { libc::getpgrp() }, launcher_group);
+                    assert_ne!(unsafe { libc::getsid(0) }, pid);
+                }
+                "group-leader" => {
+                    assert_eq!(unsafe { libc::getpgrp() }, pid);
+                    assert_ne!(unsafe { libc::getsid(0) }, pid);
+                }
+                "session-leader" => assert_eq!(unsafe { libc::getsid(0) }, pid),
+                other => panic!("unknown placement mode {other}"),
+            }
+            let session_before = unsafe { libc::getsid(0) };
+            for _ in 0..2 {
+                establish_own_process_session().unwrap();
+                assert_eq!(unsafe { libc::getpgrp() }, pid);
+                assert_ne!(unsafe { libc::getpgrp() }, launcher_group);
+                if mode == "group-leader" {
+                    assert_eq!(unsafe { libc::getsid(0) }, session_before);
+                } else {
+                    assert_eq!(unsafe { libc::getsid(0) }, pid);
+                }
+            }
+            let identity = capture_current_process_identity().unwrap();
+            assert_eq!(identity.group_leader_pid, pid as u32);
+            return;
+        }
+        let caller_group = unsafe { libc::getpgrp() };
+        let caller_session = unsafe { libc::getsid(0) };
+        for mode in ["inherited", "group-leader", "session-leader"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "process_control::tests::own_session_placement_leaves_the_launcher_group_and_is_idempotent",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(CHILD, mode)
+                .env("LILLUX_TEST_LAUNCHER_GROUP", caller_group.to_string());
+            match mode {
+                "group-leader" => {
+                    command.process_group(0);
+                }
+                "session-leader" => unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                },
+                _ => {}
+            }
+            assert!(command.status().unwrap().success(), "{mode}");
+            assert_eq!(unsafe { libc::getpgrp() }, caller_group);
+            assert_eq!(unsafe { libc::getsid(0) }, caller_session);
         }
     }
 }

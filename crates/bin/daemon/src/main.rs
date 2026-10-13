@@ -3077,6 +3077,11 @@ async fn run(
         }
     }
 
+    // Every node route leads its own session and process group: a direct
+    // start would otherwise remain in the operator's group. The supervised
+    // controller already established this before exec, so this is a no-op
+    // there. It precedes every exact current-process identity capture.
+    lillux::process_control::establish_own_process_session().map_err(anyhow::Error::msg)?;
     if let Some(service) = &host_service {
         // An association is not placement: only a process the host supervisor
         // put in the controller leaf may take the supervised node route. The
