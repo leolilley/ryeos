@@ -93,6 +93,10 @@ pub async fn start_with_endpoint_configuration(
         .ensure_protects_app_root(&locked_env.config().app_root)?;
     let env = &locked_env;
     let original_config = env.config();
+    // The daemon refuses an inhibited start itself, but only after the
+    // supervisor launched it; a supervisor would then relaunch it in a tight
+    // loop until this operation's deadline. Refuse before any Up intent.
+    require_start_not_inhibited(&original_config.app_root)?;
 
     // Resolve launch ownership only after acquiring the same lifecycle lock
     // retained by host association publication. Otherwise a start that first
@@ -441,6 +445,18 @@ impl LifecycleStartLock {
     }
 }
 
+/// The daemon's own restart-inhibition refusal, extended with the record's
+/// location so the operator can find what is holding the node down.
+fn require_start_not_inhibited(app_root: &Path) -> Result<()> {
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    crate::lifecycle_marker::require_restart_allowed(&state_dir).map_err(|refusal| {
+        anyhow::anyhow!(
+            "{refusal:#}\nrestart inhibition record: {}",
+            crate::lifecycle_marker::restart_inhibition_record(&state_dir).display()
+        )
+    })
+}
+
 fn resolve_ryeosd() -> PathBuf {
     if let Ok(current) = std::env::current_exe()
         && let Some(dir) = current.parent()
@@ -521,6 +537,48 @@ mod tests {
             .unwrap()
             .expect("stop must not wait for startup readiness");
         assert!(lock.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_refuses_an_inhibited_node_before_any_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().to_path_buf();
+        let bundles = app_root.join(".ai/node/bundles");
+        std::fs::create_dir_all(&bundles).unwrap();
+        std::fs::write(
+            bundles.join("core.yaml"),
+            "# ryeos:signed:test\nkind: node\n",
+        )
+        .unwrap();
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).state();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        require_start_not_inhibited(&app_root).unwrap();
+        crate::lifecycle_marker::inhibit_restart(
+            &state_dir,
+            "service_refusal_stop",
+            Some("fixture refusal"),
+        )
+        .unwrap();
+
+        let env = LocalLifecycleEnv::from_config(
+            crate::NodeConfig::load_local(Some(app_root.clone())).unwrap(),
+        );
+        let refusal = format!(
+            "{:#}",
+            start(&env, Duration::from_secs(5)).await.unwrap_err()
+        );
+        assert!(refusal.contains("start refused"), "{refusal}");
+        assert!(refusal.contains("service_refusal_stop"), "{refusal}");
+        assert!(refusal.contains("ryeos node allow-restart"), "{refusal}");
+        let record = crate::lifecycle_marker::restart_inhibition_record(&state_dir);
+        assert!(
+            refusal.contains(&record.display().to_string()),
+            "{refusal}"
+        );
+        // The refusal left no lifecycle gate held.
+        let _gate = LifecycleStartLock::try_acquire(&app_root)
+            .unwrap()
+            .expect("a refused start releases its lifecycle gate");
     }
 
     #[test]

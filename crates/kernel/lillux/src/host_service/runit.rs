@@ -284,7 +284,10 @@ fn run_program(launch: &HostServiceLaunch) -> Result<Vec<u8>> {
         .executable
         .to_str()
         .context("host executable is not UTF-8")?;
-    let mut body = format!("#!{NATIVE_SCRIPT_INTERPRETER}\n");
+    // runsv pipes only stdout to the service's log; join stderr to it so a
+    // refusal written before the daemon's own logging starts is captured
+    // rather than surviving only in the supervisor's process title.
+    let mut body = format!("#!{NATIVE_SCRIPT_INTERPRETER}\nexec 2>&1\n");
     for (name, value) in &launch.environment {
         if name.is_empty()
             || !name.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
@@ -583,7 +586,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             rendered,
-            "#!/bin/sh\nexport HOME='/home/example/it'\"'\"'s-safe'\nexport PATH='/usr/bin:/bin'\nexec '/usr/bin/ryeosd' 'host-service' '--app-root' '/home/example/.local/share/ryeos'\n"
+            "#!/bin/sh\nexec 2>&1\nexport HOME='/home/example/it'\"'\"'s-safe'\nexport PATH='/usr/bin:/bin'\nexec '/usr/bin/ryeosd' 'host-service' '--app-root' '/home/example/.local/share/ryeos'\n"
         );
     }
 

@@ -261,6 +261,11 @@ pub fn read_restart_inhibition(state_dir: &Path) -> anyhow::Result<Option<Restar
     })?))
 }
 
+/// Where the restart inhibition record of `state_dir` lives.
+pub fn restart_inhibition_record(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join(RESTART_INHIBIT_FILE)
+}
+
 /// Refuse a start while a restart inhibition is recorded.
 pub fn require_restart_allowed(state_dir: &Path) -> anyhow::Result<()> {
     match read_restart_inhibition(state_dir)? {
