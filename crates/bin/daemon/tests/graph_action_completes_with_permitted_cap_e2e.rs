@@ -54,6 +54,7 @@ fn plant_echo_tool(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()
 #   category: echo
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "echo input as json"
 
 import json, sys

@@ -73,10 +73,9 @@ async fn rejects_request_signed_with_caller_audience_when_daemon_identity_differ
             write_authorized_key_signed_by(state_path, &client_key, &fixture.node)?;
             Ok(())
         },
-        |cmd| {
-            // Enable auth enforcement.
-            cmd.arg("--require-auth");
-        },
+        // `/execute` declares `ryeos_signed` route auth, so the daemon
+        // enforces signed-request verification without a launch flag.
+        |_cmd| {},
     )
     .await
     .expect("daemon should start");
@@ -147,9 +146,9 @@ async fn accepts_request_signed_with_daemon_audience() {
             write_authorized_key_signed_by(state_path, &client_key, &fixture.node)?;
             Ok(())
         },
-        |cmd| {
-            cmd.arg("--require-auth");
-        },
+        // `/execute` declares `ryeos_signed` route auth, so the daemon
+        // enforces signed-request verification without a launch flag.
+        |_cmd| {},
     )
     .await
     .expect("daemon should start");

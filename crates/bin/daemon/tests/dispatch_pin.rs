@@ -148,12 +148,35 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {{}}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
 description: "synth runtime for V5.3 dispatch_pin capability tests"
 "#
@@ -254,6 +277,7 @@ async fn synth_tool_request(
 #   category: hello_pin
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "V5.3 dispatch_pin tool"
 
 import sys
@@ -262,7 +286,16 @@ sys.exit(0)
 "#;
     let tool_dir = tools_dir.join("hello_pin");
     std::fs::create_dir_all(&tool_dir).expect("mkdir tool dir");
-    std::fs::write(tool_dir.join("hello_pin.py"), body).expect("write tool");
+    // Source-owning project items must carry a verified signer; the fixture
+    // publisher is pinned in the node trust store.
+    let signed = lillux::signature::sign_content_at(
+        body,
+        &common::fast_fixture::publisher_signing_key(),
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(tool_dir.join("hello_pin.py"), signed).expect("write tool");
     let (status, value) = post_execute_with_extras(
         h,
         "tool:hello_pin/hello_pin",

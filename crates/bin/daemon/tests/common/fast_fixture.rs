@@ -109,7 +109,6 @@ const FULL_BUNDLE_INVENTORY: &[&str] = &[
     "codex",
     "core",
     "hosted-node",
-    "local-inference",
     "opencode",
     "render-sandbox",
     "ryeos-ui",
@@ -148,6 +147,13 @@ impl FastFixtureProfile {
 
 /// Verify every authored profile member is registered to its exact prepared
 /// bundle root after caller fixtures have been installed.
+///
+/// A registration outside the authored inventory is admitted only when it
+/// names a synthetic test bundle (one with no published bundle of that name
+/// in the workspace), as written by [`register_fixture_bundle`],
+/// [`register_presigned_fixture_bundle`] or [`register_config_fixture_bundle`].
+/// A published bundle the selected profile does not include is refused, so a
+/// test cannot silently run a composition no authored profile selects.
 pub fn validate_profile_bundle_records(
     state_path: &Path,
     fixture: &FastFixture,
@@ -189,10 +195,24 @@ pub fn validate_profile_bundle_records(
             "selected profile registration directory contains duplicate entry {name}"
         );
     }
+    let missing = expected_names
+        .difference(&observed_names)
+        .cloned()
+        .collect::<Vec<_>>();
     anyhow::ensure!(
-        observed_names == expected_names,
-        "selected profile registration inventory differs from the exact authored profile"
+        missing.is_empty(),
+        "selected profile registration inventory lacks authored members {missing:?}"
     );
+    for extra in observed_names.difference(&expected_names) {
+        let bundle_name = extra
+            .strip_suffix(".yaml")
+            .with_context(|| format!("bundle registration entry {extra} is not a YAML record"))?;
+        let published = super::workspace_root().join("bundles").join(bundle_name);
+        anyhow::ensure!(
+            !published.exists(),
+            "published bundle {bundle_name} is registered but the selected profile does not include it"
+        );
+    }
     for bundle_name in expected {
         let root = if *bundle_name == "core" {
             state_path.join(AI_DIR).join("bundles/core")
@@ -940,6 +960,25 @@ fn materialize_seed_node_policy_generation(
             selected_profile.name()
         );
     }
+    let mut profile = profile;
+    let isolation = profile
+        .policies
+        .get_mut("isolation")
+        .context("selected node init profile has no isolation policy")?;
+    direct_host_isolation(isolation).with_context(|| {
+        format!(
+            "derive direct-host isolation fixture from profile {}",
+            selected_profile.name()
+        )
+    })?;
+    profile
+        .validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
+        .with_context(|| {
+            format!(
+                "validate direct-host fixture policy generation for profile {}",
+                selected_profile.name()
+            )
+        })?;
     let target_dir = state_path.join(AI_DIR).join("node").join("policies");
     fs::create_dir_all(&target_dir).with_context(|| format!("create {}", target_dir.display()))?;
     for (name, policy) in profile.policies() {
@@ -949,6 +988,103 @@ fn materialize_seed_node_policy_generation(
         fs::write(target_dir.join(format!("{name}.yaml")), signed)
             .with_context(|| format!("write `{name}` test node policy"))?;
     }
+    Ok(())
+}
+
+/// Derive the fixture isolation member for a node started directly by this
+/// harness.
+///
+/// A direct `ryeosd` child has no protected host-runtime association: no host
+/// service or external controller delegates a writable cgroup subtree to it,
+/// so no per-scope capability (`limits:scope`, `recovery:scope`,
+/// `termination:scope`, ...) can ever qualify and an authored profile that
+/// requires process scopes is refused at startup by its capability floor.
+/// The fixture keeps every other authored isolation field and removes only
+/// the per-scope contract:
+///
+///   * `process_scopes` becomes `unconfigured`;
+///   * every per-scope name leaves `requires_capabilities` (an `any_of`
+///     entry that names only per-scope alternatives is refused rather than
+///     dropped);
+///   * `pid_namespace_nested` proc, which exists only for the scoped nested
+///     sandbox, narrows to `pid_namespace`.
+///
+/// The result is signed by the fixture node key and is never shipped. The
+/// authored profiles keep their floors; tests of per-scope containment need
+/// an administrator-prepared host-backed node, not this harness.
+fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
+    let policy = isolation
+        .get_mut("policy")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("isolation member has no policy mapping")?;
+    let scoped = matches!(
+        policy
+            .get("process_scopes")
+            .and_then(|scopes| scopes.get("mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("required")
+    );
+    if !scoped {
+        return Ok(());
+    }
+    policy.insert(
+        "process_scopes".to_owned(),
+        serde_json::json!({ "mode": "unconfigured" }),
+    );
+    let floor = policy
+        .get_mut("requires_capabilities")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("isolation policy has no requires_capabilities list")?;
+    let mut retained = Vec::with_capacity(floor.len());
+    for entry in floor.drain(..) {
+        match &entry {
+            serde_json::Value::String(name) => {
+                if !lillux::process_control::is_scope_capability(name) {
+                    retained.push(entry);
+                }
+            }
+            serde_json::Value::Object(alternatives) => {
+                let names = alternatives
+                    .get("any_of")
+                    .and_then(serde_json::Value::as_array)
+                    .context("isolation floor entry is neither a name nor an any_of set")?;
+                let kept = names
+                    .iter()
+                    .filter(|name| {
+                        name.as_str()
+                            .is_none_or(|name| !lillux::process_control::is_scope_capability(name))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    !kept.is_empty(),
+                    "isolation floor entry {entry} can be met only by per-scope capabilities"
+                );
+                retained.push(serde_json::json!({ "any_of": kept }));
+            }
+            other => anyhow::bail!("isolation floor entry {other} has an unknown shape"),
+        }
+    }
+    *floor = retained;
+    if let Some(filesystem) = policy
+        .get_mut("filesystem")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if filesystem.get("proc_filesystem").and_then(serde_json::Value::as_str)
+            == Some("pid_namespace_nested")
+        {
+            filesystem.insert(
+                "proc_filesystem".to_owned(),
+                serde_json::Value::String("pid_namespace".to_owned()),
+            );
+        }
+    }
+    let typed: ryeos_engine::isolation::IsolationPolicy =
+        serde_json::from_value(serde_json::Value::Object(policy.clone()))
+            .context("parse direct-host fixture isolation policy")?;
+    ryeos_engine::isolation::IsolationRuntime::validate_policy(&typed)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("validate direct-host fixture isolation policy")?;
     Ok(())
 }
 

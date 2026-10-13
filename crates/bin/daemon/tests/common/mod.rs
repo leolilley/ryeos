@@ -6,6 +6,42 @@
 //!
 //! Used by `cleanup_e2e.rs`. NOT used by `cleanup_invariants.rs`
 //! (those are pure in-process invariant checks).
+//!
+//! ## Running the daemon suite
+//!
+//! The harness initializes nodes from the authored `core`,
+//! `core-scheduling`, `standard` and `full` init profiles. Every profile
+//! except `core` installs the scheduling bundle (`service:scheduler/*`) and
+//! all but `core-scheduling` also install the standard bundle
+//! (`service:model-providers/*`). A daemon refuses to start when an installed
+//! operational service has no compiled handler, so the suite runs with the
+//! standard composition CI uses for these bundle sets:
+//!
+//! ```text
+//! cargo build -p ryeos-cli --features scheduling,model-provider-setup
+//! cargo test -p ryeosd --features scheduling,model-provider-setup --tests -- --test-threads=1
+//! ```
+//!
+//! A default-feature build refuses before spawning a daemon whose selected
+//! profile needs a feature the build lacks (see [`require_compiled_composition`]).
+//!
+//! Prerequisites:
+//!
+//! * the selected bundles are freshly published; editing non-test crate
+//!   sources or a `Cargo.toml` makes them stale and [`require_bundles_prepared`]
+//!   refuses;
+//! * the `ryeos` CLI is built beside `ryeosd` (`target/debug/ryeos`) for the
+//!   CLI-driven tests;
+//! * the temporary directory is on a durable filesystem, because every
+//!   authored profile except `hosted-node` requires `storage:durable_root`
+//!   (point `TMPDIR` at a disk-backed directory when `/tmp` is a tmpfs).
+//!
+//! A directly spawned daemon has no protected host-runtime association, so
+//! no delegated cgroup subtree exists and no per-scope capability can
+//! qualify. The fast fixture therefore signs an isolation member derived
+//! from the authored profile without its per-scope contract (see
+//! `fast_fixture::direct_host_isolation`). Per-scope containment is
+//! qualified only against an administrator-prepared host-backed node.
 
 #![allow(dead_code)]
 
@@ -442,6 +478,7 @@ pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
 }
 
 fn copy_core_to_temp_prepared(bundle_names: &[&str]) -> anyhow::Result<(TempDir, PathBuf)> {
+    require_compiled_composition(bundle_names)?;
     require_bundles_prepared(bundle_names)?;
     Ok(copy_core_to_temp_from_prepared())
 }
@@ -453,6 +490,28 @@ fn copy_core_to_temp_from_prepared() -> (TempDir, PathBuf) {
     let dst = app_root.join(".ai/bundles/core");
     copy_dir_recursive(&src, &dst).expect("copy core bundle to temp");
     (tmp, app_root)
+}
+
+/// Refuse before spawning a daemon whose selected bundles install operational
+/// services this test build has no handler for. The daemon would refuse the
+/// same composition at startup; failing here names the build command instead.
+pub fn require_compiled_composition(bundle_names: &[&str]) -> anyhow::Result<()> {
+    let needs = [
+        ("scheduling", "scheduling", cfg!(feature = "scheduling")),
+        ("standard", "model-provider-setup", cfg!(feature = "model-provider-setup")),
+    ];
+    let missing = needs
+        .iter()
+        .filter(|(bundle, _, compiled)| !compiled && bundle_names.contains(bundle))
+        .map(|(bundle, feature, _)| format!("{bundle} bundle needs feature `{feature}`"))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "this ryeosd test build cannot start the selected composition ({}); run the daemon \
+         suite with `cargo test -p ryeosd --features scheduling,model-provider-setup`",
+        missing.join(", ")
+    );
+    Ok(())
 }
 
 /// Require prebuilt, published bundle inputs without rebuilding or signing.
@@ -512,14 +571,21 @@ pub fn require_bundles_prepared(bundle_names: &[&str]) -> anyhow::Result<()> {
         }
         anyhow::ensure!(
             !bundle_inputs_newer_than(&root, published)
-                && !bundle_tree_has_newer(&bundle_root, published)?,
+                && !bundle_tree_has_newer(&bundle_root, &bundle_root, published)?,
             "prepared {name} bundle artifacts are stale; prepare the selected bundle set before running this E2E"
         );
     }
     Ok(())
 }
 
-fn bundle_tree_has_newer(path: &Path, published: std::time::SystemTime) -> anyhow::Result<bool> {
+/// The publisher writes the bundle-root `PUBLISHER_TRUST.toml` after it
+/// commits the manifest ref. The document names the signing key and does not
+/// feed the published artifacts, so its later mtime is not staleness.
+fn bundle_tree_has_newer(
+    bundle_root: &Path,
+    path: &Path,
+    published: std::time::SystemTime,
+) -> anyhow::Result<bool> {
     for entry in std::fs::read_dir(path)
         .map_err(|error| anyhow::anyhow!("inspect prepared bundle {}: {error}", path.display()))?
     {
@@ -533,9 +599,11 @@ fn bundle_tree_has_newer(path: &Path, published: std::time::SystemTime) -> anyho
             );
         }
         if file_type.is_dir() {
-            if bundle_tree_has_newer(&entry_path, published)? {
+            if bundle_tree_has_newer(bundle_root, &entry_path, published)? {
                 return Ok(true);
             }
+        } else if path == bundle_root && entry.file_name() == "PUBLISHER_TRUST.toml" {
+            continue;
         } else if entry
             .metadata()?
             .modified()
@@ -1304,6 +1372,34 @@ impl DaemonHarness {
         Ok(())
     }
 
+    /// Stop the daemon in order, as a service manager does: SIGTERM to the
+    /// exact `ryeosd` process authenticated over its own UDS endpoint, then
+    /// wait for a successful exit. Stopped-node commands need a node that
+    /// completed a first start; a SIGKILL would instead leave crash recovery
+    /// for the next start.
+    #[cfg(unix)]
+    pub async fn stop_gracefully(&mut self) -> anyhow::Result<()> {
+        use std::os::fd::AsFd as _;
+
+        let stream = std::os::unix::net::UnixStream::connect(&self.uds_path)
+            .with_context(|| format!("connect daemon endpoint {}", self.uds_path.display()))?;
+        let peer = lillux::local_ipc::AuthenticatedUnixPeer::capture(stream.as_fd())?;
+        peer.require_executable_name(std::ffi::OsStr::new("ryeosd"))?;
+        drop(stream);
+        peer.request_termination()
+            .context("request orderly daemon stop")?;
+        let status = tokio::time::timeout(Duration::from_secs(120), self.child.wait())
+            .await
+            .context("daemon did not stop within 120s of its orderly stop request")?
+            .context("observe daemon exit after orderly stop request")?;
+        anyhow::ensure!(
+            status.success(),
+            "daemon orderly stop exited with {status}; stderr log {}",
+            self.stderr_log_path.display()
+        );
+        Ok(())
+    }
+
     /// Re-spawn the daemon against the same `state_path`, `user_space`,
     /// `bind`, and `uds_path`. The caller passes a `tweak` closure to
     /// set env vars or args (e.g. `RUST_LOG`).
@@ -1607,54 +1703,35 @@ impl Drop for DaemonHarness {
 
 /// Persistent standalone harness for multi-step `run-service` tests.
 ///
-/// Holds tempdirs alive across multiple `run_service()` calls so that
-/// state (installed bundles, node identity, trust store) persists.
-/// The harness installs core under `.ai/bundles/core/` AND registers
-/// it via `.ai/node/bundles/core.yaml` so preflight's
+/// Holds a stopped node alive across multiple `run_service()` calls so that
+/// state (installed bundles, node identity, trust store) persists. Core is
+/// installed under `.ai/bundles/core/` and registered via
+/// `.ai/node/bundles/core.yaml`, so preflight's
 /// `discover_installed_bundle_roots` finds it.
 ///
 /// Use this when a test needs to run several `ryeosd run-service`
 /// invocations against the same state (e.g. install → list → remove).
 pub struct StandaloneHarness {
-    /// Keeps the core-bundle temp copy alive for the harness lifetime.
-    _core_tmp: TempDir,
-    /// Persistent app root (the temp copy of core).
+    /// The node, started once and stopped in order; owns every tempdir.
+    node: DaemonHarness,
+    /// Persistent app root of the stopped node.
     pub app_root: PathBuf,
-    /// Persistent app root dir.
-    pub user_space: TempDir,
-    /// UDS path (unused for standalone but required by CLI).
-    uds_path: PathBuf,
     /// Fixture keys for signing.
     pub fixture: fast_fixture::FastFixture,
 }
 
 impl StandaloneHarness {
-    /// Create a fully initialized standalone harness:
-    /// - Fast-fixture state (node identity, vault, trust)
-    /// - Core bundle copied into `.ai/bundles/core/` (disk install)
-    /// - Core bundle registered in `.ai/node/bundles/core.yaml`
-    /// - Standard bundle registered (path points to workspace)
-    ///
-    /// After this, `run_service()` can invoke any stopped-node service
-    /// and preflight will find installed bundles for dependency discovery.
-    pub fn new_initialized() -> anyhow::Result<Self> {
-        let user_space = tempfile::tempdir()?;
-        let (core_tmp, app_root) = copy_core_to_temp();
-        let fixture = fast_fixture::populate_initialized_state_with_profile(
-            &app_root,
-            user_space.path(),
-            fast_fixture::FastFixtureProfile::Standard,
-        )?;
-        fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
-        fast_fixture::register_standard_composition(&app_root, &fixture)?;
-        fast_fixture::seal_initialized_state(&app_root)?;
-
-        let uds_path = app_root.join("ryeosd.sock");
+    /// Create a stopped node from the authored Standard profile. Stopped-node
+    /// commands refuse a node that never completed a first start, so the node
+    /// is started once as a daemon and stopped in order before any
+    /// `run_service()` call.
+    pub async fn new_initialized() -> anyhow::Result<Self> {
+        let (mut node, fixture) = DaemonHarness::start_fast().await?;
+        node.stop_gracefully().await?;
+        let app_root = node.state_path.clone();
         Ok(Self {
-            _core_tmp: core_tmp,
+            node,
             app_root,
-            user_space,
-            uds_path,
             fixture,
         })
     }
@@ -1670,7 +1747,7 @@ impl StandaloneHarness {
         cmd.arg("--app-root")
             .arg(&self.app_root)
             .arg("--uds-path")
-            .arg(&self.uds_path)
+            .arg(&self.node.uds_path)
             .arg("run-service")
             .arg(service_ref);
         if let Some(p) = params_json {
@@ -1678,7 +1755,7 @@ impl StandaloneHarness {
         }
         cmd.env("HOSTNAME", "testhost")
             .env("RYEOS_APP_ROOT", &self.app_root)
-            .env("HOME", self.user_space.path())
+            .env("HOME", self.node.user_space.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -1700,74 +1777,33 @@ impl StandaloneHarness {
     }
 }
 
-/// Run `ryeosd run-service <ref> ...` standalone (no daemon), with a
-/// fresh state_dir + user_space pair, returning (output, state_dir, user_space).
+/// Run `ryeosd run-service <ref> ...` standalone against a fresh node.
 ///
-/// The tempdirs are returned so callers can keep them alive for follow-up
-/// inspection or for a subsequent harness.
-pub async fn run_service_standalone(
-    state_dir: TempDir,
-    user_space: TempDir,
+/// Stopped-node commands refuse a node that has never completed a first
+/// start, so the node is initialized from the authored Standard profile,
+/// started once as a daemon and stopped in order before the standalone
+/// command runs. The stopped harness is returned so callers keep its state
+/// alive for follow-up inspection.
+pub async fn run_service_standalone_fresh(
     service_ref: &str,
     params_json: Option<&str>,
-) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
-    // Use the fast fixture to set up a fully initialized state with bundles.
-    let (core_tmp, state_path) = copy_core_to_temp();
-    let fixture = fast_fixture::populate_initialized_state_with_profile(
-        &state_path,
-        user_space.path(),
-        fast_fixture::FastFixtureProfile::Standard,
-    )?;
-    fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-    fast_fixture::register_standard_composition(&state_path, &fixture)?;
-    fast_fixture::seal_initialized_state(&state_path)?;
-    // Establish the current-schema Runtime store through the native gate.
-    drop(ryeos_app::test_support::TestRuntime::open(
-        &state_path.join(".ai/state/runtime.sqlite3"),
-    ));
-    // The scheduler store exists only in builds composed with scheduling.
-    #[cfg(feature = "scheduling")]
-    {
-        // Opened natively on this thread's shared test host; the store
-        // settles into the host's census before the host is released.
-        let runtime_state_dir = state_path.join(".ai/state");
-        let scheduler_runtime = lillux::PinnedDirectory::open(&runtime_state_dir)?
-            .context("scheduler fixture runtime directory is absent")?;
-        let scheduler_host = ryeos_scheduler::test_native::TestSchedulerHost::acquire();
-        let scheduler_db = match scheduler_host.open_at(&runtime_state_dir) {
-            Ok(db) => db,
-            Err(failure) => {
-                let error = anyhow::anyhow!("open fixture scheduler store: {failure}");
-                scheduler_host.settle_refusal(failure);
-                return Err(error);
-            }
-        };
-        let seeded = scheduler_db
-            .require_runtime(&scheduler_runtime)
-            .and_then(|()| {
-                ryeos_scheduler::projection::rebuild_fires_from_dir(
-                    &runtime_state_dir.join("schedules"),
-                    &scheduler_db,
-                )
-            });
-        scheduler_host.settle(scheduler_db);
-        drop(scheduler_host);
-        seeded?;
-    }
+) -> anyhow::Result<(std::process::Output, DaemonHarness)> {
+    let (mut node, _fixture) = DaemonHarness::start_fast().await?;
+    node.stop_gracefully().await?;
 
     let mut cmd = ryeosd_command();
     cmd.arg("--app-root")
-        .arg(&state_path)
+        .arg(&node.state_path)
         .arg("--uds-path")
-        .arg(state_dir.path().join("ryeosd.sock"))
+        .arg(&node.uds_path)
         .arg("run-service")
         .arg(service_ref);
     if let Some(p) = params_json {
         cmd.arg("--params").arg(p);
     }
     cmd.env("HOSTNAME", "testhost")
-        .env("RYEOS_APP_ROOT", &state_path)
-        .env("HOME", user_space.path())
+        .env("RYEOS_APP_ROOT", &node.state_path)
+        .env("HOME", node.user_space.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1781,27 +1817,14 @@ pub async fn run_service_standalone(
         s.read_to_end(&mut stderr_buf).await?;
     }
     let status = child.wait().await?;
-    // core_tmp cleaned up here — child has exited so files are closed.
-    let _ = core_tmp;
     Ok((
         std::process::Output {
             status,
             stdout: stdout_buf,
             stderr: stderr_buf,
         },
-        state_dir,
-        user_space,
+        node,
     ))
-}
-
-/// Convenience: fresh tempdirs + run_service_standalone.
-pub async fn run_service_standalone_fresh(
-    service_ref: &str,
-    params_json: Option<&str>,
-) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
-    let state_dir = tempfile::tempdir()?;
-    let user_space = tempfile::tempdir()?;
-    run_service_standalone(state_dir, user_space, service_ref, params_json).await
 }
 
 /// Build ryeos-signed auth headers for a test request.

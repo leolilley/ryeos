@@ -169,6 +169,7 @@ fn plant_python_echo_tool(root: &Path, rel: &str, signer: &SigningKey) -> anyhow
 #   category: "{dir_relative}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "P3b echo tool — prints its single arg back"
 
 import json
@@ -1090,6 +1091,7 @@ fn plant_sleepy_marker_tool(
 #   category: "{name}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "concurrency e2e marker tool {index}"
 
 import json

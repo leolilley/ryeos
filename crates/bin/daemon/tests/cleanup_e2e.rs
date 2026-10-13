@@ -41,7 +41,7 @@ async fn live_execute_service_node_status_over_tcp() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_run_service_node_status() {
-    let (out, _sd, _us) = run_service_standalone_fresh("service:node/status", None)
+    let (out, _node) = run_service_standalone_fresh("service:node/status", None)
         .await
         .expect("run-service");
     assert!(
@@ -145,7 +145,7 @@ async fn stopped_node_service_errors_when_daemon_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_only_service_errors_via_run_service() {
-    let (out, _sd, _us) = run_service_standalone_fresh(
+    let (out, _node) = run_service_standalone_fresh(
         "service:commands/submit",
         Some(r#"{"thread_id":"T-test","command_type":"noop","params":{}}"#),
     )
@@ -614,7 +614,7 @@ response:
         Err(e) => {
             let err_msg = format!("{:#}", e);
             assert!(
-                err_msg.contains("legacy structural field 'section'"),
+                err_msg.contains("declares path-owned structural field 'section'"),
                 "error should mention legacy section rejection, got: {err_msg}"
             );
         }

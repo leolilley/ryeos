@@ -58,13 +58,15 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    // The descriptor table also serves the bundle catalog and bundle release
-    // services, whose signed items live in their own source bundles.
+    // The descriptor table also serves the bundle catalog, bundle release and
+    // (in builds composed with scheduling) scheduler services, whose signed
+    // items live in their own source bundles.
     let bundle_roots = vec![
         bundle_root,
         standard_root,
         workspace.join("bundles/bundle-source"),
         workspace.join("bundles/bundle-release"),
+        workspace.join("bundles/scheduling"),
     ];
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())

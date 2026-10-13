@@ -95,12 +95,35 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {{}}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
 description: "synth runtime for runtime_e2e"
 "#

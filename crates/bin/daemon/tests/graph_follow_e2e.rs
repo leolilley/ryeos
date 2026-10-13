@@ -153,6 +153,7 @@ fn plant_project_mutating_tool(project_dir: &Path, signer: &SigningKey) -> anyho
 #   category: mutate
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 
 import json
 import pathlib
