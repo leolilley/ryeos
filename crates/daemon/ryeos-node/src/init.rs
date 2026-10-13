@@ -1445,6 +1445,26 @@ pub fn seal_init_completion_after_policy_update(
     seal_current_init_completion(app_root, Some(expected_policy_generation_digest))
 }
 
+/// Advance the whole-init commit point after a stopped-node bundle
+/// registration change.
+///
+/// The completion record pins the digest of every bundle registration, so a
+/// bundle install or removal invalidates it the moment the registration set
+/// changes; nothing stopped-node can run against the node, and the daemon
+/// cannot boot, until a new record is sealed. Sealing here, under the same
+/// state lock the mutation held, makes the new registration set startable.
+/// A crash between the mutation and this seal leaves the node refusing until
+/// the same operation is re-run, which reseals it.
+pub fn seal_init_completion_after_bundle_registration_change(
+    app_root: &Path,
+    state_lock: &ryeos_node_runtime::state_lock::StateLockLease,
+) -> Result<()> {
+    state_lock
+        .ensure_protects_app_root(app_root)
+        .context("init-completion publication requires this app root's state lock")?;
+    seal_current_init_completion(app_root, None)
+}
+
 /// Seal the exact initialized state authored by an integration-test fixture.
 ///
 /// This is deliberately available only when the `test-support` feature is

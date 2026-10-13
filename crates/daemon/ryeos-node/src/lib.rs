@@ -36,7 +36,8 @@ pub use init::{
     load_verified_substrate_identity, preflight_existing_policy_generation,
     prepare_bundle_set_init_completion, prepare_prospective_init_completion, run_init,
     run_init_with_operator_ceremony, run_init_with_progress,
-    seal_init_completion_after_policy_update, verify_init_completion,
+    seal_init_completion_after_bundle_registration_change, seal_init_completion_after_policy_update,
+    verify_init_completion,
 };
 pub use init_check::{InitDiagnostics, InitState, require_initialized};
 pub use lifecycle_wire::{

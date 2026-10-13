@@ -135,6 +135,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     );
     transaction.begin_remove()?;
     transaction.commit_absent()?;
+    // The registration set is pinned by the signed init completion record;
+    // reseal it so the node without this bundle is startable and the next
+    // stopped-node operation is admitted.
+    ryeos_node::seal_init_completion_after_bundle_registration_change(
+        &state.config.app_root,
+        &state.controller_lifetime,
+    )
+    .context("commit bundle removal into initialized state")?;
 
     Ok(serde_json::json!({
         "name": req.name,

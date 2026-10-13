@@ -216,6 +216,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let config_item_path = transaction
         .commit_present(state.identity.signing_key())
         .context("commit bundle registration")?;
+    // The registration set is pinned by the signed init completion record;
+    // reseal it so the node with this bundle is startable and the next
+    // stopped-node operation is admitted.
+    ryeos_node::seal_init_completion_after_bundle_registration_change(
+        &state.config.app_root,
+        &state.controller_lifetime,
+    )
+    .context("commit bundle registration into initialized state")?;
 
     let report = serde_json::json!({
         "name": req.name,
