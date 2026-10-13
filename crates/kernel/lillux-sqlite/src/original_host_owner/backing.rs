@@ -141,8 +141,11 @@ impl HostStorage {
                         let error = std::io::Error::last_os_error();
                         // The limits looked sufficient but the kernel refused
                         // the lock for lack of lockable memory or privilege.
-                        // The swap proof is an equal alternative, observed
-                        // afresh; any other failure refuses outright.
+                        // A swap proof is the alternative, observed afresh;
+                        // any other failure refuses outright. It can be a
+                        // weaker basis than the lock that was planned, so
+                        // the node re-decides its capability floor from the
+                        // proof returned here before admitting work.
                         if !matches!(error.raw_os_error(), Some(libc::ENOMEM) | Some(libc::EPERM)) {
                             return Err(format!(
                                 "host physical residency refused: mlock of {} bytes failed ({error}) although {basis}; original mapping retained",
@@ -157,8 +160,8 @@ impl HostStorage {
                         })?
                     }
                 }
-                lillux::process_control::ResidencyProof::SwapUnreachable { basis } => {
-                    let proof = lillux::process_control::ResidencyProof::SwapUnreachable { basis };
+                proof @ (lillux::process_control::ResidencyProof::SwapLimit { basis: _ }
+                | lillux::process_control::ResidencyProof::SwapAbsent { basis: _ }) => {
                     // Observed again right before the touch: the pages stay
                     // resident only while nothing can page them out.
                     proof.confirm_swap_unreachable().map_err(|reason| {

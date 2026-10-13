@@ -1876,7 +1876,10 @@ impl IsolationRuntime {
     /// Node-owned control budget, distinct from a workload request deadline.
     pub fn process_scope_control_timeout(&self) -> Result<lillux::time::Duration, EngineError> {
         self.ensure_registered_generation_current()?;
-        for name in &self.inspection.requires_capabilities {
+        for entry in &self.inspection.requires_capabilities {
+            let lillux::process_control::CapabilityRequirement::Name(name) = entry else {
+                continue;
+            };
             let Some(capability) = lillux::ProcessScopeCapability::from_capability_name(name)
             else {
                 continue;
@@ -5994,29 +5997,59 @@ fn validate_descriptor_bound_command(
     }
 }
 
-/// The floor is canonical data: sorted, unique, well-formed names. A
-/// per-scope name needs a configured scope provider, and a configured
-/// provider's scopes cannot run without termination and recovery, so the
-/// floor must name both whenever scopes are required. Trusted enclosure
-/// inits are sorted, unique executable file names.
+/// The floor is canonical data: well-formed names, each named once across
+/// the whole floor. An `any_of` set lists at least two names in sorted
+/// order, and the entries are sorted by their first name. A set never names
+/// a per-scope capability, whose requirement decides how scopes are
+/// configured and so must be unconditional. A weaker residency basis, which
+/// a stronger basis does not meet, is named only in a set beside
+/// `accounting`. A per-scope name needs a
+/// configured scope provider, and a configured provider's scopes cannot run
+/// without termination and recovery, so the floor must name both whenever
+/// scopes are required. Trusted enclosure inits are sorted, unique
+/// executable file names.
 fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError> {
-    let names = &policy.requires_capabilities;
-    if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+    use lillux::process_control::CapabilityRequirement;
+    let entries = &policy.requires_capabilities;
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        let names = entry.names();
+        if let CapabilityRequirement::AnyOf(_) = entry {
+            if names.len() < 2 || names.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities entry {} must list at least two names, \
+                     sorted and unique",
+                    entry.label()
+                )));
+            }
+        }
+        if let Some(reason) = lillux::process_control::floor_entry_refusal(entry) {
+            return Err(refused(format!("isolation requires_capabilities {reason}")));
+        }
+        for name in names {
+            let well_formed = !name.is_empty()
+                && name.len() <= 128
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-' | b':' | b'.')
+                });
+            if !well_formed {
+                return Err(refused(format!(
+                    "isolation requires_capabilities names an invalid capability {name:?}"
+                )));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities names {name} more than once"
+                )));
+            }
+        }
+    }
+    if entries.windows(2).any(|pair| pair[0].names()[0] >= pair[1].names()[0]) {
         return Err(refused(
             "isolation requires_capabilities must be sorted and unique".to_owned(),
         ));
-    }
-    for name in names {
-        let well_formed = !name.is_empty()
-            && name.len() <= 128
-            && name.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b':' | b'.')
-            });
-        if !well_formed {
-            return Err(refused(format!(
-                "isolation requires_capabilities names an invalid capability {name:?}"
-            )));
-        }
     }
     let inits = &policy.enclosure_inits;
     if inits.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -10629,7 +10662,7 @@ mod tests {
             "nested_sandbox": false,
         }))
         .unwrap();
-        policy.requires_capabilities = vec!["recovery:scope".to_owned(), "termination:scope".to_owned()];
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
         let source = app_root.path().join("isolation.yaml");
         let digest = format!("sha256:{}", "a".repeat(64));
         let prospective = IsolationRuntime::resolve_compiled_policy_for_definition_validation(
@@ -10711,14 +10744,50 @@ mod tests {
         let error = IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap_err();
         assert!(error.to_string().contains("need termination:scope"), "{error}");
         scoped_without_sandbox.requires_capabilities =
-            vec!["recovery:scope".to_owned(), "termination:scope".to_owned()];
+            vec!["recovery:scope".into(), "termination:scope".into()];
         IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap();
         let mut unsorted = scoped_without_sandbox.clone();
         unsorted.requires_capabilities.reverse();
         assert!(IsolationRuntime::validate_policy(&unsorted).is_err());
         let mut unconfigured_scope_floor = policy.clone();
-        unconfigured_scope_floor.requires_capabilities = vec!["termination:scope".to_owned()];
+        unconfigured_scope_floor.requires_capabilities = vec!["termination:scope".into()];
         assert!(IsolationRuntime::validate_policy(&unconfigured_scope_floor).is_err());
+        // A set of alternatives accepts a weaker grade only by naming it.
+        let any_of = |names: &[&str]| {
+            lillux::process_control::CapabilityRequirement::AnyOf(
+                lillux::process_control::AnyOfCapabilities {
+                    any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+                },
+            )
+        };
+        let mut alternatives = policy.clone();
+        alternatives.requires_capabilities =
+            vec![any_of(&["accounting", "residency:swap_absent"]), "time".into()];
+        IsolationRuntime::validate_policy(&alternatives).unwrap();
+        let value = serde_json::to_value(&alternatives).unwrap();
+        assert_eq!(
+            value["requires_capabilities"],
+            serde_json::json!([{"any_of": ["accounting", "residency:swap_absent"]}, "time"])
+        );
+        assert_eq!(serde_json::from_value::<IsolationPolicy>(value).unwrap(), alternatives);
+        for (floor, refusal) in [
+            (vec![any_of(&["accounting"]), "time".into()], "at least two names"),
+            (vec![any_of(&["residency:swap_absent", "accounting"])], "at least two names"),
+            (vec![any_of(&["accounting", "termination:scope"])], "per-scope capability"),
+            (vec![any_of(&["accounting", "limits:scope"])], "per-scope capability"),
+            (vec!["residency:swap_absent".into()], "stronger residency basis does not meet"),
+            (
+                vec![any_of(&["residency:locked", "residency:swap_absent"])],
+                "stronger residency basis does not meet",
+            ),
+            (vec!["accounting".into(), any_of(&["accounting", "residency:swap_absent"])], "more than once"),
+            (vec!["time".into(), any_of(&["accounting", "residency:swap_absent"])], "sorted and unique"),
+        ] {
+            let mut invalid = policy.clone();
+            invalid.requires_capabilities = floor;
+            let error = IsolationRuntime::validate_policy(&invalid).unwrap_err().to_string();
+            assert!(error.contains(refusal), "{refusal}: {error}");
+        }
         let mut inits = scoped_without_sandbox.clone();
         inits.enclosure_inits = vec!["catatonit".to_owned(), "dumb-init".to_owned(), "tini".to_owned()];
         IsolationRuntime::validate_policy(&inits).unwrap();

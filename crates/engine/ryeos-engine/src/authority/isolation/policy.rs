@@ -12,10 +12,12 @@ pub struct IsolationPolicy {
     pub mode: IsolationMode,
     pub backend: Option<IsolationBackendSelection>,
     pub process_scopes: IsolationProcessScopePolicy,
-    /// Capability names this node must prove before it starts, sorted and
-    /// unique. Names are open strings matched against the node capability
+    /// Capabilities this node must prove before it starts, sorted and
+    /// unique. Each entry is a name, or an `any_of` set of names any one of
+    /// which meets it, so a weaker grade is accepted only where the floor
+    /// names it. Names are open strings matched against the node capability
     /// report; a name this build cannot prove is refused, never ignored.
-    pub requires_capabilities: Vec<String>,
+    pub requires_capabilities: Vec<lillux::process_control::CapabilityRequirement>,
     /// Executable names of inits trusted to exit when their only child
     /// exits, sorted and unique. When the node's parent is pid 1 and pid 1
     /// is one of these, the node's exit is trusted to end its container
@@ -31,13 +33,19 @@ pub struct IsolationPolicy {
 }
 
 impl IsolationPolicy {
-    /// Per-scope guarantees named by this policy's capability floor.
+    /// Per-scope guarantees this policy's capability floor requires outright.
+    /// A set of alternatives never names one, which validation enforces.
     pub fn required_process_scope_capabilities(
         &self,
     ) -> std::collections::BTreeSet<lillux::ProcessScopeCapability> {
         self.requires_capabilities
             .iter()
-            .filter_map(|name| lillux::ProcessScopeCapability::from_capability_name(name))
+            .filter_map(|entry| match entry {
+                lillux::process_control::CapabilityRequirement::Name(name) => {
+                    lillux::ProcessScopeCapability::from_capability_name(name)
+                }
+                lillux::process_control::CapabilityRequirement::AnyOf(_) => None,
+            })
             .collect()
     }
 

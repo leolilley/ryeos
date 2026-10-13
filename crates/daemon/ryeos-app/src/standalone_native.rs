@@ -11,6 +11,7 @@
 //! itself takes the runtime namespace lock when it opens.
 
 use anyhow::{Context, Result, ensure};
+use lillux::process_control::ResidencyProof;
 use lillux_sqlite::offline_host::{
     OfflineNativeAuthority, OfflineNativeFacts, OfflineNativeHost, OfflineNativeReleased,
     OfflineNativeRetained,
@@ -110,13 +111,22 @@ pub struct StandaloneNativeHost {
 impl StandaloneNativeHost {
     /// Issue the class's signed envelope under the caller's StateLock, for a
     /// Store that takes the runtime namespace lock itself when it opens.
-    pub fn issue(config: &Config, identity: &NodeIdentity, state_lock: &StateLock) -> Result<Self> {
+    ///
+    /// `admit_residency` decides the caller's capability floor on the
+    /// residency the host's region actually established. A refusal finishes
+    /// the host before any connection ticket is issued.
+    pub fn issue(
+        config: &Config,
+        identity: &NodeIdentity,
+        state_lock: &StateLock,
+        admit_residency: &dyn Fn(&ResidencyProof) -> Result<()>,
+    ) -> Result<Self> {
         let runtime_dir = config.runtime_state_dir();
         let runtime = Arc::new(
             lillux::PinnedDirectory::open(&runtime_dir)?
                 .with_context(|| format!("runtime state is absent: {}", runtime_dir.display()))?,
         );
-        Self::issue_inner(config, identity, state_lock, runtime, None)
+        Self::issue_inner(config, identity, state_lock, runtime, None, admit_residency)
     }
 
     /// Issue the class's signed envelope in the stopped-node maintenance
@@ -129,9 +139,10 @@ impl StandaloneNativeHost {
         state_lock: &StateLock,
         runtime: Arc<lillux::PinnedDirectory>,
         namespace: &lillux::PinnedDirectoryLock,
+        admit_residency: &dyn Fn(&ResidencyProof) -> Result<()>,
     ) -> Result<Self> {
         namespace.ensure_protects(&runtime)?;
-        Self::issue_inner(config, identity, state_lock, runtime, Some(namespace.clone()))
+        Self::issue_inner(config, identity, state_lock, runtime, Some(namespace.clone()), admit_residency)
     }
 
     fn issue_inner(
@@ -140,6 +151,7 @@ impl StandaloneNativeHost {
         state_lock: &StateLock,
         runtime: Arc<lillux::PinnedDirectory>,
         namespace: Option<lillux::PinnedDirectoryLock>,
+        admit_residency: &dyn Fn(&ResidencyProof) -> Result<()>,
     ) -> Result<Self> {
         state_lock.ensure_protects_app_root(&config.app_root)?;
         runtime.ensure_path_binding()?;
@@ -198,6 +210,21 @@ impl StandaloneNativeHost {
         // opens on this host takes the runtime namespace lock itself.
         match unsafe { OfflineNativeHost::issue(raw, host_authority) } {
             Ok(host) => {
+                // The plan the floor was admitted on can be stronger than the
+                // basis the region established; with no proof the floor
+                // cannot be decided. Either refusal finishes the host while
+                // it has issued no connection ticket.
+                let admitted = host
+                    .residency_proof()
+                    .context("standalone native host established no residency proof")
+                    .and_then(|proof| admit_residency(&proof));
+                if let Err(error) = admitted {
+                    return Err(match host.finish() {
+                        Ok(_) => error,
+                        Err(retained) => anyhow::Error::new(retained)
+                            .context(format!("standalone native host refused on its residency: {error:#}")),
+                    });
+                }
                 let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
                     match host.factory() {
                         Ok(factory) => Arc::new(StandaloneLeaseAuthority {

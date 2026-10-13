@@ -32,11 +32,13 @@ mod scope;
 #[cfg(target_os = "linux")]
 pub(crate) use scope::SelectedScopePreparation;
 pub use host_capability::{
-    CapabilityEvidence, CgroupFacts, CgroupLimit, HOST_FACTS_VERSION, HostCapabilities, HostFacts,
-    MemlockFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT,
-    ResidencyProof, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT,
-    TRUSTED_GRADE_CAPABILITIES, admit_enclosure_inits, current_host_generation,
-    satisfies_local_requirement,
+    ACCOUNTING, AnyOfCapabilities, CapabilityEvidence, CapabilityRequirement, CgroupFacts,
+    CgroupLimit, HOST_FACTS_VERSION, HostCapabilities, HostFacts, MemlockFacts, ProbeOutcome,
+    ProofSource, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES,
+    RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof,
+    TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, TRUSTED_GRADE_CAPABILITIES,
+    SCOPE_LIMITS, admit_enclosure_inits, current_host_generation, floor_entry_refusal,
+    is_scope_capability, is_weaker_grade, met_by_strongest, satisfies_local_requirement,
 };
 pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress};
 pub use scope::{

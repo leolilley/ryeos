@@ -60,7 +60,7 @@ dockerfile_instructions() {
 
 for path in "$root"/Dockerfile*; do
     [[ -f "$path" ]] || continue
-    # Dockerfile.release deliberately contains three named runtime targets.
+    # Dockerfile.release contains multiple named runtime targets.
     # They are asserted individually below rather than misclassified as one
     # final-stage daemon image by this single-image discovery pass.
     [[ "$(basename "$path")" != Dockerfile.release ]] || continue
@@ -155,12 +155,12 @@ for image in "${daemon_images[@]}"; do
     fi
 done
 
-for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow; do
+for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow ryeos-substrate; do
     final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
     if ! grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$final_stage"; then
         # The named final stages inherit the separately asserted runtime base.
         runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
-        [[ "$stage" == ryeos-hosted-workflow ]] && \
+        [[ "$stage" == ryeos-hosted-workflow || "$stage" == ryeos-substrate ]] && \
             runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" hosted-runtime)"
         grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$runtime_stage" || {
             echo "Dockerfile.release target $stage does not inherit an installed tini" >&2
@@ -237,6 +237,7 @@ assert_runtime_bundle_inventory Dockerfile.release central-host ryeos-central-ho
 assert_runtime_bundle_inventory Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-contained-workflow
+assert_runtime_bundle_inventory Dockerfile.release bundle-source ryeos-substrate
 
 assert_runtime_init_profile() {
     local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_selector actual_selector
@@ -270,6 +271,19 @@ assert_runtime_init_profile Dockerfile.release standard ryeos-standard
 assert_runtime_init_profile Dockerfile.release central-host ryeos-central-host
 assert_runtime_init_profile Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-workflow
+assert_runtime_init_profile Dockerfile.release bundle-source ryeos-substrate
+
+# Contained startup receives its profile through the admitted worker binding,
+# rather than the generic image entrypoint. Keep the declared requirement exact
+# and prove it maps to the copied hosted-workflow set; an ENV seed cannot replace
+# that binding's authority.
+contained_profile="$(sed -nE 's/^LABEL io\.ryeos\.required-node-profile="([^" ]+)"$/\1/p' <<<"$contained_stage")"
+[[ "$contained_profile" == contained-workflow ]]
+[[ "$(ryeos_node_init_profile_bundle_set "$contained_profile")" == hosted-workflow ]]
+if grep -Eq '^ENV RYEOS_INIT_NODE_PROFILE=' <<<"$contained_stage"; then
+    echo "contained workflow image must obtain its profile from the admitted worker binding" >&2
+    exit 1
+fi
 
 # The shared entrypoint consumes only a generic selector and must not infer
 # provider/workload policy from the bundles present in an image.
@@ -378,12 +392,18 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
       exit 1
     fi
     unset RYEOS_HOST_RUNTIME_BINDING
+    # A recorded restart inhibition paces the start ryeosd will refuse.
+    [[ "$(restart_inhibition_hold_seconds "$policy_test_root")" == 0 ]]
+    mkdir -p "$policy_test_root/.ai/state"
+    : > "$policy_test_root/.ai/state/restart-inhibited.json"
+    [[ "$(restart_inhibition_hold_seconds "$policy_test_root")" == "$RESTART_INHIBITED_HOLD_SECONDS" ]]
+    [[ "$RESTART_INHIBITED_HOLD_SECONDS" -gt 0 && "$RESTART_INHIBITED_HOLD_SECONDS" -le 60 ]]
     grep -Fq 'exec ryeosd "${DAEMON_ARGS[@]}"' "$root/deploy/entrypoint.sh"
     ! sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh" | grep -Fq -- '--bind'
 )
 
-# central-auth owns Python-authored support and every runtime set that includes
-# it must mechanically prove the interpreter is present in the final image.
+# These current images require Python for readiness probes and admitted tools;
+# optional central-auth is one additional consumer, not the interpreter owner.
 for image in "${daemon_images[@]}"; do
     instructions="$(dockerfile_instructions "$root/$image")"
     final_stage="$(awk '
@@ -396,10 +416,10 @@ for image in "${daemon_images[@]}"; do
         exit 1
     fi
 done
-for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow; do
+for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow ryeos-substrate; do
     final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
     runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
-    [[ "$stage" == ryeos-hosted-workflow ]] && \
+    [[ "$stage" == ryeos-hosted-workflow || "$stage" == ryeos-substrate ]] && \
         runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" hosted-runtime)"
     [[ "$(grep -Eic '^run test -x /usr/bin/python3$' <<<"$runtime_stage")" -eq 1 ]] || {
         echo "Dockerfile.release target $stage does not inherit a proven Python runtime" >&2

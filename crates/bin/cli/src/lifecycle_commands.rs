@@ -2163,6 +2163,20 @@ fn inspect_capability_report(
                 "provided": signed.report.provided,
                 "missing": signed.report.missing,
                 "capacity": signed.report.capacity,
+                // The basis the report holds, as of the daemon's start: the
+                // one its reservation established, or else only the plan.
+                "residency_basis": match (&signed.report.established_residency, &signed.report.host.residency) {
+                    (Some(proof), _) => serde_json::json!({
+                        "name": proof.capability_name(),
+                        "stage": "established",
+                    }),
+                    (None, Some(proof)) => serde_json::json!({
+                        "name": proof.capability_name(),
+                        "stage": "planned",
+                    }),
+                    (None, None) => serde_json::Value::Null,
+                },
+                "residency_now": residency_now(&signed.report),
                 "residency_planned": signed.report.host.residency,
                 "enclosure_exit": signed.report.host.enclosure_exit,
                 "enclosure_exit_refusal": signed.report.host.enclosure_exit_refusal,
@@ -2172,6 +2186,20 @@ fn inspect_capability_report(
             });
             (status, detail, Some(signed))
         }
+    }
+}
+
+/// Whether the residency basis the report recorded at the daemon's start
+/// still holds now, checked from this shell: a swap-absent basis ends with
+/// any later `swapon`, and a swap limit can be lifted. The shell's cgroup can
+/// differ from the daemon's, so a swap-limit answer describes this shell.
+fn residency_now(report: &ryeos_node::capability_report::NodeCapabilityReport) -> serde_json::Value {
+    let Some(proof) = report.established_residency.as_ref().or(report.host.residency.as_ref()) else {
+        return serde_json::Value::Null;
+    };
+    match proof.confirm_swap_unreachable() {
+        Ok(()) => serde_json::json!({ "holds": true, "name": proof.capability_name() }),
+        Err(reason) => serde_json::json!({ "holds": false, "name": proof.capability_name(), "reason": reason }),
     }
 }
 
@@ -2219,12 +2247,34 @@ fn capability_section(
         _ => "unknown".to_owned(),
     };
     section.rows.push(crate::tty::Row::key_value("report", &format!("{} ({generation})", report.generated_at)));
+    let basis_name = |proof: &lillux::process_control::ResidencyProof| {
+        proof.capability_name().unwrap_or("an unknown basis")
+    };
+    // The signed report records the basis as of the daemon's start; whether
+    // it still holds is checked again now.
     let residency = match (&report.established_residency, &report.host.residency) {
-        (Some(proof), _) => format!("{} (established): {}", proof.method(), proof.basis()),
-        (None, Some(proof)) => format!("{} (planned before reservation): {}", proof.method(), proof.basis()),
+        (Some(proof), _) => {
+            format!("{} (established, as of startup): {}", basis_name(proof), proof.basis())
+        }
+        (None, Some(proof)) => {
+            format!("{} (planned before reservation, as of startup): {}", basis_name(proof), proof.basis())
+        }
         (None, None) => report.host.residency_refusal.clone().unwrap_or_else(|| "not proven".to_owned()),
     };
     section.rows.push(crate::tty::Row::key_value("residency", &residency));
+    if let Some(proof) = report.established_residency.as_ref().or(report.host.residency.as_ref()) {
+        let (now, tone) = match proof.confirm_swap_unreachable() {
+            Ok(()) => (format!("{} still holds", basis_name(proof)), crate::tty::Tone::Secondary),
+            Err(reason) => (
+                format!("{} no longer holds: {reason}", basis_name(proof)),
+                crate::tty::Tone::Warning,
+            ),
+        };
+        section.rows.push(
+            crate::tty::Row::key_value("residency now", &format!("{now} (checked from this shell)"))
+                .with_tone(tone),
+        );
+    }
     let host = &report.host;
     let enclosure_exit = match (&host.enclosure_exit, &host.enclosure_exit_refusal) {
         (Some(evidence), _) => format!("{}: {}", evidence.source.as_str(), evidence.basis),
@@ -2253,12 +2303,27 @@ fn capability_section(
             "requires",
             &format!(
                 "{} — {}",
-                floor.requires.join(", "),
+                floor.requires.iter().map(|entry| entry.label()).collect::<Vec<_>>().join(", "),
                 if floor.admitted { "met" } else { "NOT met" }
             ),
         )
         .with_tone(floor_tone),
     );
+    for (label, name) in &floor.met_by {
+        // Only an admission on a weaker grade than the entry's strongest
+        // name is worth a warning.
+        let strongest = floor
+            .requires
+            .iter()
+            .find(|entry| entry.label() == *label)
+            .is_some_and(|entry| lillux::process_control::met_by_strongest(entry, name));
+        let (text, tone) = if strongest {
+            (format!("  met {label} by {name}"), crate::tty::Tone::Secondary)
+        } else {
+            (format!("  met {label} by {name}, a weaker grade it names"), crate::tty::Tone::Warning)
+        };
+        section.rows.push(crate::tty::Row::text(text).with_tone(tone));
+    }
     for (name, reason) in &floor.unmet {
         section.rows.push(
             crate::tty::Row::text(format!("  unmet {name}: {reason}")).with_tone(crate::tty::Tone::Failure),

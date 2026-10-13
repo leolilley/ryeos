@@ -595,6 +595,7 @@ pub fn load_node_config_two_phase(
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
     load_node_config_two_phase_with_socket(config, Some(&config.uds_path), None)
+        .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Running-daemon bootstrap with one already selected protected host runtime.
@@ -610,6 +611,7 @@ pub fn load_node_config_two_phase_with_host_runtime(
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
     load_node_config_two_phase_with_socket(config, Some(&config.uds_path), host_runtime)
+        .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Standalone service execution has no daemon callback listener to capture.
@@ -618,6 +620,10 @@ pub fn load_node_config_two_phase_with_host_runtime(
 /// It also does not own the supervised process-scope provider. Definition
 /// admission retains enforced isolation without claiming those capabilities;
 /// persistent worker execution belongs to the normal daemon bootstrap.
+///
+/// The capability report it admitted the service on is returned with the
+/// rest: the floor was met on the planned residency, and the native host
+/// the service issues must meet it again on the residency it establishes.
 pub fn load_node_config_two_phase_standalone(
     config: &Config,
 ) -> Result<(
@@ -625,6 +631,7 @@ pub fn load_node_config_two_phase_standalone(
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
+    ryeos_node::capability_report::NodeCapabilityReport,
 )> {
     load_node_config_two_phase_with_socket(config, None, None)
 }
@@ -638,6 +645,7 @@ fn load_node_config_two_phase_with_socket(
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
+    ryeos_node::capability_report::NodeCapabilityReport,
 )> {
     let app_root = &config.app_root;
 
@@ -850,7 +858,9 @@ fn load_node_config_two_phase_with_socket(
         // admits no scoped job, so the per-scope names of the floor describe
         // nothing it does and are not checked here; every host-level name
         // is. The recorded report stays the running daemon's, so it is not
-        // overwritten from this process.
+        // overwritten from this process. This check is on the planned
+        // residency; the service checks again on the one its native host
+        // establishes.
         report
             .require_floor_without_scopes()
             .context("Phase 1: node capability floor for a service without process scopes")?;
@@ -859,6 +869,7 @@ fn load_node_config_two_phase_with_socket(
         // the reason.
         let floor_result = report.require_floor();
         let signed = report
+            .clone()
             .sign(node_identity.signing_key())
             .context("Phase 1: sign node capability report")?;
         let path = signed.write(app_root).context("Phase 1: record node capability report")?;
@@ -867,6 +878,8 @@ fn load_node_config_two_phase_with_socket(
             digest = %signed.digest,
             provided = ?signed.report.provided.keys().collect::<Vec<_>>(),
             missing = ?signed.report.missing.keys().collect::<Vec<_>>(),
+            floor_met_by = ?signed.report.floor.met_by,
+            residency_basis = ?signed.report.host.residency.as_ref().and_then(|proof| proof.capability_name()),
             residency = ?signed.report.host.residency,
             "node capability report recorded"
         );
@@ -898,7 +911,7 @@ fn load_node_config_two_phase_with_socket(
         "Phase 2: node config loaded"
     );
 
-    Ok((engine, snapshot, node_policy, isolation))
+    Ok((engine, snapshot, node_policy, isolation, report))
 }
 
 #[cfg(test)]

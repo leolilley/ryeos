@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T11:47:25Z:a517386aa24056424cabcdd6fe7743fcd36cb29dd5e2b7fd03de24efb47a5880:UaxsWXEkwJwfXQvT0poH9QRznoG2bpwn8JuwqHVBFx0Qyt4FbLtsq0uGu7nFpjjl6e1InOPJ4wvxYkkaTrhNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T23:27:10Z:8c886955eeea5283049b27b78a7be5ac7176f6e961e4f5830f7d68d9563edd29:5qyPJPwZzQtCmZzrfc84OORLnQ0pvYXz1ECqJ0uhytlJgBaw5dKbqylKDjiSdPDi4sZiGomVKBgTB7ShJAjdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -209,7 +209,10 @@ policies:
       version: 8
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, time]
+      # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
+      # class also accepts a resident region proven only by the absence of
+      # swap at startup (residency:swap_absent), which a later swapon ends.
+      requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves

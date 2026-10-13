@@ -17,22 +17,50 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-pub const HOST_FACTS_VERSION: u32 = 2;
+pub const HOST_FACTS_VERSION: u32 = 3;
+
+// Residency names match exactly, like every capability name: a proof meets
+// only the name of its own basis, so a stronger basis does not meet a
+// weaker name. A host that locks its region does not meet a floor naming
+// `residency:swap_absent`. A floor that accepts a weaker basis therefore
+// names it beside `accounting` in one `any_of` set, which every standing
+// basis meets; `floor_entry_refusal` rejects any other placement.
+
+/// The native region is resident by a lock.
+pub const RESIDENCY_LOCKED: &str = "residency:locked";
+/// The native region is resident because `memory.swap.max` is 0 on an
+/// enclosing cgroup the node can neither write nor leave: a standing limit.
+pub const RESIDENCY_SWAP_LIMIT: &str = "residency:swap_limit";
+/// The native region is resident because no swap device was active when it
+/// was observed: true only at that moment, since a later `swapon` undoes it.
+pub const RESIDENCY_SWAP_ABSENT: &str = "residency:swap_absent";
+/// The native region is resident by a standing basis: a lock or a swap
+/// limit. A momentary absence of swap is a weaker grade and is named
+/// `RESIDENCY_SWAP_ABSENT` only.
+pub const ACCOUNTING: &str = "accounting";
+/// Every name the residency proof decides.
+pub const RESIDENCY_CAPABILITIES: [&str; 4] =
+    [ACCOUNTING, RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT];
 
 /// How the node's resident native region is kept in physical memory.
 ///
 /// A lock holds for the mapping's life. A swap-unreachable proof holds only
-/// while its basis holds: `memory.swap.max` of 0 on an enclosing cgroup the
-/// node cannot write is a standing kernel limit and is preferred; an empty
-/// swap list is a point-in-time observation that a later `swapon` can undo,
-/// so its holder re-checks it before admitting new native work.
+/// while its basis holds, and its holder re-checks it before admitting new
+/// native work. Each basis is a distinct method, so the grade it carries is
+/// never inferred from text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidencyProof {
     /// The pages are locked with mlock.
     Locked { basis: String },
-    /// The pages are touched once while no swap is reachable for this
-    /// process, so the kernel has nowhere to page anonymous memory out to.
-    SwapUnreachable { basis: String },
+    /// The pages are touched once while `memory.swap.max` is 0 on an
+    /// enclosing cgroup the node can neither write nor move out of, so the
+    /// kernel has nowhere to page anonymous memory out to for as long as
+    /// that limit stands.
+    SwapLimit { basis: String },
+    /// The pages are touched once while no swap device is active. A later
+    /// `swapon` ends this, so it proves residency only at the moment it is
+    /// observed.
+    SwapAbsent { basis: String },
     /// A method this build does not know, carried from another report with
     /// every field it had, so the report re-serializes exactly. It proves
     /// nothing here.
@@ -44,7 +72,8 @@ pub enum ResidencyProof {
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 enum KnownResidencyProof {
     Locked { basis: String },
-    SwapUnreachable { basis: String },
+    SwapLimit { basis: String },
+    SwapAbsent { basis: String },
 }
 
 impl Serialize for ResidencyProof {
@@ -53,8 +82,11 @@ impl Serialize for ResidencyProof {
             Self::Locked { basis } => {
                 KnownResidencyProof::Locked { basis: basis.clone() }.serialize(serializer)
             }
-            Self::SwapUnreachable { basis } => {
-                KnownResidencyProof::SwapUnreachable { basis: basis.clone() }.serialize(serializer)
+            Self::SwapLimit { basis } => {
+                KnownResidencyProof::SwapLimit { basis: basis.clone() }.serialize(serializer)
+            }
+            Self::SwapAbsent { basis } => {
+                KnownResidencyProof::SwapAbsent { basis: basis.clone() }.serialize(serializer)
             }
             Self::Unknown(original) => original.serialize(serializer),
         }
@@ -69,21 +101,23 @@ impl<'de> Deserialize<'de> for ResidencyProof {
             Some(serde_json::Value::String(method)) => method.as_str(),
             _ => return Err(D::Error::custom("residency proof requires a string method")),
         };
-        if !matches!(method, "locked" | "swap_unreachable") {
+        if !matches!(method, "locked" | "swap_limit" | "swap_absent") {
             return Ok(Self::Unknown(original));
         }
         match serde_json::from_value(serde_json::Value::Object(original)).map_err(D::Error::custom)? {
             KnownResidencyProof::Locked { basis } => Ok(Self::Locked { basis }),
-            KnownResidencyProof::SwapUnreachable { basis } => Ok(Self::SwapUnreachable { basis }),
+            KnownResidencyProof::SwapLimit { basis } => Ok(Self::SwapLimit { basis }),
+            KnownResidencyProof::SwapAbsent { basis } => Ok(Self::SwapAbsent { basis }),
         }
     }
 }
 
 impl ResidencyProof {
     /// Choose the proof this process can establish for `bytes` of resident
-    /// memory, or explain in plain words why neither is available. Locking is
+    /// memory, or explain in plain words why none is available. Locking is
     /// chosen whenever the effective capability or the remaining
-    /// RLIMIT_MEMLOCK allows it.
+    /// RLIMIT_MEMLOCK allows it, then a standing swap limit, then an
+    /// observed absence of swap.
     pub fn plan(bytes: u64) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
@@ -96,13 +130,14 @@ impl ResidencyProof {
         }
     }
 
-    /// The swap-unreachable proof alone, for a holder whose lock attempt the
-    /// kernel refused although the limits looked sufficient.
+    /// A swap-unreachable proof alone, the standing limit before the
+    /// momentary absence, for a holder whose lock attempt the kernel refused
+    /// although the limits looked sufficient.
     pub fn plan_without_lock(bytes: u64) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
             let _ = bytes;
-            linux::swap_unreachable_basis().map(|basis| Self::SwapUnreachable { basis })
+            linux::swap_unreachable_proof()
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -114,29 +149,61 @@ impl ResidencyProof {
     pub fn method(&self) -> &'static str {
         match self {
             Self::Locked { basis: _ } => "locked",
-            Self::SwapUnreachable { basis: _ } => "swap_unreachable",
+            Self::SwapLimit { basis: _ } => "swap_limit",
+            Self::SwapAbsent { basis: _ } => "swap_absent",
             Self::Unknown(_) => "unknown",
         }
     }
 
     pub fn basis(&self) -> &str {
         match self {
-            Self::Locked { basis } | Self::SwapUnreachable { basis } => basis,
+            Self::Locked { basis } | Self::SwapLimit { basis } | Self::SwapAbsent { basis } => basis,
             Self::Unknown(_) => "",
         }
     }
 
-    /// Re-check that a swap-unreachable proof still holds: immediately
-    /// before the pages are touched, and again before new native work is
-    /// admitted against them. A locked proof is held by the lock itself.
+    /// The capability name this proof's basis provides, or `None` for a
+    /// method this build does not know.
+    pub fn capability_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Locked { basis: _ } => Some(RESIDENCY_LOCKED),
+            Self::SwapLimit { basis: _ } => Some(RESIDENCY_SWAP_LIMIT),
+            Self::SwapAbsent { basis: _ } => Some(RESIDENCY_SWAP_ABSENT),
+            Self::Unknown(_) => None,
+        }
+    }
+
+    /// Whether the basis stands for the region's life rather than only for
+    /// the moment it was observed.
+    pub fn standing(&self) -> bool {
+        match self {
+            Self::Locked { basis: _ } | Self::SwapLimit { basis: _ } => true,
+            Self::SwapAbsent { basis: _ } | Self::Unknown(_) => false,
+        }
+    }
+
+    /// Re-check that a swap-unreachable proof still holds at its own grade:
+    /// immediately before the pages are touched, and again before new native
+    /// work is admitted against them. A swap-limit proof needs the standing
+    /// limit still in place; a swap-absent proof is met by either basis. A
+    /// locked proof is held by the lock itself.
     pub fn confirm_swap_unreachable(&self) -> Result<(), String> {
         match self {
             Self::Locked { basis: _ } => Ok(()),
             Self::Unknown(_) => Err("an unknown residency method cannot be confirmed".to_owned()),
             #[cfg(target_os = "linux")]
-            Self::SwapUnreachable { basis: _ } => linux::swap_unreachable_basis().map(|_| ()),
+            Self::SwapLimit { basis: _ } => match linux::swap_unreachable_proof()? {
+                Self::SwapLimit { basis: _ } => Ok(()),
+                current => Err(format!(
+                    "the standing swap limit no longer holds; only {} remains ({})",
+                    current.capability_name().unwrap_or("an unknown basis"),
+                    current.basis()
+                )),
+            },
+            #[cfg(target_os = "linux")]
+            Self::SwapAbsent { basis: _ } => linux::swap_unreachable_proof().map(|_| ()),
             #[cfg(not(target_os = "linux"))]
-            Self::SwapUnreachable { basis: _ } => {
+            Self::SwapLimit { basis: _ } | Self::SwapAbsent { basis: _ } => {
                 Err("resident memory proof is unavailable on this OS".to_owned())
             }
         }
@@ -194,10 +261,17 @@ impl From<ProofSource> for String {
     }
 }
 
-/// Capability names whose only proof is policy trust: the grade is part of
+/// Capability names whose grade admits policy trust: the grade is part of
 /// the name, so a requirement that names one explicitly accepts trusted
-/// evidence for it. Every other requirement needs a local measurement.
-pub const TRUSTED_GRADE_CAPABILITIES: &[&str] = &["termination:process_group"];
+/// evidence for it. The enclosure `trusted_init` names are proven by trust
+/// in a policy-named init at pid 1, and stay distinct from the measured
+/// enclosure names, which only a node that is pid 1 itself can prove. Every
+/// other requirement needs a local measurement.
+pub const TRUSTED_GRADE_CAPABILITIES: &[&str] = &[
+    RECOVERY_ENCLOSURE_TRUSTED_INIT,
+    TERMINATION_ENCLOSURE_TRUSTED_INIT,
+    "termination:process_group",
+];
 
 /// Whether `evidence` satisfies a local requirement for `name`. Provider
 /// and peer attestations never satisfy a local requirement.
@@ -206,6 +280,117 @@ pub fn satisfies_local_requirement(name: &str, evidence: &CapabilityEvidence) ->
         ProofSource::Measured => true,
         ProofSource::Trusted => TRUSTED_GRADE_CAPABILITIES.contains(&name),
         ProofSource::ProviderAttested | ProofSource::PeerAttested | ProofSource::Unknown(_) => false,
+    }
+}
+
+/// One entry of a capability floor: a name the node must prove, or a set of
+/// names any one of which meets the entry. A set lets a floor accept a
+/// weaker grade only by naming it; nothing the entry does not name meets
+/// it, and admission records which name did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CapabilityRequirement {
+    Name(String),
+    AnyOf(AnyOfCapabilities),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnyOfCapabilities {
+    pub any_of: Vec<String>,
+}
+
+impl CapabilityRequirement {
+    /// The names that can meet this entry, in the order written.
+    pub fn names(&self) -> &[String] {
+        match self {
+            Self::Name(name) => std::slice::from_ref(name),
+            Self::AnyOf(alternatives) => &alternatives.any_of,
+        }
+    }
+
+    /// How the entry is shown in an admission: the name itself, or
+    /// `any_of(a, b)` for a set.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Name(name) => name.clone(),
+            Self::AnyOf(alternatives) => format!("any_of({})", alternatives.any_of.join(", ")),
+        }
+    }
+}
+
+/// Per-job scope limits, proven only by a qualified delegated provider.
+pub const SCOPE_LIMITS: &str = "limits:scope";
+
+/// Whether `name` is a guarantee of per-job process scopes rather than of
+/// the host or the node's enclosure.
+pub fn is_scope_capability(name: &str) -> bool {
+    name == SCOPE_LIMITS || super::ProcessScopeCapability::from_capability_name(name).is_some()
+}
+
+/// Residency names that a stronger basis does not meet, so a floor may name
+/// them only as an alternative to `accounting`.
+const WEAKER_RESIDENCY: [&str; 2] = [RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT];
+
+/// Pairs of names where the first is a weaker grade of the second: every
+/// guarantee the first gives, the second gives at least as firmly.
+const WEAKER_GRADES: [(&str, &str); 6] = [
+    (RESIDENCY_SWAP_ABSENT, ACCOUNTING),
+    (RESIDENCY_SWAP_ABSENT, RESIDENCY_LOCKED),
+    (RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT),
+    (RESIDENCY_SWAP_LIMIT, RESIDENCY_LOCKED),
+    (RECOVERY_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE),
+    (TERMINATION_ENCLOSURE_TRUSTED_INIT, TERMINATION_ENCLOSURE),
+];
+
+/// Whether `name` is a weaker grade of `than`.
+pub fn is_weaker_grade(name: &str, than: &str) -> bool {
+    WEAKER_GRADES.contains(&(name, than))
+}
+
+/// Whether `met` is the strongest name of `entry`: no other name the entry
+/// lists is a stronger grade of it. An admission met by a weaker grade is
+/// worth showing to an operator.
+pub fn met_by_strongest(entry: &CapabilityRequirement, met: &str) -> bool {
+    !entry.names().iter().any(|other| is_weaker_grade(met, other))
+}
+
+/// Why one floor entry is malformed in what it names, or `None` when it is
+/// well placed. A per-scope name decides how scopes are configured, so it is
+/// never conditional inside a set. A weaker residency basis is not met by a
+/// stronger one, so it appears only in a set beside `accounting`, which
+/// every standing basis meets.
+pub fn floor_entry_refusal(entry: &CapabilityRequirement) -> Option<String> {
+    let names = entry.names();
+    if let CapabilityRequirement::AnyOf(_) = entry
+        && let Some(scoped) = names.iter().find(|name| is_scope_capability(name))
+    {
+        return Some(format!(
+            "entry {} names per-scope capability {scoped}, which must be required on its own",
+            entry.label()
+        ));
+    }
+    let beside_accounting =
+        matches!(entry, CapabilityRequirement::AnyOf(_)) && names.iter().any(|name| name == ACCOUNTING);
+    match names.iter().find(|name| WEAKER_RESIDENCY.contains(&name.as_str())) {
+        Some(weaker) if !beside_accounting => Some(format!(
+            "entry {} names {weaker}, which a stronger residency basis does not meet; name it \
+             only beside {ACCOUNTING} in one any_of set",
+            entry.label()
+        )),
+        _ => None,
+    }
+}
+
+impl From<&str> for CapabilityRequirement {
+    fn from(name: &str) -> Self {
+        Self::Name(name.to_owned())
+    }
+}
+
+impl From<String> for CapabilityRequirement {
+    fn from(name: String) -> Self {
+        Self::Name(name)
     }
 }
 
@@ -440,6 +625,13 @@ impl HostCapabilities {
             self.missing.insert(name.to_owned(), reason.into());
         }
     }
+
+    /// Forget whatever this view held for `name`, so it can be decided again
+    /// from newer evidence.
+    pub fn withdraw(&mut self, name: &str) {
+        self.provided.remove(name);
+        self.missing.remove(name);
+    }
 }
 
 impl HostFacts {
@@ -500,6 +692,55 @@ impl HostFacts {
         self.kernel_kind == "gvisor"
     }
 
+    /// Decide every residency name from `proof`, or refuse them all with the
+    /// reason no proof exists, replacing whatever `view` held for them. The
+    /// basis name of the proof is provided exactly; `accounting` is provided
+    /// only for a standing basis and carries that basis name. It runs for the
+    /// startup plan and again for the proof the reservation established,
+    /// which can be weaker when the kernel refuses a lock the limits allowed.
+    pub fn apply_residency(&self, view: &mut HostCapabilities, proof: Result<&ResidencyProof, &str>) {
+        for name in RESIDENCY_CAPABILITIES {
+            view.withdraw(name);
+        }
+        let known = proof.and_then(|proof| match proof.capability_name() {
+            Some(held) => Ok((proof, held)),
+            None => Err("the resident region's proof uses a method this build does not know"),
+        });
+        let (proof, held) = match known {
+            Ok(known) => known,
+            Err(reason) => {
+                for name in RESIDENCY_CAPABILITIES {
+                    view.refuse(name, reason);
+                }
+                return;
+            }
+        };
+        let source = if self.gvisor() { ProofSource::ProviderAttested } else { ProofSource::Measured };
+        let mut basis = format!("resident region {}: {}", proof.method(), proof.basis());
+        if self.gvisor() {
+            basis.push_str(" (observed under gVisor emulation)");
+        }
+        for name in [RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT] {
+            if name == held {
+                view.provide(name, source.clone(), basis.clone());
+            } else {
+                view.refuse(name, format!("the resident region is held by {held}, not {name}"));
+            }
+        }
+        if proof.standing() {
+            view.provide(ACCOUNTING, source, format!("{held}: {basis}"));
+        } else {
+            view.refuse(
+                ACCOUNTING,
+                format!(
+                    "the resident region is held only by {held} ({}), which lasts only until swap \
+                     is enabled; {ACCOUNTING} needs {RESIDENCY_LOCKED} or {RESIDENCY_SWAP_LIMIT}",
+                    proof.basis()
+                ),
+            );
+        }
+    }
+
     /// Host-level capabilities these facts prove. Under gVisor a kernel
     /// answer is emulated, so what would be measured is provider-attested.
     ///
@@ -516,22 +757,22 @@ impl HostFacts {
         };
         let mut view = HostCapabilities::default();
         view.provide("time", ProofSource::Measured, "the node enforces each deadline and then kills");
-        match (&self.residency, &self.residency_refusal) {
-            (Some(proof), _) if !matches!(proof, ResidencyProof::Unknown(_)) => view.provide(
-                "accounting",
-                observed.clone(),
-                emulated(format!("resident region {}: {}", proof.method(), proof.basis())),
-            ),
-            (_, refusal) => view.refuse(
-                "accounting",
-                refusal.clone().unwrap_or_else(|| "resident memory is not proven".to_owned()),
-            ),
-        }
+        let unproven = "resident memory is not proven".to_owned();
+        self.apply_residency(
+            &mut view,
+            self.residency.as_ref().ok_or(self.residency_refusal.as_ref().unwrap_or(&unproven).as_str()),
+        );
+        // Trust in a mechanism's semantics holds only where the kernel itself
+        // answered; under gVisor the facts it rests on are emulated, so the
+        // grade falls to provider-attested.
+        let trusted = if self.gvisor() { ProofSource::ProviderAttested } else { ProofSource::Trusted };
         if self.pidfd.allowed() {
             view.provide(
                 "termination:process_group",
-                ProofSource::Trusted,
-                "process group plus pidfd; a job that calls setsid or double-forks escapes it",
+                trusted.clone(),
+                emulated(
+                    "process group plus pidfd; a job that calls setsid or double-forks escapes it".to_owned(),
+                ),
             );
         } else {
             view.refuse("termination:process_group", format!("pidfd_open {}", self.pidfd.describe()));
@@ -554,7 +795,7 @@ impl HostFacts {
                          by trust in pid 1 ({})",
                         evidence.basis
                     )),
-                    Ok((ProofSource::Trusted, evidence.basis.clone())),
+                    Ok((trusted.clone(), emulated(evidence.basis.clone()))),
                 ),
                 _ => (Err(unproven()), Err(unproven())),
             };
@@ -787,8 +1028,7 @@ mod linux {
             }
             _ => lock_notes.push("RLIMIT_MEMLOCK or the locked-memory count is unreadable".to_owned()),
         }
-        swap_unreachable_basis()
-            .map(|basis| ResidencyProof::SwapUnreachable { basis })
+        swap_unreachable_proof()
             .map_err(|swap| {
                 format!(
                     "the resident region needs {bytes} bytes locked or swap proven unreachable; {}, and {swap}",
@@ -805,26 +1045,27 @@ mod linux {
             .collect())
     }
 
-    /// Plain-language basis for "no swap is reachable for this process", or
-    /// the reason it cannot be proven.
-    /// The standing cgroup limit is preferred; an empty swap list is only
-    /// what is true now.
-    pub(super) fn swap_unreachable_basis() -> Result<String, String> {
+    /// The proof that no swap is reachable for this process, or the reason
+    /// it cannot be proven. The standing cgroup limit is preferred; an empty
+    /// swap list is only what is true now.
+    pub(super) fn swap_unreachable_proof() -> Result<ResidencyProof, String> {
         if let Some(cgroup) = zero_swap_cgroup() {
-            return Ok(format!(
-                "memory.swap.max is 0 on enclosing cgroup {cgroup}, which the node can neither \
-                 write nor move itself out of"
-            ));
+            return Ok(ResidencyProof::SwapLimit {
+                basis: format!(
+                    "memory.swap.max is 0 on enclosing cgroup {cgroup}, which the node can neither \
+                     write nor move itself out of"
+                ),
+            });
         }
         let devices = swap_devices();
         if let Ok(devices) = &devices
             && devices.is_empty()
         {
-            return Ok(
-                "no swap device is active now (/proc/swaps lists none); a point-in-time \
-                 observation, re-checked before new native work is admitted"
+            return Ok(ResidencyProof::SwapAbsent {
+                basis: "no swap device is active now (/proc/swaps lists none); a point-in-time \
+                        observation, re-checked before new native work is admitted"
                     .to_owned(),
-            );
+            });
         }
         Err(match devices {
             Ok(devices) => format!(
@@ -1329,6 +1570,25 @@ mod tests {
     }
 
     #[test]
+    fn trusted_grades_fall_to_provider_attested_under_gvisor() {
+        let mut under_tini = facts(decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()), Some(42));
+        under_tini.kernel_kind = "gvisor".to_owned();
+        under_tini.pidfd = ProbeOutcome::Allowed;
+        let view = under_tini.capabilities();
+        for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT, "termination:process_group"] {
+            let evidence = &view.provided[name];
+            assert_eq!(evidence.source, ProofSource::ProviderAttested, "{name}");
+            assert!(evidence.basis.contains("gVisor"), "{name}: {}", evidence.basis);
+            assert!(!satisfies_local_requirement(name, evidence), "{name}");
+        }
+
+        under_tini.kernel_kind = "native".to_owned();
+        let view = under_tini.capabilities();
+        assert_eq!(view.provided["termination:process_group"].source, ProofSource::Trusted);
+        assert!(satisfies_local_requirement("termination:process_group", &view.provided["termination:process_group"]));
+    }
+
+    #[test]
     fn enclosure_capabilities_follow_the_exit_grade() {
         let pid_one = facts(decide_enclosure_exit(Some(true), 1, 0, Some("ryeosd"), &[]), Some(42));
         let view = pid_one.capabilities();
@@ -1349,6 +1609,18 @@ mod tests {
         assert_eq!(view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].source, ProofSource::Trusted);
         assert_eq!(view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].source, ProofSource::Trusted);
         assert!(view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].basis.contains("inode 42"));
+        // The trusted-init names admit their trusted proof; the measured
+        // names never accept trust, even when a floor names them.
+        for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT] {
+            assert!(satisfies_local_requirement(name, &view.provided[name]), "{name}");
+        }
+        let trusted = view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].clone();
+        for name in [TERMINATION_ENCLOSURE, RECOVERY_ENCLOSURE] {
+            assert!(!satisfies_local_requirement(name, &trusted), "{name}");
+        }
+        // A provider attestation of a trusted-init name is still not local.
+        let attested = CapabilityEvidence { source: ProofSource::ProviderAttested, basis: String::new() };
+        assert!(!satisfies_local_requirement(TERMINATION_ENCLOSURE_TRUSTED_INIT, &attested));
 
         let other = facts(decide_enclosure_exit(Some(true), 7, 1, Some("sh"), &inits()), Some(42));
         let view = other.capabilities();
@@ -1366,6 +1638,125 @@ mod tests {
         let view = not_whole.capabilities();
         assert!(view.provided.contains_key(TERMINATION_ENCLOSURE));
         assert!(view.missing[RECOVERY_ENCLOSURE].contains("not the whole of a container"));
+    }
+
+    #[test]
+    fn residency_names_follow_the_proof_basis() {
+        let mut host = facts(Err("fixture".to_owned()), None);
+        let cases = [
+            (ResidencyProof::Locked { basis: "cap".to_owned() }, RESIDENCY_LOCKED, true),
+            (ResidencyProof::SwapLimit { basis: "cgroup /a".to_owned() }, RESIDENCY_SWAP_LIMIT, true),
+            (ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() }, RESIDENCY_SWAP_ABSENT, false),
+        ];
+        for (proof, held, standing) in cases {
+            host.residency = Some(proof.clone());
+            host.residency_refusal = None;
+            let view = host.capabilities();
+            assert_eq!(proof.standing(), standing, "{held}");
+            assert_eq!(proof.capability_name(), Some(held));
+            assert_eq!(view.provided[held].source, ProofSource::Measured, "{held}");
+            assert!(view.provided[held].basis.contains(proof.basis()), "{held}");
+            for other in [RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT] {
+                if other != held {
+                    assert!(view.missing[other].contains(held), "{other}: {view:?}");
+                }
+            }
+            if standing {
+                // The strong name shows the basis name that proves it.
+                assert!(view.provided[ACCOUNTING].basis.starts_with(held), "{view:?}");
+            } else {
+                assert!(!view.provided.contains_key(ACCOUNTING));
+                assert!(view.missing[ACCOUNTING].contains(RESIDENCY_SWAP_ABSENT), "{view:?}");
+            }
+        }
+
+        // An established proof re-decides every residency name.
+        host.residency = Some(ResidencyProof::Locked { basis: "cap".to_owned() });
+        let mut view = host.capabilities();
+        let weaker = ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() };
+        host.apply_residency(&mut view, Ok(&weaker));
+        assert!(!view.provided.contains_key(ACCOUNTING));
+        assert!(!view.provided.contains_key(RESIDENCY_LOCKED));
+        assert!(view.provided.contains_key(RESIDENCY_SWAP_ABSENT));
+
+        host.residency = None;
+        host.residency_refusal = Some("mlock refused and swap is active".to_owned());
+        let view = host.capabilities();
+        for name in RESIDENCY_CAPABILITIES {
+            assert_eq!(view.missing[name], "mlock refused and swap is active", "{name}");
+        }
+        host.residency = Some(ResidencyProof::Unknown(serde_json::Map::new()));
+        let view = host.capabilities();
+        for name in RESIDENCY_CAPABILITIES {
+            assert!(view.missing[name].contains("does not know"), "{name}");
+        }
+
+        host.kernel_kind = "gvisor".to_owned();
+        host.residency = Some(ResidencyProof::Locked { basis: "cap".to_owned() });
+        let view = host.capabilities();
+        assert_eq!(view.provided[ACCOUNTING].source, ProofSource::ProviderAttested);
+        assert!(!satisfies_local_requirement(ACCOUNTING, &view.provided[ACCOUNTING]));
+    }
+
+    #[test]
+    fn floor_entries_parse_as_a_name_or_a_named_set() {
+        let entries: Vec<CapabilityRequirement> = serde_json::from_value(serde_json::json!([
+            {"any_of": [ACCOUNTING, RESIDENCY_SWAP_ABSENT]},
+            "time"
+        ]))
+        .unwrap();
+        assert_eq!(entries[1], CapabilityRequirement::from("time"));
+        assert_eq!(entries[0].names(), [ACCOUNTING, RESIDENCY_SWAP_ABSENT]);
+        assert_eq!(entries[0].label(), "any_of(accounting, residency:swap_absent)");
+        assert_eq!(entries[1].names(), ["time"]);
+        assert_eq!(
+            serde_json::to_value(&entries).unwrap(),
+            serde_json::json!([{"any_of": ["accounting", "residency:swap_absent"]}, "time"])
+        );
+        assert!(serde_json::from_value::<CapabilityRequirement>(
+            serde_json::json!({"any_of": ["accounting"], "prefer": "accounting"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<CapabilityRequirement>(serde_json::json!(7)).is_err());
+    }
+
+    #[test]
+    fn weaker_residency_names_appear_only_beside_accounting() {
+        let any_of = |names: &[&str]| {
+            CapabilityRequirement::AnyOf(AnyOfCapabilities {
+                any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+            })
+        };
+        for entry in [
+            CapabilityRequirement::from(ACCOUNTING),
+            CapabilityRequirement::from(RESIDENCY_LOCKED),
+            CapabilityRequirement::from("time"),
+            any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]),
+            any_of(&[ACCOUNTING, RESIDENCY_SWAP_LIMIT]),
+            any_of(&[TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT]),
+        ] {
+            assert_eq!(floor_entry_refusal(&entry), None, "{}", entry.label());
+        }
+        for (entry, refusal) in [
+            (CapabilityRequirement::from(RESIDENCY_SWAP_ABSENT), "does not meet"),
+            (CapabilityRequirement::from(RESIDENCY_SWAP_LIMIT), "does not meet"),
+            (any_of(&[RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT]), "does not meet"),
+            (any_of(&[ACCOUNTING, "termination:scope"]), "per-scope"),
+            (any_of(&[ACCOUNTING, SCOPE_LIMITS]), "per-scope"),
+        ] {
+            let reason = floor_entry_refusal(&entry).unwrap_or_default();
+            assert!(reason.contains(refusal), "{}: {reason}", entry.label());
+        }
+        assert!(is_scope_capability(SCOPE_LIMITS));
+        assert!(is_scope_capability("recovery:scope"));
+        assert!(!is_scope_capability(ACCOUNTING));
+
+        let residency = any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]);
+        assert!(met_by_strongest(&residency, ACCOUNTING));
+        assert!(!met_by_strongest(&residency, RESIDENCY_SWAP_ABSENT));
+        let enclosure = any_of(&[TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT]);
+        assert!(met_by_strongest(&enclosure, TERMINATION_ENCLOSURE));
+        assert!(!met_by_strongest(&enclosure, TERMINATION_ENCLOSURE_TRUSTED_INIT));
     }
 
     #[test]
@@ -1391,10 +1782,18 @@ mod tests {
         assert_eq!(serde_json::to_value(&proof).unwrap(), original);
         assert!(proof.confirm_swap_unreachable().is_err());
 
-        let locked = serde_json::json!({"method": "locked", "basis": "cap"});
-        let proof: ResidencyProof = serde_json::from_value(locked.clone()).unwrap();
-        assert_eq!(proof, ResidencyProof::Locked { basis: "cap".to_owned() });
-        assert_eq!(serde_json::to_value(&proof).unwrap(), locked);
+        for (method, expected) in [
+            ("locked", ResidencyProof::Locked { basis: "cap".to_owned() }),
+            ("swap_limit", ResidencyProof::SwapLimit { basis: "cap".to_owned() }),
+            ("swap_absent", ResidencyProof::SwapAbsent { basis: "cap".to_owned() }),
+        ] {
+            let known = serde_json::json!({"method": method, "basis": "cap"});
+            let proof: ResidencyProof = serde_json::from_value(known.clone()).unwrap();
+            assert_eq!(proof, expected);
+            assert_eq!(proof.method(), method);
+            assert_eq!(serde_json::to_value(&proof).unwrap(), known);
+        }
+
         // A known method keeps its strict shape.
         assert!(serde_json::from_value::<ResidencyProof>(
             serde_json::json!({"method": "locked", "basis": "cap", "extra": 1})

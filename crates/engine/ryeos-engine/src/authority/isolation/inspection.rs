@@ -151,7 +151,7 @@ pub struct IsolationInspection {
     pub backend: IsolationBackendInspection,
     pub process_scopes: IsolationProcessScopePolicy,
     /// Signed capability floor this node must prove before it starts.
-    pub requires_capabilities: Vec<String>,
+    pub requires_capabilities: Vec<lillux::process_control::CapabilityRequirement>,
     /// Signed executable names of inits trusted to exit with their only
     /// child, which can make the node's exit end its container enclosure.
     pub enclosure_inits: Vec<String>,

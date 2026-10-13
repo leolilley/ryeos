@@ -400,6 +400,14 @@ impl OfflineNativeHost {
         Ok(())
     }
 
+    /// The residency proof this host's region established, once issued. It
+    /// can be a weaker basis than the one planned, when the kernel refused a
+    /// lock the limits allowed, so a caller bound by a capability floor
+    /// re-decides it from this proof before opening any connection.
+    pub fn residency_proof(&self) -> Option<lillux::process_control::ResidencyProof> {
+        self.admission.as_ref().map(|admission| admission.residency.clone())
+    }
+
     /// The admitting factory: valid from Ready until the backend finishes.
     pub fn factory(&self) -> Result<&Arc<OriginalNativeFactory>> {
         ensure!(self.ready && self.backend.is_none(), "offline native factory is not admitting");

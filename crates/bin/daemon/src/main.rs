@@ -909,6 +909,21 @@ impl DaemonSelectedComposition {
         anyhow::anyhow!("live native startup refused; original failure custody retained")
     }
 
+    /// Refuse a start whose capability floor is not met on the residency
+    /// its reservation established. A fact refusal inhibits the restart at
+    /// once, with its reason, so an always-restart supervisor cannot spend
+    /// another native incarnation on the same host. The refusal owns no
+    /// native owner; it is retained typed so recovery releases exactly the
+    /// reservation it followed.
+    fn refuse_established_residency(&mut self, error: anyhow::Error) -> anyhow::Error {
+        let detail = format!("{error:#}");
+        tracing::error!(error = %detail, "capability floor refused after native reservation");
+        if lillux_sqlite::native_refusal_is_fact(&error) {
+            self.inhibit_supervised_restart_with_detail("capability_floor_refused", Some(&detail));
+        }
+        self.retain_native_failure(anyhow::Error::new(EstablishedResidencyRefused(error)))
+    }
+
     fn prepare_live_native(
         &mut self,
         config: &Config,
@@ -950,11 +965,26 @@ impl DaemonSelectedComposition {
             }
         };
         self.native_reservation = Some(Arc::clone(&reservation));
+        // Re-decide the capability floor on the residency this reservation
+        // actually established, before anything is installed, armed,
+        // initialized or admitted against it: a lock the kernel refused can
+        // leave a weaker basis than the plan the floor was admitted on.
+        let floor = record_established_residency(
+            reservation.residency_proof(),
+            ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(&config.app_root),
+            identity,
+            &config.app_root,
+        );
         // Bind the previous stop's unapplied facts as soon as this start's
         // debit is durable, before any further preparation can fail or the
         // process be killed: once the debit settles the carrier, only this
-        // start's binding keeps them acceptable to the next one.
+        // start's binding keeps them acceptable to the next one. Binding
+        // admits no work, so it precedes even a floor refusal, which would
+        // otherwise drop those facts.
         self.bind_previous_latched_drain(&reservation)?;
+        if let Err(error) = floor {
+            return Err(self.refuse_established_residency(error));
+        }
         let factory = match ryeos_node::native_capacity::LiveNativeFactory::install(reservation) {
             Ok(factory) => factory,
             Err(error) => return Err(self.retain_native_failure(error)),
@@ -1554,6 +1584,29 @@ impl DaemonSelectedComposition {
                 }
             };
         }
+        // A floor refusal on the established residency precedes factory
+        // install and every service. Its error owns nothing, so release the
+        // exact reservation it followed.
+        if self.native_factory.is_none() && self.native_failure.as_ref()
+            .is_some_and(|error| error.is::<EstablishedResidencyRefused>()) {
+            anyhow::ensure!(self.app_state_custody.is_none()
+                && self.live_state_store_custody.is_none()
+                && self.persistent_pool_custody.is_none() && !self.has_scheduler_custody()
+                && !self.root.has_unresolved_owners()
+                && self.native_reservation_close_failure.is_none(),
+                "refused residency reservation still has published composition owners");
+            let reservation = self.native_reservation.take()
+                .context("refused residency reservation absent")?;
+            // The original startup error remains the run result.
+            self.native_failure.take();
+            return match reservation.release_and_settle() {
+                Ok(settled) => self.retain_settled_reservation(settled),
+                Err(failure) => {
+                    self.native_reservation_close_failure = Some(failure);
+                    anyhow::bail!("refused residency reservation settlement pending");
+                }
+            };
+        }
         if self.native_factory.is_none() && self.native_failure.as_ref()
             .is_some_and(|error| error.is::<ryeos_node::native_capacity::LiveNativeFactoryFailure>()) {
             anyhow::ensure!(self.app_state_custody.is_none()
@@ -1911,8 +1964,12 @@ impl DaemonSelectedComposition {
     /// logged. Unresolved custody can also end a graceful stop; its operator
     /// already set the service down, so this repeats that state.
     fn inhibit_supervised_restart(&mut self, reason: &str) {
+        self.inhibit_supervised_restart_with_detail(reason, None);
+    }
+
+    fn inhibit_supervised_restart_with_detail(&mut self, reason: &str, detail: Option<&str>) {
         match self.lifecycle_exit.as_ref() {
-            Some(lifecycle) => match lifecycle_marker::inhibit_restart(&lifecycle.state_dir, reason, None) {
+            Some(lifecycle) => match lifecycle_marker::inhibit_restart(&lifecycle.state_dir, reason, detail) {
                 Ok(()) => tracing::warn!(reason,
                     "restart inhibited; the next start is refused until `ryeos node allow-restart`"),
                 Err(error) => tracing::error!(reason, error = %format!("{error:#}"),
@@ -1938,9 +1995,10 @@ impl DaemonSelectedComposition {
         }
     }
 
-    /// Native bootstrap claims its original attempt before the incarnation
+    /// A capability floor refusal inhibits the restart at any stage. Native
+    /// bootstrap claims its original attempt before the incarnation
     /// debit, so a startup failure from that point on may have consumed it.
-    /// Only a fact refusal inhibits the restart: a fact bit on the service
+    /// Otherwise only a fact refusal inhibits the restart: a fact bit on the service
     /// latch, or a failure that is not momentary contention, the planned
     /// edge or a transient shortage of host resources. A transient failure
     /// is retried by the next start rather than stopping the node for good.
@@ -1949,7 +2007,20 @@ impl DaemonSelectedComposition {
         reason: &str,
         failure: Option<&anyhow::Error>,
     ) {
-        if reason != "startup_failed" || !self.native_bootstrap_entered {
+        if reason != "startup_failed" {
+            return;
+        }
+        // A capability floor refusal is a deterministic fact of this host and
+        // policy, so it inhibits even before native bootstrap, where a start
+        // spends nothing but would otherwise repeat the same refusal forever.
+        if let Some(refusal) =
+            failure.and_then(ryeos_node::capability_report::CapabilityFloorRefused::find)
+        {
+            let detail = refusal.to_string();
+            self.inhibit_supervised_restart_with_detail("capability_floor_refused", Some(&detail));
+            return;
+        }
+        if !self.native_bootstrap_entered {
             return;
         }
         let latched_fact = self.service_stop.latch.as_ref().is_some_and(|latch| {
@@ -2106,6 +2177,45 @@ impl DaemonSelectedComposition {
         }
         self.inhibit_supervised_restart_after_startup_failure(reason, failure);
     }
+}
+
+/// The capability floor refused the residency a native reservation
+/// established. It carries no native owner.
+#[derive(Debug)]
+struct EstablishedResidencyRefused(anyhow::Error);
+
+impl std::fmt::Display for EstablishedResidencyRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for EstablishedResidencyRefused {}
+
+/// Record the residency proof a reservation established in the signed
+/// capability report, re-deciding every residency name and the floor from
+/// it, and refuse when the floor is not met on it. A reservation with no
+/// proof, or a start with no verified report naming its floor, is refused:
+/// the floor cannot be decided, so it is not met.
+fn record_established_residency(
+    proof: Option<lillux::process_control::ResidencyProof>,
+    report: Result<Option<ryeos_node::capability_report::SignedNodeCapabilityReport>>,
+    identity: &NodeIdentity,
+    app_root: &std::path::Path,
+) -> Result<()> {
+    let proof = proof.context(
+        "startup refused after native reservation: the reservation established no residency \
+         proof, so the capability floor cannot be decided",
+    )?;
+    let signed = report
+        .context("startup refused after native reservation: read the node capability report")?
+        .context(
+            "startup refused after native reservation: no verified node capability report records \
+             the floor this start was admitted on",
+        )?;
+    let established = signed.with_established_residency(proof, identity.signing_key())?;
+    established.write(app_root)?;
+    established.report.require_floor()
 }
 
 impl Drop for DaemonSelectedComposition {
@@ -3448,18 +3558,6 @@ async fn run(
                 Arc::new(startup.clone());
             let (native_factory, native_deadline, native_exclusion) =
                 composition.prepare_live_native(&config, &identity, &node_policy_snapshot)?;
-            // Record how the resident region was kept in memory, in the signed
-            // capability report, once the incarnation established it.
-            let reservation_proof = composition
-                .native_reservation
-                .as_ref()
-                .and_then(|reservation| reservation.residency_proof());
-            if let Some(proof) = reservation_proof
-                && let Some(signed) =
-                    ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(&config.app_root)?
-            {
-                signed.with_established_residency(proof, identity.signing_key())?.write(&config.app_root)?;
-            }
             let native_lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
                 composition.native_factory.as_ref().context("actual native issuer absent before State startup")?.clone();
             // Retained Bundle executors are revalidated against the same node
@@ -6902,7 +7000,7 @@ async fn run_service_standalone(
 
     // Two-phase node-config bootstrap without daemon callback-socket authority:
     // standalone mode does not bind the configured UDS listener.
-    let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
+    let (engine, node_config_snapshot, node_policy_snapshot, isolation, capability_report) =
         bootstrap::load_node_config_two_phase_standalone(config)?;
     let external_artifacts = engine.with_checked_bundle_generation(|_| {
         ryeos_app::external_artifacts::resolve_external_execution_artifacts(
@@ -7025,10 +7123,24 @@ async fn run_service_standalone(
         }
         ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => None,
     };
+    // Bootstrap admitted this service on the planned residency; the native
+    // host must meet the same floor on the residency its region establishes.
+    let admit_residency = |proof: &lillux::process_control::ResidencyProof| -> Result<()> {
+        let mut established = capability_report.clone();
+        established.establish_residency(proof.clone());
+        established
+            .require_floor_without_scopes()
+            .context("node capability floor for a service without process scopes")
+    };
     let standalone_native = match standalone_state_access {
         ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => Some(
-            ryeos_app::standalone_native::StandaloneNativeHost::issue(config, &identity, &standalone_state_lock)
-                .context("issue the standalone native host")?,
+            ryeos_app::standalone_native::StandaloneNativeHost::issue(
+                config,
+                &identity,
+                &standalone_state_lock,
+                &admit_residency,
+            )
+            .context("issue the standalone native host")?,
         ),
         ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
         | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting => {
@@ -7042,6 +7154,7 @@ async fn run_service_standalone(
                     &standalone_state_lock,
                     Arc::clone(runtime),
                     namespace,
+                    &admit_residency,
                 )
                 .context("issue the standalone stopped-node native host")?,
             )
@@ -7466,6 +7579,75 @@ mod selected_composition_tests {
             SelectedInstallationRefusal::Detached
         );
         let _replacement = state_lock::StateLock::acquire(&lock_path).unwrap();
+    }
+
+    #[test]
+    fn floor_refusal_before_native_bootstrap_inhibits_restart_and_transient_failure_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut composition, _attachment) = fixture(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        assert!(!composition.native_bootstrap_entered);
+        // A failure that is not a floor refusal, before native bootstrap,
+        // leaves the next start free to retry.
+        let transient = anyhow::anyhow!("fixture transient failure").context("Phase 1: fixture");
+        composition.inhibit_supervised_restart_after_startup_failure("startup_failed", Some(&transient));
+        assert!(lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().is_none());
+        // The floor refusal is found through Phase 1 context and inhibits.
+        let refused = anyhow::Error::new(ryeos_node::capability_report::CapabilityFloorRefused(
+            "startup refused before native reservation: this host cannot prove what node policy \
+             requires\n  requires accounting: fixture"
+                .to_owned(),
+        ))
+        .context("Phase 1: node capability floor");
+        composition.inhibit_supervised_restart_after_startup_failure("signal", Some(&refused));
+        assert!(lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().is_none());
+        composition.inhibit_supervised_restart_after_startup_failure("startup_failed", Some(&refused));
+        assert!(state_dir.join("restart-inhibited.json").is_file());
+        let inhibition = lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().unwrap();
+        assert_eq!(inhibition.reason, "capability_floor_refused");
+        assert!(
+            inhibition.detail.as_deref().unwrap_or_default().contains("requires accounting: fixture"),
+            "{inhibition:?}"
+        );
+    }
+
+    #[test]
+    fn floor_refusal_after_reservation_inhibits_restart_and_retains_typed_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut composition, _attachment) = fixture(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        let identity = NodeIdentity::create(&root.path().join("node.pem")).unwrap();
+        let locked = || lillux::process_control::ResidencyProof::Locked { basis: "fixture".to_owned() };
+        // Without a proof or a verified report the floor cannot be decided,
+        // so the start is refused rather than admitted.
+        let no_proof = record_established_residency(None, Ok(None), &identity, root.path()).unwrap_err();
+        assert!(format!("{no_proof:#}").contains("no residency proof"), "{no_proof:#}");
+        let no_report =
+            record_established_residency(Some(locked()), Ok(None), &identity, root.path()).unwrap_err();
+        assert!(format!("{no_report:#}").contains("no verified node capability report"), "{no_report:#}");
+        let stale = record_established_residency(
+            Some(locked()),
+            Err(anyhow::anyhow!("stale report: fixture")),
+            &identity,
+            root.path(),
+        )
+        .unwrap_err();
+        assert!(format!("{stale:#}").contains("stale report"), "{stale:#}");
+
+        assert!(lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().is_none());
+        let floor = anyhow::anyhow!(
+            "startup refused after native reservation, on the residency it established: fixture"
+        );
+        assert!(lillux_sqlite::native_refusal_is_fact(&floor));
+        let returned = composition.refuse_established_residency(floor);
+        assert!(returned.to_string().contains("custody retained"), "{returned}");
+        assert!(state_dir.join("restart-inhibited.json").is_file());
+        let inhibition = lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().unwrap();
+        assert_eq!(inhibition.reason, "capability_floor_refused");
+        assert!(inhibition.detail.as_deref().unwrap_or_default().contains("fixture"), "{inhibition:?}");
+        let retained = composition.native_failure.take().unwrap();
+        assert!(retained.is::<EstablishedResidencyRefused>());
+        assert!(format!("{retained}").contains("fixture"));
     }
 
     #[test]
