@@ -9,6 +9,7 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
+//!   - `ryeos node capacity reissue` — open the next native-capacity epoch on a stopped node
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
 //!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
@@ -88,6 +89,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "allow-restart"],
         summary: "Clear a node's restart inhibition after resolving why it stopped itself",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "capacity", "reissue"],
+        summary: "Open the next native-capacity epoch on a stopped node, under the operator key",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -199,6 +205,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("allow-restart")) => {
             run_node_allow_restart_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reissue") => {
+            run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
@@ -1509,6 +1519,100 @@ fn run_node_allow_restart_command(argv: &[String], console: &crate::tty::Console
     Ok(())
 }
 
+// ── ryeos node capacity reissue ─────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node capacity reissue",
+    about = "Open the next native-capacity epoch on a stopped node. The signed policy must \
+             pre-authorise operator re-issuance; the operator key signs a document naming \
+             the exact account state it renews. Restart inhibition is not cleared.",
+    no_binary_name = true
+)]
+struct NodeCapacityReissueArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Why the operator opens another epoch; recorded in the signed document
+    /// and the evidence log.
+    #[arg(long)]
+    reason: String,
+
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_capacity_reissue_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeCapacityReissueArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let app_root = controller.config().app_root.clone();
+    // A running daemon holds the state lock, so re-issuance refuses while the
+    // node is up: the live account owner is the only writer of a live node.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+    )
+    .context("capacity reissue requires the node to be stopped")?;
+    let operator_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/signing/private_key.pem");
+    let operator_pem = zeroize::Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)
+            .with_context(|| format!("read operator key {}", operator_key_path.display()))?,
+    )?);
+    let operator_key = {
+        use lillux::crypto::DecodePrivateKey as _;
+        lillux::crypto::SigningKey::from_pkcs8_pem(operator_pem.as_str())
+            .context("decode operator signing key")?
+    };
+    let report = ryeos_node::native_capacity::reissue_capacity(
+        ryeos_node::native_capacity::ReissueRequest {
+            app_root: &app_root,
+            state_lock: &state_lock,
+            operator_key: &operator_key,
+            reason: &args.reason,
+            command: "ryeos node capacity reissue",
+        },
+    )?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "reissue": report }))?;
+        return Ok(());
+    }
+    console.status(&capacity_reissue_banner(&app_root, &report))?;
+    Ok(())
+}
+
+fn capacity_reissue_banner(
+    app_root: &std::path::Path,
+    report: &ryeos_node::native_capacity::ReissueReport,
+) -> crate::tty::StatusBanner {
+    let mut banner = if report.already_applied {
+        let mut banner = crate::tty::StatusBanner::new(
+            crate::tty::Tone::Neutral,
+            format!("ALREADY RE-ISSUED: epoch {} → {}", report.from_epoch, report.to_epoch),
+        );
+        banner.detail = Some("the account already carries this re-issuance; nothing new was written".to_owned());
+        banner
+    } else {
+        crate::tty::StatusBanner::new(
+            crate::tty::Tone::Success,
+            format!("CAPACITY RE-ISSUED: epoch {} → {}", report.from_epoch, report.to_epoch),
+        )
+    };
+    banner.rows.push(crate::tty::Row::key_value("app root", app_root.display().to_string()));
+    banner.rows.push(crate::tty::Row::key_value("document", report.document_digest.clone()));
+    if let Some(settled) = &report.settled_incarnation {
+        banner.rows.push(crate::tty::Row::key_value("settled incarnation", settled.clone()));
+    }
+    banner.rows.push(crate::tty::Row::text(
+        "restart inhibition is not cleared; run `ryeos node allow-restart` when the cause is resolved",
+    ));
+    banner
+}
+
 // ── ryeos node doctor ───────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
@@ -1767,6 +1871,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
         None
     };
+
+    // The native-capacity account as its anchor on disk reports it. Reading is
+    // not recovery: a torn or foreign record is reported, never repaired here.
+    if initialized {
+        checks.push(native_capacity_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "native_capacity",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
 
     // Use the same policy loader as daemon and offline execution. Disabled is
     // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
@@ -2095,6 +2211,49 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
 
 /// Recorded, signed capability report plus a fresh probe-free generation
 /// check. A refused floor fails the doctor; a missing or stale report warns.
+/// Doctor row for the native-capacity account: healthy with its summary,
+/// a warning with the cure when the allowance is spent and the signed policy
+/// lets the operator re-issue, a failure when it does not.
+fn native_capacity_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    match ryeos_node::native_capacity::inspect_capacity_account(app_root) {
+        Ok(None) => check(
+            "native_capacity",
+            NA,
+            serde_json::json!({ "note": "no capacity issuance; `ryeos init` issues it" }),
+        ),
+        Ok(Some(summary)) if summary.incarnations_remaining > 0 => {
+            check("native_capacity", OK, serde_json::json!({ "account": summary }))
+        }
+        Ok(Some(summary)) if summary.renewal.operator_reissue => check(
+            "native_capacity",
+            WARN,
+            serde_json::json!({
+                "account": summary,
+                "message": "native capacity account exhausted: no incarnation remains in this epoch",
+                "fix": "ryeos node capacity reissue --reason \"...\" (then ryeos node allow-restart if a restart inhibition is recorded)",
+            }),
+        ),
+        Ok(Some(summary)) => check(
+            "native_capacity",
+            FAIL,
+            serde_json::json!({
+                "account": summary,
+                "message": "native capacity account exhausted and the signed policy forbids operator re-issuance",
+                "fix": "re-provision the node under a policy that pre-authorises renewal",
+            }),
+        ),
+        Err(error) => check(
+            "native_capacity",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "fix": "the account or its anchor is unreadable or foreign; re-provision the node, do not repair records by hand",
+            }),
+        ),
+    }
+}
+
 fn inspect_capability_report(
     app_root: &std::path::Path,
 ) -> (
@@ -2728,7 +2887,7 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
                 .push(crate::tty::Row::key_value("detail", &diagnostics.message));
             banner
         }
-        LifecycleStatus::Stopped { app_root } => {
+        LifecycleStatus::Stopped { app_root, capacity, capacity_error } => {
             let mut banner = crate::tty::StatusBanner::new(
                 crate::tty::Tone::Neutral,
                 "INITIALIZED, STOPPED — RUN: RYEOS START",
@@ -2737,12 +2896,24 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
                 "app root",
                 app_root.display().to_string(),
             ));
+            for (key, value) in ryeos_node::status::capacity_status_rows(
+                capacity.as_ref(),
+                capacity_error.as_deref(),
+            ) {
+                banner.rows.push(crate::tty::Row::key_value(key, value));
+            }
             banner
         }
         LifecycleStatus::Running {
-            metadata, ready_at, ..
+            metadata, ready_at, capacity, capacity_error, ..
         } => {
             let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RUNNING");
+            for (key, value) in ryeos_node::status::capacity_status_rows(
+                capacity.as_ref(),
+                capacity_error.as_deref(),
+            ) {
+                banner.rows.push(crate::tty::Row::key_value(key, value));
+            }
             if let Some(pid) = metadata.pid {
                 banner
                     .rows
@@ -2892,6 +3063,56 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_reissue_refuses_while_the_state_lock_is_held_and_names_the_operator_key_next() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
+        let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
+        let argv: Vec<String> = ["--app-root", root.path().to_str().unwrap(), "--reason", "unit", "--json"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        // What a running daemon holds is exactly this lock: the command refuses
+        // before it reads a key or opens the account.
+        let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("requires the node to be stopped"),
+            "{error:#}"
+        );
+        assert!(!root.path().join(".ai/config/onboarding/native-capacity-reissuance.json").exists());
+        drop(held);
+        // With the lock free, the next refusal is the absent operator key of an
+        // uninitialized root; nothing about capacity has been touched.
+        let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
+        assert!(format!("{error:#}").contains("operator key"), "{error:#}");
+        assert!(!root.path().join(".ai/config/onboarding").exists());
+    }
+
+    #[test]
+    fn capacity_reissue_banner_names_the_epochs_and_keeps_allow_restart_separate() {
+        let report = ryeos_node::native_capacity::ReissueReport {
+            from_epoch: 3,
+            to_epoch: 4,
+            document_digest: "d".repeat(64),
+            settled_incarnation: Some("e".repeat(64)),
+            already_applied: false,
+        };
+        let banner = capacity_reissue_banner(std::path::Path::new("/srv/node"), &report);
+        assert_eq!(banner.heading, "CAPACITY RE-ISSUED: epoch 3 → 4");
+        let value = |key: &str| banner.rows.iter()
+            .find(|row| row.key.as_deref() == Some(key))
+            .map(|row| row.value.clone())
+            .unwrap_or_else(|| panic!("no {key} row"));
+        assert_eq!(value("document"), "d".repeat(64));
+        assert_eq!(value("settled incarnation"), "e".repeat(64));
+        assert!(banner.rows.iter().any(|row| row.key.is_none() && row.value.contains("allow-restart")));
+        let applied = capacity_reissue_banner(std::path::Path::new("/srv/node"),
+            &ryeos_node::native_capacity::ReissueReport { already_applied: true, settled_incarnation: None, ..report });
+        assert_eq!(applied.heading, "ALREADY RE-ISSUED: epoch 3 → 4");
+        assert!(applied.rows.iter().all(|row| row.key.as_deref() != Some("settled incarnation")));
+    }
 
     #[test]
     fn doctor_renders_composition_storage_and_exposure_rows() {
