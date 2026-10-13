@@ -6076,18 +6076,32 @@ impl AccountingDb {
                 );
             }
             if let Some(directive_budget_id) = directive_budget_id {
+                // A directive account is one allowance for one execution, and
+                // an execution is a chain of segments: every continuation
+                // successor is a distinct thread under the same audit chain
+                // root and settles against the same directive account. So a
+                // sibling binding of this directive is only a conflict when
+                // its gate belongs to a different chain root; a chain member
+                // sharing the account is the expected shape, not a leak of
+                // one thread's budget into an unrelated thread.
                 let conflicting_owner: Option<String> = conn
                     .query_row(
-                        "SELECT thread_id FROM launch_accounting_scope_binding
-                         WHERE directive_budget_id = ?1 AND thread_id != ?2
+                        "SELECT b.thread_id
+                         FROM launch_accounting_scope_binding b
+                         JOIN launch_accounting_gate g
+                           ON g.thread_id = b.thread_id
+                          AND g.launch_generation = b.launch_generation
+                         WHERE b.directive_budget_id = ?1
+                           AND b.thread_id != ?2
+                           AND g.audit_chain_root_id != ?3
                          LIMIT 1",
-                        rusqlite::params![directive_budget_id, thread_id],
+                        rusqlite::params![directive_budget_id, thread_id, audit_chain_root_id],
                         |row| row.get(0),
                     )
                     .optional()?;
                 if let Some(owner) = conflicting_owner {
                     bail!(
-                        "directive budget account {directive_budget_id} is already bound to thread {owner}"
+                        "directive budget account {directive_budget_id} is already bound to thread {owner} in another execution chain"
                     );
                 }
                 let directive = self
@@ -14085,6 +14099,88 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn directive_launch_gate_admits_continuation_successor_in_same_chain() {
+        let (_dir, db) = setup();
+        db.create_execution_account_prepared(
+            EXEC,
+            "T-root",
+            Some(UsdNanos::from_nanos(100).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(EXEC, "execution", EXEC).unwrap();
+        db.create_directive_account_prepared(
+            EXEC,
+            DIRECTIVE,
+            Some(UsdNanos::from_nanos(50).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(EXEC, "directive_item", DIRECTIVE)
+            .unwrap();
+        db.open_launch_gate_with_credential_binding(
+            THREAD,
+            GENERATION,
+            EXEC,
+            Some(DIRECTIVE),
+            "audit-chain",
+            None,
+        )
+        .unwrap();
+        // A continuation successor is a different thread under the SAME audit
+        // chain root and shares the execution's directive account; the source
+        // gate is still open (its terminal publication is pending).
+        db.open_launch_gate_with_credential_binding(
+            "T-successor",
+            "G-successor",
+            EXEC,
+            Some(DIRECTIVE),
+            "audit-chain",
+            None,
+        )
+        .unwrap();
+        sql(&db, |conn| {
+            assert_eq!(
+                db.load_gate(conn, THREAD, GENERATION).unwrap().unwrap().state,
+                "open"
+            );
+            assert_eq!(
+                db.load_gate(conn, "T-successor", "G-successor")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "open"
+            );
+            assert_eq!(
+                db.load_gate_scope_binding(conn, "T-successor", "G-successor")
+                    .unwrap(),
+                Some(Some(DIRECTIVE.to_string()))
+            );
+        });
+        // An unrelated thread under another chain root is still refused even
+        // though the directive account is active and owned by this execution.
+        let error = db
+            .open_launch_gate_with_credential_binding(
+                "T-unrelated",
+                "G-unrelated",
+                EXEC,
+                Some(DIRECTIVE),
+                "audit-other",
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("already bound to thread"),
+            "unexpected refusal: {error:#}"
+        );
+        sql(&db, |conn| {
+            assert!(
+                db.load_gate(conn, "T-unrelated", "G-unrelated")
+                    .unwrap()
+                    .is_none()
+            );
+        });
     }
 
     #[test]
