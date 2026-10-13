@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-12T23:47:00Z:8c6839ea123f1ad28ba1c28366ff62bbc53d76091da8660f92772affb3c07986:09ldq4WhjJ0qKG94+sO8rG1N8SU+bnKhIUKnDXbavYzhVKeo1KyK27VVogMctCxRgLv895aNpvYZqQxRYHm5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: Check the actual Q command and independent diagnostic through restricted daemon callbacks; propose finite claims for issuer corroboration.

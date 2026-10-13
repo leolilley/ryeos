@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-12T22:46:14Z:d1815c4c2fad803bb708d970a0e5270e1ab6320cbd6b2d89c2a58249cd5e45f6:Xzb0bh0s5lcvklUXkLu40Dcc7StROMOgf9BacpFDpiHeYWlImvQI3pbqKWnB+lNYGxv0U2znD/7Rl14Vch54Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained authored Codex semantic checker source; capture is not checker execution or qualification.
@@ -8,7 +9,7 @@ build_products:
   products:
     - name: semantic_checker_code
       source: {kind: retained_project}
-      path: bundles/codex/.ai/tools/codex/qualification/semantic-checker
+      path: bundles/codex/.ai/tools/codex/qualification/lib/semantic-checker
       shape: tree
       storage: content
       required: true
