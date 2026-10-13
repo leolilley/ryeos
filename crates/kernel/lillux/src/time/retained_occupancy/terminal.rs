@@ -51,7 +51,9 @@ impl RetainedClockCloseFailure {
             || self.original.process_id != std::process::id() {
             return Err(self);
         }
-        Ok(ManuallyDrop::into_inner(self.original))
+        // The refusal holds no owner; only the clock moves out.
+        let mut this = ManuallyDrop::new(self);
+        Ok(unsafe { ManuallyDrop::take(&mut this.original) })
     }
     pub fn effects_entered(&self) -> bool { matches!(self.refusal, Refusal::Entered { .. }) }
     pub fn close_results(&self) -> Option<[Result<(), i32>; 2]> {
@@ -59,6 +61,16 @@ impl RetainedClockCloseFailure {
             Refusal::Before(_) => None,
             Refusal::Entered { first, second } => Some([first, second]),
         }
+    }
+}
+impl Drop for RetainedClockCloseFailure {
+    fn drop(&mut self) {
+        // Only `into_original` settles a refusal. Before effects the clock's
+        // registered descriptors are still live; after effects the close is
+        // ambiguous and no wrapper may close again. Either way the whole clock
+        // stays retained until the process exits.
+        let original = unsafe { ManuallyDrop::take(&mut self.original) };
+        crate::custody::abandon("lillux::time::retained-clock-close-failure", original);
     }
 }
 impl std::fmt::Debug for RetainedClockCloseFailure {
@@ -206,6 +218,18 @@ mod controls {
         assert!(!failure.effects_entered());
         let clock = failure.into_original().unwrap();
         clock.into_terminal(&limit, Duration::ZERO, deadline).unwrap();
+    }
+
+    #[test]
+    fn dropped_close_failure_retains_the_whole_clock() {
+        const KIND: &str = "lillux::time::retained-clock-close-failure";
+        let clock = RetainedOccupancyClock::capture().unwrap();
+        let limit = OccupancyLimit::new(clock.start().clone(), 30_000_000_000).unwrap();
+        let failure = clock.into_terminal(&limit, Duration::ZERO,
+            MonotonicDeadline::after(Duration::ZERO)).unwrap_err();
+        let before = crate::custody::abandoned_custody().count(KIND);
+        drop(failure);
+        assert_eq!(crate::custody::abandoned_custody().count(KIND), before + 1);
     }
 
     #[test]

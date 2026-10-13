@@ -853,12 +853,22 @@ enum OriginalWitnessRemovalPhase {
     Conflict,
 }
 struct OriginalWitnessRemovalState {
-    quarantine: std::mem::ManuallyDrop<Option<std::ffi::OsString>>,
+    quarantine: Option<std::ffi::OsString>,
     parent: std::mem::ManuallyDrop<Option<Arc<PinnedDirectory>>>,
     deadline: Option<lillux::time::MonotonicDeadline>,
     phase: OriginalWitnessRemovalPhase,
     parent_transferred: bool,
     work: Option<std::sync::Weak<dyn OriginalWitnessCleanupWork>>,
+}
+impl Drop for OriginalWitnessRemovalState {
+    fn drop(&mut self) {
+        // Only the transfer after durable removal and witness retirement ends
+        // the retained cleanup parent. Without it the parent directory stays
+        // held until the process exits.
+        if let Some(parent) = unsafe { std::mem::ManuallyDrop::take(&mut self.parent) } {
+            lillux::custody::abandon("lillux-sqlite::witness-removal-parent", parent);
+        }
+    }
 }
 /// Transfers the actual publisher File; no File/FD/dup borrow can escape.
 pub struct RetainedOriginalWitnessFile {
@@ -883,7 +893,7 @@ impl RetainedOriginalWitnessFile {
             original: RetainedSqliteDestinationRole::created(file, parent, name),
             removal: std::sync::Mutex::new(Some(OriginalWitnessRemovalState {
                 parent: std::mem::ManuallyDrop::new(None),
-                quarantine: std::mem::ManuallyDrop::new(None),
+                quarantine: None,
                 deadline: None,
                 phase: OriginalWitnessRemovalPhase::Original,
                 parent_transferred: false,
@@ -968,7 +978,7 @@ impl RetainedOriginalWitnessFile {
             if original.quarantine.is_none() {
                 let mut quarantine = std::ffi::OsString::from("cleanup.");
                 quarantine.push(&self.original.name);
-                *original.quarantine = Some(quarantine);
+                original.quarantine = Some(quarantine);
             }
             Ok(())
         });
@@ -1023,7 +1033,7 @@ impl RetainedOriginalWitnessFile {
                 *original.parent = Some(Arc::new(parent.try_clone()?));
                 let mut quarantine = std::ffi::OsString::from("cleanup.");
                 quarantine.push(&self.original.name);
-                *original.quarantine = Some(quarantine);
+                original.quarantine = Some(quarantine);
             }
             let retained_parent = original.parent.as_ref().expect("cached original witness parent").clone();
             let quarantine = original.quarantine.as_ref().context("original witness quarantine coordinate absent")?;
@@ -7217,6 +7227,38 @@ mod guarded_inspection_copy_controls {
                     .context("witness fixture charge overflow")?,
             )
         }
+    }
+    #[test]
+    fn dropped_witness_with_prepared_parent_retains_the_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = pin(tmp.path());
+        let name = OsStr::new("prepared.original");
+        let owner = Arc::new(RetainedOriginalWitnessFile::created(
+            root.atomic_create_regular(
+                name,
+                b"prepared original witness",
+                0o600,
+                crate::SQLITE_TEMP_PURPOSE,
+            )
+                .unwrap()
+                .unwrap(),
+            root.identity().unwrap(),
+            name.to_os_string(),
+        ));
+        let work = Arc::new(MechanismWitnessWork {
+            parent: root.try_clone().unwrap(),
+            deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
+            steps: std::sync::atomic::AtomicU64::new(0),
+        });
+        let cleanup: Arc<dyn OriginalWitnessCleanupWork> = work.clone();
+        let prepared = owner
+            .prepare_original_removal_parent(cleanup, &root, work.deadline)
+            .unwrap();
+        let kind = "lillux-sqlite::witness-removal-parent";
+        let before = lillux::custody::abandoned_custody().count(kind);
+        drop(prepared);
+        drop(owner);
+        assert_eq!(lillux::custody::abandoned_custody().count(kind), before + 1);
     }
     // Actual ordinary witness mechanics; this fixture has no platform authority.
     #[test]

@@ -126,6 +126,46 @@ struct JoinState {
     generated_root_registry: Option<OriginalPhysicalRegistryIdentity>,
     generated_roots_retired: bool,
 }
+impl JoinState {
+    /// No owner remains: the canonical and live parents moved out, and every
+    /// leaf released its source alias, generated root and registration.
+    fn owns_nothing(
+        parent: &Option<OriginalProjectionStateOwner>,
+        leaves: &[RetainedLeaf],
+        live_parent: &Option<live_native::LiveStateNativeOwner>,
+    ) -> bool {
+        parent.is_none()
+            && live_parent.is_none()
+            && leaves.iter().all(|leaf| {
+                leaf.source.is_none()
+                    && leaf.generated.as_ref().is_none_or(|owner| {
+                        owner.root.is_none() && owner.registration.is_none()
+                    })
+            })
+    }
+}
+impl Drop for JoinState {
+    fn drop(&mut self) {
+        // Each field is taken exactly once, here; every consuming path leaves
+        // it None or empty first.
+        let parent = unsafe { ManuallyDrop::take(&mut self.parent) };
+        let leaves = unsafe { ManuallyDrop::take(&mut self.leaves) };
+        let live_parent = unsafe { ManuallyDrop::take(&mut self.live_parent) };
+        if Self::owns_nothing(&parent, &leaves, &live_parent) {
+            drop(parent);
+            drop(leaves);
+            drop(live_parent);
+        } else {
+            // A retained parent, source alias, generated root or registration
+            // ends only through the supervised outside receiver. Dropped
+            // without it, the whole graph stays held until the process exits.
+            lillux::custody::abandon(
+                "ryeos-state::destination-join",
+                (parent, leaves, live_parent),
+            );
+        }
+    }
+}
 struct RetainedLeaf {
     evidence: OriginalNativeOutsideLeafEvidence,
     source: Option<StateDestinationLeaf>,
@@ -881,13 +921,14 @@ fn discard_unpublished(candidate: Arc<OriginalStateDestinationJoin>) {
     let candidate = Arc::try_unwrap(candidate)
         .ok()
         .expect("unpublished State join is unique");
-    let state = candidate
+    let mut state = candidate
         .state
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    drop(ManuallyDrop::into_inner(state.parent));
-    drop(ManuallyDrop::into_inner(state.leaves));
-    drop(ManuallyDrop::into_inner(state.live_parent));
+    drop(state.parent.take());
+    drop(std::mem::take(&mut *state.leaves));
+    drop(state.live_parent.take());
+    drop(state);
 }
 
 /// Move the actual authority allocation into the shared State receiver. The
@@ -1011,6 +1052,70 @@ unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for StateLeafC
             .checked_add(8)
             .context("State destination holder census quote overflow")?;
         Ok(OutsideWork { bytes: 0, steps })
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    const KIND: &str = "ryeos-state::destination-join";
+
+    struct NoLease;
+    impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for NoLease {
+        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
+            -> anyhow::Result<()> {
+            anyhow::bail!("drop test admits no projection lease")
+        }
+        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
+            -> anyhow::Result<lillux::time::MonotonicDeadline> {
+            anyhow::bail!("drop test admits no projection lease")
+        }
+    }
+
+    fn join(parent: Option<OriginalProjectionStateOwner>, census_closed: bool,
+        live_parent_outside_pending: bool) -> OriginalStateDestinationJoin {
+        OriginalStateDestinationJoin {
+            process: std::process::id(),
+            factory: std::sync::Weak::new(),
+            maximum: 1,
+            state: Mutex::new(JoinState {
+                parent: ManuallyDrop::new(parent),
+                leaves: ManuallyDrop::new(Vec::with_capacity(1)),
+                census_closed,
+                live_parent: ManuallyDrop::new(None),
+                live_parent_outside_pending,
+                generated_root_registry: None,
+                generated_roots_retired: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn transferred_join_drops_without_abandoning() {
+        // The shape a closed census leaves after its live parent body moved
+        // to the outside frame: no parent, no live parent, no leaf alias.
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(join(None, true, true));
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn join_with_untransferred_parent_is_abandoned_whole() {
+        let lease: std::sync::Weak<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
+            std::sync::Weak::<NoLease>::new();
+        let owner = Arc::new(OriginalPreparedProjectionAuthority {
+            outside_join: Mutex::new(std::sync::Weak::new()),
+            preparation: Mutex::new(None),
+            factory: std::sync::Weak::new(),
+            lease_authority: lease,
+        });
+        let observer = Arc::downgrade(&owner);
+        let published = join(Some(OriginalProjectionStateOwner::Offline(owner)), false, false);
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(published);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        assert!(observer.upgrade().is_some());
     }
 }
 

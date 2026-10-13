@@ -5343,6 +5343,25 @@ fn relinquish_foreign_descriptor_coordinate(file: Option<std::fs::File>) {
     }
 }
 
+/// Whether this process is the child of a protected fork that installed its
+/// own descriptor barrier. Reads one atomic pointer: no lock, no allocation,
+/// so it is safe between fork and exec.
+pub fn in_forked_child() -> bool {
+    !CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire).is_null()
+}
+
+/// Give up a forked child's copy of an abandoned owner without running its
+/// destructor. Every native handle, descriptor or lock inside the copy belongs
+/// to the original process, which retains the real owner; running the copy's
+/// destructor would act on custody this child does not hold, and recording it
+/// would allocate or enter a mutex copied mid-operation by the fork. This is
+/// the only place an owner's destructor is deliberately skipped: the named
+/// binding below holds the copy until the end of this frame and is never
+/// dropped. Allocation-free and lock-free.
+pub(crate) fn relinquish_forked_child_owner<T>(owner: T) {
+    let _relinquished_child_copy = std::mem::ManuallyDrop::new(owner);
+}
+
 #[cfg(unix)]
 impl Drop for ForkChildCloseFile {
     fn drop(&mut self) {

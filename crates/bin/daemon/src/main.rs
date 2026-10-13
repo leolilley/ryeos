@@ -1856,6 +1856,21 @@ impl DaemonSelectedComposition {
             || self.native_terminal.is_some()
             || self.native_startup_recovery_failure.is_some()
             || self.native_released_startup.is_some()
+            || self.native_inputs.is_some()
+            || self.has_operator_lock_custody()
+    }
+
+    /// The consumed operator lock owner awaiting registration with the
+    /// settled finalizer.
+    fn has_operator_lock_custody(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.native_operator_lock.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 
     fn unresolved_native_custody(&self) -> UnresolvedNativeCustody {
@@ -7871,6 +7886,23 @@ mod render_composition_custody_tests {
         // Clear fixture custody so this test can return without entering the
         // production Drop hold. AppState adoption is not exercised here.
         composition.persistent_pool_custody.take();
+        assert!(!composition.has_unresolved_custody());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_operator_lock_alone_is_unresolved_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let mut composition = DaemonSelectedComposition::bootstrap();
+        assert!(!composition.has_unresolved_custody());
+        let lock = lillux::ExactExclusiveFileLock::acquire(&root.path().join("operator.lock")).unwrap();
+        composition.native_operator_lock = Some(std::mem::ManuallyDrop::new(Arc::new(lock)));
+
+        assert!(composition.has_unresolved_custody());
+
+        // Release the fixture owner so Drop takes the resolved path.
+        let owner = composition.native_operator_lock.take().unwrap();
+        drop(std::mem::ManuallyDrop::into_inner(owner));
         assert!(!composition.has_unresolved_custody());
     }
 }

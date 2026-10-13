@@ -362,7 +362,7 @@ struct LiveOperationalSchemaSource {
     terminal: Option<OriginalNativeConnectionTerminal>,
 }
 struct LiveClosedOperationalContext {
-    schema_sources: std::mem::ManuallyDrop<Vec<LiveOperationalSchemaSource>>,
+    schema_sources: Vec<LiveOperationalSchemaSource>,
     schema_native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
     original: Arc<crate::state_db::live_native::LiveStateNativeOwner>,
     references: super::live_native::LiveOperationalSchemaReferences,
@@ -371,16 +371,67 @@ struct LiveClosedOperationalContext {
     initialization_retirement: Option<super::live_native::LiveOperationalInitializationRetirement>,
     _marker: Option<File>,
 }
+impl Drop for LiveClosedOperationalContext {
+    fn drop(&mut self) {
+        release_or_abandon_schema_sources(
+            "ryeos-state::operational-live-context-schema-sources",
+            std::mem::take(&mut self.schema_sources),
+            |source| source.terminal.is_some(),
+        );
+    }
+}
+/// Release schema sources whose native receipts have all moved outside. A set
+/// still holding a receipt stays retained until the process exits: only the
+/// outside native transfer may end a receipt.
+fn release_or_abandon_schema_sources<S: Send + 'static>(
+    kind: &'static str,
+    sources: Vec<S>,
+    receipt_retained: impl Fn(&S) -> bool,
+) {
+    if sources.iter().any(receipt_retained) {
+        lillux::custody::abandon(kind, sources);
+    } else {
+        drop(sources);
+    }
+}
 // Full live semantic/descriptor custody after the duplicate State-parent
 // edge ends. None of these retained bodies is a disposal or settlement receipt.
 struct LiveOperationalMetadataCustody {
     parent: std::sync::Weak<crate::state_db::live_native::LiveStateNativeOwner>,
     factory: std::sync::Weak<OriginalNativeFactory>,
-    schema_sources: std::mem::ManuallyDrop<Vec<LiveOperationalSchemaSource>>,
+    schema_sources: Vec<LiveOperationalSchemaSource>,
     schema_native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
     references: std::mem::ManuallyDrop<super::live_native::LiveOperationalSchemaReferences>,
     _initialization_retirement: std::mem::ManuallyDrop<Option<super::live_native::LiveOperationalInitializationRetirement>>,
     _marker: std::mem::ManuallyDrop<Option<File>>,
+}
+impl Drop for LiveOperationalMetadataCustody {
+    fn drop(&mut self) {
+        // Each retained field is taken exactly once, here.
+        let schema_sources = std::mem::take(&mut self.schema_sources);
+        let references = unsafe { std::mem::ManuallyDrop::take(&mut self.references) };
+        let initialization_retirement =
+            unsafe { std::mem::ManuallyDrop::take(&mut self._initialization_retirement) };
+        let marker = unsafe { std::mem::ManuallyDrop::take(&mut self._marker) };
+        // Settled exactly when live metadata retirement would accept it: no
+        // schema native failure, no schema receipt, no original schema
+        // reference and no marker descriptor remain.
+        let settled = self.schema_native_failure.is_none()
+            && schema_sources.iter().all(|source| source.terminal.is_none())
+            && references.original_source_count() == 0
+            && marker.is_none();
+        if settled {
+            drop(schema_sources);
+            drop(references);
+            drop(initialization_retirement);
+            drop(marker);
+        } else {
+            lillux::custody::abandon(
+                "ryeos-state::operational-live-metadata",
+                (schema_sources, references, initialization_retirement, marker),
+            );
+        }
+    }
 }
 impl ContextOwner {
     fn domain(&self) -> OriginalNativeDomain {
@@ -646,10 +697,22 @@ impl OutsideOriginalOperationalCustody {
         lillux_sqlite::OriginalNativeDestinationAuthority::require_original(parent.as_ref(), factory)?;
         let parent_identity = Arc::downgrade(parent);
         let factory_identity = Arc::downgrade(factory);
-        let live = self.live.take().expect("validated retained live Operational context");
+        let mut live = std::mem::ManuallyDrop::new(
+            self.live.take().expect("validated retained live Operational context"));
+        // Every field is named so none can be skipped, and each is read out
+        // exactly once; the emptied shell is never dropped.
+        // The initialization phase is a plain copied fact with no owner.
         let LiveClosedOperationalContext { schema_sources, schema_native_failure,
             original, references, initialization_phase: _, _initialization,
-            initialization_retirement, _marker } = live;
+            initialization_retirement, _marker } = &mut *live;
+        let (schema_sources, schema_native_failure, original, references,
+            _initialization, initialization_retirement, _marker) = unsafe {(
+            std::ptr::read(schema_sources), std::ptr::read(schema_native_failure),
+            std::ptr::read(original), std::ptr::read(references),
+            std::ptr::read(_initialization),
+            std::ptr::read(initialization_retirement), std::ptr::read(_marker),
+        )};
+        drop(_initialization);
         *self.live_metadata = Some(LiveOperationalMetadataCustody {
             parent: parent_identity, factory: factory_identity, schema_sources,
             schema_native_failure, references: std::mem::ManuallyDrop::new(references),
@@ -1100,14 +1163,9 @@ impl OutsideOriginalOperationalCustody {
         let metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.live_metadata) };
         self.live_metadata = std::mem::ManuallyDrop::new(None);
         let metadata = metadata.expect("validated live Operational metadata");
-        let LiveOperationalMetadataCustody {
-            parent: _, factory: _, schema_sources, schema_native_failure: _,
-            references, _initialization_retirement, _marker,
-        } = metadata;
-        drop(unsafe { std::mem::ManuallyDrop::into_inner(schema_sources) });
-        drop(unsafe { std::mem::ManuallyDrop::into_inner(references) });
-        drop(unsafe { std::mem::ManuallyDrop::into_inner(_initialization_retirement) });
-        drop(unsafe { std::mem::ManuallyDrop::into_inner(_marker) });
+        // The checks above include its settled predicate, so its Drop
+        // releases every field normally.
+        drop(metadata);
         Ok(())
     }
 
@@ -1229,7 +1287,7 @@ fn advance_close(
                 OperationalConnection::Original { owner, factory: _, reference: _ } => owner,
                 OperationalConnection::Live(live) => {
                     context.live = Some(LiveClosedOperationalContext {
-                        schema_sources: std::mem::ManuallyDrop::new(Vec::new()),
+                        schema_sources: Vec::new(),
                         schema_native_failure: None,
                         original: live.original,
                         references: live.references,
@@ -1464,6 +1522,69 @@ impl OperationalDb {
             });
         }
         advance_close(context, Custody::Operational(self), None)
+    }
+}
+
+#[cfg(test)]
+mod abandoned_schema_source_tests {
+    use super::{LiveOperationalMetadataCustody, release_or_abandon_schema_sources};
+    use std::sync::Arc;
+
+    const SOURCES: &str = "ryeos-state::operational-test-schema-sources";
+    const METADATA: &str = "ryeos-state::operational-live-metadata";
+
+    struct Source {
+        receipt: Option<Arc<()>>,
+    }
+
+    #[test]
+    fn settled_schema_sources_release_normally() {
+        let receipt = Arc::new(());
+        let before = lillux::custody::abandoned_custody().count(SOURCES);
+        release_or_abandon_schema_sources(SOURCES,
+            vec![Source { receipt: None }, Source { receipt: None }],
+            |source| source.receipt.is_some());
+        drop(receipt);
+        assert_eq!(lillux::custody::abandoned_custody().count(SOURCES), before);
+    }
+
+    #[test]
+    fn schema_sources_with_a_receipt_are_retained_whole() {
+        let receipt = Arc::new(());
+        let before = lillux::custody::abandoned_custody().count(SOURCES);
+        release_or_abandon_schema_sources(SOURCES,
+            vec![Source { receipt: None }, Source { receipt: Some(Arc::clone(&receipt)) }],
+            |source| source.receipt.is_some());
+        assert_eq!(lillux::custody::abandoned_custody().count(SOURCES), before + 1);
+        assert_eq!(Arc::strong_count(&receipt), 2);
+    }
+
+    fn metadata(marker: Option<std::fs::File>) -> LiveOperationalMetadataCustody {
+        LiveOperationalMetadataCustody {
+            parent: std::sync::Weak::new(),
+            factory: std::sync::Weak::new(),
+            schema_sources: Vec::new(),
+            schema_native_failure: None,
+            references: std::mem::ManuallyDrop::new(
+                super::super::live_native::LiveOperationalSchemaReferences::empty_for_test()),
+            _initialization_retirement: std::mem::ManuallyDrop::new(None),
+            _marker: std::mem::ManuallyDrop::new(marker),
+        }
+    }
+
+    #[test]
+    fn settled_live_metadata_releases_normally() {
+        let before = lillux::custody::abandoned_custody().count(METADATA);
+        drop(metadata(None));
+        assert_eq!(lillux::custody::abandoned_custody().count(METADATA), before);
+    }
+
+    #[test]
+    fn live_metadata_with_its_marker_is_retained_whole() {
+        let marker = tempfile::tempfile().unwrap();
+        let before = lillux::custody::abandoned_custody().count(METADATA);
+        drop(metadata(Some(marker)));
+        assert_eq!(lillux::custody::abandoned_custody().count(METADATA), before + 1);
     }
 }
 

@@ -181,6 +181,8 @@ pub(super) struct LiveOperationalSchemaReferences {
 }
 impl LiveOperationalSchemaReferences {
     pub(super) fn original_source_count(&self) -> usize { self.entries.len() }
+    #[cfg(test)]
+    pub(super) fn empty_for_test() -> Self { Self { entries: Vec::new() } }
     pub(super) fn retirement_capacity(&self) -> usize { self.entries.capacity() }
     pub(super) fn require_original_sources(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> Result<()> {
         for (_, reference) in &self.entries {
