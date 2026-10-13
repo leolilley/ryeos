@@ -196,12 +196,12 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
             Ok(())
         };
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
     })
     .await
     .expect("daemon should start");
-    let (status, body) = tokio::time::timeout(
+    let (status, body) = match tokio::time::timeout(
         std::time::Duration::from_secs(60),
         h.post_execute(
             "directive:test/ctx_dir",
@@ -211,7 +211,13 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
     )
     .await
     .expect("execute timed out")
-    .expect("post_execute failed");
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("post_execute failed: {e:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
 
     assert_eq!(status, reqwest::StatusCode::OK, "response body: {body:?}");
 

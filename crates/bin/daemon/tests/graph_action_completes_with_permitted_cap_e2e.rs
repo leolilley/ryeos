@@ -596,34 +596,21 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         "canonical graph lifecycle events must not be rejected: {warnings:#?}"
     );
 
-    // Lifecycle testimony is read through the live daemon's replay service
-    // for the graph and every immediate child it recorded.
+    // Lifecycle testimony is read through the live daemon's replay service.
+    // An inline in-process child is a fresh root (no upstream edge, no
+    // `child_thread_spawned`), so `threads.children` never lists it; capture
+    // every thread this principal owns while the daemon is live and select
+    // the child once the intent ledger names it below.
     let graph_events = persisted_thread_events(&h, &graph_thread).await;
-    let (children_status, children_body) = h
-        .post_execute(
-            "service:threads/children",
-            ".",
-            json!({ "thread_id": graph_thread }),
-        )
-        .await
-        .expect("post service:threads/children for graph thread");
-    assert!(
-        children_status.is_success(),
-        "threads.children for graph thread failed: status={children_status}; body={children_body:#}"
-    );
-    let mut child_events_by_thread = std::collections::BTreeMap::new();
-    for child in children_body
-        .pointer("/result/children")
-        .and_then(Value::as_array)
-        .expect("threads.children result carries a children array")
-    {
-        let child_id = child
-            .get("thread_id")
-            .and_then(Value::as_str)
-            .expect("child thread row carries thread_id")
-            .to_owned();
-        let events = persisted_thread_events(&h, &child_id).await;
-        child_events_by_thread.insert(child_id, events);
+    let mut child_events_by_thread: std::collections::BTreeMap<String, Vec<(String, Value)>> =
+        std::collections::BTreeMap::new();
+    for (thread_id, event_type, payload) in h.principal_events().await {
+        if thread_id != graph_thread {
+            child_events_by_thread
+                .entry(thread_id)
+                .or_default()
+                .push((event_type, payload));
+        }
     }
 
     // The runtime-action intent ledger has no service surface. Stop the node
@@ -681,8 +668,8 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
 
     let child_events = child_events_by_thread.get(child_thread).unwrap_or_else(|| {
         panic!(
-            "the pre-minted in-process child {child_thread} must be a recorded child of the graph; \
-             children={:?}",
+            "the pre-minted in-process child {child_thread} must be a recorded thread of the \
+             launching principal; threads={:?}",
             child_events_by_thread.keys().collect::<Vec<_>>()
         )
     });

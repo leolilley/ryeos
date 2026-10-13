@@ -159,8 +159,11 @@ import json
 import pathlib
 import sys
 
-params = json.loads(sys.stdin.read())
-pathlib.Path(params["project_path"]).joinpath("follow-generation-moved.txt").write_text(
+# The python script runtime binds the project root as `--project-path` on
+# argv; stdin carries only the item parameters.
+json.loads(sys.stdin.read())
+project_path = sys.argv[sys.argv.index("--project-path") + 1]
+pathlib.Path(project_path).joinpath("follow-generation-moved.txt").write_text(
     "moved before follow\n", encoding="utf-8"
 )
 print(json.dumps({"mutated": True}))
@@ -301,7 +304,10 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out after 30s.\n--- daemon stderr ---\n{stderr}");
@@ -477,7 +483,7 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
     plant_child_graph(project.path(), &fixture.publisher).expect("plant child graph");
     plant_parent_follow_graph(project.path(), &fixture.publisher).expect("plant parent graph");
 
-    let (status, body) = h
+    let result = h
         .post_json(
             "/execute",
             serde_json::json!({
@@ -490,8 +496,14 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
                 ),
             }),
         )
-        .await
-        .expect("execute pinned parent");
+        .await;
+    let (status, body) = match result {
+        Ok(pair) => pair,
+        Err(e) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("execute pinned parent: {e:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
         body.pointer("/result/status").and_then(Value::as_str),
@@ -762,7 +774,10 @@ async fn graph_follow_child_failure_routes_parent_on_error() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
@@ -959,7 +974,10 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
@@ -1210,7 +1228,10 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(45), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
@@ -1359,10 +1380,16 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         .to_str()
         .expect("utf-8 operator input project path");
 
-    let (status, body) = h
+    let (status, body) = match h
         .post_execute("graph:parent_cost", project_path, serde_json::json!({}))
         .await
-        .expect("launch graph-follow parent");
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("launch graph-follow parent: {e:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
         body.pointer("/result/status").and_then(Value::as_str),
