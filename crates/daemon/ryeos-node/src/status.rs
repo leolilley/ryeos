@@ -155,15 +155,20 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                     unusable_control_paths.push((control_path.clone(), live_error.to_string()));
                 } else if let Some(connect_error) =
                     err.downcast_ref::<crate::control::ControlConnectError>()
-                    && !matches!(
+                {
+                    if let Some(reason) = unaddressable_control_path(control_path, connect_error.kind) {
+                        // No socket can be bound at this pathname, so nothing
+                        // is listening there: proof of absence, like NotFound.
+                        tracing::warn!("{reason}");
+                    } else if !matches!(
                         connect_error.kind,
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    )
-                {
-                    unusable_control_paths.push((
-                        control_path.clone(),
-                        format!("lifecycle ownership is uncertain because {connect_error}"),
-                    ));
+                    ) {
+                        unusable_control_paths.push((
+                            control_path.clone(),
+                            format!("lifecycle ownership is uncertain because {connect_error}"),
+                        ));
+                    }
                 }
                 continue;
             }
@@ -348,6 +353,27 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
             app_root: config.app_root.clone(),
         }),
     }
+}
+
+/// A connect refused with `InvalidInput` on a pathname longer than the
+/// platform's Unix socket address bound names a path no daemon could ever
+/// have bound. Returns the explanation to log; `None` for every other
+/// connect failure, which keeps its own classification.
+fn unaddressable_control_path(control_path: &std::path::Path, kind: std::io::ErrorKind) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt as _;
+    if kind != std::io::ErrorKind::InvalidInput
+        || lillux::local_ipc::local_endpoint_path_addressable(control_path)
+    {
+        return None;
+    }
+    Some(format!(
+        "lifecycle control path {} is {} bytes but a Unix socket pathname is limited to {} \
+         bytes on this platform; no listener can exist there, so the daemon is treated as \
+         stopped (shorten the app root to control it)",
+        control_path.display(),
+        control_path.as_os_str().as_bytes().len(),
+        lillux::local_ipc::max_local_endpoint_path_bytes()
+    ))
 }
 
 /// True only once the daemon's lifecycle response has passed the strict
@@ -601,6 +627,45 @@ mod tests {
         assert!(
             matches!(status, LifecycleStatus::Stopped { .. }),
             "recycled marker pid should not classify as Starting, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn over_long_control_path_is_stopped_not_uncertain() {
+        // An app root deep enough that the control socket pathname exceeds
+        // the Unix socket address bound: connect refuses with InvalidInput
+        // before any peer is consulted. No daemon could have bound it, so
+        // this is proof of absence, not uncertain ownership.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut root = tmp.path().to_path_buf();
+        while root.as_os_str().len() <= lillux::local_ipc::max_local_endpoint_path_bytes() {
+            root.push("a-deliberately-long-directory-segment");
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let env = test_env(&root);
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        assert!(!lillux::local_ipc::local_endpoint_path_addressable(&config.uds_path));
+        let reason =
+            unaddressable_control_path(&config.uds_path, std::io::ErrorKind::InvalidInput)
+                .unwrap();
+        assert!(reason.contains("limited to"), "{reason}");
+        assert!(
+            unaddressable_control_path(&config.uds_path, std::io::ErrorKind::PermissionDenied)
+                .is_none()
+        );
+        assert!(
+            unaddressable_control_path(
+                tmp.path(),
+                std::io::ErrorKind::InvalidInput
+            )
+            .is_none()
+        );
+
+        let status = status(&env).await.unwrap();
+        assert!(
+            matches!(status, LifecycleStatus::Stopped { .. }),
+            "unbindable control path should be Stopped, got: {status:?}"
         );
     }
 

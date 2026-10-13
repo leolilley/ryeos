@@ -21,6 +21,22 @@ use crate::{PinnedDirectory, protect_descriptor_from_exec};
 // within that platform boundary before asking the OS to bind or connect it.
 const MAX_ENDPOINT_PATH_BYTES: usize = 103;
 
+/// Longest pathname, in bytes without its trailing NUL, that this platform's
+/// `sockaddr_un` can carry. Nothing can bind or connect a longer pathname.
+pub fn max_local_endpoint_path_bytes() -> usize {
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_path.len() - 1
+}
+
+/// Whether `endpoint` can be named by a `sockaddr_un` at all. A pathname past
+/// the platform bound can be neither bound nor connected, so no listener can
+/// exist at it and a connect refusal there is proof of absence, not of a
+/// peer that failed to answer.
+pub fn local_endpoint_path_addressable(endpoint: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    endpoint.as_os_str().as_bytes().len() <= max_local_endpoint_path_bytes()
+}
+
 /// Kernel-authenticated process that connected one Unix stream. Its PID is
 /// expressed in the receiver's namespace, not in the peer's namespace. The
 /// retained pidfd pins the incarnation; a caller's numeric PID is never proof.
