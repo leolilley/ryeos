@@ -1088,7 +1088,14 @@ fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn authorize_fixture_bundle(state_path: &Path, bundle_name: &str, node: &SigningKey) -> Result<()> {
+/// Grant `bundle_name` an explicit (empty) command-registration authority in
+/// the node policy. The policy generation is sealed by initialization, so a
+/// bundle a test installs later must be granted here, before the seal.
+pub fn authorize_fixture_bundle(
+    state_path: &Path,
+    bundle_name: &str,
+    node: &SigningKey,
+) -> Result<()> {
     let path = state_path
         .join(AI_DIR)
         .join("node")

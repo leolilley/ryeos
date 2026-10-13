@@ -68,13 +68,14 @@ fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> V
     })
 }
 
-/// Execute a service that deliberately retains the default recorded-thread
-/// behavior and return its durable service thread id.
+/// Execute a service that retains the default recorded-thread behavior
+/// (`system/routes` declares no `record_thread` override) and return its
+/// durable service thread id.
 async fn recorded_service_thread_id(h: &DaemonHarness) -> String {
-    let (status, body) = exec(h, "service:identity/public_key", json!({})).await;
+    let (status, body) = exec(h, "service:system/routes", json!({})).await;
     assert!(
         status.is_success(),
-        "recorded identity.public_key service failed: {body}"
+        "recorded system.routes service failed: {body}"
     );
     let tid = body
         .get("thread")

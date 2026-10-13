@@ -53,7 +53,10 @@ async fn standalone_rebuild_runs_on_fresh_state() {
 async fn standalone_bundle_install_then_list_then_remove() {
     // Persistent harness: core is installed under .ai/bundles/core/
     // so preflight's discover_installed_bundle_roots finds it.
-    let harness = StandaloneHarness::new_initialized()
+    // `testbundle` is granted explicit (empty) command-registration
+    // authority in the sealed node policy; install refuses any active bundle
+    // the node policy does not name.
+    let harness = StandaloneHarness::new_initialized_authorizing(&["testbundle"])
         .await
         .expect("standalone harness init");
 

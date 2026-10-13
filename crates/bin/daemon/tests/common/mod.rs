@@ -15,11 +15,12 @@
 //! all but `core-scheduling` also install the standard bundle
 //! (`service:model-providers/*`). A daemon refuses to start when an installed
 //! operational service has no compiled handler, so the suite runs with the
-//! standard composition CI uses for these bundle sets:
+//! standard composition CI uses for these bundle sets. The handoff crash
+//! recovery tests are compiled only with `handoff-test-support`:
 //!
 //! ```text
 //! cargo build -p ryeos-cli --features scheduling,model-provider-setup
-//! cargo test -p ryeosd --features scheduling,model-provider-setup --tests -- --test-threads=1
+//! cargo test -p ryeosd --features scheduling,model-provider-setup,handoff-test-support --tests -- --test-threads=1
 //! ```
 //!
 //! A default-feature build refuses before spawning a daemon whose selected
@@ -1295,6 +1296,115 @@ impl DaemonHarness {
         Ok(body.get("result").filter(|value| !value.is_null()).cloned())
     }
 
+    /// Persisted events of one thread as `(event_type, payload)` in chain
+    /// order, read through `service:events/replay` (Standard bundle). `None`
+    /// when the daemon does not know the thread yet. A running daemon's
+    /// projection is never opened from the test process.
+    pub async fn thread_events(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<Vec<(String, serde_json::Value)>>> {
+        Ok(self
+            .replay_events(
+                "service:events/replay",
+                serde_json::json!({ "thread_id": thread_id }),
+            )
+            .await?
+            .map(|events| {
+                events
+                    .into_iter()
+                    .map(|(_, event_type, payload)| (event_type, payload))
+                    .collect()
+            }))
+    }
+
+    /// Persisted events of one chain as `(thread_id, event_type, payload)` in
+    /// chain order, read through `service:events/chain_replay` (Standard
+    /// bundle). `None` when the daemon does not know the chain root yet.
+    pub async fn chain_events(
+        &self,
+        chain_root_id: &str,
+    ) -> anyhow::Result<Option<Vec<(String, String, serde_json::Value)>>> {
+        self.replay_events(
+            "service:events/chain_replay",
+            serde_json::json!({ "chain_root_id": chain_root_id }),
+        )
+        .await
+    }
+
+    /// Every persisted event of every chain this harness's principal can
+    /// list, as `(thread_id, event_type, payload)`, each chain in chain order.
+    /// Read through `service:threads/list` and `service:events/chain_replay`;
+    /// empty while the daemon cannot answer, so callers may poll it.
+    pub async fn principal_events(&self) -> Vec<(String, String, serde_json::Value)> {
+        let Ok(threads) = self.list_threads(500).await else {
+            return Vec::new();
+        };
+        let chain_roots = threads
+            .iter()
+            .map(|thread| thread.chain_root_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut events = Vec::new();
+        for chain_root in chain_roots {
+            if let Ok(Some(chain)) = self.chain_events(&chain_root).await {
+                events.extend(chain);
+            }
+        }
+        events
+    }
+
+    /// Page through one replay service until its cursor is exhausted.
+    async fn replay_events(
+        &self,
+        service_ref: &str,
+        scope: serde_json::Value,
+    ) -> anyhow::Result<Option<Vec<(String, String, serde_json::Value)>>> {
+        let mut events = Vec::new();
+        let mut after_chain_seq: Option<i64> = None;
+        loop {
+            let mut params = scope.clone();
+            params["after_chain_seq"] = serde_json::json!(after_chain_seq);
+            params["limit"] = serde_json::json!(500);
+            let (status, body) = self.post_execute(service_ref, ".", params).await?;
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            anyhow::ensure!(status.is_success(), "{service_ref} failed: {status} {body}");
+            let page = body
+                .pointer("/result/events")
+                .and_then(serde_json::Value::as_array)
+                .with_context(|| format!("{service_ref} returned no event array"))?;
+            for event in page {
+                let field = |name: &str| {
+                    event
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .with_context(|| format!("replayed event has no {name}: {event}"))
+                };
+                let payload = event.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                events.push((field("thread_id")?, field("event_type")?, payload));
+            }
+            match body
+                .pointer("/result/next_cursor")
+                .and_then(serde_json::Value::as_i64)
+            {
+                Some(cursor) => after_chain_seq = Some(cursor),
+                None => return Ok(Some(events)),
+            }
+        }
+    }
+
+    /// Like [`Self::thread_events`] but the thread must exist.
+    pub async fn existing_thread_events(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
+        self.thread_events(thread_id)
+            .await?
+            .with_context(|| format!("events/replay does not know thread {thread_id}"))
+    }
+
     /// POST JSON to an authenticated daemon route and return
     /// (status, json body). When the harness has fast-fixture keys, the
     /// request is signed for the exact route path.
@@ -1695,9 +1805,76 @@ impl DaemonHarness {
 
 impl Drop for DaemonHarness {
     fn drop(&mut self) {
-        // Best-effort: kill the child synchronously. tokio::process::Child also
-        // has kill_on_drop enabled; stderr is already captured in a regular file.
+        // Kill the daemon and wait for its exit. Runtimes it launched run in
+        // their own process groups and deliberately survive daemon death for
+        // restart recovery, so a SIGKILLed or stopped daemon can leave them
+        // reparented to init holding inherited descriptors. Once the daemon is
+        // gone, terminate every execution still attached in its Runtime store.
         let _ = self.child.start_kill();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let exited = loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) | Err(_) => break false,
+            }
+        };
+        if exited {
+            terminate_attached_executions(&self.state_path);
+        }
+    }
+}
+
+/// Hard-terminate every execution still attached in an exited node's Runtime
+/// store. Each attachment is an exact process identity, so a recycled PID or
+/// process group is never signalled. The store is read through the native
+/// test gate only after the daemon has exited.
+fn terminate_attached_executions(state_path: &Path) {
+    let runtime_db = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    if !runtime_db.is_file() {
+        return;
+    }
+    let attached = std::panic::catch_unwind(|| {
+        ryeos_app::test_support::read_existing_runtime(&runtime_db, |connection| {
+            let mut statement = connection.prepare(
+                "SELECT process_identity FROM thread_runtime WHERE process_identity IS NOT NULL",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    });
+    let Ok(attached) = attached else {
+        eprintln!(
+            "harness teardown could not read attached executions from {}",
+            runtime_db.display()
+        );
+        return;
+    };
+    for raw in attached {
+        match serde_json::from_str::<ryeos_app::process::ExecutionProcessIdentity>(&raw) {
+            Ok(identity) if ryeos_app::process::execution_group_alive(&identity) => {
+                let result = ryeos_app::process::kill_by_action(
+                    &identity,
+                    ryeos_app::process::ShutdownAction::Hard,
+                );
+                if !result.success {
+                    eprintln!(
+                        "harness teardown could not terminate attached execution {raw}: {}",
+                        result.method
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("harness teardown found an undecodable process identity: {error}");
+            }
+        }
     }
 }
 
@@ -1726,7 +1903,29 @@ impl StandaloneHarness {
     /// is started once as a daemon and stopped in order before any
     /// `run_service()` call.
     pub async fn new_initialized() -> anyhow::Result<Self> {
-        let (mut node, fixture) = DaemonHarness::start_fast().await?;
+        Self::new_initialized_authorizing(&[]).await
+    }
+
+    /// Like [`Self::new_initialized`], but the sealed node policy also grants
+    /// explicit command-registration authority to each named bundle. A bundle
+    /// installed later by `bundle/install` must already hold that authority:
+    /// installation refuses a prospective bundle set the node policy does not
+    /// cover, and the policy generation cannot change after initialization.
+    pub async fn new_initialized_authorizing(bundle_names: &[&str]) -> anyhow::Result<Self> {
+        let (mut node, fixture) = DaemonHarness::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedStandard,
+            |state_path, _user_space, fixture| {
+                fast_fixture::register_standard_composition(state_path, fixture)?;
+                for bundle_name in bundle_names {
+                    fast_fixture::authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
+                }
+                Ok(())
+            },
+            |_| {},
+        )
+        .await?;
         node.stop_gracefully().await?;
         let app_root = node.state_path.clone();
         Ok(Self {

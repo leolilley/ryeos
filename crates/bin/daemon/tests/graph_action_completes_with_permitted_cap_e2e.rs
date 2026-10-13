@@ -295,28 +295,11 @@ fn receipt_metadata_for_node<'a>(
         .unwrap_or_else(|| panic!("receipt for node `{node}` missing metadata object: {receipt:#}"))
 }
 
-fn persisted_thread_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = common::selected_projection_path(state_path)
-        .expect("resolve selected projection generation");
-    let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap_or_else(|e| panic!("open projection DB at {}: {e}", db_path.display()));
-    let mut stmt = conn
-        .prepare(
-            "SELECT event_type, payload FROM events \
-             WHERE thread_id = ?1 \
-             ORDER BY chain_seq ASC",
-        )
-        .expect("prepare persisted event query");
-    stmt.query_map(rusqlite::params![thread_id], |row| {
-        let event_type: String = row.get(0)?;
-        let payload_blob: Vec<u8> = row.get(1)?;
-        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-        Ok((event_type, payload))
-    })
-    .expect("query persisted events")
-    .collect::<Result<Vec<_>, _>>()
-    .expect("read persisted events")
+/// Persisted events of `thread_id`, read through the daemon's replay service.
+async fn persisted_thread_events(h: &DaemonHarness, thread_id: &str) -> Vec<(String, Value)> {
+    h.existing_thread_events(thread_id)
+        .await
+        .unwrap_or_else(|e| panic!("replay persisted events of {thread_id}: {e:#}"))
 }
 
 fn assert_graph_runtime_event_identity(
@@ -551,7 +534,7 @@ async fn graph_action_completes_with_permitted_cap() {
         "successful action receipt must carry a non-empty node result hash; receipt_metadata={receipt_metadata:#?}"
     );
 
-    let events = persisted_thread_events(&h.state_path, &graph_thread_id);
+    let events = persisted_thread_events(&h, &graph_thread_id).await;
     assert_graph_runtime_event_identity(
         &events,
         "graph_step_started",
@@ -603,33 +586,72 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         );
     }
 
-    let graph_thread = graph_thread_id(&body, "in-process service graph");
+    let graph_thread = graph_thread_id(&body, "in-process service graph").to_owned();
+    let warnings = body
+        .pointer("/result/warnings")
+        .and_then(Value::as_array)
+        .expect("graph runtime result carries warnings array");
+    assert!(
+        warnings.is_empty(),
+        "canonical graph lifecycle events must not be rejected: {warnings:#?}"
+    );
+
+    // Lifecycle testimony is read through the live daemon's replay service
+    // for the graph and every immediate child it recorded.
+    let graph_events = persisted_thread_events(&h, &graph_thread).await;
+    let (children_status, children_body) = h
+        .post_execute(
+            "service:threads/children",
+            ".",
+            json!({ "thread_id": graph_thread }),
+        )
+        .await
+        .expect("post service:threads/children for graph thread");
+    assert!(
+        children_status.is_success(),
+        "threads.children for graph thread failed: status={children_status}; body={children_body:#}"
+    );
+    let mut child_events_by_thread = std::collections::BTreeMap::new();
+    for child in children_body
+        .pointer("/result/children")
+        .and_then(Value::as_array)
+        .expect("threads.children result carries a children array")
+    {
+        let child_id = child
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .expect("child thread row carries thread_id")
+            .to_owned();
+        let events = persisted_thread_events(&h, &child_id).await;
+        child_events_by_thread.insert(child_id, events);
+    }
+
+    // The runtime-action intent ledger has no service surface. Stop the node
+    // in order, then read its Runtime store through the native test gate;
+    // the live store behind a running daemon is never reopened.
+    h.stop_gracefully()
+        .await
+        .expect("stop daemon before reading its Runtime store");
     let runtime_path = h
         .state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let runtime = rusqlite::Connection::open_with_flags(
-        runtime_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open runtime database read-only");
-    let intents = runtime
-        .prepare(
+    let intents = ryeos_app::test_support::read_existing_runtime(&runtime_path, |runtime| {
+        let mut statement = runtime.prepare(
             "SELECT operation_id, mode, child_thread_id FROM runtime_action_intent \
              WHERE chain_root_id=?1 ORDER BY operation_id",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query_map([graph_thread], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .expect("read runtime-action intents");
+        )?;
+        let rows = statement
+            .query_map([graph_thread.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    });
     assert_eq!(
         intents.len(),
         1,
@@ -642,17 +664,8 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         "operation id must be a SHA-256 hex digest"
     );
     assert_eq!(mode, "inline");
-    assert_ne!(child_thread, graph_thread);
+    assert_ne!(child_thread, &graph_thread);
 
-    let warnings = body
-        .pointer("/result/warnings")
-        .and_then(Value::as_array)
-        .expect("graph runtime result carries warnings array");
-    assert!(
-        warnings.is_empty(),
-        "canonical graph lifecycle events must not be rejected: {warnings:#?}"
-    );
-    let graph_events = persisted_thread_events(&h.state_path, graph_thread);
     for event_type in ["tool_call_start", "tool_call_result"] {
         let payload = graph_events
             .iter()
@@ -666,7 +679,13 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         );
     }
 
-    let child_events = persisted_thread_events(&h.state_path, child_thread);
+    let child_events = child_events_by_thread.get(child_thread).unwrap_or_else(|| {
+        panic!(
+            "the pre-minted in-process child {child_thread} must be a recorded child of the graph; \
+             children={:?}",
+            child_events_by_thread.keys().collect::<Vec<_>>()
+        )
+    });
     assert!(
         child_events
             .iter()
@@ -724,7 +743,7 @@ async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() 
     );
 
     let graph_thread = graph_thread_id(&body, "pinned graph action");
-    let events = persisted_thread_events(&h.state_path, graph_thread);
+    let events = persisted_thread_events(&h, graph_thread).await;
     assert!(
         events.iter().any(|(event_type, payload)| {
             event_type == "tool_call_result"
@@ -975,7 +994,7 @@ async fn graph_action_denied_without_permitted_cap() {
         "failed action receipt must carry dispatch error context; receipt_metadata={receipt_metadata:#?}"
     );
 
-    let events = persisted_thread_events(&h.state_path, &graph_thread_id);
+    let events = persisted_thread_events(&h, &graph_thread_id).await;
     assert_graph_runtime_event_identity(
         &events,
         "graph_step_started",

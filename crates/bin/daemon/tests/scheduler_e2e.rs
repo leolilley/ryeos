@@ -930,7 +930,7 @@ async fn scheduler_pause_prevents_fires() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_deregister_stops_fires() {
-    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling()
         .await
         .expect("start daemon");
 
@@ -980,20 +980,28 @@ async fn scheduler_deregister_stops_fires() {
     );
 
     // `show_fires` is owner-authorized through the live schedule spec and
-    // therefore returns not-found after deregistration. Inspect the durable
-    // fire projection instead: completion may still update an already-claimed
-    // row, but the successful response is the fence after which no new fire
-    // identity may be claimed.
-    let count_after_deregister =
-        projected_fire_count(&h, "dereg-stop").expect("read projected fires after deregister");
-    for _ in 0..3 {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(
-            projected_fire_count(&h, "dereg-stop"),
-            Some(count_after_deregister),
-            "deregistered schedule should not claim additional fires"
-        );
-    }
+    // therefore returns not-found after deregistration. The successful
+    // deregister response is the fence after which no new fire identity may
+    // be reserved (completion may still update an already-claimed row). Give
+    // the 2s interval time to fire again, stop the node in order, and read
+    // the durable fire rows from the stopped Scheduler store.
+    let deregistered_at_ms = lillux::time::timestamp_millis();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    h.stop_gracefully()
+        .await
+        .expect("stop daemon before reading its Scheduler store");
+    let reservations = stopped_fire_reservations(&h, "dereg-stop");
+    assert!(
+        !reservations.is_empty(),
+        "the fire observed before deregistration must be durable: {reservations:?}"
+    );
+    assert!(
+        reservations
+            .iter()
+            .all(|(_, reserved_at)| *reserved_at <= deregistered_at_ms),
+        "deregistered schedule should not reserve additional fires after {deregistered_at_ms}: \
+         {reservations:?}"
+    );
 }
 
 // ── Schedule ID reuse blocked ──────────────────────────────────────────────
@@ -1351,23 +1359,24 @@ async fn fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
     body.get("result")?.get("total")?.as_u64()
 }
 
-fn projected_fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
-    let path = h
-        .state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("scheduler.sqlite3");
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let count = connection
-        .query_row(
-            "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
-            [schedule_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .ok()?;
-    u64::try_from(count).ok()
+/// `(fire_id, reserved_at_ms)` of every durable fire of `schedule_id`, read
+/// from a stopped node's Scheduler store through the native test gate. The
+/// daemon must already have exited; a live store is never reopened.
+fn stopped_fire_reservations(h: &DaemonHarness, schedule_id: &str) -> Vec<(String, i64)> {
+    let state_dir = h.state_path.join(ryeos_engine::AI_DIR).join("state");
+    let host = ryeos_scheduler::test_native::TestSchedulerHost::acquire();
+    host.with_fixture_sql(&state_dir, "scheduler.sqlite3", false, |connection| {
+        let mut statement = connection.prepare(
+            "SELECT fire_id, reserved_at FROM schedule_fires \
+             WHERE schedule_id = ?1 ORDER BY reserved_at",
+        )?;
+        let rows = statement
+            .query_map([schedule_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
 }
 
 /// Observe `show_fires` over a time window, checking that the fire count

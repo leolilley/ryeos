@@ -141,7 +141,7 @@ async fn await_thread_id(
 /// `cursor` (proves node before `cursor` completed and the runtime is now
 /// parked at the test hook).
 async fn await_checkpoint_cursor(
-    state_path: &Path,
+    h: &DaemonHarness,
     thread_id: &str,
     checkpoints_dir: &Path,
     cursor: &str,
@@ -159,7 +159,7 @@ async fn await_checkpoint_cursor(
             Instant::now() < deadline,
             "checkpoint with cursor `{cursor}` never appeared at {}; events={:#?}",
             checkpoints_dir.display(),
-            projection_events(state_path, thread_id),
+            projection_events(h, thread_id).await,
         );
         tokio::select! {
             result = &mut *execute_request => {
@@ -170,71 +170,46 @@ async fn await_checkpoint_cursor(
     }
 }
 
-/// Read the recorded process identity for `thread_id` from the runtime DB
-/// (recorded by the runtime's `runtime.mark_running` callback, which is
-/// its first action — so it is present by the time any checkpoint exists).
+/// Read the recorded process identity for `thread_id` from a stopped node's
+/// Runtime store through the native test gate (recorded by the runtime's
+/// `runtime.mark_running` callback, which is its first action — so it is
+/// present by the time any checkpoint exists). The daemon must already have
+/// exited; a live store is never reopened.
 fn read_process_identity(
     state_path: &Path,
     thread_id: &str,
-    deadline: Instant,
 ) -> ryeos_app::process::ExecutionProcessIdentity {
     let db_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    loop {
-        if let Ok(conn) = rusqlite::Connection::open_with_flags(
-            &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) {
-            let identity: Option<String> = conn
-                .query_row(
-                    "SELECT process_identity FROM thread_runtime WHERE thread_id = ?1",
-                    rusqlite::params![thread_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            if let Some(value) = identity
-                && let Ok(identity) = serde_json::from_str(&value)
-            {
-                return identity;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
+    let identity: Option<String> =
+        ryeos_app::test_support::read_existing_runtime(&db_path, |connection| {
+            let mut statement = connection
+                .prepare("SELECT process_identity FROM thread_runtime WHERE thread_id = ?1")?;
+            let mut rows = statement.query([thread_id])?;
+            Ok(match rows.next()? {
+                Some(row) => row.get::<_, Option<String>>(0)?,
+                None => None,
+            })
+        });
+    let identity = identity.unwrap_or_else(|| {
+        panic!(
             "process identity for {thread_id} never recorded in {}",
             db_path.display()
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        )
+    });
+    serde_json::from_str(&identity)
+        .unwrap_or_else(|e| panic!("decode recorded process identity for {thread_id}: {e}"))
 }
 
-fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let mut stmt = match conn.prepare(
-        "SELECT event_type, payload FROM events WHERE thread_id = ?1 ORDER BY chain_seq ASC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map(rusqlite::params![thread_id], |row| {
-        let event_type: String = row.get(0)?;
-        let payload_blob: Vec<u8> = row.get(1)?;
-        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-        Ok((event_type, payload))
-    })
-    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-    .unwrap_or_default()
+/// Persisted events of `thread_id` through the daemon's replay service;
+/// empty while the daemon does not know the thread or cannot answer.
+async fn projection_events(h: &DaemonHarness, thread_id: &str) -> Vec<(String, Value)> {
+    h.thread_events(thread_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 fn count_event(events: &[(String, Value)], event_type: &str) -> usize {
@@ -335,7 +310,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         .join(&thread_id)
         .join("checkpoints");
     await_checkpoint_cursor(
-        &h.state_path,
+        &h,
         &thread_id,
         &checkpoints_dir,
         "b",
@@ -345,7 +320,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
     .await;
 
     // Sanity: pre-crash, node `a` ran exactly once and the thread started once.
-    let pre = projection_events(&h.state_path, &thread_id);
+    let pre = projection_events(&h, &thread_id).await;
     assert_eq!(
         count_step_started_for_node(&pre, "a"),
         1,
@@ -357,12 +332,12 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         "pre-crash: exactly one thread_started; events={pre:#?}"
     );
 
-    // 2. Record the process identity, then SIGKILL only the daemon (leaving the
-    //    row `running` and the exact attached group alive for restart-owned
-    //    teardown).
-    let process_identity = read_process_identity(&h.state_path, &thread_id, setup_deadline);
+    // 2. SIGKILL only the daemon (leaving the row `running` and the exact
+    //    attached group alive for restart-owned teardown), then read the
+    //    process identity it recorded from the stopped Runtime store.
     h.kill_daemon().await.expect("kill daemon");
     exec_task.abort();
+    let process_identity = read_process_identity(&h.state_path, &thread_id);
     assert!(
         ryeos_app::process::execution_group_alive(&process_identity),
         "restart recovery fixture requires the exact orphan group to remain pin-able"
@@ -386,7 +361,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
     // 4. Poll for terminal completion of the SAME thread.
     let resume_deadline = Instant::now() + Duration::from_secs(45);
     let final_events = loop {
-        let events = projection_events(&h.state_path, &thread_id);
+        let events = projection_events(&h, &thread_id).await;
         if count_event(&events, "thread_completed") >= 1 {
             break events;
         }
