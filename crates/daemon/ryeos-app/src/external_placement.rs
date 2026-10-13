@@ -8218,6 +8218,85 @@ pub mod test_support {
         )
     }
 
+    /// Root launch metadata a composed external placement would have been
+    /// admitted with: a managed-runtime closure whose session inventory names
+    /// the stored persistent-session capsule, and an execution realization
+    /// rooted in this node's booted execution identity.
+    fn composed_fixture_launch_metadata(
+        state: &AppState,
+        project_root: &std::path::Path,
+        base_snapshot_hash: &str,
+        admitted_capsule_hash: &str,
+    ) -> Result<crate::launch_metadata::RuntimeLaunchMetadata> {
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:external-placement-test".to_owned(),
+            Some(project_root.to_path_buf()),
+            base_snapshot_hash.to_owned(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )?
+        .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)?;
+        let mut launch_metadata = crate::state_store::external_fixture_launch_metadata(
+            project_authority,
+            serde_json::json!({
+                "binding_records": {},
+                "required_secrets": [],
+                "admitted_sessions": {"external_candidate": admitted_capsule_hash},
+            }),
+            serde_json::json!({}),
+        );
+        let provisional = launch_metadata
+            .admitted_launch_capsule()?
+            .context("composed external fixture has no provisional launch capsule")?;
+        let authority = provisional.launch_authority();
+        let execution_identity = crate::execution_identity_probe::boot_node_execution_identity(
+            &state.state_store,
+            &state.identity,
+            &crate::build_info::get(),
+        )?;
+        let effective_definition_digest = provisional
+            .exact_program
+            .get("effective_definition_digest")
+            .and_then(serde_json::Value::as_str)
+            .context("composed external fixture exact program has no definition digest")?
+            .to_owned();
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+            runtime_ref,
+            runtime_content_hash,
+            ..
+        } = &provisional.artifact_identity
+        else {
+            anyhow::bail!("composed external fixture requires a managed runtime launch identity");
+        };
+        let realization = ryeos_state::objects::AdmittedExecutionRealization {
+            schema: ryeos_state::objects::EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ryeos_state::objects::ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: execution_identity.identity_hash.clone(),
+            substrate_attestation_hash: execution_identity.attestation_hash.clone(),
+            launch_authority_digest: authority.digest()?,
+            effective_definition_digest,
+            artifact_identity_digest: authority.artifact_identity_digest()?,
+            execution_closure_digest: authority.execution_closure_digest()?,
+            contract_ref: runtime_ref.clone(),
+            contract_digest: runtime_content_hash.clone(),
+            components: Vec::new(),
+            properties: BTreeMap::new(),
+        };
+        let state_authority = state.state_store.pinned_state_authority()?;
+        let guard = state_authority.acquire_shared_guard()?;
+        let realization_hash = state_authority
+            .cas_store()?
+            .store_object(&realization.to_value()?)?;
+        state_authority.ensure_guard(&guard)?;
+        drop(guard);
+        drop(state_authority);
+        launch_metadata.execution_realization_hash = Some(realization_hash);
+        Ok(launch_metadata)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_bound_external_supervisor_inner(
         state: &mut AppState,
@@ -8378,6 +8457,12 @@ pub mod test_support {
             let operator =
                 ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?
                     .principal_id();
+            let launch_metadata = composed_fixture_launch_metadata(
+                state,
+                project_root,
+                &base_snapshot_hash,
+                &stored_capsule_hash,
+            )?;
             state
                 .state_store
                 .install_external_placement_test_fixture_with_workspace_owner(
@@ -8385,6 +8470,7 @@ pub mod test_support {
                     &retained,
                     project_root,
                     &operator,
+                    &launch_metadata,
                     |launch_owner| {
                         let (backend_id, backend_version) = state
                             .isolation
@@ -8460,9 +8546,17 @@ pub mod test_support {
                     },
                 )?;
         } else {
-            state
-                .state_store
-                .install_external_placement_test_fixture(&reservation, &retained)?;
+            let launch_metadata = composed_fixture_launch_metadata(
+                state,
+                std::path::Path::new(crate::state_store::EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+                &base_snapshot_hash,
+                &stored_capsule_hash,
+            )?;
+            state.state_store.install_admitted_external_placement_test_fixture(
+                &reservation,
+                &retained,
+                &launch_metadata,
+            )?;
         }
         let contact = state
             .state_store

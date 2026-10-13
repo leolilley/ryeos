@@ -2126,6 +2126,28 @@ pub(crate) struct TestWorkspaceBinding {
     pub base_output_capture_hash: Option<String>,
 }
 
+/// Project root recorded by external placement fixtures that have no real
+/// retained workspace.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT: &str = "/external-placement-test";
+
+#[cfg(any(test, feature = "test-support"))]
+fn external_placement_test_workspace_binding(
+    reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+) -> Result<TestWorkspaceBinding> {
+    Ok(TestWorkspaceBinding {
+        workspace_id: reservation.owner.dedicated_session()?.workspace_id.clone(),
+        thread_id: reservation.placement_thread_id.clone(),
+        launch_owner: None,
+        backend_id: Some("fixture".into()),
+        backend_version: Some("fixture".into()),
+        pinned_root_identities: Some("fixture".into()),
+        mount_identity: Some("view:external-composed-controller".into()),
+        workspace_output_partition_identity: None,
+        base_output_capture_hash: None,
+    })
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn external_fixture_launch_metadata(
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
@@ -18881,20 +18903,30 @@ impl StateStore {
         self.install_external_placement_test_fixture_with_workspace(
             reservation,
             binding,
-            std::path::Path::new("/external-placement-test"),
-            |_| {
-                Ok(TestWorkspaceBinding {
-                    workspace_id: reservation.owner.dedicated_session()?.workspace_id.clone(),
-                    thread_id: reservation.placement_thread_id.clone(),
-                    launch_owner: None,
-                    backend_id: Some("fixture".into()),
-                    backend_version: Some("fixture".into()),
-                    pinned_root_identities: Some("fixture".into()),
-                    mount_identity: Some("view:external-composed-controller".into()),
-                    workspace_output_partition_identity: None,
-                    base_output_capture_hash: None,
-                })
-            },
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            |_| external_placement_test_workspace_binding(reservation),
+        )
+    }
+
+    /// Install the composed placement as a chain root admitted through the
+    /// exact root launch metadata, so the production placement owner finds
+    /// the same admitted launch capsule an ordinary launch would record.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn install_admitted_external_placement_test_fixture(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        root_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            reservation,
+            Some(binding),
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            "fp:operator",
+            true,
+            false,
+            Some(root_launch_metadata),
+            |_| external_placement_test_workspace_binding(reservation),
         )
     }
 
@@ -18925,6 +18957,7 @@ impl StateStore {
         binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
         project_root: &std::path::Path,
         owner_principal: &str,
+        root_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         prepare_workspace: impl FnOnce(&str) -> Result<TestWorkspaceBinding>,
     ) -> Result<()> {
         self.install_external_placement_test_fixture_with_workspace_inner(
@@ -18934,7 +18967,7 @@ impl StateStore {
             owner_principal,
             true,
             false,
-            None,
+            Some(root_launch_metadata),
             prepare_workspace,
         )
     }
