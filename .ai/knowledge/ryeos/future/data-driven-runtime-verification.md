@@ -1,14 +1,21 @@
-<!-- ryeos:signed:2026-09-29T00:19:35Z:ecd22eaf8ab8927bfe9ad74fa5afce215d5c20ffa328d3adc94fb564c2314c67:DOG5AAveRXJkXCsF4C3wm0/Z+YZLr6eUuAdDdO4ZFvxFcNqSbJVq0ylWFQHsEOVxrTNO39uxDHxBjq+COrRXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:f0d8e3f70e13b31480fa038e182918abcb5f15b5ce5edcb1d1154f9963fc269c:ODXxwxslyXtB2tg4nofo75HhND+pa2pFezfOvoDjbj6bFF9oU4pzqdqQq2WPhSeNw6zhQONChFcZCjrwqnsbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-runtime-verification
 title: Data-Driven Runtime Verification
 description: Future separation of declarative verification policy, reusable evidence transport, and runtime-specific protocol interpreters
 entry_type: design
-version: "0.2.0"
+version: "0.2.1"
 ```
 
 # Data-Driven Runtime Verification
+
+Within the [platform direction](platform-direction-and-delivery.md), a focused
+semantic verifier may use any supported admitted runtime, including Python.
+The second-scenario gate below concerns extracting shared verification semantics;
+it does not gate interpreted authoring or use of an existing qualification Tool
+contract. Launch, settlement and other independently owned evidence remain
+mandatory wherever the selected claim requires them.
 
 RyeOS already has a generic product qualification framework. Pinned GNU Python
 qualification uses that framework with specialized signed Tool content; it does

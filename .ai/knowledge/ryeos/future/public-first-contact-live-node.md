@@ -1,13 +1,13 @@
-<!-- ryeos:signed:2026-07-22T04:32:50Z:181a4fb57997888aa624c0644a0a9dd5e2714f01a6bcd0f007f5bf6e2f957f43:2/wvaXu1X9HtUyuxPbggNTff+do8pAc9qgKNv/PGwc3B8/fd8SeGzz67iGyRMj0DNROdojCKZJn27DzwZwfnBg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:b781ee480a80a1782145e84ce5e44d2b3caf55a9779dcf06f1a35d3af9be656e:aKadGUx9fiKsJyFmvbElPoJySmu2RopLXe6uXt06OwKBkHmutiL0Hy8L7Vz2SRsVZPUMfuBm6fekMfrzU6nMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: public-first-contact-live-node
 title: Public First Contact and Live-Node Web Experience
 description: Future direction for a cinematic public RyeOS arrival surface that resolves into a real capability-limited hosted-node UI rather than a detached marketing site
 entry_type: design
-version: "0.1.0"
+version: "0.1.1"
 created_at: 2026-07-22T00:00:00Z
-updated_at: 2026-07-22T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 tags:
   - ryeos-ui
   - hosted-node
@@ -39,6 +39,16 @@ This note describes the intended relationship between:
 
 It does not authorize public arbitrary execution, shared hostile tenancy, or a
 second frontend application model.
+
+## Place in the platform direction
+
+The [platform direction and delivery](platform-direction-and-delivery.md) owns
+the overall product destination and first useful application milestones. This
+note owns an optional public presentation of a working platform. Select it when
+there is a useful, deliberately public-safe application or demonstration to
+enter. The cinematic treatment and public session work do not gate the first
+local authoring and operation experience. Historical source observations below
+must be rechecked before implementation.
 
 ## Thesis
 
@@ -72,7 +82,7 @@ conversion. The conversion is entry into the product itself.
 
 ## Product truth the experience must express
 
-RyeOS is portable verified execution.
+RyeOS is a platform for building, running and evolving applications that combine code, models, tools and services. Portable execution with explicit authority and evidence is part of the foundation that supports that experience.
 
 It represents executable capability, authority, runtime state, and execution
 history as signed, content-addressed data. That gives work an identity that can
@@ -95,9 +105,10 @@ The public experience should build from the actual RyeOS primitives:
 - **surfaces and views** are interpretations of semantic RyeOS state, not the
   state itself.
 
-The page must not reduce this to generic AI-agent positioning. Agents are an
-important RyeOS application, but portable verified execution is the product
-thesis.
+The page should connect these mechanisms to an application people can actually
+use or inspect. Agents are one application family. The overarching product
+direction remains with the platform owner; this presentation illustrates its
+qualified capabilities.
 
 ## Why the `ryeos init` ceremony is the narrative source
 
@@ -226,9 +237,10 @@ GET /ui
 ```
 
 The public page may be visually rich, but it is not allowed to become a second
-semantic RyeOS client. State transitions, view meaning, execution semantics,
-and operator behavior continue to belong to the shared Rust UI core and signed
-surface/view content.
+semantic RyeOS client. Shared platform state transitions, execution controls and binding semantics
+continue to use the shared UI contracts and signed surface/view content.
+Application domain behavior belongs to its admitted implementation and content;
+this rule does not require each new application to add Rust UI state.
 
 ### The seam
 

@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:837402dabe5f07e8c1b86d6ca5cf4b120ea08c25ffac6db5bd1def994198de1d:dxrkDFw5Pa/MxL5wxX/t+7LlrRfYNGOpzWixikJ7/7ev/LA5t5FDSVGzW3SVG7eM69sesH6LGpIw+3vQQl3bBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:3c529d553125abe8101a4aba4150dab4e312b29ce96ba2e646e7aa0ff2c3b9f9:7mkw0sHPLtt7YE/RCemhnwW7zLvLYNN1ruge5m49pQ3YSrllL5/9vn0GMKWHO2NhWi6/NiNoOvor9JdqSxMJDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, determinism, replay, evidence, effects]
-version: "0.2.1"
+version: "0.2.2"
 status: implementable
 description: >
   Effect-class contract (sealed/recorded/live) making chain re-execution mean
@@ -102,7 +102,8 @@ at which step.
 
 ## Triggers to revisit
 
-- content-addressed workers land (hard prerequisite satisfied);
+- a concrete effect consumer needs explicit class/replay declarations; external
+  realization supplies runtime identity independently of warm-worker support;
 - anyone asks "did the engine upgrade change solve outcomes?" and the answer
   requires manual archaeology;
 - the second recorded-class mechanism gets built ad hoc (the pattern is

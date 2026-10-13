@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-16T03:44:57Z:c94332fb19102ffc4cab0427bb5fd0bdec57a964f6069677d805064f459360fd:4DLIpgvSuNis/kgTDl7WrOUtjT7Kx+iOJ2INvY+ERx8aVMCrHBb0vkethMf7MqyJxtHIruH9VGk1FGZxOiBoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:ce981c97351aaf026584202900a65385036a4071ae2d408e54c8ad3083329c0b:a+uPsyd5EplJNAt+yrNAUECZrEiugwOnAjkSA3hR/BGqBeMPTkWap5efAkEfy9CoX9pVkm7OtnyiMeNc60aWBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Shared Engine-Backed Offline Executor
 
 ## Status
 
 Not now. The current CLI offline-dispatch rewrite should stay a scoped, CLI-owned implementation:
 
-1. load aliases and verbs from node config;
+1. load admitted command descriptors from `node/commands`;
 2. boot the engine with installed bundle roots;
 3. call `engine.effective_item(... expected_kind: None ...)`;
 4. inspect composed dispatch fields;
@@ -17,7 +17,7 @@ This keeps the immediate `ryeos tui` path small while removing duplicated descri
 
 Create a shared executor only when there is real pressure from more than one caller or from protocol complexity. Good triggers:
 
-- `ryeos execute <item_ref>` needs to share the same local/offline path as verb dispatch.
+- `ryeos execute <item_ref>` needs to share the same local/offline path as command dispatch.
 - The daemon or another local worker needs identical `cli_exec` / subprocess launch semantics.
 - More executable item shapes appear beyond the current field patterns.
 - Protocol handling grows beyond simple env injection, argv forwarding, stdin/stdout mode, and trusted binary resolution.
@@ -52,7 +52,7 @@ Shared offline executor
 
 - The executor should not switch on hardcoded kind names as its primary model.
 - Prefer composed field contracts over kind-specific Rust structs.
-- Keep alias and verb loading outside this executor unless node config itself moves into engine kinds.
+- Keep command registration and dispatch-intent loading outside this executor unless node config itself moves into engine kinds.
 - Keep trusted binary resolution delegated to `ryeos_engine::binary_resolver`.
 - Treat protocols as the natural place for launch semantics once they become richer than today’s small `cli_exec` subset.
 - Keep outcome explicit: TTY-owning clients need a silent outcome; tools/services may produce JSON.

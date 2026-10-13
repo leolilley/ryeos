@@ -1,15 +1,19 @@
-<!-- ryeos:signed:2026-10-06T00:22:22Z:2d5aa539611d025ba29e62a78efebbd523d45f8c2391c752de1a14f586af085b:b07ZGrC1oKTLxOoTWgtyZTKYI/MspL6DnyREb0HJj38o15JzLzbSaIsEHlx/qhF9YO1BuEG7JoM4+D5jWKYXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:3545021904afb4535376bca2885bd460f464f6752063a207ee7951263463d998:04NXSnx30hsMDf/2prZmMaUtbjid5SCpuKvp68UsctTCDd606Ohg/4gr/WZw4hM3mDQY8ZW2LAuanm3EK+4pCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: language-neutral-application-development-and-execution
 title: Language-Neutral Application Development and Execution
 description: Author and drive RyeOS applications from other languages through existing execution, content, authority and lifecycle contracts
 entry_type: design
-version: "0.1.0"
+version: "0.1.1"
 status: discussion
 ```
 
 # Language-Neutral Application Development and Execution
+
+This note owns authoring/control contracts and SDK staging beneath
+[Platform direction and delivery](platform-direction-and-delivery.md), which
+owns the overarching application lifecycle and platform milestones.
 
 ## Purpose and status
 
@@ -275,7 +279,10 @@ publication, canonical references and recovery paths.
 4. **Prove the current adapter boundary.** Complete the selected integration
    and original ownership/admission/qualification gates. Make two meaningful
    successive interpreted changes with unchanged complete native binaries.
-5. **Extend through concrete demand.** Add another execution form, explicit
+5. **Prove reuse, then extend through concrete demand.** Exercise a second
+   materially different consumer, including ordinary application composition
+   beyond provider integration, before claiming a reusable application path.
+   Add another execution form, explicit
    remote placement or content-publication interface when its owner contract
    supports the selected consumer. Generalize after showing where contracts
    agree; retain capability differences.
@@ -330,10 +337,8 @@ staged SDK questions. Existing documents retain their mechanism ownership:
   and [execution isolation](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md):
   existing operating surfaces; source documentation is not current qualification.
 
-The companion **Language-Neutral Integration Adapters** and **Native Modularity
-and Bundle Composition** notes authored in the originating discussion are
-currently preserved under
-`.worktrees/preserved-next-changes-20261005/.ai/knowledge/ryeos/future/`.
-They respectively own interpreted product launch/trust and native dependency,
-service/state composition. Their eventual durable placement must preserve those
-owners; this note does not replace them or claim their full implementation.
+The companion [Language-Neutral Integration Adapters](language-neutral-integration-adapters.md)
+and [Native Modularity and Bundle Composition](native-modularity-and-bundle-composition.md)
+own interpreted product launch/trust and native dependency/service/state
+composition. They have durable locations in this directory; this note does not
+replace their owners or claim their full implementation.

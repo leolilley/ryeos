@@ -1,14 +1,18 @@
-<!-- ryeos:signed:2026-08-27T04:21:31Z:3db6d1ce55c5946df0f5e02d8195222162f87389717fb6365fd10e24b54b219c:YeF/vgHETq99ZA0wPheVu0eKHr0/iLTWmpZKRz4wGO+hg4Q/KLZlZNRiEUhhdyqymrlgB+B2gHZhk9Q6EHshBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:b9c7a6bc14f14f94be6abf95861466267b2969f47f5ee1313640a9a5cede3203:O0cU5kz+dYtTFawPT3rsbgAvkxDIjj3gOSp1KO+rOHXEWjx+JAUFvA+HSboRYjZySYz2DPZfQOhVC6IWvTPTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: local-execution-roadmap
 title: Local Execution Roadmap
 description: Current recorded local-model foundation and the scheduled path through serious remote inference, traces, training, sealed qualification, generation capsules, and offline export
 entry_type: reference
-version: "0.3.0"
+version: "0.3.1"
 ```
 
 # Local execution roadmap
+
+This is a specialized execution branch beneath the [platform direction](platform-direction-and-delivery.md).
+Its serious-model, training and offline acceptance gates apply to that consumer;
+they do not block a supported language-neutral application or client path.
 
 This note is the ownership and sequencing map for local execution. The current
 operating contract is `knowledge:local-inference/activation`; implementation

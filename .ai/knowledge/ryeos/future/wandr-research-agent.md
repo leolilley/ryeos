@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-07-16T03:25:48Z:a8c823d036fe883789322e3ce733b46e9f8bb88dc0f502d01be1707153717c74:0H/Jzw1V/0lCGfY8Mv8V1Xk32UQpSaD9gOTbQVcvnriKMl9jzMiXO5hq+2/u0K3nxu7jy981Qgx4Bl6SxSB+BQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:f100cfbaf34c1749eaa6a364d6aebb88f1cb016a6d97e86d57efbeb093f50f06:z93jPtjd4SZFnf001LHYLTA5zYbiAjiH122Pygz98mYVOAqEtlXU/IZwcgNegbd+ZV4vUlfsvFljeJGTtEXeAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 name: ryeos/future/wandr-research-agent
-version: "0.1.0"
+version: "0.1.1"
 category: ryeos/future
 tags: [wandr, research-agent, graph, directive, tool, knowledge, evidence, benchmark]
 description: Future implementation design for a RyeOS-native WANDR wide-and-deep research agent with hierarchical coverage, parallel entity enrichment, evidence admission, durable dossiers, and benchmark-compatible JSONL output.
@@ -14,6 +14,18 @@ references: [ryeos/development/architecture, ryeos/development/signing]
 
 Future implementation design. This document defines the intended RyeOS architecture and development
 sequence; it does not describe an existing implementation.
+
+Under the [platform direction and delivery](platform-direction-and-delivery.md),
+this is a candidate application for proving interpreted tools and graph/directive
+composition beyond provider integration. It is not a scheduled benchmark
+programme or a prerequisite for the first application milestone. Select it when
+research is a concrete consumer; prove one complete member before broadening.
+
+Schemas, namespaces, artifact references and persistence calls below are
+prospective application contracts. Trace them to supported execution, retention
+and item-authoring operations before implementation. They do not establish a
+generic opaque-byte ingest API or grant authority merely by naming a namespace.
+Benchmark-specific data and checks belong to the application implementation.
 
 ## Objective
 

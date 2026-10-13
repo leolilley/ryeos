@@ -1,14 +1,13 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:d9f21b66cc543bf1ff7fafef49fadc5a276b48373a3e491151e5563885656841:y/1Z1b5UK3VRTtd/NREJrzmT7kH6IqOr2qLyG0nEgtNmW5kSpbjhegDuSAedbVXN+I/0JWOzGeKfsa3GW5qTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-<!-- rye:signed:2026-06-03T03:31:14Z:41823d75c9809ff76ae9e8e621014b981eee359eee6629cdf16592a39765c42f:kG1hveYOMEoTULljD7ppaUekyvjBwknaPiBOKNeQ2tSlj2wtSO_x4HIaFYKq9sNkWORKz3-gHaDjMlUEKKPrDg:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:4a0910226f9e86c38e16f38d2a6e7af27408765dd7be49e0d3a75eb857ddfd7d:/nYzviI/NHEJGLdet5Ix/dEW6D+NEXlMStf9rWZ8CTIZC5pLmndYZcdj7MDdDX81wBR0rkXScVKAdhGQuNs8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future/creative-code-spaces
 name: ryeos-substrate-roadmap
 title: RyeOS Substrate Roadmap for Portals, Worlds, and Dimensions
 entry_type: implementation_guide
-version: "0.2.0"
+version: "0.2.1"
 author: amp
 created_at: 2026-05-28T00:00:00Z
-updated_at: 2026-06-03T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 description: Future technical roadmap from principal-aware hosted user-space toward signed object worlds, portals, dimensions, hosted presence, object graph sync, remote execution, and federation.
 tags:
   - creative-code-spaces
@@ -24,11 +23,22 @@ tags:
 
 # RyeOS Substrate Roadmap for Portals, Worlds, and Dimensions
 
+## Place in the platform direction
+
+This is a deferred application-family proposal under the
+[platform direction and delivery](../platform-direction-and-delivery.md).
+Its examples, object names and sequencing are prospective domain designs, not
+new core kinds, current API guarantees or the project-wide delivery order.
+Choose a concrete creative application before scheduling this branch; begin
+with one persisted object, an admitted action, a view and a reusable application
+edit. Richer simulation, open frame authoring and federation follow their own
+requirements. Re-audit the historical baseline below against current owners.
+
 ## Purpose
 
 This roadmap describes the future RyeOS substrate needed for Cockpit portals, signed worlds, renderer/runtime dimensions, hosted presence, peer sync, and decentralized remote execution.
 
-It does not restate implemented local/hosted-principal work. That work is assumed as the baseline. The remaining challenge is to turn the current RyeOS substrate into a protocol for signed digital spaces.
+It does not restate implemented local/hosted-principal work. That work is assumed as the baseline. This branch explores how creative applications could use and extend the shared platform for signed digital spaces; it does not redefine the platform around that application family.
 
 ## Design stance
 
