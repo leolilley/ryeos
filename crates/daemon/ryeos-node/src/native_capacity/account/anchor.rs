@@ -8,7 +8,7 @@ use lillux::time::MonotonicDeadline;
 use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
 use std::ffi::OsStr;
 
-pub(super) const PROTOCOL: &str = "ryeos/native-capacity-redo/v1";
+pub(super) const PROTOCOL: &str = "ryeos/native-capacity-redo/v2";
 const NAMESPACE_ENTRIES: usize = 8;
 pub(super) const READ_WORK: u64 = ANCHOR_BYTES as u64 / 64 + 16;
 // Fixed-block copying/hashing plus bounded namespace/descriptor/syscall phases;

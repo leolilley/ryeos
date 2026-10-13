@@ -9,16 +9,18 @@
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
-use lillux::crypto::{Signature, Signer, SigningKey, Verifier};
+use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use lillux::{
     PinnedDirectory, PinnedDirectoryIdentity, PinnedRegularFile, PinnedRegularFileIdentity,
 };
 use ryeos_engine::trust::TrustStore;
 use ryeos_node_runtime::node_policy::sections::native_capacity::{
-    NativeCapacityUnits, NativeCapacityUnitsRefusal, NodeNativeCapacityPolicy,
+    NativeCapacityUnits, NativeCapacityUnitsRefusal, NativeRenewalEnvelope,
+    NodeNativeCapacityPolicy,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -29,6 +31,7 @@ use std::sync::Mutex;
 
 mod redo;
 mod anchor;
+pub(super) mod reissue;
 #[cfg(all(test, target_os = "linux"))]
 mod persistence_controls;
 
@@ -37,9 +40,9 @@ mod persistence_controls;
 // before/target images authorize repair; no valid-older-record fallback exists.
 const RECORD_BYTES: usize = 4096;
 const PAYLOAD_BYTES: usize = RECORD_BYTES - 32;
-const RECORD_MAGIC: &[u8; 8] = b"RYECAP04";
-const RECORD_SCHEMA: u32 = 4;
-const PROCESS_START: usize = 261;
+const RECORD_MAGIC: &[u8; 8] = b"RYECAP05";
+const RECORD_SCHEMA: u32 = 5;
+const PROCESS_START: usize = 269;
 const PROCESS_END: usize = PROCESS_START + redo::PROCESS_STORAGE_BYTES;
 // Conservative simultaneous storage: fixed account, incumbent/staged/retained
 // anchor roles, bounded lower recovery marker and signed issuance document.
@@ -63,7 +66,7 @@ pub struct NativeCapacityAccountBinding {
 
 impl NativeCapacityAccountBinding {
     pub(crate) fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 5, "foreign capacity issuance binding");
+        ensure!(self.schema == 6, "foreign capacity issuance binding");
         ensure!(
             digest(&self.node_fingerprint),
             "invalid issuance node fingerprint"
@@ -128,6 +131,7 @@ impl NativeCapacityAccountBinding {
             incarnation: Incarnation,
             issuance_nonce: &'a str,
             recovery: Recovery,
+            renewal: Renewal,
             schema: u32,
         }
         #[derive(Serialize)]
@@ -136,6 +140,13 @@ impl NativeCapacityAccountBinding {
             maximum_attempts: u64,
             maximum_duration_ms: u64,
             work_per_attempt: u64,
+        }
+        // `None` serialises as `null`, exactly as canonical JSON writes it.
+        #[derive(Serialize)]
+        struct Renewal {
+            at_orderly_rollover: bool,
+            maximum_epochs: Option<u64>,
+            operator_reissue: bool,
         }
         #[derive(Serialize)]
         struct Binding<'a> {
@@ -177,6 +188,11 @@ impl NativeCapacityAccountBinding {
                     maximum_attempts: self.policy.recovery.maximum_attempts,
                     maximum_duration_ms: self.policy.recovery.maximum_duration_ms,
                     work_per_attempt: self.policy.recovery.work_per_attempt,
+                },
+                renewal: {
+                    let NativeRenewalEnvelope { at_orderly_rollover, operator_reissue, maximum_epochs } =
+                        self.policy.renewal;
+                    Renewal { at_orderly_rollover, maximum_epochs, operator_reissue }
                 },
                 schema: self.policy.schema,
             },
@@ -447,7 +463,7 @@ pub(crate) fn prepare_initial_capacity_binding(
                 .context("capacity anchor creation collided")?,
         );
         let binding = NativeCapacityAccountBinding {
-            schema: 5,
+            schema: 6,
             node_fingerprint: node_fingerprint.to_owned(),
             root_identity: state.root.identity()?,
             runtime_identity: state.runtime.identity()?,
@@ -463,15 +479,10 @@ pub(crate) fn prepare_initial_capacity_binding(
         binding.validate()?;
         let genesis = CapacityRecord {
             schema: RECORD_SCHEMA,
+            epoch: 1,
             issuance_digest: binding.issuance_digest()?,
             sequence: 0,
-            consumed: NativeCapacityUnits {
-                storage_bytes: control_storage,
-                host_control_storage_bytes: 0,
-                allocator_steps: 0,
-                connection_tickets: 0,
-                cleanup_steps: 0,
-            },
+            consumed: genesis_consumed(),
             outstanding: None,
         };
         let bytes = encode(&genesis)?;
@@ -481,7 +492,7 @@ pub(crate) fn prepare_initial_capacity_binding(
         state.exclusion.ensure_protects_app_root(app_root)?;
         binding.require_installed(app_root, node_fingerprint, policy)?;
         let body = IssuanceBody {
-            schema: "ryeos/native-capacity-issuance/v2".to_owned(),
+            schema: "ryeos/native-capacity-issuance/v3".to_owned(),
             operator_fingerprint: operator_fingerprint.clone(),
             binding: binding.clone(),
         };
@@ -551,7 +562,7 @@ pub(crate) fn load_existing_capacity_binding(
     )?;
     let document: IssuanceDocument = serde_json::from_slice(&input.bytes)?;
     ensure!(
-        document.body.schema == "ryeos/native-capacity-issuance/v2",
+        document.body.schema == "ryeos/native-capacity-issuance/v3",
         "foreign capacity issuance schema"
     );
     ensure!(
@@ -581,17 +592,48 @@ pub(crate) fn load_existing_capacity_binding(
     Ok(document.body.binding)
 }
 
+/// One durable account image. `epoch` counts the grants opened under this
+/// issuance: genesis is epoch 1, each renewal opens the next, and `sequence`
+/// keeps counting debits across epochs so an incarnation number never repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CapacityRecord {
-    schema: u32,
-    issuance_digest: [u8; 32],
-    sequence: u64,
-    consumed: NativeCapacityUnits,
-    outstanding: Option<IncarnationDebit>,
+pub(crate) struct CapacityRecord {
+    pub(crate) schema: u32,
+    pub(crate) epoch: u64,
+    pub(crate) issuance_digest: [u8; 32],
+    pub(crate) sequence: u64,
+    pub(crate) consumed: NativeCapacityUnits,
+    pub(crate) outstanding: Option<IncarnationDebit>,
+}
+
+/// The consumption every epoch opens with: the fixed control files, charged
+/// once at issuance and again by each renewal, never any incarnation.
+pub(super) fn genesis_consumed() -> NativeCapacityUnits {
+    NativeCapacityUnits {
+        storage_bytes: ACCOUNT_CONTROL_STORAGE_BYTES,
+        host_control_storage_bytes: 0,
+        allocator_steps: 0,
+        connection_tickets: 0,
+        cleanup_steps: 0,
+    }
+}
+
+/// Digest a rollover renewal carries: it names the issuance, the epoch being
+/// closed, the served incarnation and its sequence, all taken from the
+/// owner's own retained record, never from the stop owner's claim.
+pub(super) fn rollover_authorization(issuance: &[u8; 32], before: &CapacityRecord) -> Result<[u8; 32]> {
+    let served = before.outstanding
+        .context("rollover renewal requires the served incarnation in its before image")?;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"ryeos/native-capacity-rollover-claim/v1");
+    hasher.update(issuance);
+    hasher.update(before.epoch.to_le_bytes());
+    hasher.update(served.process_digest);
+    hasher.update(before.sequence.to_le_bytes());
+    Ok(hasher.finalize().into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IncarnationDebit {
+pub(crate) struct IncarnationDebit {
     process_digest: [u8; 32],
     process: redo::StoredProcess,
     clock_digest: [u8; 32],
@@ -610,6 +652,7 @@ fn digest(value: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapacityRecordRefusal {
     Schema,
+    Epoch,
     Consumption,
     Unsequenced,
     Units(NativeCapacityUnitsRefusal),
@@ -627,6 +670,7 @@ impl std::fmt::Display for CapacityRecordRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Schema => "foreign capacity record schema",
+            Self::Epoch => "unopened capacity epoch",
             Self::Consumption => "invalid cumulative capacity debit",
             Self::Unsequenced => "unsequenced capacity debit",
             Self::Units(_) => "invalid capacity debit units",
@@ -700,6 +744,9 @@ impl CapacityRecord {
     fn validate(&self) -> std::result::Result<(), CapacityRecordRefusal> {
         if self.schema != RECORD_SCHEMA {
             return Err(CapacityRecordRefusal::Schema);
+        }
+        if self.epoch == 0 {
+            return Err(CapacityRecordRefusal::Epoch);
         }
         for value in [
             self.consumed.storage_bytes,
@@ -778,16 +825,17 @@ fn encode(
     let mut bytes = [0; RECORD_BYTES];
     bytes[..8].copy_from_slice(RECORD_MAGIC);
     bytes[8..12].copy_from_slice(&record.schema.to_le_bytes());
-    bytes[12..20].copy_from_slice(&record.sequence.to_le_bytes());
-    bytes[20..52].copy_from_slice(&record.issuance_digest);
-    encode_units(record.consumed, &mut bytes[52..92]);
+    bytes[12..20].copy_from_slice(&record.epoch.to_le_bytes());
+    bytes[20..28].copy_from_slice(&record.sequence.to_le_bytes());
+    bytes[28..60].copy_from_slice(&record.issuance_digest);
+    encode_units(record.consumed, &mut bytes[60..100]);
     if let Some(debit) = record.outstanding {
-        bytes[92] = 1;
-        bytes[93..125].copy_from_slice(&debit.process_digest);
-        bytes[125..157].copy_from_slice(&debit.clock_digest);
-        bytes[157..189].copy_from_slice(&debit.completion_digest);
-        bytes[189..221].copy_from_slice(&debit.policy_generation_digest);
-        encode_units(debit.units, &mut bytes[221..261]);
+        bytes[100] = 1;
+        bytes[101..133].copy_from_slice(&debit.process_digest);
+        bytes[133..165].copy_from_slice(&debit.clock_digest);
+        bytes[165..197].copy_from_slice(&debit.completion_digest);
+        bytes[197..229].copy_from_slice(&debit.policy_generation_digest);
+        encode_units(debit.units, &mut bytes[229..269]);
         debit.process.encode_into(&mut bytes[PROCESS_START..PROCESS_END]);
     }
     let checksum: [u8; 32] = sha2::Sha256::digest(&bytes[..PAYLOAD_BYTES]).into();
@@ -806,9 +854,9 @@ fn decode(
     if bytes[PROCESS_END..PAYLOAD_BYTES].iter().any(|b| *b != 0) {
         return Err(CapacityRecordRefusal::Padding);
     }
-    let outstanding = match bytes[92] {
+    let outstanding = match bytes[100] {
         0 => {
-            if bytes[93..PROCESS_END].iter().any(|b| *b != 0) {
+            if bytes[101..PROCESS_END].iter().any(|b| *b != 0) {
                 return Err(CapacityRecordRefusal::AbsentDebitData);
             }
             None
@@ -816,19 +864,19 @@ fn decode(
         1 => Some(IncarnationDebit {
             process: redo::StoredProcess::decode(&bytes[PROCESS_START..PROCESS_END])
                 .map_err(|_| CapacityRecordRefusal::Process)?,
-            process_digest: bytes[93..125]
+            process_digest: bytes[101..133]
                 .try_into()
                 .map_err(|_| CapacityRecordRefusal::Layout)?,
-            clock_digest: bytes[125..157]
+            clock_digest: bytes[133..165]
                 .try_into()
                 .map_err(|_| CapacityRecordRefusal::Layout)?,
-            completion_digest: bytes[157..189]
+            completion_digest: bytes[165..197]
                 .try_into()
                 .map_err(|_| CapacityRecordRefusal::Layout)?,
-            policy_generation_digest: bytes[189..221]
+            policy_generation_digest: bytes[197..229]
                 .try_into()
                 .map_err(|_| CapacityRecordRefusal::Layout)?,
-            units: decode_units(&bytes[221..261]),
+            units: decode_units(&bytes[229..269]),
         }),
         _ => return Err(CapacityRecordRefusal::Tag),
     };
@@ -838,15 +886,20 @@ fn decode(
                 .try_into()
                 .map_err(|_| CapacityRecordRefusal::Layout)?,
         ),
-        issuance_digest: bytes[20..52]
-            .try_into()
-            .map_err(|_| CapacityRecordRefusal::Layout)?,
-        sequence: u64::from_le_bytes(
+        epoch: u64::from_le_bytes(
             bytes[12..20]
                 .try_into()
                 .map_err(|_| CapacityRecordRefusal::Layout)?,
         ),
-        consumed: decode_units(&bytes[52..92]),
+        issuance_digest: bytes[28..60]
+            .try_into()
+            .map_err(|_| CapacityRecordRefusal::Layout)?,
+        sequence: u64::from_le_bytes(
+            bytes[20..28]
+                .try_into()
+                .map_err(|_| CapacityRecordRefusal::Layout)?,
+        ),
+        consumed: decode_units(&bytes[60..100]),
         outstanding,
     };
     record.validate()?;
@@ -865,7 +918,101 @@ const PROCESS_OBSERVATION_WORK: u64 = 512;
 // The selected node's enclosing bootstrap scope pays these fixed, finite
 // admission operations before a durable recovery attempt exists. It is not
 // native-region credit or retroactive funding from the attempt being issued.
-const BOOTSTRAP_WORK: u64 = 16 * anchor::PUBLICATION_WORK + 16 * anchor::READ_WORK;
+// One extra anchor read funds the operator re-issuance document check.
+const BOOTSTRAP_WORK: u64 = 16 * anchor::PUBLICATION_WORK + 17 * anchor::READ_WORK;
+
+pub(crate) const REISSUANCE_DOCUMENT_NAME: &str = "native-capacity-reissuance.json";
+pub(crate) const REISSUANCE_DOCUMENT_BOUND: u64 = 16 * 1024;
+pub(crate) const REISSUANCE_SCHEMA: &str = "ryeos/native-capacity-reissuance/v1";
+
+/// What the operator signed to open one epoch on a stopped node. The anchor
+/// digest and the epoch pair bind it to exactly one redo transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReissuanceBody {
+    pub(crate) schema: String,
+    pub(crate) operator_fingerprint: String,
+    pub(crate) node_fingerprint: String,
+    pub(crate) issuance_digest: String,
+    pub(crate) from_epoch: u64,
+    pub(crate) to_epoch: u64,
+    pub(crate) anchor_digest: String,
+    pub(crate) previous_reissuance_digest: Option<String>,
+    pub(crate) reason: String,
+    pub(crate) issued_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReissuanceDocument {
+    pub(crate) body: ReissuanceBody,
+    pub(crate) signature: String,
+}
+
+/// Parse and verify a re-issuance document against the node it must name and
+/// the pinned operator key. Shared by the live open and the stopped-node
+/// command so both refuse the same foreign documents.
+pub(crate) fn verify_reissuance_document(
+    bytes: &[u8],
+    operator: &VerifyingKey,
+    operator_fingerprint: &str,
+    node_fingerprint: &str,
+    issuance: &[u8; 32],
+) -> Result<ReissuanceBody> {
+    ensure!(u64::try_from(bytes.len())? <= REISSUANCE_DOCUMENT_BOUND,
+        "operator re-issuance document exceeds its bound");
+    let document: ReissuanceDocument = serde_json::from_slice(bytes)?;
+    let body = document.body;
+    ensure!(body.schema == REISSUANCE_SCHEMA, "foreign operator re-issuance schema");
+    ensure!(body.operator_fingerprint == operator_fingerprint,
+        "operator re-issuance was signed for another operator");
+    ensure!(body.node_fingerprint == node_fingerprint,
+        "operator re-issuance belongs to another node");
+    ensure!(body.issuance_digest == hex_digest(issuance),
+        "operator re-issuance belongs to another issuance");
+    ensure!(body.from_epoch.checked_add(1) == Some(body.to_epoch),
+        "operator re-issuance does not open the next epoch");
+    ensure!(digest(&body.anchor_digest), "operator re-issuance anchor digest is not canonical");
+    ensure!(body.previous_reissuance_digest.as_deref().is_none_or(digest),
+        "operator re-issuance previous digest is not canonical");
+    ensure!(body.reason.chars().count() <= 1024, "operator re-issuance reason exceeds its bound");
+    let encoded = document.signature.strip_prefix("ed25519:")
+        .context("operator re-issuance signature encoding invalid")?;
+    let signature = Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded)?)?;
+    operator.verify(lillux::canonical_json(&serde_json::to_value(&body)?)?.as_bytes(), &signature)?;
+    Ok(body)
+}
+
+/// The document an `OperatorReissue` anchor names must still be the one the
+/// operator signed for exactly this anchor: present in `onboarding`, bytes
+/// hashing to the anchor's authorization, naming this operator, node,
+/// issuance and the epoch the anchor opened, and signed by `operator`. The
+/// retained input is returned so the caller can pin it after further checks.
+fn verify_reissue_anchor_document(
+    onboarding: PinnedDirectory,
+    operator: &VerifyingKey,
+    operator_fingerprint: &str,
+    node_fingerprint: &str,
+    issuance: &[u8; 32],
+    current: &redo::AccountRedo,
+) -> Result<super::RetainedInput> {
+    ensure!(current.operation() == redo::Operation::OperatorReissue,
+        "capacity anchor is not an operator re-issuance");
+    ensure!(onboarding.open_pinned_regular(OsStr::new(REISSUANCE_DOCUMENT_NAME), false)?.is_some(),
+        "operator re-issuance anchor has no document");
+    let input = super::RetainedInput::capture(onboarding, OsStr::new(REISSUANCE_DOCUMENT_NAME),
+        REISSUANCE_DOCUMENT_BOUND)?;
+    let digest: [u8; 32] = sha2::Sha256::digest(&input.bytes).into();
+    ensure!(digest == current.authorization(), "operator re-issuance document is stale");
+    let body = verify_reissuance_document(&input.bytes, operator, operator_fingerprint,
+        node_fingerprint, issuance)?;
+    ensure!(body.to_epoch == current.epoch(), "operator re-issuance names another epoch");
+    Ok(input)
+}
+
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 impl RetainedStore {
     fn open(parent: PinnedDirectory, expected: PinnedRegularFileIdentity) -> Result<Self> {
@@ -1164,6 +1311,27 @@ impl RetainedCapacityAccount {
         }
     }
 
+    /// Spend one read from the opening budget and verify the document the
+    /// `OperatorReissue` anchor names, with the operator key pinned under the
+    /// initialized operator fingerprint. Read-only; nothing is repaired.
+    fn require_reissue_document(&self, inputs: &LiveNativeCapacityInputs,
+        current: &redo::AccountRedo, budget: &AccountControlBudget) -> Result<()> {
+        budget.spend(inputs, anchor::READ_WORK)?;
+        let onboarding = inputs.root.open_child_directory(OsStr::new(".ai"))?
+            .context("initialized capacity .ai directory is absent")?
+            .open_child_directory(OsStr::new("config"))?
+            .context("initialized capacity config directory is absent")?
+            .open_child_directory(OsStr::new("onboarding"))?
+            .context("initialized capacity onboarding directory is absent")?;
+        let trust = TrustStore::load(None, &inputs.root.path().join(".ai/config"))?;
+        let operator = &trust.get(&inputs.operator_fingerprint)
+            .context("capacity operator is not pinned")?.verifying_key;
+        let input = verify_reissue_anchor_document(onboarding, operator, &inputs.operator_fingerprint,
+            &inputs.node_fingerprint, &self.issuance, current)?;
+        input.require_original()?;
+        inputs.require_original(true)
+    }
+
     fn prepare_open(&mut self, inputs: &LiveNativeCapacityInputs) -> Result<()> {
         ensure!(matches!(self.phase, AccountPhase::Opening), "capacity account is no longer opening");
         self.require_inputs(inputs, true)?;
@@ -1184,6 +1352,12 @@ impl RetainedCapacityAccount {
         self.anchor.load(&inputs.policy, &self.issuance, budget.deadline,
             &|steps| budget.spend(inputs, steps))?;
         let current = *self.anchor.current()?;
+        // An operator re-issuance anchor is admissible only while the document
+        // that authorised it is present and verifies; this runs before any
+        // repair so an absent or foreign document refuses the whole open.
+        if current.operation() == redo::Operation::OperatorReissue {
+            self.require_reissue_document(inputs, &current, budget)?;
+        }
         let bytes = self.account.read_bytes(budget.deadline, &|steps| budget.spend(inputs, steps))?;
         ensure!(current.accepts_account_bytes(&bytes)?, "capacity account corruption has no permitted redo");
         let needs_repair = bytes != encode(current.target())?;
@@ -1278,7 +1452,8 @@ impl RetainedCapacityAccount {
                 &|steps| budget.budget.spend(inputs, steps))?;
             self.phase = AccountPhase::Debited;
         }
-        self.prepare_settlement(inputs)?;
+        // A before-region release never served a window, so it never renews.
+        self.prepare_settlement(inputs, None)?;
         let AccountPhase::SettlementPending(target) = self.phase else {
             anyhow::bail!("pre-region settlement lost its original transition");
         };
@@ -1291,26 +1466,66 @@ impl RetainedCapacityAccount {
         Ok(())
     }
 
-    fn prepare_settlement(&mut self, inputs: &LiveNativeCapacityInputs) -> Result<()> {
+    /// A pending settlement is retried as published; a renewal decided once
+    /// cannot downgrade to a plain settlement, nor the reverse.
+    fn prepare_settlement(&mut self, inputs: &LiveNativeCapacityInputs,
+        renewal: Option<(CapacityRecord, [u8; 32])>) -> Result<()> {
         if matches!(self.phase, AccountPhase::SettlementPending(_)) { return Ok(()); }
         ensure!(matches!(self.phase, AccountPhase::Debited), "native settlement lacks completed original debit");
         let before = self.record.context("original native debit record absent")?;
         ensure!(before.outstanding == Some(self.original_incarnation), "native settlement changed its original incarnation");
         ensure!(self.anchor.current()?.target() == &before, "native settlement changed redo target");
-        let target = CapacityRecord { outstanding: None, ..before };
-        let redo = self.anchor.current()?.successor(redo::Operation::ReleaseSettlement, target, &inputs.policy)?;
-        self.record = Some(target);
+        let redo = match renewal {
+            Some((target, authorization)) => self.anchor.current()?
+                .renew(redo::Operation::RolloverRenewal, target, authorization, &inputs.policy)?,
+            None => {
+                let target = CapacityRecord { outstanding: None, ..before };
+                self.anchor.current()?.successor(redo::Operation::ReleaseSettlement, target, &inputs.policy)?
+            }
+        };
+        self.record = Some(*redo.target());
         self.phase = AccountPhase::SettlementPending(redo);
         Ok(())
     }
 
+    /// The account owner's own proof that this release ends a served window.
+    /// The claim is advisory: every fact comes from the retained inputs and
+    /// record, and any failed part yields `None`, a plain settlement, never a
+    /// refusal that would strand an otherwise correct stop.
+    fn rollover_renewal_target(&self, inputs: &LiveNativeCapacityInputs,
+        claim: Option<super::RolloverClaim>) -> Result<Option<(CapacityRecord, [u8; 32])>> {
+        let Some(super::RolloverClaim { latch_bits }) = claim else { return Ok(None); };
+        if latch_bits & super::service_refusal::FACT != 0 { return Ok(None); }
+        if !inputs.policy.renewal.at_orderly_rollover { return Ok(None); }
+        let Some(before) = self.record else { return Ok(None); };
+        if before.outstanding != Some(self.original_incarnation) { return Ok(None); }
+        let window = inputs.clock.window_fixed(&inputs.occupancy,
+            Duration::from_millis(inputs.policy.incarnation.cleanup_occupancy_ms))
+            .map_err(anyhow::Error::msg)?;
+        let drained = match window {
+            lillux::time::OccupancyWindowState::Cleanup { .. }
+            | lillux::time::OccupancyWindowState::Expired => true,
+            lillux::time::OccupancyWindowState::Service { remaining } =>
+                remaining <= Duration::from_millis(inputs.policy.incarnation.rollover_drain_margin_ms),
+        };
+        if !drained { return Ok(None); }
+        let Some(epoch) = before.epoch.checked_add(1) else { return Ok(None); };
+        if inputs.policy.renewal.maximum_epochs.is_some_and(|maximum| epoch > maximum) {
+            return Ok(None);
+        }
+        let target = CapacityRecord { epoch, consumed: genesis_consumed(), outstanding: None, ..before };
+        Ok(Some((target, rollover_authorization(&self.issuance, &before)?)))
+    }
+
     pub(super) fn settle_released(&mut self, inputs: &LiveNativeCapacityInputs,
         release: &lillux_sqlite::original_host_owner::backing::HostStorageReleased,
+        claim: Option<super::RolloverClaim>,
         pay: &dyn Fn(u64) -> Result<()>) -> Result<()> {
         release.require_original_process().map_err(anyhow::Error::msg)?;
         self.require_inputs(inputs, true)?;
         if matches!(self.phase, AccountPhase::Settled) { return Ok(()); }
-        self.prepare_settlement(inputs)?;
+        let renewal = self.rollover_renewal_target(inputs, claim)?;
+        self.prepare_settlement(inputs, renewal)?;
         let AccountPhase::SettlementPending(target) = self.phase else { unreachable!("prepared settlement") };
         self.anchor.publish(target, &inputs.policy, &self.issuance, inputs.cleanup_deadline, pay)?;
         self.account.apply_redo(self.anchor.current()?, inputs.cleanup_deadline, pay)?;
@@ -1381,6 +1596,11 @@ impl RetainedCapacityAccount {
         Ok((self.original_incarnation.process_digest, self.predecessor))
     }
 
+    /// Read-only view of the durable anchor for the boot log and status.
+    pub(super) fn summary(&self, policy: &NodeNativeCapacityPolicy) -> Result<CapacityAccountSummary> {
+        summarize(self.anchor.current()?, policy)
+    }
+
     pub(super) fn require_original_debit(&self, inputs: &LiveNativeCapacityInputs, cleanup: bool) -> Result<()> {
         self.require_inputs(inputs, cleanup)?;
         ensure!(matches!(self.phase, AccountPhase::Debited), "original capacity debit is not durably active");
@@ -1394,6 +1614,87 @@ impl RetainedCapacityAccount {
             "original capacity debit no longer matches durable account/redo");
         inputs.require_original(cleanup)
     }
+}
+
+/// Read-only view of the account for status and doctor. Decoding is not
+/// recovery: a torn or unresolved anchor is reported, never repaired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityAccountSummary {
+    pub epoch: u64,
+    pub maximum_epochs: Option<u64>,
+    pub sequence: u64,
+    pub outstanding_incarnation: bool,
+    pub recovery_attempts_used: u64,
+    pub recovery_attempts_maximum: u64,
+    /// Allowance minus consumption, saturating per dimension.
+    pub remaining: NativeCapacityUnits,
+    /// Whole incarnations the remaining allowance still funds.
+    pub incarnations_remaining: u64,
+    pub last_operation: String,
+    pub renewal: NativeRenewalEnvelope,
+}
+
+fn summarize(redo: &redo::AccountRedo, policy: &NodeNativeCapacityPolicy) -> Result<CapacityAccountSummary> {
+    let target = redo.target();
+    let NativeCapacityUnits {
+        storage_bytes, host_control_storage_bytes, allocator_steps, connection_tickets, cleanup_steps,
+    } = policy.allowance;
+    let remaining = NativeCapacityUnits {
+        storage_bytes: storage_bytes.saturating_sub(target.consumed.storage_bytes),
+        host_control_storage_bytes: host_control_storage_bytes
+            .saturating_sub(target.consumed.host_control_storage_bytes),
+        allocator_steps: allocator_steps.saturating_sub(target.consumed.allocator_steps),
+        connection_tickets: connection_tickets.saturating_sub(target.consumed.connection_tickets),
+        cleanup_steps: cleanup_steps.saturating_sub(target.consumed.cleanup_steps),
+    };
+    let per = policy.incarnation.units;
+    // A zero-sized dimension funds any number of incarnations; the minimum
+    // over the sized dimensions is what the next debits can still cover.
+    let incarnations_remaining = [
+        (remaining.storage_bytes, per.storage_bytes),
+        (remaining.host_control_storage_bytes, per.host_control_storage_bytes),
+        (remaining.allocator_steps, per.allocator_steps),
+        (remaining.connection_tickets, per.connection_tickets),
+        (remaining.cleanup_steps, per.cleanup_steps),
+    ].into_iter().filter_map(|(left, unit)| left.checked_div(unit)).min().unwrap_or(0);
+    Ok(CapacityAccountSummary {
+        epoch: target.epoch,
+        maximum_epochs: policy.renewal.maximum_epochs,
+        sequence: target.sequence,
+        outstanding_incarnation: target.outstanding.is_some(),
+        recovery_attempts_used: redo.recovery_attempts(),
+        recovery_attempts_maximum: policy.recovery.maximum_attempts,
+        remaining,
+        incarnations_remaining,
+        last_operation: redo.operation().name().to_owned(),
+        renewal: policy.renewal,
+    })
+}
+
+/// Decode the durable anchor of an initialized root without opening the
+/// record owners, taking the lock or writing. `None` before initialization;
+/// an absent or unresolved anchor is an error the caller reports as such.
+pub fn inspect_capacity_account(app_root: &Path) -> Result<Option<CapacityAccountSummary>> {
+    let Some(report) = crate::init::verify_init_completion(app_root)? else { return Ok(None); };
+    let binding = report.capacity_account;
+    binding.validate()?;
+    let policy = &binding.policy;
+    let issuance = binding.issuance_digest()?;
+    let directory = PinnedDirectory::open(&app_root.join(".ai/node/native-capacity"))?
+        .context("capacity directory absent")?;
+    ensure!(directory.identity()? == binding.account_directory_identity,
+        "capacity directory differs from original issuance");
+    let anchor = directory.open_pinned_regular(OsStr::new("anchor"), false)?
+        .context("capacity redo is unresolved; only its live owner recovers it")?;
+    anchor.require_effective_user_owned()?;
+    ensure!(anchor.observation()?.size() == redo::ANCHOR_BYTES as u64, "capacity redo size changed");
+    let deadline = lillux::time::MonotonicDeadline::after(
+        Duration::from_millis(policy.recovery.maximum_duration_ms));
+    let mut bytes = [0; redo::ANCHOR_BYTES];
+    anchor.read_exact_stable_into(&mut bytes, deadline)?;
+    let current = redo::AccountRedo::decode(&bytes, policy, &issuance)?;
+    Ok(Some(summarize(&current, policy)?))
 }
 
 #[cfg(test)]
@@ -1442,8 +1743,89 @@ mod issuance_digest_tests {
     }
 
     #[test]
+    fn previous_record_format_is_foreign_even_with_a_valid_checksum() {
+        let (_, genesis, _) = redo::controls::fixture();
+        let mut previous = encode(genesis.target()).unwrap();
+        previous[..8].copy_from_slice(b"RYECAP04");
+        previous[8..12].copy_from_slice(&4u32.to_le_bytes());
+        let checksum: [u8; 32] = sha2::Sha256::digest(&previous[..PAYLOAD_BYTES]).into();
+        previous[PAYLOAD_BYTES..].copy_from_slice(&checksum);
+        assert_eq!(decode(&previous).unwrap_err(), CapacityRecordRefusal::Format);
+        // An epoch of zero is not an opened grant, whatever the checksum says.
+        let unopened = CapacityRecord { epoch: 0, ..*genesis.target() };
+        assert_eq!(encode(&unopened).unwrap_err(), CapacityRecordRefusal::Epoch);
+        let mut zeroed = encode(genesis.target()).unwrap();
+        zeroed[12..20].copy_from_slice(&0u64.to_le_bytes());
+        let checksum: [u8; 32] = sha2::Sha256::digest(&zeroed[..PAYLOAD_BYTES]).into();
+        zeroed[PAYLOAD_BYTES..].copy_from_slice(&checksum);
+        assert_eq!(decode(&zeroed).unwrap_err(), CapacityRecordRefusal::Epoch);
+    }
+
+    #[test]
+    fn rollover_authorization_names_the_served_incarnation_from_the_record() {
+        let (_, genesis, debited) = redo::controls::fixture();
+        assert!(rollover_authorization(&[7; 32], genesis.target()).is_err());
+        let digest = rollover_authorization(&[7; 32], &debited).unwrap();
+        assert_ne!(digest, [0; 32]);
+        assert_eq!(digest, rollover_authorization(&[7; 32], &debited).unwrap());
+        assert_ne!(digest, rollover_authorization(&[8; 32], &debited).unwrap());
+        assert_ne!(digest, rollover_authorization(&[7; 32], &CapacityRecord { epoch: 2, ..debited }).unwrap());
+        assert_ne!(digest, rollover_authorization(&[7; 32], &CapacityRecord { sequence: 2, ..debited }).unwrap());
+    }
+
+    #[test]
+    fn reissuance_document_refuses_tampered_foreign_and_unsigned_bodies() {
+        let operator = SigningKey::from_bytes(&[5; 32]);
+        let fingerprint = ryeos_engine::trust::compute_fingerprint(&operator.verifying_key());
+        let issuance = [0x31; 32];
+        let body = ReissuanceBody {
+            schema: REISSUANCE_SCHEMA.to_owned(),
+            operator_fingerprint: fingerprint.clone(),
+            node_fingerprint: "e".repeat(64),
+            issuance_digest: hex_digest(&issuance),
+            from_epoch: 3,
+            to_epoch: 4,
+            anchor_digest: "0".repeat(64),
+            previous_reissuance_digest: None,
+            reason: "exhausted".to_owned(),
+            issued_at: "2026-10-14T00:00:00Z".to_owned(),
+        };
+        let sign = |body: &ReissuanceBody, key: &SigningKey| {
+            let canonical = lillux::canonical_json(&serde_json::to_value(body).unwrap()).unwrap();
+            let signature = key.sign(canonical.as_bytes());
+            serde_json::to_vec(&ReissuanceDocument {
+                body: body.clone(),
+                signature: format!("ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())),
+            }).unwrap()
+        };
+        let verify = |bytes: &[u8]| verify_reissuance_document(bytes, &operator.verifying_key(),
+            &fingerprint, &"e".repeat(64), &issuance);
+        let good = sign(&body, &operator);
+        assert_eq!(verify(&good).unwrap(), body);
+        assert!(verify(&sign(&body, &SigningKey::from_bytes(&[6; 32]))).is_err(), "foreign key");
+        let mut tampered: ReissuanceDocument = serde_json::from_slice(&good).unwrap();
+        tampered.body.to_epoch = 5;
+        assert!(verify(&serde_json::to_vec(&tampered).unwrap()).is_err(), "tampered body");
+        for (label, edit) in [
+            ("schema", Box::new(|b: &mut ReissuanceBody| b.schema = "ryeos/native-capacity-issuance/v3".into()) as Box<dyn Fn(&mut ReissuanceBody)>),
+            ("node", Box::new(|b: &mut ReissuanceBody| b.node_fingerprint = "f".repeat(64))),
+            ("issuance", Box::new(|b: &mut ReissuanceBody| b.issuance_digest = "0".repeat(64))),
+            ("operator", Box::new(|b: &mut ReissuanceBody| b.operator_fingerprint = "a".repeat(64))),
+            ("epoch", Box::new(|b: &mut ReissuanceBody| b.to_epoch = 6)),
+            ("anchor digest", Box::new(|b: &mut ReissuanceBody| b.anchor_digest = "xyz".into())),
+            ("reason", Box::new(|b: &mut ReissuanceBody| b.reason = "r".repeat(1025))),
+        ] {
+            let mut foreign = body.clone();
+            edit(&mut foreign);
+            assert!(verify(&sign(&foreign, &operator)).is_err(), "{label}");
+        }
+        assert!(verify(b"{}").is_err());
+    }
+
+    #[test]
     fn streamed_binding_digest_matches_canonical_protocol() {
-        for maximum in [false, true] {
+        for (maximum, maximum_epochs) in [(false, None), (true, Some(8))] {
             let units = NativeCapacityUnits {
                 storage_bytes: if maximum { i64::MAX as u64 } else { 65_537 },
                 host_control_storage_bytes: if maximum { i64::MAX as u64 } else { 4_096 },
@@ -1458,7 +1840,7 @@ mod issuance_digest_tests {
                 "containing_device": 2, "inode": u64::MAX,
             })).unwrap();
             let mut binding = NativeCapacityAccountBinding {
-                schema: 5,
+                schema: 6,
                 node_fingerprint: "f".repeat(64),
                 root_identity: directory,
                 runtime_identity: directory,
@@ -1466,7 +1848,7 @@ mod issuance_digest_tests {
                 account_identity: account,
                 anchor_protocol: anchor::PROTOCOL.to_owned(),
                 policy: NodeNativeCapacityPolicy {
-                    schema: 5,
+                    schema: 6,
                     issuance_nonce: "a".repeat(32),
                     allowance: units,
                     incarnation: ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope {
@@ -1476,6 +1858,9 @@ mod issuance_digest_tests {
                     recovery: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRecoveryEnvelope {
                         maximum_attempts: 32, work_per_attempt: 65_536,
                         control_storage_bytes: 262_144, maximum_duration_ms: 120_000,
+                    },
+                    renewal: NativeRenewalEnvelope {
+                        at_orderly_rollover: maximum, operator_reissue: !maximum, maximum_epochs,
                     },
                 },
             };
