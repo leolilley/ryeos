@@ -9,6 +9,7 @@
 //! manufacture the outcome.
 
 #![cfg(all(unix, feature = "handoff-test-support"))]
+#![recursion_limit = "256"]
 
 mod common;
 

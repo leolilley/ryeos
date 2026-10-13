@@ -2167,9 +2167,12 @@ async fn verify_direct_codex_diagnostic(
     let evidence = ryeos_state::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)?;
     let proof = evidence
         .execution_proof
-        .scoped_attempt
+        .subordinate_attempt
         .as_ref()
-        .context("published direct diagnostic lacks daemon scoped-attempt proof")?;
+        .and_then(
+            ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof::scoped_producer,
+        )
+        .context("published direct diagnostic lacks daemon scoped-producer attempt proof")?;
     ensure!(
         evidence.product_witness_hash == captured_subject["witness_hash"]
             && evidence.verifier.chain_root_id == root
