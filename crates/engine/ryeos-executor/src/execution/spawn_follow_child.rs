@@ -994,13 +994,16 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             .ok_or_else(|| anyhow::anyhow!("follow: admitted unknown child {launch_child_id}"))?;
         let (launch_handoff, launch_ready) = crate::execution::launch::LaunchHandoff::channel();
         launch_receivers.push((launch_child_id.clone(), launch_ready));
+        // The launch future is built on this worker's stack before the task
+        // takes it; its claim-and-run state machine is boxed so that build
+        // costs a pointer here rather than the whole follow-child launch.
         tokio::spawn(async move {
-            if let Err(e) = crate::execution::launch::launch_prepared_follow_child(
+            if let Err(e) = Box::pin(crate::execution::launch::launch_prepared_follow_child(
                 launch_state,
                 &launch_child_id,
                 prepared,
                 &launch_handoff,
-            )
+            ))
             .await
             {
                 tracing::error!(

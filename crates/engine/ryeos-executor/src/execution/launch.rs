@@ -8611,6 +8611,43 @@ async fn prepare_successor_launch(
         launch_metadata = launch_metadata.with_execution_realization_hash(realization.hash);
         authority.launch_metadata = Some(launch_metadata.clone());
     }
+    // The managed authority pass leaves resource selection to its caller. A
+    // successor prepared here is launched directly from this carrier, so the
+    // selection must be bound now: spawn refuses any managed launch whose
+    // authority carries no selected resources. The selection is verified
+    // against the realization the successor already carries (transferred from
+    // its continuation source or persisted with the existing row) exactly as a
+    // re-driven follow child is, so a node whose resources no longer match the
+    // admitted realization refuses rather than launching on a different
+    // substrate. A remote-adopted successor is the one exception: its template
+    // carries the foreign node's realization hash, which the adoption caller
+    // clears before minting and binding the local selection itself.
+    if transferred_continuation_capsule.is_none() {
+        let selected_resources = state
+            .execution_resources
+            .select(authority.prepared_launch.target_requirement.as_ref())
+            .map_err(BuildAndLaunchError::Internal)?;
+        let verified = super::execution_realization::admit_or_verify(
+            state,
+            &launch_metadata,
+            authority.effective_program.resolution(),
+            authority
+                .effective_program
+                .effective_definition_digest()
+                .as_str(),
+            &authority.selected_runtime.canonical_ref.to_string(),
+            &authority.selected_runtime.raw_content_digest,
+            selected_resources.selections(),
+            None,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+        if launch_metadata.execution_realization_hash.as_deref() != Some(verified.hash.as_str()) {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "continuation successor resource selection differs from retained execution realization"
+            )));
+        }
+        authority.selected_resources = Some(selected_resources);
+    }
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()
@@ -10571,12 +10608,20 @@ async fn launch_claimed_follow_child(
         effect_authority: metadata.effect_authority.as_ref(),
         launch_handoff,
     };
+    // Each run future holds the rebuilt launch envelope and the managed
+    // runtime attachment across its awaits; heap-allocate it so the two arms
+    // are not both reserved inline in this frame.
     match prepared_authority {
         Some(authority) => {
-            run_claimed_thread_row_with_authority(launch_params, thread, authority, launch_audit)
-                .await
+            Box::pin(run_claimed_thread_row_with_authority(
+                launch_params,
+                thread,
+                authority,
+                launch_audit,
+            ))
+            .await
         }
-        None => run_claimed_thread_row(launch_params, thread).await,
+        None => Box::pin(run_claimed_thread_row(launch_params, thread)).await,
     }
 }
 
@@ -10675,11 +10720,14 @@ pub fn prepare_and_spawn_follow_child(
         }
     };
     let child_id = child_id.to_string();
+    // The launch future is built on this worker's stack before the task takes
+    // it; its claim-and-run state machine is boxed so that build costs a
+    // pointer here rather than the whole follow-child launch.
     tokio::spawn(async move {
         if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
             return;
         }
-        match launch_follow_child_with_claim(
+        match Box::pin(launch_follow_child_with_claim(
             state,
             &child_id,
             provenance_override,
@@ -10687,7 +10735,7 @@ pub fn prepare_and_spawn_follow_child(
             None,
             None,
             Some(claim),
-        )
+        ))
         .await
         {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
@@ -10788,14 +10836,18 @@ async fn launch_follow_child_with_claim(
         return Ok(SuccessorLaunchOutcome::Skipped("already_started"));
     }
 
-    let result = launch_claimed_follow_child(
+    // The prepare-and-run state machine carries the child's whole admitted
+    // authority, envelope and managed-runtime launch across its awaits; it
+    // lives on the heap so building it inside a runtime worker never costs
+    // that worker's stack.
+    let result = Box::pin(launch_claimed_follow_child(
         &state,
         thread,
         provenance_override,
         parent_context,
         launch_handoff,
         prepared_child,
-    )
+    ))
     .await;
 
     match result {
