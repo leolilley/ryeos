@@ -451,7 +451,14 @@ SQLITE_API int ryeos_native_scope_enter(void *handle,int cleanup,uint32_t ticket
   if(!ryeos_native_process_matches()){return SQLITE_MISUSE;}
   if(ryeosNativeInGate) return SQLITE_BUSY;
   RyeosNativeArena *a=(RyeosNativeArena*)handle;int rc=SQLITE_MISUSE;
-  if(pthread_mutex_trylock(&ryeosNativeOwnerMutex)!=0)return SQLITE_BUSY;
+  /* Another thread holding the owner mutex is only mid-admission, mid-census
+     or mid-release: every holder runs atomics, thread-local bookkeeping and
+     at most one bounded unmap, and none calls back into scope entry, so a
+     blocking lock cannot self-deadlock and waits out contention instead of
+     refusing a concurrent callback. SQLITE_BUSY below is reserved for facts
+     of this thread (inside the commit gate, or a nested scope that does not
+     match the open one) that no amount of waiting changes. */
+  if(pthread_mutex_lock(&ryeosNativeOwnerMutex)!=0)return SQLITE_MISUSE;
   /* Lookup/reference admission under owner gate BEFORE dereferencing mapping;
      release cannot unmap between lookup and scopes++ even on another thread. */
   if(!a || a!=atomic_load(&ryeosNativeOwner) || atomic_load(&a->poisoned)

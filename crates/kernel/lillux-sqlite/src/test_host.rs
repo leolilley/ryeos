@@ -1465,6 +1465,35 @@ mod tests {
         retained.host.finish().unwrap();
     }
 
+    /// Two threads entering unticketed allocator scopes at once contend on
+    /// the native owner mutex. Contention waits; below every limit no entry
+    /// may refuse, and every scope is left so the arena census ends at zero.
+    #[test]
+    fn concurrent_scope_entries_wait_instead_of_refusing() {
+        const THREADS: usize = 2;
+        const ENTRIES: usize = 20_000;
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (factory, barrier) = (factory.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..ENTRIES {
+                        factory.raw_scope_for_test(|| ()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        // Every scope was left: a cleanup scope still opens on this thread.
+        factory.raw_cleanup_scope_for_test(|| ()).unwrap();
+        drop(factory);
+    }
+
     /// An unlinked original output retires after the native backend shut
     /// SQLite down and released the arena. While SQLite is live, an inode
     /// alias of an open connection refuses unconsumed; once the host is

@@ -1892,13 +1892,18 @@ struct NativeArena(NonNull<c_void>, u32);
 unsafe impl Send for NativeArena {}
 unsafe impl Sync for NativeArena {}
 impl NativeArena {
+    /// Enter one allocator scope. Entry waits out other threads' admission
+    /// on the native owner mutex; a non-OK code is a fact of this arena or
+    /// this thread (poisoned, released, ticket or depth limit, a nested scope
+    /// that does not match the open one, entry from inside the commit gate),
+    /// never momentary contention.
     fn scope(&self, cleanup: bool, ticket: u32) -> Result<NativeScope<'_>> {
         require_current_native_process()?;
         ensure!(self.1 == std::process::id(), "inherited native arena");
+        let code = unsafe { ryeos_native_scope_enter(self.0.as_ptr(), cleanup as c_int, ticket) };
         ensure!(
-            unsafe { ryeos_native_scope_enter(self.0.as_ptr(), cleanup as c_int, ticket) }
-                == libsqlite3_sys::SQLITE_OK,
-            "original native scope entry refused"
+            code == libsqlite3_sys::SQLITE_OK,
+            "original native scope entry refused (sqlite code {code})"
         );
         Ok(NativeScope(self))
     }
