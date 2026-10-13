@@ -18,7 +18,12 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
 
-const DAEMON_DEFAULT_FILTER: &str = "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos.metrics=info";
+// Every crate keeps its warnings and errors: the leading `warn` is the floor,
+// so a crate missing from the info list (the node crate's lifecycle warnings
+// were lost this way, including crash detection after SIGKILL) still reaches
+// the operator. The info entries name the first-party crates whose routine
+// lines belong in the daemon log.
+const DAEMON_DEFAULT_FILTER: &str = "warn,ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos_node=info,ryeos_node_runtime=info,ryeos_scheduler=info,ryeos_scheduler_service=info,ryeos_api=info,lillux=info,ryeos.metrics=info";
 
 /// Configuration for the tracing subscriber.
 #[derive(Debug)]
@@ -125,7 +130,7 @@ impl SubscriberConfig {
     /// Config suitable for the graph runtime.
     pub fn for_graph_runtime() -> Self {
         Self {
-            default_filter: "ryeos_graph_runtime=info,ryeos_engine=info".into(),
+            default_filter: "warn,ryeos_graph_runtime=info,ryeos_engine=info".into(),
             ..Self::default()
         }
     }
@@ -133,7 +138,7 @@ impl SubscriberConfig {
     /// Config suitable for the directive runtime.
     pub fn for_directive_runtime() -> Self {
         Self {
-            default_filter: "ryeos_directive_runtime=info,ryeos_engine=info".into(),
+            default_filter: "warn,ryeos_directive_runtime=info,ryeos_engine=info".into(),
             ..Self::default()
         }
     }
@@ -358,5 +363,23 @@ mod tests {
             daemon.default_filter.contains("ryeos.metrics=info"),
             "daemon cache and execution metrics must be observable without a custom RUST_LOG"
         );
+    }
+
+    #[test]
+    fn preset_filters_keep_every_crates_warnings() {
+        for filter in [
+            SubscriberConfig::for_daemon().default_filter,
+            SubscriberConfig::for_graph_runtime().default_filter,
+            SubscriberConfig::for_directive_runtime().default_filter,
+        ] {
+            assert!(
+                filter.starts_with("warn,"),
+                "a crate absent from the info list must still surface warnings: {filter}"
+            );
+        }
+        let daemon = SubscriberConfig::for_daemon().default_filter;
+        for target in ["ryeos_node=info", "ryeos_scheduler=info", "lillux=info"] {
+            assert!(daemon.contains(target), "daemon filter lacks {target}");
+        }
     }
 }
