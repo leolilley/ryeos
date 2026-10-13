@@ -4461,7 +4461,10 @@ async fn prepare_managed_launch_authority(
                     .launch_timings
                     .as_ref()
                     .map(|timings| timings.nested("background_dispatch", "launch_augmentation"));
-                let audits = crate::augmentations::run_augmentations(
+                // Boxed: the augmentation chain (context composition, inline
+                // finalization, metadata decoding) otherwise polls on this
+                // frame and exhausts the worker stack in debug builds.
+                let audits = Box::pin(crate::augmentations::run_augmentations(
                     exec,
                     &mut resolution,
                     thread_id,
@@ -4478,7 +4481,7 @@ async fn prepare_managed_launch_authority(
                         .root_admission
                         .as_ref()
                         .and_then(|admission| admission.admitted_request_snapshot()),
-                )
+                ))
                 .await
                 .map_err(|error| {
                     BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -5462,7 +5465,7 @@ pub async fn build_and_launch(
             })
             .await
         }
-        Ok(None) => build_and_launch_inner(params).await,
+        Ok(None) => Box::pin(build_and_launch_inner(params)).await,
         Err(error) => Err(BuildAndLaunchError::from(
             DispatchError::pre_birth_admission_refused(error.into_dispatch_error(&runtime_ref)),
         )),
@@ -5670,7 +5673,8 @@ async fn build_and_launch_inner(
                 map_launch_planning_check_error(error, &thread_id, "authoritative planning")
             })?;
     }
-    let mut authority = prepare_managed_launch_authority(&params, &thread_id, None, None).await?;
+    let mut authority =
+        Box::pin(prepare_managed_launch_authority(&params, &thread_id, None, None)).await?;
     if params.pre_minted_thread_id.is_some() {
         params
             .state
