@@ -33,9 +33,12 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
+pub use account::{CapacityAccountSummary, inspect_capacity_account};
+pub use account::reissue::{CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances, reissue_capacity};
 pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use factory::{LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPublicationFailure, LiveNativeProducerPreparationFailure, LiveProducerControlCensus, ServiceRefusalLatch, ServiceRefusalWake, service_refusal};
+pub use reservation::RolloverClaim;
 pub use reservation::{FinalizedLiveNative, LiveNativeCapacityReservation, LiveNativeCapacityReservationFailure, SettledLiveNative, quote_operator_lock_handoff, required_cleanup_occupancy, required_rollover_drain_margin};
 
 const MAX_COMPLETION_BYTES: u64 = 256 * 1024;
@@ -96,6 +99,9 @@ pub struct LiveNativeCapacityInputs {
     policy: NodeNativeCapacityPolicy,
     snapshot: NodePolicySnapshot,
     node_fingerprint: String,
+    // The operator key that signed the issuance; an operator re-issuance
+    // document found at open must verify under exactly this key.
+    operator_fingerprint: String,
     capacity_account: NativeCapacityAccountBinding,
     // Inputs and the prepaid late owner share this ONE captured clock. A late
     // owner must carry no input/account/lease backedge; terminal close requires
@@ -277,6 +283,7 @@ impl LiveNativeCapacityInputs {
             policy,
             snapshot,
             node_fingerprint: report.node_fingerprint,
+            operator_fingerprint: report.operator_fingerprint,
             capacity_account: report.capacity_account,
             clock,
             occupancy,
@@ -334,7 +341,8 @@ impl LiveNativeCapacityInputs {
 
         let Self {
             root, runtime, exclusion, completion, policy_file, clock,
-            policy: _, snapshot: _, node_fingerprint: _, capacity_account: _, occupancy: _,
+            policy: _, snapshot: _, node_fingerprint: _, operator_fingerprint: _,
+            capacity_account: _, occupancy: _,
             sql_deadline: _, cleanup_deadline: _, service_edge: _, process: _,
         } = self;
         let (completion_parent, completion_file, completion_duplicate) = completion.into_finalization_parts();

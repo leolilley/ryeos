@@ -558,6 +558,19 @@ pub struct LiveNativeCapacityReservation {
     late: Option<Arc<LateNativeControl>>,
     physical_registry:
         Mutex<Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>>,
+    // The stop owner's rollover claim, fixed by the first release call. A
+    // retry after a refused settlement keeps that first claim and never
+    // takes a fresher one, so the settlement it retries cannot re-decide.
+    rollover_claim: OnceLock<Option<RolloverClaim>>,
+}
+
+/// What the stop owner observed when it chose an orderly rollover. It is a
+/// claim, not evidence: the account owner re-proves every part before it
+/// opens an epoch, and publishes a plain release settlement if any part fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RolloverClaim {
+    /// Service-refusal latch bits at the moment of the claim; any FACT bit forbids it.
+    pub latch_bits: u8,
 }
 
 enum ReleasedReservation {
@@ -2007,7 +2020,8 @@ impl SettledLiveNative {
         drop(input_sources);
         let LiveNativeCapacityReservation { inputs, account, budget, raw_budget, region,
             release_exclusion, seal_failure, resident_generation: _, factory_entered: _,
-            host_storage, host_release_credit, released, late, physical_registry } =
+            host_storage, host_release_credit, released, late, physical_registry,
+            rollover_claim } =
             std::mem::ManuallyDrop::into_inner(original);
         // The input Arc moved into the finalizer frame checked above; this
         // ManuallyDrop shell is a stale copy, not an owner, and is not dropped.
@@ -2024,6 +2038,8 @@ impl SettledLiveNative {
         drop(host_storage);
         drop(host_release_credit);
         drop(late);
+        // The settled claim is a plain copied observation; nothing to settle.
+        drop(rollover_claim);
         Ok(FinalizedLiveNative {
             process: std::process::id(),
             _released: released.expect("checked settled release receipt"),
@@ -2149,6 +2165,7 @@ impl LiveNativeCapacityReservation {
             released: None,
             late: None,
             physical_registry: Mutex::new(None),
+            rollover_claim: OnceLock::new(),
         };
         let result = (|| -> Result<()> {
             let mut account_guard = original
@@ -2384,6 +2401,17 @@ impl LiveNativeCapacityReservation {
             .incarnation_lineage()
     }
 
+    /// Read-only view of the debited account for the boot log and status:
+    /// epoch, remaining allowance and recovery attempts. Shares the boundary
+    /// read lock and writes nothing.
+    pub fn capacity_summary(&self) -> Result<super::account::CapacityAccountSummary> {
+        self.inputs.require_original(true)?;
+        self.account_for_check()?
+            .as_ref()
+            .context("original capacity account owner absent")?
+            .summary(&self.inputs.policy)
+    }
+
     /// Durable account verification runs at native operation boundaries,
     /// never per VM step. Boundaries share the account read lock; only
     /// settlement and recovery take it exclusively, and neither overlaps
@@ -2431,9 +2459,13 @@ impl LiveNativeCapacityReservation {
 
     /// The outside supervisor transfers its sole reservation after closing
     /// every real native/service owner. Counts and native terminal evidence,
-    /// rather than Arc count alone, authorize resident disposal.
+    /// rather than Arc count alone, authorize resident disposal. `claim` is
+    /// what the stop owner observed when it chose an orderly rollover; the
+    /// account owner re-proves it before opening an epoch and settles plainly
+    /// when any part fails, so passing it never weakens a settlement.
     pub fn release_and_settle(
         self: Arc<Self>,
+        claim: Option<RolloverClaim>,
     ) -> std::result::Result<SettledLiveNative, LiveNativeCapacityReservationFailure> {
         let mut original = match Arc::try_unwrap(self) {
             Ok(original) => original,
@@ -2447,6 +2479,9 @@ impl LiveNativeCapacityReservation {
             }
         };
         let result = (|| -> Result<()> {
+            // Fix the claim before any check can refuse: the first call's
+            // observation is the one every retry settles under.
+            original.rollover_claim.get_or_init(|| claim);
             original.inputs.require_original(true)?;
             // Match the outside receipt before consulting any region state.
             // The original mapping may already be gone and account writes may
@@ -2708,7 +2743,10 @@ impl LiveNativeCapacityReservation {
                     .as_ref()
                     .context("original released region lost its late cleanup owner")?;
                 let inputs = &self.inputs;
-                account.settle_released(inputs, released, &|steps| {
+                // Only a served region release carries the rollover claim; a
+                // before-region release above is never a served window.
+                let claim = self.rollover_claim.get().copied().flatten();
+                account.settle_released(inputs, released, claim, &|steps| {
                     inputs.require_original(true)?;
                     late.prepay(0, steps)
                 })?;

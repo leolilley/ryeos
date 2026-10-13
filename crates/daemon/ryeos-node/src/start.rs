@@ -485,6 +485,8 @@ mod tests {
             &mut lock,
             &LifecycleStatus::Stopped {
                 app_root: root.path().to_owned(),
+                capacity: None,
+                capacity_error: None,
             },
         );
         assert!(

@@ -1005,6 +1005,19 @@ impl DaemonSelectedComposition {
             }
         };
         self.native_reservation = Some(Arc::clone(&reservation));
+        // Name the epoch this start debited once; a summary that cannot be
+        // read is logged, not refused, because every later step re-proves
+        // the account itself.
+        match reservation.capacity_summary() {
+            Ok(summary) => tracing::info!(
+                epoch = summary.epoch,
+                maximum_epochs = summary.maximum_epochs,
+                incarnations_remaining = summary.incarnations_remaining,
+                recovery_attempts_used = summary.recovery_attempts_used,
+                "native capacity debited"
+            ),
+            Err(error) => tracing::warn!(error = %format!("{error:#}"), "native capacity summary unavailable"),
+        }
         // Re-decide the capability floor on the residency this reservation
         // actually established, before anything is installed, armed,
         // initialized or admitted against it: a lock the kernel refused can
@@ -1489,7 +1502,10 @@ impl DaemonSelectedComposition {
             self.native_reservation.take()
                 .context("actual original Store reservation release owner absent")?
         };
-        match reservation.release_and_settle() {
+        // A served window may end in an orderly rollover; the claim is the
+        // stop owner's observation and the account owner re-proves it.
+        let claim = self.service_stop.rollover_claim();
+        match reservation.release_and_settle(claim) {
             Ok(settled) => self.retain_settled_reservation(settled),
             Err(failure) => {
                 self.native_reservation_close_failure = Some(failure);
@@ -1616,7 +1632,8 @@ impl DaemonSelectedComposition {
                     anyhow::bail!("original bootstrap reservation transfer refused");
                 }
             };
-            return match reservation.release_and_settle() {
+            // A bootstrap refusal served no window: no rollover claim.
+            return match reservation.release_and_settle(None) {
                 Ok(settled) => self.retain_settled_reservation(settled),
                 Err(failure) => {
                     self.native_reservation_close_failure = Some(failure);
@@ -1639,7 +1656,8 @@ impl DaemonSelectedComposition {
                 .context("refused residency reservation absent")?;
             // The original startup error remains the run result.
             self.native_failure.take();
-            return match reservation.release_and_settle() {
+            // A floor refusal served no window: no rollover claim.
+            return match reservation.release_and_settle(None) {
                 Ok(settled) => self.retain_settled_reservation(settled),
                 Err(failure) => {
                     self.native_reservation_close_failure = Some(failure);
@@ -1662,7 +1680,8 @@ impl DaemonSelectedComposition {
             match failure.retire_uninstalled() {
                 Ok(()) => {
                     let reservation = self.native_reservation.take().context("uninstalled issuer reservation absent")?;
-                    return match reservation.release_and_settle() {
+                    // An uninstalled issuer served no window: no rollover claim.
+                    return match reservation.release_and_settle(None) {
                         Ok(settled) => self.retain_settled_reservation(settled),
                         Err(failure) => {
                             self.native_reservation_close_failure = Some(failure);
@@ -1695,7 +1714,8 @@ impl DaemonSelectedComposition {
             drop(factory);
             let reservation = self.native_reservation.take()
                 .context("failed initialization reservation absent")?;
-            return match reservation.release_and_settle() {
+            // A failed initialization served no window: no rollover claim.
+            return match reservation.release_and_settle(None) {
                 Ok(settled) => self.retain_settled_reservation(settled),
                 Err(failure) => {
                     self.native_reservation_close_failure = Some(failure);
@@ -1868,7 +1888,10 @@ impl DaemonSelectedComposition {
             }
         }
         let reservation = self.native_reservation.take().context("actual original reservation release owner absent")?;
-        match reservation.release_and_settle() {
+        // This route follows a served window too; the claim is the stop
+        // owner's observation and the account owner re-proves it.
+        let claim = self.service_stop.rollover_claim();
+        match reservation.release_and_settle(claim) {
             Ok(settled) => self.retain_settled_reservation(settled),
             Err(failure) => {
                 self.native_reservation_close_failure = Some(failure);
@@ -2393,6 +2416,17 @@ impl ServiceStopState {
         } else {
             None
         }
+    }
+
+    /// A claim only when the stop is the planned window and no fact bit
+    /// latched. The claim is advisory: the account owner re-proves the window
+    /// and the policy from its own retained inputs before it opens an epoch.
+    fn rollover_claim(&self) -> Option<ryeos_node::native_capacity::RolloverClaim> {
+        use ryeos_node::native_capacity::service_refusal;
+        let bits = self.latch.as_ref().map_or(0, |latch| latch.observe());
+        (bits & service_refusal::FACT == 0
+            && matches!(self.outcome(), Some(ServiceStopOutcome::ServiceWindowRollover)))
+            .then_some(ryeos_node::native_capacity::RolloverClaim { latch_bits: bits })
     }
 }
 

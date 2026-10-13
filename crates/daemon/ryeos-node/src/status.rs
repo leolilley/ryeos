@@ -9,6 +9,7 @@ use crate::LocalLifecycleEnv;
 use crate::init_check::{InitDiagnostics, InitState, init_state};
 use crate::lifecycle_wire::{LifecycleResponse, LifecycleWireState, StartupSnapshot};
 use crate::metadata::DaemonMetadata;
+use crate::native_capacity::CapacityAccountSummary;
 
 /// The daemon records its running marker immediately before publishing the
 /// startup control listener. Beyond this grace period, a live marker without a
@@ -22,11 +23,20 @@ pub enum LifecycleStatus {
     },
     Stopped {
         app_root: PathBuf,
+        /// The native-capacity account as the anchor on disk reports it:
+        /// epoch, remaining allowance and recovery attempts. `None` before
+        /// issuance or when the anchor could not be read.
+        capacity: Option<CapacityAccountSummary>,
+        /// Why `capacity` is `None` on an issued node: a torn or foreign
+        /// anchor is reported here, never repaired by a status probe.
+        capacity_error: Option<String>,
     },
     Running {
         metadata: DaemonMetadata,
         ready_at: String,
         startup: StartupSnapshot,
+        capacity: Option<CapacityAccountSummary>,
+        capacity_error: Option<String>,
     },
     Failed {
         metadata: DaemonMetadata,
@@ -233,13 +243,18 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 startup: response.startup,
                 control_available: true,
             },
-            LifecycleWireState::Running => LifecycleStatus::Running {
-                metadata,
-                ready_at: response
-                    .ready_at
-                    .expect("validated running lifecycle response has ready_at"),
-                startup: response.startup,
-            },
+            LifecycleWireState::Running => {
+                let (capacity, capacity_error) = capacity_report(&config.app_root);
+                LifecycleStatus::Running {
+                    metadata,
+                    ready_at: response
+                        .ready_at
+                        .expect("validated running lifecycle response has ready_at"),
+                    startup: response.startup,
+                    capacity,
+                    capacity_error,
+                }
+            }
             LifecycleWireState::Failed => LifecycleStatus::Failed {
                 metadata,
                 startup: response.startup,
@@ -349,10 +364,51 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 },
             })
         }
-        None => Ok(LifecycleStatus::Stopped {
-            app_root: config.app_root.clone(),
-        }),
+        None => {
+            let (capacity, capacity_error) = capacity_report(&config.app_root);
+            Ok(LifecycleStatus::Stopped {
+                app_root: config.app_root.clone(),
+                capacity,
+                capacity_error,
+            })
+        }
     }
+}
+
+/// Read the capacity account for a status report. The read creates nothing
+/// and repairs nothing: an unreadable anchor becomes the error text so an
+/// exhausted or torn account is visible rather than silently absent.
+fn capacity_report(app_root: &std::path::Path) -> (Option<CapacityAccountSummary>, Option<String>) {
+    match crate::native_capacity::inspect_capacity_account(app_root) {
+        Ok(capacity) => (capacity, None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    }
+}
+
+/// Key/value rows describing the capacity account for a text status report.
+/// The JSON report carries the summary verbatim; this is the text shape only.
+pub fn capacity_status_rows(
+    capacity: Option<&CapacityAccountSummary>,
+    capacity_error: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if let Some(summary) = capacity {
+        let epoch = match summary.maximum_epochs {
+            Some(maximum) => format!("{} of {maximum}", summary.epoch),
+            None => summary.epoch.to_string(),
+        };
+        rows.push(("epoch", epoch));
+        rows.push(("incarnations remaining", summary.incarnations_remaining.to_string()));
+        rows.push((
+            "recovery attempts",
+            format!("{} of {}", summary.recovery_attempts_used, summary.recovery_attempts_maximum),
+        ));
+        rows.push(("last operation", summary.last_operation.clone()));
+    }
+    if let Some(error) = capacity_error {
+        rows.push(("capacity", format!("unreadable: {error}")));
+    }
+    rows
 }
 
 /// A connect refused with `InvalidInput` on a pathname longer than the
@@ -484,6 +540,82 @@ mod tests {
         assert!(matches!(status, LifecycleStatus::NotInitialized { .. }));
         assert!(!env.config().app_root.exists());
         assert!(!tmp.path().join("runtime").exists());
+    }
+
+    #[tokio::test]
+    async fn stopped_status_without_issuance_reports_no_capacity_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        let before: Vec<_> = walkdir(&config.app_root);
+        let status = status(&env).await.unwrap();
+        let LifecycleStatus::Stopped { app_root, capacity, capacity_error } = status else {
+            panic!("expected stopped status, got: {status:?}")
+        };
+        assert_eq!(app_root, config.app_root);
+        assert!(capacity.is_none(), "no issuance means no account: {capacity:?}");
+        assert!(capacity_error.is_none(), "an un-issued root is not an error: {capacity_error:?}");
+        assert_eq!(walkdir(&config.app_root), before, "status must create no files");
+        assert!(!tmp.path().join("runtime").exists());
+    }
+
+    fn walkdir(root: &std::path::Path) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn capacity_rows_name_epoch_bound_and_error() {
+        let unbounded = crate::native_capacity::CapacityAccountSummary {
+            epoch: 3,
+            maximum_epochs: None,
+            sequence: 7,
+            outstanding_incarnation: false,
+            recovery_attempts_used: 5,
+            recovery_attempts_maximum: 32,
+            remaining: ryeos_node_runtime::node_policy::sections::native_capacity::NativeCapacityUnits {
+                storage_bytes: 0,
+                host_control_storage_bytes: 0,
+                allocator_steps: 0,
+                connection_tickets: 0,
+                cleanup_steps: 0,
+            },
+            incarnations_remaining: 11,
+            last_operation: "rollover_renewal".to_owned(),
+            renewal: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRenewalEnvelope {
+                at_orderly_rollover: true,
+                operator_reissue: true,
+                maximum_epochs: None,
+            },
+        };
+        let rows = capacity_status_rows(Some(&unbounded), None);
+        assert_eq!(rows[0], ("epoch", "3".to_owned()));
+        assert_eq!(rows[1], ("incarnations remaining", "11".to_owned()));
+        assert_eq!(rows[2], ("recovery attempts", "5 of 32".to_owned()));
+        assert_eq!(rows[3], ("last operation", "rollover_renewal".to_owned()));
+        assert_eq!(rows.len(), 4);
+
+        let bounded = crate::native_capacity::CapacityAccountSummary {
+            maximum_epochs: Some(8),
+            ..unbounded
+        };
+        let rows = capacity_status_rows(Some(&bounded), None);
+        assert_eq!(rows[0], ("epoch", "3 of 8".to_owned()));
+
+        let rows = capacity_status_rows(None, Some("foreign capacity anchor"));
+        assert_eq!(rows, vec![("capacity", "unreadable: foreign capacity anchor".to_owned())]);
     }
 
     #[tokio::test]

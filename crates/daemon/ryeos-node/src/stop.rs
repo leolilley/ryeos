@@ -58,6 +58,8 @@ pub async fn stop_supervised_with_invalid_config(
     Ok(StopReport {
         status: LifecycleStatus::Stopped {
             app_root: app_root.to_path_buf(),
+            capacity: None,
+            capacity_error: None,
         },
         already_stopped: false,
     })
@@ -149,6 +151,8 @@ pub async fn stop_with_progress(
             return Ok(StopReport {
                 status: LifecycleStatus::Stopped {
                     app_root: env.config().app_root.clone(),
+                    capacity: None,
+                    capacity_error: None,
                 },
                 already_stopped: false,
             });
@@ -387,6 +391,8 @@ mod tests {
         assert!(!failure_names_exited_target(&failed, recorded.wrapping_add(1)));
         let stopped = LifecycleStatus::Stopped {
             app_root: env.config().app_root.clone(),
+            capacity: None,
+            capacity_error: None,
         };
         assert!(!failure_names_exited_target(&stopped, recorded));
     }
