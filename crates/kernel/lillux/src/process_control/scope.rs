@@ -331,6 +331,14 @@ impl ControllerAccount {
         Self(AccountBackend::Unix { uid, gid })
     }
 
+    /// Exact numeric account coordinates for a native adapter that must name
+    /// the account inside administrator-owned host configuration it renders.
+    pub(crate) fn unix_ids(&self) -> Result<(u32, u32), String> {
+        self.validate()?;
+        let AccountBackend::Unix { uid, gid } = self.0;
+        Ok((uid, gid))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         match self.0 {
             AccountBackend::Unix { uid, gid }
