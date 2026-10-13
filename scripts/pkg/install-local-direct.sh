@@ -7,9 +7,9 @@
 #   - binaries -> /usr/bin
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
-#     scripts/pkg/bundle-sets.sh (full = core, central-auth, standard, web,
-#     browser, ryeos-ui, hosted-node, codex, local-inference; the lean sets are
-#     subsets).
+#     scripts/pkg/bundle-sets.sh (full = core, central-auth, scheduling,
+#     standard, web, browser, ryeos-ui, hosted-node, codex, render-sandbox,
+#     opencode; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -30,8 +30,8 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, standard, web, browser, ryeos-ui, hosted-node, codex,
-local-inference). The release-authority set additionally installs the
+central-auth, scheduling, standard, web, browser, ryeos-ui, hosted-node, codex,
+render-sandbox, opencode). The release-authority set additionally installs the
 standalone publisher measurement executable; it does not start the separately
 operated key-bearing publisher service.
 
@@ -59,8 +59,10 @@ Options:
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: RyeOS Development)
   --bundle-set SET      Bundle set to populate/install: full, central-host,
-                        standard, local-inference, hosted-node, hosted-workflow,
-                        bundle-source, or release-authority. Each set
+                        standard, standard-central-auth, local-inference, hosted-node,
+                        hosted-workflow,
+                        bundle-source, core, core-scheduling, or release-authority.
+                        Each set
                         has an explicit default publisher-authored node init
                         profile; an existing signed generation is preserved.
                         (default: full)

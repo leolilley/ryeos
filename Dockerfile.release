@@ -2,7 +2,8 @@
 #
 # One release solve owns compilation and official bundle publication. The
 # native archive and every runtime image below derive from that exact published
-# generation; final stages copy only their declared deployable bundle set.
+# generation. Node binaries additionally select the native scheduler composition
+# appropriate to the final stage's declared bundle set.
 
 # Only contained qualification targets may select the development publication.
 # Official images and archives always depend on the checked published stage.
@@ -100,6 +101,27 @@ FROM compiled-publication AS development-publication
 # Local qualification must not masquerade as official publication.
 RUN python3 -c 'import tomllib; from pathlib import Path; actual=tomllib.loads(Path("bundles/.ai/PUBLISHER_TRUST.toml").read_text()); expected=tomllib.loads(Path(".dev-keys/PUBLISHER_DEV_TRUST.toml").read_text()); assert actual["fingerprint"] == expected["fingerprint"]; assert actual["owner"] != "ryeos-official"'
 
+# The bundle-source substrate omits Standard. Compile its node pair explicitly
+# from the same source and lockfile; copying the full publication's node pair
+# would retain the scheduler implementation despite omitting its bundle.
+FROM published AS scheduler-free-publication
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) set -- ;; \
+      latency-profiling) set -- --features ryeosd/latency-profiling ;; \
+      *) exit 2 ;; \
+    esac && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "$@" && \
+    mkdir -p /build/target/scheduler-free && \
+    cp /build/target-cache/release/ryeosd /build/target/scheduler-free/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/scheduler-free/ryeos
+
 FROM ${CONTAINED_PUBLICATION_STAGE} AS contained-publication
 
 FROM scratch AS bundle-artifact
@@ -129,7 +151,7 @@ COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeo
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=published /build/bundles/core         /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=published /build/bundles/standard     /opt/ryeos/standard
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -158,7 +180,7 @@ COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeo
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=published /build/bundles/.ai             /opt/ryeos/.ai
 COPY --from=published /build/bundles/core            /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth    /opt/ryeos/central-auth
+COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=published /build/bundles/standard        /opt/ryeos/standard
 COPY --from=published /build/bundles/local-inference /opt/ryeos/local-inference
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -188,10 +210,10 @@ COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeo
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=published /build/bundles/.ai                   /opt/ryeos/.ai
 COPY --from=published /build/bundles/core                  /opt/ryeos/core
+COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=published /build/bundles/central-auth          /opt/ryeos/central-auth
 COPY --from=published /build/bundles/standard              /opt/ryeos/standard
 COPY --from=published /build/bundles/web                   /opt/ryeos/web
-COPY --from=published /build/bundles/tv-tracker-authoring  /opt/ryeos/tv-tracker-authoring
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
@@ -233,7 +255,7 @@ COPY --from=contained-publication /build/target/release/ryeos-core-tools /usr/lo
 COPY --from=contained-publication /build/target/release/lillux     /usr/local/bin/lillux
 COPY --from=contained-publication /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=contained-publication /build/bundles/core         /opt/ryeos/core
-COPY --from=contained-publication /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=contained-publication /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=contained-publication /build/bundles/standard     /opt/ryeos/standard
 COPY --from=contained-publication /build/bundles/hosted-node  /opt/ryeos/hosted-node
 COPY --from=contained-publication /build/bundles/codex        /opt/ryeos/codex
@@ -278,12 +300,11 @@ WORKDIR /app
 # releases advance CAS/catalog and node-selection coordinates; they do not
 # rebuild this image or replace its seed on restart.
 FROM hosted-runtime AS ryeos-substrate
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=scheduler-free-publication /build/target/scheduler-free/ryeosd /usr/local/bin/ryeosd
+COPY --from=scheduler-free-publication /build/target/scheduler-free/ryeos  /usr/local/bin/ryeos
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=published /build/bundles/.ai           /opt/ryeos/.ai
 COPY --from=published /build/bundles/core          /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth  /opt/ryeos/central-auth
 COPY --from=published /build/bundles/bundle-source /opt/ryeos/bundle-source
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -304,7 +325,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.bundle-seed-mode="first-boot-only"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD ["ryeos", "node", "status"]
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-hosted-workflow
@@ -313,7 +334,7 @@ COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeo
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=published /build/bundles/core         /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=published /build/bundles/standard     /opt/ryeos/standard
 COPY --from=published /build/bundles/hosted-node  /opt/ryeos/hosted-node
 COPY --from=published /build/bundles/codex        /opt/ryeos/codex

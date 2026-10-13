@@ -1135,8 +1135,8 @@ async fn admit_execution_with_publication(
     }
 
     // Capability check: derive the required cap from the item_ref
-    // (e.g. "directive:apps/tv-tracker/ai_chat" →
-    //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+    // (e.g. "directive:apps/example-app/ai_chat" →
+    //  "ryeos.execute.directive.apps/example-app/ai_chat") and check
     // via the unified Authorizer. This replaces the old ad-hoc
     // `s == "*" || s == "execute"` check, supporting fine-grained
     // `ryeos.execute.<kind>.<subject>` scopes and wildcards like

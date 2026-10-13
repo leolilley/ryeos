@@ -26,8 +26,8 @@ ryeos_bundle_set_ids() {
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference ;;
-    central-host)    printf '%s\n' core central-auth scheduling standard web tv-tracker-authoring ;;
+    full)            printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode ;;
+    central-host)    printf '%s\n' core central-auth scheduling standard web ;;
     standard)        printf '%s\n' core scheduling standard ;;
     standard-central-auth) printf '%s\n' core scheduling standard central-auth ;;
     local-inference) printf '%s\n' core scheduling standard local-inference ;;
@@ -37,14 +37,14 @@ ryeos_bundle_set_names() {
     core-scheduling) printf '%s\n' core scheduling ;;
     bundle-source)   printf '%s\n' core bundle-source ;;
     release-authority)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-release
+      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode bundle-release
       ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference tv-tracker-authoring bundle-source bundle-release
+      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
@@ -211,11 +211,10 @@ ryeos_bundle_set_node_init_profile() {
 ryeos_bundle_set_bin_managed_names() {
   local name
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
-    # scheduling (service/command content), central-auth (Python tool support)
-    # and tv-tracker-authoring (reuses
-    # bin:core/ryeos-core-tools) own no compiled
-    # binaries; local-inference owns separately built payloads.
-    [[ "$name" == "scheduling" || "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
+    # scheduling (service/command content) and central-auth (Python tool
+    # support) own no compiled binaries; local-inference owns separately built
+    # payloads.
+    [[ "$name" == "scheduling" || "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
     printf '%s\n' "$name"
   done
 }

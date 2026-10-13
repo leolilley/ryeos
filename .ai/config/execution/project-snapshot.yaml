@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T08:41:46Z:98da9091318c8b0657987326cae267d36a0668681d2a18884db89297ff0e9eec:6EBlaWuf5nkdLpB4aNrfkPlNyutDaAdRJ/1pVJGSEKSyB/qPJPf0ruhMUDunCZuKWqyX1o/hhvV58CP5yYnODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:dc32073a689757fa48c3163e4142f40b608300e727c9edbc76e07279e571c2fb:TVe9J8LAeADJVLX6rwPpD28n/mbItx64AfNlQY0Unxg3MDDH/wy2mYqTQUdEpogizBMhWKIrOuDpirlJRg+RAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Repository capture intent, composed with the target's signed node patterns.
 # Git ignores are not snapshot authority. Keep source and the public developer
 # signing fixture, but never send local artifacts or nested worktrees as source.
@@ -60,10 +60,6 @@ exclusions:
   - "/bundles/standard/.ai/bin/"
   - "/bundles/standard/.ai/objects/"
   - "/bundles/standard/.ai/refs/"
-  - "/bundles/tv-tracker-authoring/.ai/bin/"
-  - "/bundles/tv-tracker-authoring/.ai/objects/"
-  - "/bundles/tv-tracker-authoring/.ai/refs/"
-  - "/bundles/tv-tracker-authoring/PUBLISHER_TRUST.toml"
   - "/bundles/web/.ai/bin/"
   - "/bundles/web/.ai/objects/"
   - "/bundles/web/.ai/refs/"

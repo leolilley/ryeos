@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T11:47:25Z:893d6f1dee89bde599f47390d3177862c93169445379fffe9734dd670031776c:hHWHpH118l4VtfmR96CKFQWch0mO+A+X8Y23o1zDZU+zOq2FY3uPgC+ZixAXd7fTTQOdnVc7e4NJ5YXJbycBAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:a646937dd8399e355dbc68bfc957902b4f5bfb473056fa2ee13b1836296b774e:qCfIXMpKZ8zPT6cjQqqucGkMEvvLcCVPTJ5a6hHYLbNe4I2wIk1aS/5t907BzNrFeSeoi4SEe/a+4EafN/DnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -7,7 +7,6 @@ exact_bundles:
   - codex
   - core
   - hosted-node
-  - local-inference
   - opencode
   - render-sandbox
   - ryeos-ui
@@ -189,7 +188,6 @@ policies:
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
       hosted-node: []
-      local-inference: []
       render-sandbox: []
       ryeos-ui: []
       scheduling:

@@ -1195,7 +1195,7 @@ impl CallbackClient {
     /// retained as `result_text` without reparsing so crash recovery reproduces
     /// the identical value and provider wire shape.
     ///
-    /// `tool` is the canonical ref (e.g. `apps_tv_tracker_workspace_render_chart`)
+    /// `tool` is the canonical ref (e.g. `apps_example_app_workspace_render_chart`)
     /// so SSE consumers can route results without cross-referencing tool_call_start.
     // Wire-shaped: each argument is one field of the emitted result
     // envelope; eight call sites pass them positionally today.

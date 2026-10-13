@@ -254,11 +254,11 @@ mod tests {
         // model) only to be denied at dispatch time. Both must agree.
         let tools = vec![ToolSchema {
             name: "backend_client".to_string(),
-            item_id: "tool:apps/tv-tracker/api/backend-client".to_string(),
+            item_id: "tool:apps/example-app/api/backend-client".to_string(),
             description: None,
             input_schema: None,
         }];
-        let caps = vec!["ryeos.execute.tool.apps/tv-tracker/api/*".to_string()];
+        let caps = vec!["ryeos.execute.tool.apps/example-app/api/*".to_string()];
         let filtered = filter_tools_by_caps(&tools, &caps);
         assert_eq!(
             filtered.len(),
@@ -273,7 +273,7 @@ mod tests {
         // Production ToolSchema item_ids always carry the `kind:` prefix;
         // a bare id arriving here means upstream is broken. We hard-fail
         // rather than fall back so the bug surfaces immediately.
-        let _ = required_cap_for("apps/tv-tracker/api/backend-client");
+        let _ = required_cap_for("apps/example-app/api/backend-client");
     }
 
     #[test]

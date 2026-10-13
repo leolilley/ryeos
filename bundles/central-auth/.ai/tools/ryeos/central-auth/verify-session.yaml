@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:24Z:378373f219d1f9e1b9e2f9e84f07aa380b91c92fb850c0c62ea84f8a54e2c9ce:ZfKjq9rmOMcGlmCk/bLRUPPvbHtw0blYx7SPf5e4I49TwZXEUVL0H7DaXbaT/KYJ2CNLojKBIw/mrEIjuI28Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:d8b7da46da6a3e48c0edf572dec4b69329e929ea134b533c3b2e376f5ea22ff7:odSeYEqJPyRmTbKAUOD8xekgQ7+BFbN6uNdLn4NJfXXTtj2gcnKLpS5aPHKrbt89kdgYqafWyM1+vQqUGjAfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "verify-session"
@@ -26,7 +26,7 @@ config_schema:
       description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
-      description: "Realm/app namespace, e.g. tv-tracker."
+      description: "Realm/app namespace, e.g. example-app."
     session_token:
       type: string
     required_capability:

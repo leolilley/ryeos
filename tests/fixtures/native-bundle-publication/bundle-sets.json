@@ -9,8 +9,7 @@
       "central-auth",
       "scheduling",
       "standard",
-      "web",
-      "tv-tracker-authoring"
+      "web"
     ],
     "core": [
       "core"
@@ -30,8 +29,7 @@
       "hosted-node",
       "codex",
       "render-sandbox",
-      "opencode",
-      "local-inference"
+      "opencode"
     ],
     "hosted-node": [
       "core",
@@ -64,7 +62,6 @@
       "codex",
       "render-sandbox",
       "opencode",
-      "local-inference",
       "bundle-release"
     ],
     "standard": [

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:23Z:2f3b73d4ad88dca2e86144b90eb0655ef325787b70df1162408d38afd5e5f97b:7JYYleGE7iM9fhe85JQk+CI8AL7UIhkX1jpbsBSS52WgiOql/7icEOfARVDfxwaJlQX0Jew3BZI6UaE3kMLZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:68e3e71f3dbd8dab4b22fd8f8e2f961bd378b5a8ad0e74d5a377ab5bc20b81ec:xeIpDZJR7cePRsCX3saS7/CW7xJb9uWu2aAK6NQf2OZmnTaansRuhcvWwnlwnULl4Iyag8LjHwgiWRD1XHmODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "set-policy"
@@ -26,7 +26,7 @@ config_schema:
       description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
-      description: "Realm/app namespace, e.g. tv-tracker."
+      description: "Realm/app namespace, e.g. example-app."
     policy:
       type: object
       description: "Policy object with roles and allowed_capabilities."

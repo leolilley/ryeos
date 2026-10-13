@@ -53,7 +53,7 @@ Common fields:
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker"
+  "realm_id": "example-app"
 }
 ```
 
@@ -67,15 +67,15 @@ Stores the realm policy.
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "policy": {
     "roles": {
-      "viewer": { "capabilities": ["tv-tracker.ratings.read"] },
-      "analyst": { "capabilities": ["tv-tracker.ratings.read", "tv-tracker.ai.chat"] }
+      "viewer": { "capabilities": ["example-app.ratings.read"] },
+      "analyst": { "capabilities": ["example-app.ratings.read", "example-app.ai.chat"] }
     },
     "allowed_capabilities": [
-      "tv-tracker.ratings.read",
-      "tv-tracker.ai.chat"
+      "example-app.ratings.read",
+      "example-app.ai.chat"
     ]
   }
 }
@@ -89,7 +89,7 @@ accepted while the realm has no principals.
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "principal_id": "alice",
   "display_name": "Alice",
   "roles": ["analyst"],
@@ -107,7 +107,7 @@ returned once.
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "roles": ["analyst"],
   "capabilities": [],
   "ttl_secs": 86400,
@@ -122,7 +122,7 @@ Passphrase login:
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "method": "passphrase",
   "principal_id": "alice",
   "passphrase": "secret123",
@@ -135,7 +135,7 @@ Invite redemption creates a principal and immediately issues a session:
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "method": "invite",
   "invite_code": "returned-once",
   "principal_id": "alice",
@@ -150,9 +150,9 @@ Invite redemption creates a principal and immediately issues a session:
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "session_token": "opaque-token",
-  "required_capability": "tv-tracker.ai.chat"
+  "required_capability": "example-app.ai.chat"
 }
 ```
 
@@ -161,7 +161,7 @@ Invite redemption creates a principal and immediately issues a session:
 ```json
 {
   "project_path": "/abs/project",
-  "realm_id": "tv-tracker",
+  "realm_id": "example-app",
   "session_token": "opaque-token"
 }
 ```

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-07-03T09:54:30Z:f8344999a1311dc7c79a23258303efe16a51962ab345f83f6cfba456520891e4:80FL+NCFSSCX3zI6f8q22LIpdtFrsT0wJJrj5Xzwh0+YwA/1SvSzAozuWCARH0Cw1AnK+TV0Sr2KJMI/5qXGDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T22:44:06Z:1128b9f9cd54d32b98b5739917e9247a4351f36575a3da9b439b86d1e0a33670:QWFSofLjF170SqmB4MO6KBaKpG3sa7OHLu1KUJDgkHoyAe8QiMNqwPuTN8INO+sRBHzyLiv+TcaYOxTukNRjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: central-auth
 version: 0.1.0
-description: 'Central web-app auth primitives: principals, sessions, invites, roles and capabilities'
+description: 'Optional application authentication above Standard: principals, sessions, invites, roles and capabilities; separate from native node authority'
 provides_kinds: []
 requires_kinds:
 - tool

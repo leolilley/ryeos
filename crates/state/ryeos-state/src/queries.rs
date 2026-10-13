@@ -4299,11 +4299,11 @@ mod tests {
             .thread_seq(1)
             .payload(json!({
                 "kind": "directive",
-                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "item_ref": "directive:apps/example-app/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
                 "launch_mode": "wait",
                 "usage_subject": {
-                    "namespace": "tv-tracker",
+                    "namespace": "example-app",
                     "subject": "csm01"
                 },
                 "usage_subject_asserted_by": "fp:backend"
@@ -4312,7 +4312,7 @@ mod tests {
         project_event(&db, &event).unwrap();
 
         let row = get_thread_usage_subject(&db, "T-root").unwrap().unwrap();
-        assert_eq!(row.namespace, "tv-tracker");
+        assert_eq!(row.namespace, "example-app");
         assert_eq!(row.subject, "csm01");
         assert_eq!(row.asserted_by.as_deref(), Some("fp:backend"));
         assert_eq!(row.created_at, "2026-06-01T00:00:00Z");
@@ -4328,10 +4328,10 @@ mod tests {
             .thread_seq(1)
             .payload(json!({
                 "kind": "directive",
-                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "item_ref": "directive:apps/example-app/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
                 "launch_mode": "wait",
-                "usage_subject": { "namespace": "tv-tracker", "subject": "user-a" },
+                "usage_subject": { "namespace": "example-app", "subject": "user-a" },
                 "usage_subject_asserted_by": "fp:backend"
             }))
             .build_with_ts("2026-06-01T00:00:00Z".to_string());
@@ -4344,10 +4344,10 @@ mod tests {
             .thread_seq(1)
             .payload(json!({
                 "kind": "directive",
-                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "item_ref": "directive:apps/example-app/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
                 "launch_mode": "wait",
-                "usage_subject": { "namespace": "tv-tracker", "subject": "user-b" },
+                "usage_subject": { "namespace": "example-app", "subject": "user-b" },
                 "usage_subject_asserted_by": "fp:other"
             }))
             .build_with_ts("2026-06-01T00:00:00Z".to_string());
@@ -4357,7 +4357,7 @@ mod tests {
         let rows = summarize_usage_by_subject(
             &db,
             UsageSummaryFilter {
-                namespace: Some("tv-tracker"),
+                namespace: Some("example-app"),
                 asserted_by: Some("fp:backend"),
                 ..Default::default()
             },
@@ -4365,7 +4365,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].namespace, "tv-tracker");
+        assert_eq!(rows[0].namespace, "example-app");
         assert_eq!(rows[0].subject, "user-a");
         assert_eq!(rows[0].chain_count, 1);
         assert_eq!(rows[0].thread_count, 1);
@@ -4382,10 +4382,10 @@ mod tests {
             .thread_seq(1)
             .payload(json!({
                 "kind": "directive",
-                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "item_ref": "directive:apps/example-app/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
                 "launch_mode": "wait",
-                "usage_subject": { "namespace": "tv-tracker", "subject": "user-a" },
+                "usage_subject": { "namespace": "example-app", "subject": "user-a" },
                 "usage_subject_asserted_by": "fp:backend"
             }))
             .build_with_ts("2026-06-01T00:00:00Z".to_string());
@@ -4405,7 +4405,7 @@ mod tests {
         let rows = summarize_usage_by_subject(
             &db,
             UsageSummaryFilter {
-                namespace: Some("tv-tracker"),
+                namespace: Some("example-app"),
                 asserted_by: Some("fp:backend"),
                 ..Default::default()
             },

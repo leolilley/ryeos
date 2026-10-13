@@ -126,11 +126,12 @@ assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 for forbidden in hosted-node codex render-sandbox opencode web browser ryeos-ui; do
   assert_rejected contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference tv-tracker-authoring bundle-source bundle-release" ]]
-[[ "${release_authority[*]}" == "core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
+[[ "${release_authority[*]}" == "core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode bundle-release" ]]
 [[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"
 assert_rejected contains bundle-source "${release_authority[@]}"
+assert_rejected contains local-inference "${release_authority[@]}"
 render_specs="$ROOT/bundles/render-sandbox/specs"
 render_fixture="$ROOT/crates/host-adapters/render-sandbox-adapter/fixtures"
 for profile in provider-spec.json snapshot-production-spec.json settings.schema.json; do
@@ -227,7 +228,7 @@ for profile_name in "${node_init_profiles[@]}"; do
   fi
 done
 
-contains local-inference "${full[@]}"
+assert_rejected contains local-inference "${full[@]}"
 assert_rejected contains local-inference "${full_bin_managed[@]}"
 mapfile -t local_inference_bin_managed < <(ryeos_bundle_set_bin_managed_names local-inference)
 [[ "${local_inference_bin_managed[*]}" == "core standard" ]]

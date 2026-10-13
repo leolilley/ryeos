@@ -9124,17 +9124,17 @@ mod tests {
 
         let projection_path = {
             let db = TestState::open(&root, test_trust_store()).unwrap();
-            let snapshot = test_root_snapshot("directive:apps/tv-tracker/ai_chat");
+            let snapshot = test_root_snapshot("directive:apps/example-app/ai_chat");
             db.create_chain("T-root", snapshot, &signer).unwrap();
 
             let created =
                 crate::objects::thread_event::NewEvent::new("T-root", "T-root", "thread_created")
                     .payload(serde_json::json!({
-                        "item_ref": "directive:apps/tv-tracker/ai_chat",
+                        "item_ref": "directive:apps/example-app/ai_chat",
                         "executor_ref": "runtime:directive-runtime",
                         "launch_mode": "wait",
                         "usage_subject": {
-                            "namespace": "tv-tracker",
+                            "namespace": "example-app",
                             "subject": "csm01"
                         },
                         "usage_subject_asserted_by": "fp:backend"
@@ -9178,7 +9178,7 @@ mod tests {
         let subject_rows: i64 = db
             .projection().with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM thread_usage_subjects WHERE chain_root_id = 'T-root' \
-                 AND namespace = 'tv-tracker' AND subject = 'csm01' \
+                 AND namespace = 'example-app' AND subject = 'csm01' \
                  AND asserted_by = 'fp:backend'",
                 [],
                 |row| row.get(0),

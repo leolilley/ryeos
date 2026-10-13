@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:23Z:4030220baeccc23033b33f8f480ab4a26a422f9116aabc335483d6d7e5c82448:/nuBos574mkiAdw/uG/ReMzw8zPfxjeFhLXX7SsNQyU6zPTt8zBnu8CcXm/z/GtjZa1hNEzYp77fPwEaecS6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:aeea3a7f86b6e8440512f6a195d4d27c203a60660c5056dd911d44bfb56b376d:rWp4JUDKlnXa6ti6IXZuzbQU32ormMUkkUG0nfOO0nLVFxza5SLn+nV72pYCny9LBoPCTbHw3X/O4QyXL/ZJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "list-principals"
@@ -26,5 +26,5 @@ config_schema:
       description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
-      description: "Realm/app namespace, e.g. tv-tracker."
+      description: "Realm/app namespace, e.g. example-app."
   required: [realm_id]

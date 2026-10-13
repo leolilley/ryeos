@@ -1,11 +1,10 @@
-# ryeos:signed:2026-10-12T11:47:25Z:e33b7915544d179febed2a7a3366ce69d652a2561dbff15e372e6f58c406c352:5LA2usmQ6P+c/BLs2idGJJmTmOwAR8UIVPxFtjtSOsrxuE3LF4WwokRaavAN8CIC6qo0zu6rEyOYT8SMN0LpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:bad6d00aaf9f06383b48c3e9ce9b5c1c9b42ff5fe0c579f956ede937ed58e678:CKymH+vlZBhF1HJKLZVvVOPpm7lGdolVJgImfWvC4YbByG1n9PVcc7ZZbERbaZZ07BUGkfx/CSM1QrXvHXy3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
   - core
   - scheduling
   - standard
-  - tv-tracker-authoring
   - web
 policies:
   bundle_publication:
@@ -130,7 +129,6 @@ policies:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
-      tv-tracker-authoring: []
       web: []
   execution:
     schema: 4
