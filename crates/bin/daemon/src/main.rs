@@ -2875,6 +2875,19 @@ fn main() -> Result<()> {
     let external_host_runtime =
         ryeos_node::host_runtime::ExternalHostRuntime::take_from_environment()
             .context("consume inherited external host-runtime authority")?;
+    // Declared provider-delivered values must leave the process environment
+    // while this process is still single-threaded. A failure is reported by
+    // `run`, after the startup refusals that precede node initialization.
+    let provider_environment = match &cli.command {
+        Some(config::DaemonCommand::BuildInfo { .. }) => None,
+        _ => Some(
+            Config::selected_app_root(&cli.to_sources()).and_then(|app_root| {
+                // SAFETY: no async runtime, application or library thread
+                // exists yet; the runtime is built only below.
+                unsafe { ryeos_node::provider_env::take_at_startup(&app_root) }
+            }),
+        ),
+    };
     #[cfg(feature = "crash-qualification-test-support")]
     ryeos_app::dedicated_session_service::test_support::initialize_from_env()
         .context("initialize exact command-settlement crash gate")?;
@@ -2896,7 +2909,12 @@ fn main() -> Result<()> {
     // runtime shutdown on both return and unwind. The nonempty selected root
     // closes only after external unpublication and the complete shutdown drain.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(run(cli, &mut composition, external_host_runtime))
+        runtime.block_on(run(
+            cli,
+            &mut composition,
+            external_host_runtime,
+            provider_environment,
+        ))
     }));
     if composition.has_unresolved_custody() {
         // Exit 70 while the composition and runtime still own every
@@ -2986,6 +3004,7 @@ async fn run(
     cli: Cli,
     composition: &mut DaemonSelectedComposition,
     external_host_runtime: Option<ryeos_node::host_runtime::ExternalHostRuntime>,
+    provider_environment: Option<Result<ryeos_node::provider_env::StartupProviderEnvironment>>,
 ) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
@@ -3044,6 +3063,9 @@ async fn run(
     // or runtime-state writes. `ryeos init` is authoritative for bundle
     // registrations and operator identity/trust artifacts.
     ryeos_node::require_initialized(&selected_app_root)?;
+    let provider_environment = provider_environment
+        .context("the provider environment was not taken at startup")?
+        .context("take the declared provider environment at startup")?;
 
     // Handle subcommands BEFORE acquiring the daemon state lock or
     // initializing tracing. Subcommands (e.g. `run-service`) manage
@@ -3072,7 +3094,13 @@ async fn run(
                 params,
             } => {
                 let config = Config::load(&config_sources)?;
-                return run_service_standalone(&config, service_ref, params.as_deref()).await;
+                return run_service_standalone(
+                    &config,
+                    service_ref,
+                    params.as_deref(),
+                    &provider_environment,
+                )
+                .await;
             }
         }
     }
@@ -3372,7 +3400,11 @@ async fn run(
                         .map(|service| &service.binding.runtime)
                 });
             let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
-                bootstrap::load_node_config_two_phase_with_host_runtime(&config, host_runtime)?;
+                bootstrap::load_node_config_two_phase_with_host_runtime(
+                    &config,
+                    host_runtime,
+                    &provider_environment,
+                )?;
             let external_artifacts = engine.with_checked_bundle_generation(|_| {
                 ryeos_app::external_artifacts::resolve_external_execution_artifacts(
                     &engine.bundle_roots,
@@ -3956,6 +3988,7 @@ async fn run(
                 external_candidate_imports: Arc::new(Default::default()),
                 node_policy: node_policy_snapshot,
                 vault,
+                provider_env: Arc::clone(provider_environment.environment()),
                 command_registry,
                 authorizer,
                 ignore_matcher,
@@ -6992,6 +7025,7 @@ async fn run_service_standalone(
     config: &config::Config,
     service_ref: &str,
     params_json: Option<&str>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<()> {
     use ryeos_executor::executor::{ExecutionContext, ExecutionMode};
 
@@ -7021,7 +7055,7 @@ async fn run_service_standalone(
     // Two-phase node-config bootstrap without daemon callback-socket authority:
     // standalone mode does not bind the configured UDS listener.
     let (engine, node_config_snapshot, node_policy_snapshot, isolation, capability_report) =
-        bootstrap::load_node_config_two_phase_standalone(config)?;
+        bootstrap::load_node_config_two_phase_standalone(config, provider_environment)?;
     let external_artifacts = engine.with_checked_bundle_generation(|_| {
         ryeos_app::external_artifacts::resolve_external_execution_artifacts(
             &engine.bundle_roots,
@@ -7344,6 +7378,7 @@ async fn run_service_standalone(
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: node_policy_snapshot.clone(),
         vault: standalone_vault,
+        provider_env: Arc::clone(provider_environment.environment()),
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         ignore_matcher: standalone_ignore_matcher,

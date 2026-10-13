@@ -965,6 +965,7 @@ mod tests {
                 )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
+            provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
             command_registry: test_command_registry,
             authorizer: test_auth,
             ignore_matcher: Arc::new(

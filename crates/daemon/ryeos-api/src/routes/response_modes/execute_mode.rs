@@ -282,6 +282,7 @@ pub fn resolve_execution_project_authority(
     project_site_id: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
+    provider_environment_names: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -316,7 +317,8 @@ pub fn resolve_execution_project_authority(
     // not an independently authored path setting. Resolve it only after the
     // live or pinned project identity is known so remote pinned generations
     // bind to their destination-site identity instead of a synthetic local
-    // identity. Vault and delegated environments remain project-independent.
+    // identity. Vault, delegated and provider environments remain
+    // project-independent.
     let resolve_environment =
         |project: Option<(&str, &Path)>| -> anyhow::Result<EnvironmentAuthority> {
             Ok(match &policy.environment {
@@ -356,6 +358,13 @@ pub fn resolve_execution_project_authority(
                     grant_id: grant_id.clone(),
                     name_authority: resolve_name_authority(name_policy),
                 },
+                // Seal the node's signed declaration observed at admission.
+                ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
+                    EnvironmentAuthority::ProviderEnvironment {
+                        declared_names: provider_environment_names.to_vec(),
+                        name_authority: resolve_name_authority(name_policy),
+                    }
+                }
             })
         };
 
@@ -568,6 +577,7 @@ pub fn resolve_execution_contract(
         state.threads.site_id(),
         &state.isolation,
         caller_scopes,
+        state.provider_env.declared_names(),
     )?;
     authorize_terminal_publication(
         policy,
@@ -1707,7 +1717,7 @@ async fn admit_execution_with_publication(
             }
         }
         if let Err(err) = ryeos_app::vault::check_secret_availability(
-            state.vault.as_ref(),
+            &state.secret_sources(),
             &caller_principal_id,
             &accepted_preflight
                 .requested_subject
@@ -2473,6 +2483,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
+            &[],
         )
         .unwrap();
 
@@ -2502,6 +2513,7 @@ mod tests {
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_owned(),
                 "*".to_owned(),
             ],
+            &[],
         )
         .unwrap();
 
@@ -2555,6 +2567,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
+            &[],
         )
         .unwrap();
         let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
@@ -2588,6 +2601,7 @@ mod tests {
                 "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
+                &[],
             )
             .is_err()
         );
@@ -2603,6 +2617,7 @@ mod tests {
                 Some(&mismatch),
                 "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+                &[],
                 &[],
             )
             .is_err()
@@ -2645,6 +2660,7 @@ mod tests {
             Some(&destination),
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &[],
             &[],
         )
         .unwrap();

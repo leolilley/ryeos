@@ -606,14 +606,20 @@ fn compiled_features() -> Vec<String> {
 
 pub fn load_node_config_two_phase(
     config: &Config,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), None)
-        .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
+    load_node_config_two_phase_with_socket(
+        config,
+        Some(&config.uds_path),
+        None,
+        provider_environment,
+    )
+    .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Running-daemon bootstrap with one already selected protected host runtime.
@@ -622,14 +628,20 @@ pub fn load_node_config_two_phase(
 pub fn load_node_config_two_phase_with_host_runtime(
     config: &Config,
     host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), host_runtime)
-        .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
+    load_node_config_two_phase_with_socket(
+        config,
+        Some(&config.uds_path),
+        host_runtime,
+        provider_environment,
+    )
+    .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Standalone service execution has no daemon callback listener to capture.
@@ -644,6 +656,7 @@ pub fn load_node_config_two_phase_with_host_runtime(
 /// the service issues must meet it again on the residency it establishes.
 pub fn load_node_config_two_phase_standalone(
     config: &Config,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
@@ -651,13 +664,14 @@ pub fn load_node_config_two_phase_standalone(
     Arc<ryeos_engine::isolation::IsolationRuntime>,
     ryeos_node::capability_report::NodeCapabilityReport,
 )> {
-    load_node_config_two_phase_with_socket(config, None, None)
+    load_node_config_two_phase_with_socket(config, None, None, provider_environment)
 }
 
 fn load_node_config_two_phase_with_socket(
     config: &Config,
     daemon_socket: Option<&Path>,
     host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
@@ -725,6 +739,12 @@ fn load_node_config_two_phase_with_socket(
         &policy_table,
     )
     .context("Phase 1: load exact node policy generation")?;
+    // The provider environment was taken before the async runtime existed,
+    // under the generation then on disk. Composing under any other
+    // generation would deliver names this policy does not declare.
+    provider_environment
+        .require_generation(app_root, policy_generation.digest())
+        .context("Phase 1: bind the startup provider environment to the loaded policy")?;
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
     let node_policy = Arc::new(ryeos_node_runtime::node_policy::compile_generation(
         app_root,
@@ -875,6 +895,7 @@ fn load_node_config_two_phase_with_socket(
             policy_generation: format!("sha256:{}", node_policy.generation_digest()),
             isolation: isolation.inspection(),
             host_runtime_present: host_runtime.is_some(),
+            provider_environment: provider_environment.environment().as_ref(),
         },
     )
     .context("Phase 1: assemble node capability report")?;

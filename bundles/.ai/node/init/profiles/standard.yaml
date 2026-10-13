@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T01:14:15Z:ab46c9659d2dc7a6c3fa08db825a0bbdc51e573ed34a14d609de75a3e66c399e:AkIS9Lyfn4OSDJjT4/YKDCHTiUnKLxzhK/w4KPAW8W5EV46Fq/dO6W9506HuzGsYBJ4xOscuT6GOQXaSuHCuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T07:32:11Z:e8e29fc817a6e030daf00c1dda27f46538d428a33a766db6b570fea1f4685f1e:POZbp6CFjlh8GiUPLUxfMQTj/YuAUOviNhSoB7nid2aZ9jDd9HvzSMEtur7Hk1ju0AeCJjJAtnamDJ8PgdnGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -321,6 +321,9 @@ policies:
     schema: 1
     enabled: false
     limits: null
+  provider_environment:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 1
     max_live_binding_attachments_per_session: 16

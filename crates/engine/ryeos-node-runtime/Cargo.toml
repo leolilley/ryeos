@@ -43,6 +43,8 @@ ryeos-scheduler-contract.workspace = true
 
 ryeos-isolation-protocol.workspace = true
 
+ryeos-vault.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 ryeos-state = { workspace = true, features = ["test-support"] }

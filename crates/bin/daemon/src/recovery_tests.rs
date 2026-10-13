@@ -802,6 +802,7 @@ fn build_test_state() -> (
             )]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
+        provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
         command_registry: Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         ),

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T01:14:15Z:b07505a33095fd1cfe9ab5747564ebf71b51b377164714c412d28a1d1553d39c:y/WIqi9Z2sFi4nQgN/Ov9JVQErdW+I6JsN8TWJpq6wLTvTxXwHvbu0mF/Q4XODYQUPngXsLlRoVzAj13cYLQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T07:32:11Z:a0ea0ca349f825098ca1e632e74e1a0bd3d1cc7f877431ebb556237517d1fb98:+kupnkKf57wNlyKjMBMPATC8mAYngtVYAAfF3rLxRghc+wGgvHEle9GniLGrPMhfFzWTl9ejXw2neiteSBt+CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above Standard; source-only, admission pending.
 schema: 1
 exact_bundles:
@@ -324,6 +324,9 @@ policies:
     schema: 1
     enabled: false
     limits: null
+  provider_environment:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 1
     max_live_binding_attachments_per_session: 16

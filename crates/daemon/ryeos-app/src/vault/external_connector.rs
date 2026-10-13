@@ -176,7 +176,7 @@ mod tests {
         assert!(read_named_secret(&vault, "operator", access.physical_key()).is_err());
         assert!(
             authorize_secret_delivery(
-                &vault,
+                &crate::vault::vault_only_sources(&vault),
                 "operator",
                 &[access.physical_key().to_owned()],
                 &ryeos_state::objects::ExecutionProjectAuthority::projectless(

@@ -232,6 +232,14 @@ pub enum EnvironmentAuthority {
         grant_id: String,
         name_authority: EnvironmentNameAuthority,
     },
+    /// Values the executing node took from its own environment at startup.
+    /// `declared_names` is the node's signed declaration observed at
+    /// admission; delivery also requires the name in the node's live
+    /// startup declaration.
+    ProviderEnvironment {
+        declared_names: Vec<String>,
+        name_authority: EnvironmentNameAuthority,
+    },
 }
 
 impl EnvironmentAuthority {
@@ -273,6 +281,13 @@ impl EnvironmentAuthority {
             } => {
                 validate_trimmed_control_free("delegated environment provider", provider, false)?;
                 validate_trimmed_control_free("delegated environment grant", grant_id, false)?;
+                name_authority.validate()
+            }
+            Self::ProviderEnvironment {
+                declared_names,
+                name_authority,
+            } => {
+                validate_allowed_names(declared_names)?;
                 name_authority.validate()
             }
         }

@@ -2348,6 +2348,7 @@ mod tests {
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 )]),
             ),
+            provider_env: Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),
                 lillux::vault::VaultSecretKey::generate(),

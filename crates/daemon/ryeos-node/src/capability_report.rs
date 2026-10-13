@@ -19,6 +19,8 @@ use lillux::process_control::{
 use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v3";
+/// Provider-delivered environment values available for authorized delivery.
+pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
 const REPORT_FILE: &str = "node-capability-report.json";
 const MAX_REPORT_BYTES: u64 = 1024 * 1024;
 
@@ -157,6 +159,9 @@ pub struct ReportInputs<'a> {
     /// Whether a protected host-runtime binding (host service or external
     /// controller) delegated a cgroup subtree to this node.
     pub host_runtime_present: bool,
+    /// Provider-delivered environment taken at startup. Only its names reach
+    /// the report.
+    pub provider_environment: &'a ryeos_app::vault::ProviderEnvironment,
 }
 
 impl NodeCapabilityReport {
@@ -174,6 +179,7 @@ impl NodeCapabilityReport {
         }
         let mut view = host.capabilities();
         add_scope_capabilities(&mut view, inputs.isolation, inputs.host_runtime_present, host.gvisor());
+        add_provider_environment(&mut view, inputs.provider_environment);
         let mut capacity = BTreeMap::new();
         if let Some(limit) = &host.cgroup.memory_max
             && let Ok(bytes) = limit.value.parse::<u64>()
@@ -490,6 +496,36 @@ fn add_scope_capabilities(
     }
 }
 
+/// Grade the provider-delivered environment. The node cannot observe where
+/// the provider got the values, so presence is provider attested, and a
+/// delivered value is plain child environment that the recipient's model
+/// commands can read. A node that declares no names reports nothing.
+fn add_provider_environment(
+    view: &mut HostCapabilities,
+    environment: &ryeos_app::vault::ProviderEnvironment,
+) {
+    if environment.declared_names().is_empty() {
+        return;
+    }
+    let present = environment.present_names();
+    let absent = environment.absent_names();
+    if present.is_empty() {
+        view.refuse(
+            SECRETS_PROVIDER_ENV,
+            format!("declared names absent at startup: {}", absent.join(", ")),
+        );
+        return;
+    }
+    let mut basis = format!("declared names present at startup: {}", present.join(", "));
+    if !absent.is_empty() {
+        basis.push_str(&format!("; absent at startup: {}", absent.join(", ")));
+    }
+    basis.push_str(
+        "; delivered as plain child environment, readable by the recipient's model commands",
+    );
+    view.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, basis);
+}
+
 /// A name is met only by the exact named capability, proven by a local
 /// measurement, or by trust where the name itself is a trusted grade. A
 /// weaker grade is a different name and never stands in for a stronger one
@@ -789,6 +825,52 @@ mod tests {
         let mut renamed = fixture;
         renamed.daemon_digest = "sha256:other".to_owned();
         assert_ne!(renamed.digest().unwrap(), signed.digest, "the digest covers the daemon image");
+    }
+
+    fn provider_environment(
+        declared: &[&str],
+        values: &[(&str, &str)],
+    ) -> ryeos_app::vault::ProviderEnvironment {
+        ryeos_app::vault::ProviderEnvironment::captured(
+            declared.iter().map(|name| (*name).to_owned()).collect(),
+            values
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), zeroize::Zeroizing::new((*value).to_owned())))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_provider_environment_is_graded_by_name_only() {
+        let mut undeclared = view(&["time"], &[]);
+        add_provider_environment(&mut undeclared, &provider_environment(&[], &[]));
+        assert!(!undeclared.provided.contains_key(SECRETS_PROVIDER_ENV));
+        assert!(!undeclared.missing.contains_key(SECRETS_PROVIDER_ENV));
+
+        let mut absent = view(&["time"], &[]);
+        add_provider_environment(&mut absent, &provider_environment(&["OPENAI_API_KEY"], &[]));
+        assert!(!absent.provided.contains_key(SECRETS_PROVIDER_ENV));
+        assert!(absent.missing[SECRETS_PROVIDER_ENV].contains("OPENAI_API_KEY"));
+
+        let mut present = view(&["time"], &[]);
+        add_provider_environment(
+            &mut present,
+            &provider_environment(
+                &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+                &[("OPENAI_API_KEY", "sk-provider-value")],
+            ),
+        );
+        let evidence = &present.provided[SECRETS_PROVIDER_ENV];
+        assert_eq!(evidence.source, ProofSource::ProviderAttested);
+        assert!(evidence.basis.contains("declared names present at startup: OPENAI_API_KEY"));
+        assert!(evidence.basis.contains("absent at startup: ANTHROPIC_API_KEY"));
+        assert!(evidence.basis.contains("readable by the recipient's model commands"));
+        assert!(!present.missing.contains_key(SECRETS_PROVIDER_ENV));
+
+        let serialized = serde_json::to_string(&report(present, floor(&["time"]))).unwrap();
+        assert!(serialized.contains(SECRETS_PROVIDER_ENV));
+        assert!(!serialized.contains("sk-provider-value"));
     }
 
     #[test]

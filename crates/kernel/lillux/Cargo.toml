@@ -47,6 +47,11 @@ path = "tests/invocation_startup.rs"
 harness = false
 
 [[test]]
+name = "environment_capture"
+path = "tests/environment_capture.rs"
+harness = false
+
+[[test]]
 name = "private_source_owner"
 path = "tests/private_source_owner.rs"
 harness = false

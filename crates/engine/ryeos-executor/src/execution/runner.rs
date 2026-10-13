@@ -3499,7 +3499,7 @@ fn read_admitted_direct_secrets(
         ));
     }
     ryeos_app::vault::authorize_secret_delivery(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &params.acting_principal,
         &names,
         params.provenance.project_authority(),

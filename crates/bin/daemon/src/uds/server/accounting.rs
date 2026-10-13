@@ -227,7 +227,7 @@ pub(super) fn handle_provider_attempt_prepare(
         anyhow!("provider attempt requires an admitted effective-definition identity")
     })?;
     let secrets = ryeos_app::vault::read_required_secrets_with_authority(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),
@@ -452,7 +452,7 @@ pub(super) fn handle_provider_attempt_mark_issued(
     // NOT revocation evidence: it must surface as a retryable RPC error, not
     // durably brand the attempt as released.
     let current_binding = match ryeos_app::vault::read_required_secrets_with_authority(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),

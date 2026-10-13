@@ -15,6 +15,7 @@ pub mod lifecycle_wire;
 pub mod metadata;
 pub mod model_setup;
 pub mod native_capacity;
+pub mod provider_env;
 pub mod start;
 pub mod status;
 pub mod stop;

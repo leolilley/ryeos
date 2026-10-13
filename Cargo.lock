@@ -3356,6 +3356,7 @@ dependencies = [
  "ryeos-runtime",
  "ryeos-scheduler-contract",
  "ryeos-state",
+ "ryeos-vault",
  "serde",
  "serde_json",
  "serde_yaml",

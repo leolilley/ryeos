@@ -123,6 +123,10 @@ pub struct AppState {
     /// daemon stays vendor-agnostic — this trait moves opaque
     /// `String -> String` pairs and never enumerates provider names.
     pub vault: Arc<dyn NodeVault>,
+    /// Provider-delivered environment values taken once at daemon startup
+    /// for exactly the names the node policy declares. Read only through
+    /// authorized secret delivery, alongside the vault.
+    pub provider_env: Arc<crate::vault::ProviderEnvironment>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.
     pub command_registry: Arc<CommandRegistry>,
@@ -216,6 +220,14 @@ pub struct AccountingStatus {
 }
 
 impl AppState {
+    /// Every secret source an authorized delivery may read.
+    pub fn secret_sources(&self) -> crate::vault::SecretSources<'_> {
+        crate::vault::SecretSources {
+            vault: self.vault.as_ref(),
+            provider_env: self.provider_env.as_ref(),
+        }
+    }
+
     /// The same one-shot participant used by durable lifecycle observations.
     pub fn scheduler(&self) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
         self.threads.scheduler_participant()
@@ -471,6 +483,7 @@ pub mod test_support {
                 Vec::new(),
             )),
             vault: Arc::new(crate::vault::EmptyVault),
+            provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
                 &[],
                 &Default::default(),

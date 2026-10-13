@@ -76,6 +76,7 @@ impl NodePolicyTable {
             Box::new(sections::native_capacity::NodeNativeCapacityPolicySection),
             Box::new(sections::object_closure::NodeObjectClosurePolicySection),
             Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
+            Box::new(sections::provider_environment::ProviderEnvironmentPolicySection),
             Box::new(sections::thread_history::ThreadHistoryPolicySection),
             Box::new(sections::ui_browser_sessions::UiBrowserSessionPolicySection),
         ])

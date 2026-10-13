@@ -103,6 +103,7 @@ impl AppSchedulerContext {
                 self.0.threads.site_id(),
                 &self.0.isolation,
                 &spec.execution.capabilities,
+                self.0.provider_env.declared_names(),
             )?;
         if &expected != authority {
             bail!(
@@ -302,6 +303,7 @@ impl SchedulerContext for AppSchedulerContext {
                     self.0.threads.site_id(),
                     &self.0.isolation,
                     &handler_context.scopes,
+                    self.0.provider_env.declared_names(),
                 )?;
                 Ok(ScheduledProjectBinding {
                     authority,
@@ -323,6 +325,7 @@ impl SchedulerContext for AppSchedulerContext {
                     self.0.threads.site_id(),
                     &self.0.isolation,
                     &handler_context.scopes,
+                    self.0.provider_env.declared_names(),
                 )?;
                 Ok(ScheduledProjectBinding {
                     authority,
@@ -369,6 +372,7 @@ impl SchedulerContext for AppSchedulerContext {
                         state.threads.site_id(),
                         &state.isolation,
                         &handler_context.scopes,
+                        state.provider_env.declared_names(),
                     )?;
                     ryeos_api::routes::response_modes::execute_mode::authorize_terminal_publication(
                         &execution.policy,

@@ -4638,7 +4638,7 @@ fn require_prepared_launch_secret_availability(
     names.sort();
     names.dedup();
     ryeos_app::vault::check_secret_availability(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &ctx.principal_fingerprint,
         &names,
         project_authority,

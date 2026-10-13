@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T01:14:15Z:1680620578d28fd607ffbf413ba0f0c6838d31997ccabd63eaa1e7411dadcb4f:EbZdOVGEkidAJTsZJnSALcHGLJmK/AhKgOQvAeKxjxLJ3+aHeL6nf9uj6w3+ICfdGmvYpZSFunoGm/TO534ZCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T07:32:11Z:4549470389e1a4d25e883803fdda2c3d79749f0648f1da31327ab8bb3a5d6476:x/INN+BB+S/VERlczm3z4OfopamloDUPn905aOAIgbksLThrFXaU69ZKQUeDuqGb3bpouIvzkPG3eCrqXrq+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -364,6 +364,13 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  # Provider-delivered environment names this node takes out of its own
+  # environment at startup and delivers only through authorized secret
+  # delivery. Model commands in the recipient can read a delivered value.
+  provider_environment:
+    schema: 1
+    names:
+      - OPENAI_API_KEY
   ui_browser_sessions:
     schema: 1
     max_live_binding_attachments_per_session: 16

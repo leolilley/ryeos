@@ -193,7 +193,7 @@ mod tests {
         assert!(read_named_secret(&vault, "operator", name).is_err());
         assert!(
             authorize_secret_delivery(
-                &vault,
+                &crate::vault::vault_only_sources(&vault),
                 "operator",
                 &[name.to_owned()],
                 &ryeos_state::objects::ExecutionProjectAuthority::projectless(

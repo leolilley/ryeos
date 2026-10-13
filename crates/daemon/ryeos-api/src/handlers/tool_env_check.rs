@@ -180,7 +180,7 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
     };
     let report = ryeos_app::vault::report_secret_presence(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &ctx.fingerprint,
         &names,
         &project_authority,

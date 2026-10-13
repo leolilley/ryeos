@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T01:14:15Z:abdd9362dfce363c00eae208de2739965da1ddc485fc0f0e8008cbdde5f9a1b4:tG8hwCP5ikyecU6Zl5CboG2gjqlwQcTvAzGzyO26OHe1cWYAXygMJqPC+EkdcUqg9AW5oKt3NHzEqXD8tqzdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T07:32:11Z:22364ac63b6733c72a9267e3ab5105bf2db115429e97457ceee1bc45121d2130:8ovG/96Vbzyi+nOS8ml/4vsoxvhFlitBi1E0WhVDj7glsRfGjQpDOK7KbrlR/pjVZqPE2MmoZMXK5v4cSv4zCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Source-only Core+scheduling profile; signing/admission/native qualification pending.
 schema: 1
 exact_bundles:
@@ -328,6 +328,9 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  provider_environment:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 1
     max_live_binding_attachments_per_session: 16
