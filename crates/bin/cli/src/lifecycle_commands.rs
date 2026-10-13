@@ -2107,6 +2107,7 @@ fn inspect_capability_report(
 
     let shell = lillux::process_control::HostFacts::observe(
         lillux_resident_quote().unwrap_or_default(),
+        app_root,
     );
     let shell_view = shell.capabilities();
     let shell_json = serde_json::json!({
@@ -2159,6 +2160,9 @@ fn inspect_capability_report(
                     Err(error) => serde_json::json!({ "error": error }),
                 },
                 "composition": signed.report.composition,
+                "daemon_digest": signed.report.daemon_digest,
+                "exposure": signed.report.exposure,
+                "app_root_storage": app_root_storage_json(&signed.report),
                 "floor": signed.report.floor,
                 "provided": signed.report.provided,
                 "missing": signed.report.missing,
@@ -2203,6 +2207,34 @@ fn residency_now(report: &ryeos_node::capability_report::NodeCapabilityReport) -
     }
 }
 
+/// The app root's storage as the report recorded it, with the decision on
+/// durable storage.
+fn app_root_storage_json(report: &ryeos_node::capability_report::NodeCapabilityReport) -> serde_json::Value {
+    use lillux::process_control::STORAGE_DURABLE_ROOT;
+    serde_json::json!({
+        "facts": report.host.app_root_storage,
+        "decision": match (report.provided.get(STORAGE_DURABLE_ROOT), report.missing.get(STORAGE_DURABLE_ROOT)) {
+            (Some(evidence), _) => serde_json::json!({ "provided": evidence }),
+            (None, Some(reason)) => serde_json::json!({ "missing": reason }),
+            (None, None) => serde_json::Value::Null,
+        },
+    })
+}
+
+/// One line for the app root's storage: the grade and basis that prove it
+/// durable, or the reason nothing does.
+fn app_root_storage_line(report: &ryeos_node::capability_report::NodeCapabilityReport) -> (String, crate::tty::Tone) {
+    use lillux::process_control::STORAGE_DURABLE_ROOT;
+    match (report.provided.get(STORAGE_DURABLE_ROOT), report.missing.get(STORAGE_DURABLE_ROOT)) {
+        (Some(evidence), _) => (
+            format!("durable ({}): {}", evidence.source.as_str(), evidence.basis),
+            crate::tty::Tone::Secondary,
+        ),
+        (None, Some(reason)) => (format!("not durable: {reason}"), crate::tty::Tone::Warning),
+        (None, None) => ("not decided".to_owned(), crate::tty::Tone::Warning),
+    }
+}
+
 fn lillux_resident_quote() -> Option<u64> {
     ryeos_node::capability_report::resident_region_bytes().ok()
 }
@@ -2230,13 +2262,26 @@ fn capability_section(
     ));
     section.rows.push(crate::tty::Row::key_value("bundles", &composition.bundles.join(", ")));
     section.rows.push(crate::tty::Row::key_value(
-        "native services",
-        &if composition.native_services.is_empty() {
+        "compiled features",
+        &if composition.compiled_features.is_empty() {
             "none".to_owned()
         } else {
-            composition.native_services.join(", ")
+            composition.compiled_features.join(", ")
         },
     ));
+    section.rows.push(crate::tty::Row::key_value("daemon binary", &report.daemon_digest));
+    let (storage, storage_tone) = app_root_storage_line(report);
+    section.rows.push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
+    let exposure = &report.exposure;
+    section.rows.push(crate::tty::Row::key_value(
+        "listeners",
+        &if exposure.listeners.is_empty() { "none".to_owned() } else { exposure.listeners.join(", ") },
+    ));
+    let ingress = match (&exposure.ingress, &exposure.ingress_unattested) {
+        (Some(evidence), _) => format!("{}: {}", evidence.source.as_str(), evidence.basis),
+        (None, reason) => format!("unattested: {}", reason.as_deref().unwrap_or("no reason recorded")),
+    };
+    section.rows.push(crate::tty::Row::key_value("ingress", &ingress));
     let generation = match check.map(|check| &check.detail["current"]) {
         Some(serde_json::Value::Bool(true)) => "current".to_owned(),
         Some(serde_json::Value::Object(detail)) => match (detail.get("stale"), detail.get("error")) {
@@ -2847,6 +2892,85 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_renders_composition_storage_and_exposure_rows() {
+        use lillux::process_control::{CapabilityEvidence, HostFacts, ProofSource, STORAGE_DURABLE_ROOT};
+        use ryeos_node::capability_report::{
+            FloorAdmission, NodeCapabilityReport, NodeComposition, NodeExposure, ReportGeneration,
+            SignedNodeCapabilityReport,
+        };
+        let mut missing = std::collections::BTreeMap::new();
+        missing.insert(
+            STORAGE_DURABLE_ROOT.to_owned(),
+            "the app root /data/app is on overlay (the container's writable layer)".to_owned(),
+        );
+        let report = NodeCapabilityReport {
+            schema: ryeos_node::capability_report::CAPABILITY_REPORT_SCHEMA.to_owned(),
+            node_fingerprint: "fixture".to_owned(),
+            daemon_digest: "sha256:abc".to_owned(),
+            generated_at: "fixture".to_owned(),
+            generation: ReportGeneration { boot_id: "fixture".to_owned(), cgroup_enclosure: None },
+            subject: "node".to_owned(),
+            composition: NodeComposition {
+                profile: Some("hosted-node".to_owned()),
+                bundles: vec!["core".to_owned()],
+                compiled_features: vec!["model-provider-setup".to_owned(), "scheduling".to_owned()],
+                policy_generation: "fixture".to_owned(),
+            },
+            exposure: NodeExposure::unattested(vec!["[::]:8080".to_owned()]),
+            host: HostFacts::observe(0, std::path::Path::new("/")),
+            provided: std::collections::BTreeMap::new(),
+            missing,
+            capacity: std::collections::BTreeMap::new(),
+            floor: FloorAdmission {
+                requires: Vec::new(),
+                admitted: true,
+                met_by: std::collections::BTreeMap::new(),
+                unmet: std::collections::BTreeMap::new(),
+            },
+            established_residency: None,
+        };
+        let row = |section: &crate::tty::Section, key: &str| {
+            section
+                .rows
+                .iter()
+                .find(|row| row.key.as_deref() == Some(key))
+                .map(|row| row.value.clone())
+                .unwrap_or_else(|| panic!("no {key} row in {section:?}"))
+        };
+        let signed = SignedNodeCapabilityReport {
+            report: report.clone(),
+            digest: "sha256:fixture".to_owned(),
+            signer: "fp:fixture".to_owned(),
+            signature: String::new(),
+        };
+        let section = capability_section(Some(&signed), None);
+        assert_eq!(row(&section, "compiled features"), "model-provider-setup, scheduling");
+        assert_eq!(row(&section, "daemon binary"), "sha256:abc");
+        assert!(row(&section, "app root storage").starts_with("not durable: the app root /data/app is on overlay"));
+        assert_eq!(row(&section, "listeners"), "[::]:8080");
+        assert_eq!(row(&section, "ingress"), "unattested: no provider attests what fronts this listener");
+        let json = app_root_storage_json(&report);
+        assert!(json["decision"]["missing"].as_str().unwrap().contains("overlay"), "{json}");
+
+        let mut durable = report;
+        durable.missing.clear();
+        durable.provided.insert(
+            STORAGE_DURABLE_ROOT.to_owned(),
+            CapabilityEvidence { source: ProofSource::Measured, basis: "ext4 at /data, durable by mount".to_owned() },
+        );
+        durable.exposure.listeners.clear();
+        let signed = SignedNodeCapabilityReport {
+            report: durable,
+            digest: signed.digest,
+            signer: signed.signer,
+            signature: signed.signature,
+        };
+        let section = capability_section(Some(&signed), None);
+        assert_eq!(row(&section, "app root storage"), "durable (measured): ext4 at /data, durable by mount");
+        assert_eq!(row(&section, "listeners"), "none");
+    }
 
     #[test]
     fn replay_reset_reporting_distinguishes_current_and_skipped_epochs() {

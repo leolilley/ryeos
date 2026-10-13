@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{NodePolicyContext, NodePolicyTable};
+use super::{NodePolicyContext, NodePolicyTable, TypedNodePolicy};
 use crate::identity::NodeIdentity;
 
 pub const POLICIES_DIRECTORY: &str = "policies";
@@ -60,6 +60,35 @@ impl NodeInitProfile {
     ) -> Result<NodePolicyGeneration> {
         self.validate(policy_table, source_file)?;
         validate_policy_generation(policy_table, self.policies.clone(), source_file)
+    }
+
+    /// This profile's member for policy `T`, compiled by its registered
+    /// section exactly as a node generation compiles it.
+    pub fn typed_policy<T: TypedNodePolicy + Clone>(
+        &self,
+        policy_table: &NodePolicyTable,
+        source_file: &Path,
+    ) -> Result<T> {
+        let body = self
+            .policies
+            .get(T::SECTION_NAME)
+            .with_context(|| format!("node profile has no `{}` policy", T::SECTION_NAME))?;
+        let section = policy_table
+            .get(T::SECTION_NAME)
+            .with_context(|| format!("unknown node policy section `{}`", T::SECTION_NAME))?;
+        let context = NodePolicyContext {
+            section: T::SECTION_NAME.to_owned(),
+            source_file: source_file.with_file_name(format!("{}.yaml", T::SECTION_NAME)),
+            signer_fingerprint: String::new(),
+        };
+        let record = section
+            .parse(&context, body)
+            .with_context(|| format!("validate `{}` node policy", T::SECTION_NAME))?;
+        record
+            .as_any()
+            .downcast_ref::<T>()
+            .cloned()
+            .with_context(|| format!("node policy compiler `{}` returned the wrong typed record", T::SECTION_NAME))
     }
 }
 

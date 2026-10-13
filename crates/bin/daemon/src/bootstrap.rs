@@ -586,6 +586,24 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// selected after runtime admission. A mandatory launch preparer may cause the
 /// returned snapshot to capture its selected isolation backend even when the
 /// general policy is disabled.
+/// Every optional Cargo feature of this daemon, with whether it is compiled
+/// in. The capability report lists the compiled ones.
+const COMPILED_FEATURES: [(&str, bool); 5] = [
+    ("crash-qualification-test-support", cfg!(feature = "crash-qualification-test-support")),
+    ("handoff-test-support", cfg!(feature = "handoff-test-support")),
+    ("latency-profiling", cfg!(feature = "latency-profiling")),
+    ("model-provider-setup", cfg!(feature = "model-provider-setup")),
+    ("scheduling", cfg!(feature = "scheduling")),
+];
+
+fn compiled_features() -> Vec<String> {
+    COMPILED_FEATURES
+        .iter()
+        .filter(|(_, compiled)| *compiled)
+        .map(|(name, _)| (*name).to_owned())
+        .collect()
+}
+
 pub fn load_node_config_two_phase(
     config: &Config,
 ) -> Result<(
@@ -837,16 +855,23 @@ fn load_node_config_two_phase_with_socket(
     // then admits itself only if the signed policy's capability floor is met.
     // This precedes the engine and every native reservation, so a refusal
     // spends no incarnation.
-    let mut native_services = Vec::new();
-    if cfg!(feature = "scheduling") {
-        native_services.push("scheduling".to_owned());
-    }
+    let daemon_digest = lillux::current_executable_digest()
+        .map_err(anyhow::Error::msg)
+        .context("Phase 1: measure the running daemon executable")?;
+    // Only the running daemon serves the TCP listener; it is bound before
+    // this point, so the configured address is the bound one.
+    let listeners = match daemon_socket {
+        Some(_) => vec![config.bind.to_string()],
+        None => Vec::new(),
+    };
     let report = ryeos_node::capability_report::NodeCapabilityReport::assemble(
         ryeos_node::capability_report::ReportInputs {
             app_root,
             node_fingerprint: node_identity.fingerprint(),
+            daemon_digest: format!("sha256:{daemon_digest}"),
             bundles: generation.records().iter().map(|record| record.name.clone()).collect(),
-            native_services,
+            compiled_features: compiled_features(),
+            listeners,
             policy_generation: format!("sha256:{}", node_policy.generation_digest()),
             isolation: isolation.inspection(),
             host_runtime_present: host_runtime.is_some(),
@@ -918,6 +943,29 @@ fn load_node_config_two_phase_with_socket(
 mod tests {
     use super::*;
     use ryeos_node_runtime::identity::NodeIdentity;
+
+    #[test]
+    fn every_optional_cargo_feature_is_reported_when_compiled() {
+        let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+        let declared: std::collections::BTreeSet<&str> = manifest["features"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| *name != "default")
+            .collect();
+        let reported: std::collections::BTreeSet<&str> =
+            COMPILED_FEATURES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(reported, declared, "the report table must list every daemon feature");
+        assert_eq!(compiled_features().contains(&"scheduling".to_owned()), cfg!(feature = "scheduling"));
+    }
+
+    #[test]
+    fn the_daemon_digest_is_stable_for_one_executable() {
+        let first = lillux::current_executable_digest().unwrap();
+        assert_eq!(first.len(), 64, "{first}");
+        assert_eq!(lillux::current_executable_digest().unwrap(), first);
+    }
 
     /// Build a minimal Config for testing with all paths under a tempdir.
     fn test_config(tmp: &std::path::Path) -> Config {

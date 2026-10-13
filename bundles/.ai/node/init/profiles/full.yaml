@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T11:47:25Z:dc05cc49faacd3583068eae47f0717291d7e504515ffaea0c9baf23d098fe466:+0nAB6WDZePPQemNDcpDnJssS8fYwpmNN6Nsa+VpoPsrd8FRMQzORYXaLn50jY64lOXp3H25KkJKOUHAV30+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T01:14:15Z:4464d309640faaf9510ff6468b01dc2ebcf95417fd3ad780379e34f392cd5833:VrwR625rXbvCUyXi+9bXSfoIbddY9o5aEvpM3X+hhWF3uBbbLwaZNmhyTUB7Y2ZIM8vOpHXBnU6LRVCtvka8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -275,7 +275,7 @@ policies:
       version: 8
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, limits:scope, recovery:scope, termination:scope, time]
+      requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves

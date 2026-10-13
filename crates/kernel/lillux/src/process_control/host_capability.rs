@@ -17,7 +17,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-pub const HOST_FACTS_VERSION: u32 = 3;
+pub const HOST_FACTS_VERSION: u32 = 4;
 
 // Residency names match exactly, like every capability name: a proof meets
 // only the name of its own basis, so a stronger basis does not meet a
@@ -41,6 +41,12 @@ pub const ACCOUNTING: &str = "accounting";
 /// Every name the residency proof decides.
 pub const RESIDENCY_CAPABILITIES: [&str; 4] =
     [ACCOUNTING, RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT];
+
+/// The node's app root is on storage that outlives the node's container:
+/// a block or network filesystem on its own mount, or the host's own root
+/// filesystem when the node runs in the host's initial pid namespace. A
+/// container's writable layer or a memory-backed filesystem never meets it.
+pub const STORAGE_DURABLE_ROOT: &str = "storage:durable_root";
 
 /// How the node's resident native region is kept in physical memory.
 ///
@@ -357,8 +363,10 @@ pub fn met_by_strongest(entry: &CapabilityRequirement, met: &str) -> bool {
 
 /// Why one floor entry is malformed in what it names, or `None` when it is
 /// well placed. A per-scope name decides how scopes are configured, so it is
-/// never conditional inside a set. A weaker residency basis is not met by a
-/// stronger one, so it appears only in a set beside `accounting`, which
+/// never conditional inside a set. Durable app-root storage decides whether
+/// the node's identity and records survive a restart, which no alternative
+/// replaces, so it too stands alone. A weaker residency basis is not met by
+/// a stronger one, so it appears only in a set beside `accounting`, which
 /// every standing basis meets.
 pub fn floor_entry_refusal(entry: &CapabilityRequirement) -> Option<String> {
     let names = entry.names();
@@ -367,6 +375,14 @@ pub fn floor_entry_refusal(entry: &CapabilityRequirement) -> Option<String> {
     {
         return Some(format!(
             "entry {} names per-scope capability {scoped}, which must be required on its own",
+            entry.label()
+        ));
+    }
+    if let CapabilityRequirement::AnyOf(_) = entry
+        && names.iter().any(|name| name == STORAGE_DURABLE_ROOT)
+    {
+        return Some(format!(
+            "entry {} names {STORAGE_DURABLE_ROOT}, which must be required on its own",
             entry.label()
         ));
     }
@@ -554,6 +570,280 @@ pub struct MemlockFacts {
     pub cap_ipc_lock: bool,
 }
 
+/// Where the node's app root is stored, as this process sees it. Every
+/// field is a measurement, or `None` when it could not be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootStorageFacts {
+    /// The path observed.
+    pub path: String,
+    /// Filesystem type the mount table names for the path's mount.
+    pub filesystem: Option<String>,
+    /// Filesystem magic number `fstatfs` reports for the path.
+    pub f_type: Option<u64>,
+    /// Mount identity of the path, as numbered in `/proc/self/mountinfo`.
+    pub mount_id: Option<u64>,
+    pub mount_point: Option<String>,
+    pub mount_source: Option<String>,
+    /// Mount identity of `/` in this process's mount namespace.
+    pub root_mount_id: Option<u64>,
+    pub private_pid_namespace: Option<bool>,
+    /// Whether this kernel runs under a hypervisor: `Some(true)` when any
+    /// unprivileged sign names one, `Some(false)` only when every sign was
+    /// readable and none does, `None` when that cannot be told.
+    pub hypervisor: Option<bool>,
+    /// What the hypervisor answer rests on.
+    pub hypervisor_basis: String,
+    /// `native` or `gvisor`, as in [`HostFacts::kernel_kind`].
+    pub kernel_kind: String,
+}
+
+impl RootStorageFacts {
+    /// Observe where `path` is stored. Never fails: an unreadable fact is
+    /// recorded as `None`.
+    pub fn observe(path: &std::path::Path) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            linux::observe_root_storage(path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self {
+                path: path.display().to_string(),
+                filesystem: None,
+                f_type: None,
+                mount_id: None,
+                mount_point: None,
+                mount_source: None,
+                root_mount_id: None,
+                private_pid_namespace: None,
+                hypervisor: None,
+                hypervisor_basis: "virtualization is not observable on this OS".to_owned(),
+                kernel_kind: "unknown".to_owned(),
+            }
+        }
+    }
+}
+
+// Firmware vendor and product names that only virtual machines report.
+const VIRTUAL_MACHINE_FIRMWARE: [&str; 10] = [
+    "QEMU",
+    "KVM",
+    "Amazon EC2",
+    "Google Compute Engine",
+    "Virtual Machine",
+    "VMware",
+    "VirtualBox",
+    "innotek",
+    "Xen",
+    "Firecracker",
+];
+
+/// Whether this kernel runs under a hypervisor, from facts readable without
+/// privilege: the CPU's `hypervisor` flag in `/proc/cpuinfo` (x86 only),
+/// `/sys/hypervisor/type`, and the firmware's system vendor and product
+/// name. Any sign of one decides `true`. `false` needs the x86 flag line
+/// read without the flag, no hypervisor type and firmware naming no
+/// virtual machine; anything less, such as an architecture whose CPU does
+/// not report the flag, is undecided.
+fn decide_hypervisor(
+    cpuinfo: Option<&str>,
+    hypervisor_type: Option<&str>,
+    sys_vendor: Option<&str>,
+    product_name: Option<&str>,
+) -> (Option<bool>, String) {
+    let flags = cpuinfo.and_then(|cpuinfo| {
+        cpuinfo
+            .lines()
+            .find_map(|line| line.strip_prefix("flags").and_then(|rest| rest.trim_start().strip_prefix(':')))
+    });
+    if let Some(flags) = flags
+        && flags.split_whitespace().any(|flag| flag == "hypervisor")
+    {
+        return (Some(true), "the CPU reports the hypervisor flag".to_owned());
+    }
+    if let Some(kind) = hypervisor_type.map(str::trim).filter(|kind| !kind.is_empty()) {
+        return (Some(true), format!("/sys/hypervisor/type is {kind}"));
+    }
+    let firmware = [sys_vendor, product_name]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|name| VIRTUAL_MACHINE_FIRMWARE.iter().any(|known| name.contains(known)));
+    if let Some(name) = firmware {
+        return (Some(true), format!("the firmware names a virtual machine ({name})"));
+    }
+    match (flags, sys_vendor) {
+        (Some(_), Some(vendor)) => (
+            Some(false),
+            format!(
+                "the CPU does not report the hypervisor flag, no hypervisor type is exposed, and the \
+                 firmware names {} {}",
+                vendor.trim(),
+                product_name.map(str::trim).unwrap_or("")
+            )
+            .trim_end()
+            .to_owned(),
+        ),
+        (Some(_), None) => (
+            None,
+            "the CPU does not report the hypervisor flag but the firmware identity is unreadable".to_owned(),
+        ),
+        (None, _) => (
+            None,
+            "this CPU does not report whether it runs under a hypervisor".to_owned(),
+        ),
+    }
+}
+
+/// How a filesystem keeps what is written to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageClass {
+    /// A union or memory filesystem whose content goes with its container
+    /// or its host's memory: what it is, and when its content is lost.
+    Ephemeral(&'static str, &'static str),
+    /// A filesystem on a block device.
+    Block,
+    /// A filesystem served over the network.
+    Network,
+    Unclassified,
+}
+
+// Filesystem names as the mount table writes them, and the magic numbers
+// from <linux/magic.h> that `fstatfs` reports for the same filesystems.
+const EPHEMERAL_FILESYSTEMS: [(&str, u64, &str, &str); 4] = [
+    ("overlay", 0x794c_7630, "the container's writable layer", "discarded when the container is replaced"),
+    ("aufs", 0x6175_6673, "a container's union layer", "discarded when the container is replaced"),
+    ("tmpfs", 0x0102_1994, "memory-backed", "lost when its host or container stops"),
+    ("ramfs", 0x8584_58f6, "memory-backed", "lost when its host or container stops"),
+];
+const BLOCK_FILESYSTEMS: [(&str, u64); 8] = [
+    ("ext2", 0xef53),
+    ("ext3", 0xef53),
+    ("ext4", 0xef53),
+    ("xfs", 0x5846_5342),
+    ("btrfs", 0x9123_683e),
+    ("zfs", 0x2fc1_2fc1),
+    ("f2fs", 0xf2f5_2010),
+    ("bcachefs", 0xca45_1a4e),
+];
+const NETWORK_FILESYSTEMS: [(&str, u64); 5] = [
+    ("nfs", 0x6969),
+    ("nfs4", 0x6969),
+    ("cifs", 0xff53_4d42),
+    ("smb3", 0xfe53_4d42),
+    ("ceph", 0x00c3_6400),
+];
+
+/// The class of the filesystem named `filesystem` with magic `f_type`. A
+/// union or memory filesystem named by either measurement is ephemeral even
+/// when the other says otherwise.
+fn classify_storage(filesystem: Option<&str>, f_type: Option<u64>) -> StorageClass {
+    for (name, magic, what, lost) in EPHEMERAL_FILESYSTEMS {
+        if filesystem == Some(name) || f_type == Some(magic) {
+            return StorageClass::Ephemeral(what, lost);
+        }
+    }
+    let known = |table: &[(&str, u64)]| match filesystem {
+        Some(filesystem) => table.iter().any(|(name, _)| *name == filesystem),
+        None => f_type.is_some_and(|f_type| table.iter().any(|(_, magic)| *magic == f_type)),
+    };
+    if known(&BLOCK_FILESYSTEMS) {
+        StorageClass::Block
+    } else if known(&NETWORK_FILESYSTEMS) {
+        StorageClass::Network
+    } else {
+        StorageClass::Unclassified
+    }
+}
+
+/// Whether the app root's storage outlives the node's container. A union
+/// or memory filesystem is refused: it is discarded with its container or
+/// its host's memory. A block or network filesystem on a mount of its own
+/// is durable by mount, which proves only that the mount is not part of the
+/// container's layers. The root filesystem itself is durable only for a
+/// node in the host's initial pid namespace on a machine with no hypervisor
+/// detected: a container's root filesystem can be discarded when the
+/// container is replaced, and a virtual machine's root disk with the
+/// machine, which nothing inside it can measure. Under gVisor every
+/// answer is emulated, so a durable finding is provider-attested.
+pub fn decide_durable_root(facts: &RootStorageFacts) -> Result<CapabilityEvidence, String> {
+    let path = &facts.path;
+    let name = facts
+        .filesystem
+        .clone()
+        .or_else(|| facts.f_type.map(|f_type| format!("filesystem 0x{f_type:x}")))
+        .ok_or_else(|| format!("the filesystem of the app root {path} is unreadable"))?;
+    let class = classify_storage(facts.filesystem.as_deref(), facts.f_type);
+    if let StorageClass::Ephemeral(what, lost) = class {
+        return Err(format!("the app root {path} is on {name} ({what}), {lost}"));
+    }
+    if class == StorageClass::Unclassified {
+        return Err(format!(
+            "the app root {path} is on {name}, which this node cannot classify as durable storage"
+        ));
+    }
+    let (Some(mount_id), Some(root_mount_id)) = (facts.mount_id, facts.root_mount_id) else {
+        return Err(format!(
+            "the mount of the app root {path} or of / is unreadable, so whether it is the \
+             container's own filesystem is undecided"
+        ));
+    };
+    let source = facts.mount_source.as_deref().unwrap_or("an unreadable source");
+    let basis = if mount_id != root_mount_id {
+        let kind = if class == StorageClass::Network { "network" } else { "block" };
+        format!(
+            "the app root {path} is on {name}, a {kind} filesystem mounted at {} from {source}, \
+             distinct from /; durable by mount: the mount outlives the process; nothing here \
+             proves the provider keeps it across redeploys",
+            facts.mount_point.as_deref().unwrap_or("an unreadable mount point")
+        )
+    } else {
+        match (facts.private_pid_namespace, facts.hypervisor) {
+            (Some(false), Some(false)) => format!(
+                "the app root {path} is on the root filesystem ({name} from {source}), the node \
+                 runs in the host's initial pid namespace, and no hypervisor is detected ({}), so \
+                 it is the machine's own disk",
+                facts.hypervisor_basis
+            ),
+            (Some(false), Some(true)) => {
+                return Err(format!(
+                    "the app root {path} is on the virtual machine's root disk ({name}; {}), which \
+                     may be discarded with the machine; place it on a separately attached volume",
+                    facts.hypervisor_basis
+                ));
+            }
+            (Some(false), None) => {
+                return Err(format!(
+                    "the app root {path} is on the root filesystem and whether this machine is \
+                     virtual is undecided ({}), so its root disk may be discarded with it; place \
+                     the app root on a separately attached volume",
+                    facts.hypervisor_basis
+                ));
+            }
+            (Some(true), _) => {
+                return Err(format!(
+                    "the app root {path} is on the container's root filesystem ({name}), which \
+                     can be discarded when the container is replaced"
+                ));
+            }
+            (None, _) => {
+                return Err(format!(
+                    "the app root {path} is on the root filesystem and this process's pid \
+                     namespace is unreadable, so whether that is a container's is undecided"
+                ));
+            }
+        }
+    };
+    if facts.kernel_kind == "gvisor" {
+        return Ok(CapabilityEvidence {
+            source: ProofSource::ProviderAttested,
+            basis: format!("{basis} (observed under gVisor emulation)"),
+        });
+    }
+    Ok(CapabilityEvidence { source: ProofSource::Measured, basis })
+}
+
 /// Raw host observations. Every field is a measurement as this process sees
 /// it, or the reason it could not be measured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +893,8 @@ pub struct HostFacts {
     pub resident_bytes: u64,
     pub residency: Option<ResidencyProof>,
     pub residency_refusal: Option<String>,
+    /// Where the node's app root is stored.
+    pub app_root_storage: RootStorageFacts,
 }
 
 /// Host-level capability view derived from facts. Scope capabilities come
@@ -636,11 +928,12 @@ impl HostCapabilities {
 
 impl HostFacts {
     /// Observe this host for a node whose resident region is
-    /// `resident_bytes`. Never fails: an unreadable fact is recorded as such.
-    pub fn observe(resident_bytes: u64) -> Self {
+    /// `resident_bytes` and whose app root is `app_root`. Never fails: an
+    /// unreadable fact is recorded as such.
+    pub fn observe(resident_bytes: u64, app_root: &std::path::Path) -> Self {
         #[cfg(target_os = "linux")]
         {
-            linux::observe(resident_bytes)
+            linux::observe(resident_bytes, app_root)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -684,6 +977,7 @@ impl HostFacts {
                 resident_bytes,
                 residency: None,
                 residency_refusal: Some("resident memory proof is unavailable on this OS".to_owned()),
+                app_root_storage: RootStorageFacts::observe(app_root),
             }
         }
     }
@@ -864,6 +1158,10 @@ impl HostFacts {
                     ),
                 ),
             }
+        }
+        match decide_durable_root(&self.app_root_storage) {
+            Ok(evidence) => view.provide(STORAGE_DURABLE_ROOT, evidence.source, evidence.basis),
+            Err(reason) => view.refuse(STORAGE_DURABLE_ROOT, reason),
         }
         if self.unshare_user_pid_mount.allowed() {
             view.provide(
@@ -1359,10 +1657,14 @@ mod linux {
         ProbeOutcome::Allowed
     }
 
-    pub(super) fn observe(resident_bytes: u64) -> HostFacts {
+    fn kernel_kind(version: &str) -> &'static str {
+        if version.to_ascii_lowercase().contains("gvisor") { "gvisor" } else { "native" }
+    }
+
+    pub(super) fn observe(resident_bytes: u64, app_root: &Path) -> HostFacts {
         let status = read_small("/proc/self/status").unwrap_or_default();
         let version = read_small("/proc/version").unwrap_or_default();
-        let kernel_kind = if version.to_ascii_lowercase().contains("gvisor") { "gvisor" } else { "native" };
+        let kernel_kind = kernel_kind(&version);
         let pid_namespace = std::fs::metadata("/proc/self/ns/pid").ok().map(|metadata| metadata.ino());
         let (soft, hard) = memlock_limit().map_or((None, None), |(soft, hard)| (Some(soft), Some(hard)));
         let membership_path = membership().ok();
@@ -1426,6 +1728,115 @@ mod linux {
             resident_bytes,
             residency_refusal: residency.as_ref().err().cloned(),
             residency: residency.ok(),
+            app_root_storage: observe_root_storage(app_root),
+        }
+    }
+
+    /// Open `path` for observation only, following symbolic links, so the
+    /// measurement is of the directory that writes actually reach.
+    fn open_path(path: &Path) -> Option<File> {
+        use std::os::fd::FromRawFd as _;
+        let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        // SAFETY: a non-negative return is a fresh descriptor owned here.
+        (fd >= 0).then(|| unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn mount_identity(file: &File) -> Option<u64> {
+        let mut observation: libc::statx = unsafe { std::mem::zeroed() };
+        let empty = c"";
+        let status = unsafe {
+            libc::statx(
+                file.as_raw_fd(),
+                empty.as_ptr(),
+                libc::AT_EMPTY_PATH,
+                libc::STATX_MNT_ID,
+                &mut observation,
+            )
+        };
+        (status == 0 && observation.stx_mask & libc::STATX_MNT_ID != 0).then_some(observation.stx_mnt_id)
+    }
+
+    fn filesystem_magic(file: &File) -> Option<u64> {
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        (unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } == 0).then_some(stat.f_type as u64)
+    }
+
+    /// Undo the octal escapes mountinfo writes for space, tab, newline and
+    /// backslash.
+    fn unescape_mount_field(field: &str) -> String {
+        let bytes = field.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let octal = bytes.get(index + 1..index + 4).and_then(|digits| {
+                let text = std::str::from_utf8(digits).ok()?;
+                u8::from_str_radix(text, 8).ok()
+            });
+            match (bytes[index], octal) {
+                (b'\\', Some(byte)) => {
+                    out.push(byte);
+                    index += 4;
+                }
+                (byte, _) => {
+                    out.push(byte);
+                    index += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// The mount point, filesystem type and source of mount `mount_id` in
+    /// `mountinfo`.
+    pub(super) fn mount_entry(mountinfo: &str, mount_id: u64) -> Option<(String, String, String)> {
+        mountinfo.lines().find_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let fields: Vec<&str> = left.split_whitespace().collect();
+            if fields.first()?.parse::<u64>().ok()? != mount_id {
+                return None;
+            }
+            let mut right = right.split_whitespace();
+            let filesystem = right.next()?;
+            let source = right.next()?;
+            Some((
+                unescape_mount_field(fields.get(4)?),
+                unescape_mount_field(filesystem),
+                unescape_mount_field(source),
+            ))
+        })
+    }
+
+    pub(super) fn observe_root_storage(path: &Path) -> super::RootStorageFacts {
+        let opened = open_path(path);
+        let mount_id = opened.as_ref().and_then(mount_identity);
+        let entry = match (mount_id, read_small("/proc/self/mountinfo")) {
+            (Some(mount_id), Ok(mountinfo)) => mount_entry(&mountinfo, mount_id),
+            _ => None,
+        };
+        let (mount_point, filesystem, mount_source) = match entry {
+            Some((point, filesystem, source)) => (Some(point), Some(filesystem), Some(source)),
+            None => (None, None, None),
+        };
+        let firmware = |name: &str| read_small(&format!("/sys/class/dmi/id/{name}")).ok();
+        let (hypervisor, hypervisor_basis) = super::decide_hypervisor(
+            read_small("/proc/cpuinfo").ok().as_deref(),
+            read_small("/sys/hypervisor/type").ok().as_deref(),
+            firmware("sys_vendor").as_deref(),
+            firmware("product_name").as_deref(),
+        );
+        super::RootStorageFacts {
+            path: path.display().to_string(),
+            filesystem,
+            f_type: opened.as_ref().and_then(filesystem_magic),
+            mount_id,
+            mount_point,
+            mount_source,
+            root_mount_id: open_path(Path::new("/")).as_ref().and_then(mount_identity),
+            private_pid_namespace: private_pid_namespace(),
+            hypervisor,
+            hypervisor_basis,
+            kernel_kind: kernel_kind(&read_small("/proc/version").unwrap_or_default()).to_owned(),
         }
     }
 
@@ -1467,6 +1878,21 @@ mod linux {
             assert!(waited >= hold - std::time::Duration::from_millis(50), "{waited:?}");
             // The window reopened: a descriptor lease is granted at once.
             drop(crate::exec::try_retain_fork_sensitive_descriptors().unwrap());
+        }
+
+        #[test]
+        fn mountinfo_entry_is_found_by_mount_id() {
+            let mountinfo = "22 1 0:21 / / rw,relatime shared:1 - overlay overlay rw,lowerdir=/l\n\
+                             31 22 8:16 / /data\\040app rw - ext4 /dev/vdb rw\n";
+            assert_eq!(
+                super::mount_entry(mountinfo, 31),
+                Some(("/data app".to_owned(), "ext4".to_owned(), "/dev/vdb".to_owned()))
+            );
+            assert_eq!(
+                super::mount_entry(mountinfo, 22),
+                Some(("/".to_owned(), "overlay".to_owned(), "overlay".to_owned()))
+            );
+            assert_eq!(super::mount_entry(mountinfo, 7), None);
         }
 
         #[test]
@@ -1540,7 +1966,151 @@ mod tests {
             resident_bytes: 0,
             residency: None,
             residency_refusal: Some("fixture".to_owned()),
+            app_root_storage: storage("ext4", 0xef53, 40, 1, Some(true)),
         }
+    }
+
+    fn storage(
+        filesystem: &str,
+        f_type: u64,
+        mount_id: u64,
+        root_mount_id: u64,
+        private_pid_namespace: Option<bool>,
+    ) -> RootStorageFacts {
+        RootStorageFacts {
+            path: "/data/app".to_owned(),
+            filesystem: Some(filesystem.to_owned()),
+            f_type: Some(f_type),
+            mount_id: Some(mount_id),
+            mount_point: Some(if mount_id == root_mount_id { "/" } else { "/data" }.to_owned()),
+            mount_source: Some("/dev/vdb".to_owned()),
+            root_mount_id: Some(root_mount_id),
+            private_pid_namespace,
+            hypervisor: Some(false),
+            hypervisor_basis: "fixture: bare metal".to_owned(),
+            kernel_kind: "native".to_owned(),
+        }
+    }
+
+    fn in_vm(mut facts: RootStorageFacts) -> RootStorageFacts {
+        facts.hypervisor = Some(true);
+        facts.hypervisor_basis = "the CPU reports the hypervisor flag".to_owned();
+        facts
+    }
+
+    #[test]
+    fn durable_root_is_decided_from_filesystem_and_mount() {
+        let in_container = Some(true);
+        let on_host = Some(false);
+        let refused = [
+            (storage("overlay", 0x794c_7630, 1, 1, in_container), "overlay (the container's writable layer)"),
+            (storage("tmpfs", 0x0102_1994, 40, 1, in_container), "memory-backed"),
+            (storage("ramfs", 0x8584_58f6, 40, 1, on_host), "memory-backed"),
+            // The magic number alone names a union filesystem.
+            (storage("ext4", 0x794c_7630, 40, 1, in_container), "the container's writable layer"),
+            (storage("ext4", 0xef53, 1, 1, in_container), "container's root filesystem"),
+            (storage("ext4", 0xef53, 1, 1, None), "undecided"),
+            (storage("9p", 0x0102_1997, 40, 1, in_container), "cannot classify"),
+        ];
+        for (facts, reason) in refused {
+            let refusal = decide_durable_root(&facts).unwrap_err();
+            assert!(refusal.contains(reason), "{facts:?}: {refusal}");
+            assert!(refusal.contains("/data/app"), "{refusal}");
+        }
+        let own_mount = decide_durable_root(&storage("ext4", 0xef53, 40, 1, in_container)).unwrap();
+        assert_eq!(own_mount.source, ProofSource::Measured);
+        assert!(own_mount.basis.contains("durable by mount"), "{}", own_mount.basis);
+        assert!(own_mount.basis.contains("nothing here proves the provider keeps it"), "{}", own_mount.basis);
+        assert!(own_mount.basis.contains("/dev/vdb"), "{}", own_mount.basis);
+        let network = decide_durable_root(&storage("nfs4", 0x6969, 40, 1, in_container)).unwrap();
+        assert_eq!(network.source, ProofSource::Measured);
+        assert!(network.basis.contains("network filesystem"), "{}", network.basis);
+        let host_root = decide_durable_root(&storage("ext4", 0xef53, 1, 1, on_host)).unwrap();
+        assert_eq!(host_root.source, ProofSource::Measured);
+        assert!(host_root.basis.contains("initial pid namespace"), "{}", host_root.basis);
+        assert!(host_root.basis.contains("no hypervisor is detected"), "{}", host_root.basis);
+
+        // A virtual machine's root disk is refused; its separate volume is not.
+        let vm_root = decide_durable_root(&in_vm(storage("ext4", 0xef53, 1, 1, on_host))).unwrap_err();
+        assert!(vm_root.contains("virtual machine's root disk"), "{vm_root}");
+        assert!(vm_root.contains("separately attached volume"), "{vm_root}");
+        let vm_volume = decide_durable_root(&in_vm(storage("ext4", 0xef53, 40, 1, on_host))).unwrap();
+        assert_eq!(vm_volume.source, ProofSource::Measured);
+        assert!(vm_volume.basis.contains("durable by mount"), "{}", vm_volume.basis);
+        let mut undecided = storage("xfs", 0x5846_5342, 1, 1, on_host);
+        undecided.hypervisor = None;
+        assert!(decide_durable_root(&undecided).unwrap_err().contains("virtual is undecided"));
+
+        let mut unreadable = storage("ext4", 0xef53, 40, 1, in_container);
+        unreadable.filesystem = None;
+        unreadable.f_type = None;
+        assert!(decide_durable_root(&unreadable).unwrap_err().contains("unreadable"));
+        // The magic number classifies when the mount table is unreadable.
+        unreadable.f_type = Some(0x5846_5342);
+        assert!(decide_durable_root(&unreadable).is_ok());
+        unreadable.root_mount_id = None;
+        assert!(decide_durable_root(&unreadable).unwrap_err().contains("undecided"));
+
+        let mut emulated = storage("ext4", 0xef53, 40, 1, in_container);
+        emulated.kernel_kind = "gvisor".to_owned();
+        let attested = decide_durable_root(&emulated).unwrap();
+        assert_eq!(attested.source, ProofSource::ProviderAttested);
+        assert!(attested.basis.contains("gVisor"), "{}", attested.basis);
+        assert!(!satisfies_local_requirement(STORAGE_DURABLE_ROOT, &attested));
+        emulated.filesystem = Some("overlay".to_owned());
+        assert!(decide_durable_root(&emulated).is_err());
+    }
+
+    #[test]
+    fn hypervisor_is_decided_from_unprivileged_signs() {
+        let bare = "processor\t: 0\nflags\t\t: fpu vme sse2 avx2\n";
+        let guest = "processor\t: 0\nflags\t\t: fpu vme sse2 hypervisor avx2\n";
+        let arm = "processor\t: 0\nFeatures\t: fp asimd\n";
+        let decided = decide_hypervisor(Some(bare), None, Some("Dell Inc.\n"), Some("Inspiron\n"));
+        assert_eq!(decided.0, Some(false), "{}", decided.1);
+        assert!(decided.1.contains("Dell Inc."), "{}", decided.1);
+        assert_eq!(decide_hypervisor(Some(guest), None, None, None).0, Some(true));
+        assert_eq!(decide_hypervisor(Some(bare), Some("xen\n"), None, None).0, Some(true));
+        let firmware = decide_hypervisor(Some(bare), None, Some("QEMU"), Some("Standard PC"));
+        assert_eq!(firmware.0, Some(true));
+        assert!(firmware.1.contains("QEMU"), "{}", firmware.1);
+        assert_eq!(decide_hypervisor(Some(arm), None, Some("Amazon EC2"), None).0, Some(true));
+        // Without the x86 flag line or the firmware identity nothing is decided.
+        assert_eq!(decide_hypervisor(Some(arm), None, Some("Ampere"), None).0, None);
+        assert_eq!(decide_hypervisor(Some(bare), None, None, None).0, None);
+        assert_eq!(decide_hypervisor(None, None, Some("Dell Inc."), None).0, None);
+    }
+
+    #[test]
+    fn host_capabilities_carry_the_durable_root_decision() {
+        let mut host = facts(Err("fixture".to_owned()), None);
+        let view = host.capabilities();
+        assert_eq!(view.provided[STORAGE_DURABLE_ROOT].source, ProofSource::Measured);
+        host.app_root_storage = storage("overlay", 0x794c_7630, 1, 1, Some(true));
+        let view = host.capabilities();
+        assert!(view.missing[STORAGE_DURABLE_ROOT].contains("overlay"), "{view:?}");
+        assert!(!view.provided.contains_key(STORAGE_DURABLE_ROOT));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_storage_observes_a_real_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let facts = RootStorageFacts::observe(root.path());
+        assert_eq!(facts.path, root.path().display().to_string());
+        assert!(facts.f_type.is_some(), "{facts:?}");
+        assert!(facts.mount_id.is_some() && facts.root_mount_id.is_some(), "{facts:?}");
+        assert!(facts.filesystem.is_some() && facts.mount_point.is_some(), "{facts:?}");
+        assert!(facts.private_pid_namespace.is_some(), "{facts:?}");
+        assert!(!facts.hypervisor_basis.is_empty(), "{facts:?}");
+        // Whatever this host is, the decision is reached with a reason.
+        match decide_durable_root(&facts) {
+            Ok(evidence) => assert!(!evidence.basis.is_empty()),
+            Err(reason) => assert!(reason.contains(&facts.path), "{reason}"),
+        }
+        let missing = RootStorageFacts::observe(&root.path().join("absent"));
+        assert_eq!((missing.mount_id, missing.f_type), (None, None));
+        assert!(decide_durable_root(&missing).is_err());
     }
 
     fn inits() -> Vec<String> {
@@ -1731,6 +2301,7 @@ mod tests {
             CapabilityRequirement::from(ACCOUNTING),
             CapabilityRequirement::from(RESIDENCY_LOCKED),
             CapabilityRequirement::from("time"),
+            CapabilityRequirement::from(STORAGE_DURABLE_ROOT),
             any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]),
             any_of(&[ACCOUNTING, RESIDENCY_SWAP_LIMIT]),
             any_of(&[TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT]),
@@ -1743,6 +2314,8 @@ mod tests {
             (any_of(&[RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT]), "does not meet"),
             (any_of(&[ACCOUNTING, "termination:scope"]), "per-scope"),
             (any_of(&[ACCOUNTING, SCOPE_LIMITS]), "per-scope"),
+            (any_of(&[ACCOUNTING, STORAGE_DURABLE_ROOT]), "on its own"),
+            (any_of(&["isolation:namespaces", STORAGE_DURABLE_ROOT]), "on its own"),
         ] {
             let reason = floor_entry_refusal(&entry).unwrap_or_default();
             assert!(reason.contains(refusal), "{}: {reason}", entry.label());

@@ -9,6 +9,10 @@
 #
 # App root (/data/app) lives on the persistent /data volume, so operator
 # trust, signing keys, node identity, and runtime state survive redeploys.
+# A profile whose floor requires storage:durable_root measures this: when
+# /data is the container's own layer rather than a volume, init refuses
+# before any key or identity is created, and each platform restart repeats
+# that refusal at the platform's own backoff.
 #
 # If init fails the container exits immediately — never start ryeosd against
 # an unverified state.

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T11:47:25Z:ff39f00e5868749415254d235d3383a0e874b4960c1941d6437bcaf52a6d34b4:3HU2QUD6U9Gu8MNhWOiN2QW7FL3I47qNIHBpys5wzKWgW9k8YsLlBki+bO9N3xZgR2IzRQ0kbA88/4ZLjuRwBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T01:14:15Z:8c9225c881af954d562429924b487bd0190881f26a19b0b1d0d0adcd294da832:Lf7AdKeQU/WICYPioNJ5T93SesPos2M0XZZ00BAkoHn8KOtEE6h3LycyShzmarWhhCz+M58v26HST3R0GglGCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Source-only Core profile; signing/admission/native qualification pending.
 schema: 1
 exact_bundles:
@@ -210,7 +210,7 @@ policies:
       version: 8
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, isolation:namespaces, limits:scope, recovery:scope, termination:scope, time]
+      requires_capabilities: [accounting, isolation:namespaces, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves

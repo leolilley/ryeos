@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T23:27:10Z:8c886955eeea5283049b27b78a7be5ac7176f6e961e4f5830f7d68d9563edd29:5qyPJPwZzQtCmZzrfc84OORLnQ0pvYXz1ECqJ0uhytlJgBaw5dKbqylKDjiSdPDi4sZiGomVKBgTB7ShJAjdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T01:14:15Z:9fb738b0c2b434ddf352502782cfacf6cef37f33efde1a68bb6cee3f6d573429:qkQKjYjmrh+yKgTwb500aFZJSvJXoDq0maAmVSyaG/OH9FVMizrpOnCYfzrNr3omi0OguUQk369pzWrHJulzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -212,6 +212,10 @@ policies:
       # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
       # class also accepts a resident region proven only by the absence of
       # swap at startup (residency:swap_absent), which a later swapon ends.
+      # This disposable class does not require storage:durable_root. On an
+      # ephemeral app root every restart starts a new node identity, and an
+      # always-restart policy relies on the platform's own backoff, since no
+      # restart-inhibit record survives on that root to pace it.
       requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted

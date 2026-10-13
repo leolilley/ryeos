@@ -2113,6 +2113,39 @@ pub fn validate_current_executable_descriptor(fd: u32) -> Result<(), String> {
     imp::validate_current_executable(fd)
 }
 
+/// Largest executable image `current_executable_digest` measures.
+pub const MAX_CURRENT_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// SHA-256 digest of the executable image running this process: the inode
+/// `/proc/self/exe` opens, proven to be that image, read once in full while
+/// its size and identity hold still. A pathname is never measured, since it
+/// can be replaced after the process starts.
+pub fn current_executable_digest() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let executable = std::fs::File::open("/proc/self/exe")
+            .map_err(|error| format!("open the running executable: {error}"))?;
+        let fd = u32::try_from(executable.as_raw_fd())
+            .map_err(|_| "the running executable descriptor is invalid".to_owned())?;
+        validate_current_executable_descriptor(fd)?;
+        let size = executable
+            .metadata()
+            .map_err(|error| format!("inspect the running executable: {error}"))?
+            .len();
+        if size == 0 || size > MAX_CURRENT_EXECUTABLE_BYTES {
+            return Err(format!(
+                "the running executable is {size} bytes, outside 1..={MAX_CURRENT_EXECUTABLE_BYTES}"
+            ));
+        }
+        crate::secure_fs::digest_open_regular_file_stable_exact(&executable, size)
+            .map(|(digest, _)| digest)
+            .map_err(|error| format!("digest the running executable: {error:#}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("the running executable cannot be measured on this platform".to_owned())
+}
+
 /// Prove an inherited descriptor is one connected Unix stream socket.
 pub fn validate_connected_unix_stream_descriptor(fd: u32) -> Result<(), String> {
     imp::validate_connected_unix_stream(fd)

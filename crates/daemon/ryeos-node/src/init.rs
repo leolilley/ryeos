@@ -361,10 +361,12 @@ pub struct InitProgress {
 ///
 /// Order:
 ///   1. Layout: create `<app_root>/.ai/{node,state,bundles,config}`
-///   2. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
-///   3. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
-///   4. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
-///   5. Pin official publisher key into user trust dir + additional trust files
+///   2. Pin official publisher key into user trust dir + additional trust files
+///   3. Verify the selected profile and refuse, before any key exists, when
+///      its capability floor needs durable app-root storage the host lacks
+///   4. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
+///   5. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
+///   5b. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   6. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
 ///   7. Install each discovered bundle + write registration record
 ///   8. Vault X25519 keypair
@@ -420,7 +422,19 @@ pub fn run_init_with_operator_ceremony(
 
 fn run_init_internal(
     opts: &InitOptions,
+    ceremony: Option<InitOperatorCeremony>,
+    observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    run_init_on_storage(opts, ceremony, lillux::process_control::RootStorageFacts::observe, observe)
+}
+
+/// Initialization with the app-root storage observation supplied, so the
+/// durable-storage refusal can be exercised for storage this host does not
+/// have.
+fn run_init_on_storage(
+    opts: &InitOptions,
     mut ceremony: Option<InitOperatorCeremony>,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
 ) -> Result<InitReport> {
     let mut progress = |phase, completed, total, detail: Option<String>| {
@@ -490,7 +504,43 @@ fn run_init_internal(
     fs::create_dir_all(&trust_dir)
         .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
-    // ── 2. User key ──
+    // ── 2. Pin official publisher key ──
+    progress(InitPhase::PinningTrust, None, None, None)?;
+    // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
+    // ryeos-official`, all release Dockerfiles). The label is informational, but
+    // bundle preflight compares it, so a divergence used to brick boot (the
+    // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
+    let official_publisher_vk = decode_official_publisher_pubkey()?;
+    let pinned_fp = pin_key(&official_publisher_vk, "ryeos-official", &trust_dir, None)
+        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
+    if pinned_fp != OFFICIAL_PUBLISHER_FP {
+        bail!(
+            "official publisher fingerprint mismatch: hardcoded {} but \
+             public key bytes hash to {}",
+            OFFICIAL_PUBLISHER_FP,
+            pinned_fp
+        );
+    }
+
+    // ── 2b. Pin additional trust files (--trust-file) ──
+    for trust_file in &opts.trust_files {
+        pin_trust_file(trust_file, &trust_dir)
+            .with_context(|| format!("pin trust file {}", trust_file.display()))?;
+    }
+
+    // ── 3. Durable storage the selected profile requires ──
+    // Publisher trust is pinned, so the profile verifies now. A node whose
+    // floor needs durable app-root storage is refused here, before any key
+    // or identity exists: on storage that does not survive a restart, each
+    // attempt would otherwise mint a new identity that nothing can pace.
+    if let Some(name) = opts.node_profile.as_deref() {
+        let trust = TrustStore::load(None, &operator_config_root)
+            .context("load trust store for the selected node profile")?;
+        let profile = load_trusted_init_node_profile(&opts.source_dir, name, &trust)?;
+        require_profile_storage(name, &profile, &opts.app_root, observe_storage)?;
+    }
+
+    // ── 4. User key ──
     progress(InitPhase::InitializingIdentity, None, None, None)?;
     let user_key_path = opts
         .app_root
@@ -518,7 +568,7 @@ fn run_init_internal(
         contribution_digest.as_deref(),
     )?;
 
-    // ── 3. Node key ──
+    // ── 5. Node key ──
     let node_key_path = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
@@ -540,7 +590,7 @@ fn run_init_internal(
             )
         })?;
 
-    // ── 4. Self-trust both keys ──
+    // ── 5b. Self-trust both keys ──
     pin_key(
         &user_key.verifying_key(),
         "user",
@@ -555,30 +605,6 @@ fn run_init_internal(
         Some(&node_key),
     )
     .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
-
-    // ── 5. Pin official publisher key ──
-    progress(InitPhase::PinningTrust, None, None, None)?;
-    // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
-    // ryeos-official`, all release Dockerfiles). The label is informational, but
-    // bundle preflight compares it, so a divergence used to brick boot (the
-    // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
-    let official_publisher_vk = decode_official_publisher_pubkey()?;
-    let pinned_fp = pin_key(&official_publisher_vk, "ryeos-official", &trust_dir, None)
-        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
-    if pinned_fp != OFFICIAL_PUBLISHER_FP {
-        bail!(
-            "official publisher fingerprint mismatch: hardcoded {} but \
-             public key bytes hash to {}",
-            OFFICIAL_PUBLISHER_FP,
-            pinned_fp
-        );
-    }
-
-    // ── 5b. Pin additional trust files (--trust-file) ──
-    for trust_file in &opts.trust_files {
-        pin_trust_file(trust_file, &trust_dir)
-            .with_context(|| format!("pin trust file {}", trust_file.display()))?;
-    }
 
     // ── 6. Discover bundles in source_dir ──
     progress(InitPhase::DiscoveringBundles, None, None, None)?;
@@ -1646,6 +1672,46 @@ fn source_node_init_dir(source_dir: &Path) -> PathBuf {
         .join("init")
 }
 
+/// Refuse, before any key or identity exists, when `profile`'s capability
+/// floor requires durable app-root storage and `app_root` is not on it.
+fn require_profile_storage(
+    name: &str,
+    profile: &ryeos_node_runtime::node_policy::generation::NodeInitProfile,
+    app_root: &Path,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
+) -> Result<()> {
+    use lillux::process_control::STORAGE_DURABLE_ROOT;
+    let isolation: ryeos_engine::isolation::IsolationPolicy = profile.typed_policy(
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        Path::new("selected-node-profile"),
+    )?;
+    let required = isolation
+        .requires_capabilities
+        .iter()
+        .any(|entry| entry.names().iter().any(|entry_name| entry_name == STORAGE_DURABLE_ROOT));
+    if !required {
+        return Ok(());
+    }
+    let storage = observe_storage(app_root);
+    let evidence = lillux::process_control::decide_durable_root(&storage);
+    let refusal = match &evidence {
+        Ok(evidence) if lillux::process_control::satisfies_local_requirement(STORAGE_DURABLE_ROOT, evidence) => {
+            tracing::info!(profile = name, basis = %evidence.basis, "durable app-root storage proven");
+            return Ok(());
+        }
+        Ok(evidence) => format!(
+            "{STORAGE_DURABLE_ROOT} is only {}-proven here ({})",
+            evidence.source.as_str(),
+            evidence.basis
+        ),
+        Err(reason) => reason.clone(),
+    };
+    bail!(
+        "profile {name} requires {STORAGE_DURABLE_ROOT}; {refusal}. Attach a persistent volume \
+         and place the app root on it. No identity or key was created."
+    )
+}
+
 pub fn load_trusted_init_node_profile(
     source_dir: &Path,
     name: &str,
@@ -2338,6 +2404,40 @@ mod tests {
                 .join(".ai/config/keys/signing/private_key.pem")
                 .exists()
         );
+    }
+
+    fn ephemeral_root(app_root: &Path) -> lillux::process_control::RootStorageFacts {
+        lillux::process_control::RootStorageFacts {
+            path: app_root.display().to_string(),
+            filesystem: Some("overlay".to_owned()),
+            f_type: Some(0x794c_7630),
+            mount_id: Some(1),
+            mount_point: Some("/".to_owned()),
+            mount_source: Some("overlay".to_owned()),
+            root_mount_id: Some(1),
+            private_pid_namespace: Some(true),
+            hypervisor: None,
+            hypervisor_basis: "fixture".to_owned(),
+            kernel_kind: "native".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_profile_requiring_durable_storage_refuses_an_ephemeral_root_before_any_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let error = run_init_on_storage(&make_opts(&state, tmp.path()), None, ephemeral_root, |_| Ok(()))
+            .expect_err("an ephemeral root must refuse a durable-storage profile");
+        let text = format!("{error:#}");
+        assert!(text.contains("profile full requires storage:durable_root"), "{text}");
+        assert!(text.contains("is on overlay (the container's writable layer)"), "{text}");
+        assert!(text.contains("Attach a persistent volume"), "{text}");
+        assert!(text.contains("No identity or key was created"), "{text}");
+        assert!(!state.join(".ai/config/keys/signing/private_key.pem").exists());
+        assert!(!state.join(".ai/node/identity/private_key.pem").exists());
+        assert!(!state.join(".ai/node/identity/public-identity.json").exists());
+        assert!(!state.join(".ai/node/vault/private_key.pem").exists());
+        assert!(!state.join(".ai/node/vault/public_key.pem").exists());
     }
 
     #[test]

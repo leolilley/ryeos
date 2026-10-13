@@ -18,7 +18,7 @@ use lillux::process_control::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v2";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v3";
 const REPORT_FILE: &str = "node-capability-report.json";
 const MAX_REPORT_BYTES: u64 = 1024 * 1024;
 
@@ -38,9 +38,34 @@ pub struct NodeComposition {
     /// Initialization profile, when the node recorded one.
     pub profile: Option<String>,
     pub bundles: Vec<String>,
-    /// Native services compiled into this daemon.
-    pub native_services: Vec<String>,
+    /// Every optional feature compiled into this daemon binary.
+    pub compiled_features: Vec<String>,
     pub policy_generation: String,
+}
+
+/// How this node can be reached. Exactly one of `ingress` and
+/// `ingress_unattested` is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeExposure {
+    /// Addresses the node's listeners are bound to, as bound.
+    pub listeners: Vec<String>,
+    /// What fronts the listeners, as attested by whoever can see it.
+    pub ingress: Option<CapabilityEvidence>,
+    /// Why nothing about the ingress is attested.
+    pub ingress_unattested: Option<String>,
+}
+
+impl NodeExposure {
+    /// The exposure of `listeners` when no provider attests what fronts
+    /// them: a listener is visible to this node, its ingress is not.
+    pub fn unattested(listeners: Vec<String>) -> Self {
+        Self {
+            listeners,
+            ingress: None,
+            ingress_unattested: Some("no provider attests what fronts this listener".to_owned()),
+        }
+    }
 }
 
 /// The host does not prove what the signed capability floor requires. It is
@@ -83,12 +108,15 @@ pub struct FloorAdmission {
 pub struct NodeCapabilityReport {
     pub schema: String,
     pub node_fingerprint: String,
+    /// Digest of the daemon executable image that assembled this report.
+    pub daemon_digest: String,
     pub generated_at: String,
     pub generation: ReportGeneration,
     /// Who the guarantees apply to. `node` means node-wide; a narrower
     /// principal or job qualifier can be named here without a schema change.
     pub subject: String,
     pub composition: NodeComposition,
+    pub exposure: NodeExposure,
     pub host: HostFacts,
     pub provided: BTreeMap<String, CapabilityEvidence>,
     pub missing: BTreeMap<String, String>,
@@ -117,8 +145,13 @@ pub struct SignedNodeCapabilityReport {
 pub struct ReportInputs<'a> {
     pub app_root: &'a Path,
     pub node_fingerprint: &'a str,
+    /// Digest of the running daemon executable.
+    pub daemon_digest: String,
     pub bundles: Vec<String>,
-    pub native_services: Vec<String>,
+    pub compiled_features: Vec<String>,
+    /// Addresses the node's listeners are bound to; empty for a process
+    /// that serves no listener.
+    pub listeners: Vec<String>,
     pub policy_generation: String,
     pub isolation: &'a ryeos_engine::isolation::IsolationInspection,
     /// Whether a protected host-runtime binding (host service or external
@@ -135,7 +168,7 @@ impl NodeCapabilityReport {
             .map_err(anyhow::Error::msg)
             .context("read the host generation for the node capability report")?;
         let resident_bytes = resident_region_bytes()?;
-        let host = HostFacts::observe(resident_bytes);
+        let host = HostFacts::observe(resident_bytes, inputs.app_root);
         if host.boot_id != boot_id || host.container_enclosure != cgroup_enclosure {
             bail!("host generation changed while the node capability report was observed");
         }
@@ -156,6 +189,7 @@ impl NodeCapabilityReport {
         Ok(Self {
             schema: CAPABILITY_REPORT_SCHEMA.to_owned(),
             node_fingerprint: inputs.node_fingerprint.to_owned(),
+            daemon_digest: inputs.daemon_digest,
             generated_at: lillux::time::iso8601_now(),
             generation: ReportGeneration { boot_id, cgroup_enclosure },
             subject: "node".to_owned(),
@@ -164,9 +198,10 @@ impl NodeCapabilityReport {
                     .ok()
                     .and_then(|identity| identity.node_profile),
                 bundles: inputs.bundles,
-                native_services: inputs.native_services,
+                compiled_features: inputs.compiled_features,
                 policy_generation: inputs.policy_generation,
             },
+            exposure: NodeExposure::unattested(inputs.listeners),
             host,
             provided: view.provided,
             missing: view.missing,
@@ -556,16 +591,18 @@ mod tests {
         NodeCapabilityReport {
             schema: CAPABILITY_REPORT_SCHEMA.to_owned(),
             node_fingerprint: "fixture".to_owned(),
+            daemon_digest: "sha256:fixture".to_owned(),
             generated_at: "fixture".to_owned(),
             generation: ReportGeneration { boot_id: "fixture".to_owned(), cgroup_enclosure: None },
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: None,
                 bundles: Vec::new(),
-                native_services: Vec::new(),
+                compiled_features: Vec::new(),
                 policy_generation: "fixture".to_owned(),
             },
-            host: HostFacts::observe(0),
+            exposure: NodeExposure::unattested(vec!["127.0.0.1:7400".to_owned()]),
+            host: HostFacts::observe(0, Path::new("/")),
             floor: match_floor(&requires, &provided),
             provided: provided.provided,
             missing: provided.missing,
@@ -677,7 +714,7 @@ mod tests {
         let signing_key = lillux::crypto::SigningKey::from_bytes(&[7; 32]);
         let mut planned = view(&["time"], &[]);
         let lock = ResidencyProof::Locked { basis: "cap".to_owned() };
-        let host = HostFacts::observe(0);
+        let host = HostFacts::observe(0, Path::new("/"));
         host.apply_residency(&mut planned, Ok(&lock));
         let weaker = ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() };
 
@@ -706,7 +743,7 @@ mod tests {
     fn a_service_without_scopes_re_decides_its_floor_on_the_established_residency() {
         use lillux::process_control::{ACCOUNTING, RESIDENCY_SWAP_ABSENT};
         let mut planned = view(&["time"], &[]);
-        let host = HostFacts::observe(0);
+        let host = HostFacts::observe(0, Path::new("/"));
         host.apply_residency(&mut planned, Ok(&ResidencyProof::Locked { basis: "cap".to_owned() }));
         let mut service = report(planned, floor(&[ACCOUNTING, "termination:scope", "time"]));
         service.require_floor_without_scopes().unwrap();
@@ -717,19 +754,57 @@ mod tests {
     }
 
     #[test]
+    fn an_ephemeral_app_root_refuses_a_floor_that_requires_durable_storage() {
+        use lillux::process_control::STORAGE_DURABLE_ROOT;
+        let reason = "the app root /data/app is on overlay (the container's writable layer), \
+                      discarded when the container is replaced";
+        let ephemeral = view(&["time"], &[(STORAGE_DURABLE_ROOT, reason)]);
+        let durable = report(ephemeral.clone(), floor(&[STORAGE_DURABLE_ROOT, "time"]));
+        for error in [durable.require_floor(), durable.require_floor_without_scopes()] {
+            let error = error.unwrap_err().to_string();
+            assert!(error.contains(&format!("requires {STORAGE_DURABLE_ROOT}: {reason}")), "{error}");
+        }
+        // A disposable floor that does not name it admits on the same root.
+        report(ephemeral, floor(&["time"])).require_floor().unwrap();
+        let mut volume = view(&["time"], &[]);
+        volume.provide(STORAGE_DURABLE_ROOT, ProofSource::Measured, "ext4 mounted at /data, durable by mount");
+        report(volume, floor(&[STORAGE_DURABLE_ROOT, "time"])).require_floor().unwrap();
+    }
+
+    #[test]
+    fn the_report_carries_the_daemon_digest_and_an_unattested_exposure() {
+        let signing_key = lillux::crypto::SigningKey::from_bytes(&[7; 32]);
+        let fixture = report(view(&["time"], &[]), floor(&["time"]));
+        assert_eq!(fixture.exposure.listeners, ["127.0.0.1:7400"]);
+        assert_eq!(fixture.exposure.ingress, None);
+        assert_eq!(
+            fixture.exposure.ingress_unattested.as_deref(),
+            Some("no provider attests what fronts this listener")
+        );
+        let value = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(value["daemon_digest"], "sha256:fixture");
+        assert!(value["composition"].get("native_services").is_none());
+        assert_eq!(value["composition"]["compiled_features"], serde_json::json!([]));
+        let signed = fixture.clone().sign(&signing_key).unwrap();
+        let mut renamed = fixture;
+        renamed.daemon_digest = "sha256:other".to_owned();
+        assert_ne!(renamed.digest().unwrap(), signed.digest, "the digest covers the daemon image");
+    }
+
+    #[test]
     fn a_report_in_an_older_format_is_refused_as_stale() {
         let current = serde_json::json!({
             "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": lillux::process_control::HOST_FACTS_VERSION}}
         });
         assert_eq!(stale_format(&current), None);
         let older_schema = serde_json::json!({
-            "report": {"schema": "ryeos.node.capability-report/v1", "host": {"version": 2}}
+            "report": {"schema": "ryeos.node.capability-report/v2", "host": {"version": 3}}
         });
-        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v1"));
+        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v2"));
         let older_host = serde_json::json!({
-            "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 2}}
+            "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 3}}
         });
-        assert!(stale_format(&older_host).unwrap().contains("host facts version is 2"));
+        assert!(stale_format(&older_host).unwrap().contains("host facts version is 3"));
         assert!(stale_format(&serde_json::json!({})).unwrap().contains("absent"));
 
         let app_root = tempfile::tempdir().unwrap();

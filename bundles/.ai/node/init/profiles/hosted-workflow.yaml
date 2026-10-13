@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T23:27:10Z:3cc15f8f22b3688aedc2abd5e5abefcf20d1190190bbbf1ba9f1ef464cb7d395:n4r+i+fBsZP/i22JRs2C1VDz0njb/0ZwBBthQRDZQKDMD9gvc2GChW+YAzmhtk2sxbl+efE+5547u73KucSADA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T01:14:15Z:1680620578d28fd607ffbf413ba0f0c6838d31997ccabd63eaa1e7411dadcb4f:EbZdOVGEkidAJTsZJnSALcHGLJmK/AhKgOQvAeKxjxLJ3+aHeL6nf9uj6w3+ICfdGmvYpZSFunoGm/TO534ZCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -256,7 +256,13 @@ policies:
       # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
       # class also accepts a resident region proven only by the absence of
       # swap at startup (residency:swap_absent), which a later swapon ends.
-      requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, termination:process_group, time]
+      # Schedules, vault secrets, the node identity and the restart-inhibit
+      # record live under the app root, so this class requires
+      # storage:durable_root and init refuses an ephemeral root before any
+      # identity exists. If that refusal meets an always-restart policy, it
+      # relies on the platform's own backoff, since no record survives on an
+      # ephemeral root to pace it.
+      requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, storage:durable_root, termination:process_group, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
