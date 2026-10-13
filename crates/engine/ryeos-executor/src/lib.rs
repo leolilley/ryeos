@@ -9,6 +9,7 @@ pub mod execution;
 pub use execution::{
     SelectedInstallationRefusal, SelectedInvocationAttachment,
     SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, SelectedDedicatedInvocationLoan,
+    abandoned_selected_compositions,
 };
 /// Immutable daemon publication. Attachment presence never admits a worker.
 pub struct SelectedApplicationPublication {

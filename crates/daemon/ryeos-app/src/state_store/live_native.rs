@@ -969,12 +969,44 @@ impl Drop for StateOpenCustody {
     fn drop(&mut self) {
         if self.original.is_some() && (self.runtime.is_some() || self.state.is_some()) {
             // No implicit SQL close or namespace release on late refusal or
-            // panic. Supervised close/recovery must consume the actual owners.
-            std::mem::forget(self.runtime.take());
-            std::mem::forget(self.state.take());
-            std::mem::forget(self.original.take());
+            // panic. Supervised close/recovery must consume the actual owners;
+            // without it they move whole into the process-lifetime registry.
+            let abandoned = AbandonedStateStoreOpening {
+                _runtime: self.runtime.take(),
+                _state: self.state.take(),
+                _original: self.original.take(),
+            };
+            ABANDONED_STATE_STORE_OPENINGS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(abandoned);
         }
     }
+}
+
+/// The owners of a Store opening discarded without supervised close or
+/// recovery. Field order is irrelevant: the registry never drops them.
+struct AbandonedStateStoreOpening {
+    _runtime: Option<runtime_db::RuntimeDb>,
+    _state: Option<StateDb>,
+    _original: Option<Arc<LiveStateOpen>>,
+}
+
+/// Process-lifetime retention of Store openings discarded without settlement.
+/// Their native handles may still be live, so the databases and the original
+/// startup owner stay reachable here until the process exits. Nothing is ever
+/// removed from this list.
+static ABANDONED_STATE_STORE_OPENINGS: Mutex<Vec<AbandonedStateStoreOpening>> =
+    Mutex::new(Vec::new());
+
+/// Count of Store openings this process retains because they were discarded
+/// without settlement. Any nonzero count means their native custody stays
+/// held until the process exits.
+pub fn abandoned_state_store_openings() -> usize {
+    ABANDONED_STATE_STORE_OPENINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
 }
 
 pub struct LiveStateStoreOpenFailure {

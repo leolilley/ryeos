@@ -663,11 +663,70 @@ impl Drop for RetainedSqliteDestinationRole {
         if let DestinationRoleState::Open(file) =
             std::mem::replace(state, DestinationRoleState::Retired)
         {
-            std::mem::forget(file);
+            retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::DestinationRole, Box::new(file));
         }
         // PendingRaw is also preserved. No close of an unverified numeric FD.
     }
 }
+/// What kind of owner the abandoned-owner registry holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbandonedSqliteOwnerKind {
+    DestinationRole,
+    BoundConnection,
+    NativeConnection,
+    NativeCloseFailure,
+    NativeOpenFailure,
+}
+
+/// Process-lifetime retention of SQLite owners discarded without supervised
+/// close. Their native handles or descriptors may still be live, and closing
+/// them from a destructor would bypass the supervised terminal, so each owner
+/// stays reachable here until the process exits. Nothing is ever removed.
+static ABANDONED_SQLITE_OWNERS: std::sync::Mutex<
+    Vec<(AbandonedSqliteOwnerKind, Box<dyn std::any::Any + Send>)>,
+> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn retain_abandoned_sqlite_owner(
+    kind: AbandonedSqliteOwnerKind,
+    owner: Box<dyn std::any::Any + Send>,
+) {
+    ABANDONED_SQLITE_OWNERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((kind, owner));
+}
+
+/// Count of SQLite owners this process retains because they were discarded
+/// without supervised close. Any nonzero count means native custody stays
+/// held until the process exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AbandonedSqliteOwners {
+    pub destination_roles: usize,
+    pub bound_connections: usize,
+    pub native_connections: usize,
+    pub native_close_failures: usize,
+    pub native_open_failures: usize,
+}
+
+/// Report the abandoned SQLite owners this process retains.
+pub fn abandoned_sqlite_owners() -> AbandonedSqliteOwners {
+    let retained = ABANDONED_SQLITE_OWNERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut report = AbandonedSqliteOwners::default();
+    for (kind, _) in retained.iter() {
+        let count = match kind {
+            AbandonedSqliteOwnerKind::DestinationRole => &mut report.destination_roles,
+            AbandonedSqliteOwnerKind::BoundConnection => &mut report.bound_connections,
+            AbandonedSqliteOwnerKind::NativeConnection => &mut report.native_connections,
+            AbandonedSqliteOwnerKind::NativeCloseFailure => &mut report.native_close_failures,
+            AbandonedSqliteOwnerKind::NativeOpenFailure => &mut report.native_open_failures,
+        };
+        *count += 1;
+    }
+    report
+}
+
 /// Native refusal/error retains the exact original owner and observed disposition.
 #[derive(Debug)]
 pub struct SqliteDestinationRetirementFailure {
@@ -4227,13 +4286,13 @@ impl Drop for BoundSqliteConnection {
     // marks the arena refused, so arena release fails closed.
     fn drop(&mut self) {
         if let Some(connection) = self.connection.take() {
-            if let Err((_connection, _error)) = connection.close() {
-                // A leaked outstanding SQLite resource must not outlive its
-                // VFS context. Retain both rather than create use-after-free.
+            if let Err((refused, _error)) = connection.close() {
+                // An outstanding SQLite resource must not outlive its VFS
+                // context. Retain both rather than create use-after-free.
                 if let Some(mut binding) = self.binding.take() {
-                    binding.abandon(&_connection);
+                    binding.abandon(&refused);
                 }
-                std::mem::forget(_connection);
+                retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::BoundConnection, Box::new(refused));
             }
         }
         // Binding closes retained host descriptors only after connection close.

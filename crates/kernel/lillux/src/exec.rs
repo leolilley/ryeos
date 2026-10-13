@@ -5028,6 +5028,34 @@ fn retain_fork_sensitive_descriptors_inner(
     })
 }
 
+/// Fork exclusions this process holds until exit because their owner refused
+/// on a descriptor-registration invariant. Only ever incremented.
+static FORK_EXCLUSIONS_HELD_UNTIL_EXIT: AtomicUsize = AtomicUsize::new(0);
+
+/// Count of fork-sensitive descriptor leases this process holds until exit.
+/// Any nonzero count means every protected process creation in this process
+/// stays refused or waiting until the process exits.
+pub fn fork_exclusions_held_until_exit() -> usize {
+    FORK_EXCLUSIONS_HELD_UNTIL_EXIT.load(Ordering::Acquire)
+}
+
+impl ForkSensitiveDescriptorLease {
+    /// Keep this lease's fork exclusion held until the process exits. For an
+    /// owner whose descriptor registration contradicts its actual descriptor:
+    /// releasing the exclusion would let a protected fork snapshot a stale or
+    /// unregistered number. The barrier keeps counting this scope, so every
+    /// protected process creation stays refused or waiting; the lease value
+    /// carries no other owner and ends here with nothing left to release.
+    pub fn hold_until_process_exit(mut self) {
+        if self.retained && self.parent_pid == std::process::id() {
+            FORK_EXCLUSIONS_HELD_UNTIL_EXIT
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_add(1))
+                .expect("held fork exclusion count overflow");
+        }
+        self.retained = false;
+    }
+}
+
 impl Drop for ForkSensitiveDescriptorLease {
     fn drop(&mut self) {
         if !self.retained || self.parent_pid != std::process::id()
@@ -5300,6 +5328,21 @@ impl ForkChildCloseFile {
     }
 }
 
+/// Give up a fork copy's claim to a registered descriptor number without
+/// closing it. In a forked child the number is either still owned by the
+/// original process's registration, or was already consumed by the child's
+/// snapshot disposal and may now name an unrelated descriptor; closing it
+/// would act on custody this copy does not hold. Nothing is retained because
+/// nothing is owned here: the only value is the numeric coordinate, and a
+/// forked child may neither allocate nor enter a copied mutex to record it.
+#[cfg(unix)]
+fn relinquish_foreign_descriptor_coordinate(file: Option<std::fs::File>) {
+    use std::os::fd::IntoRawFd as _;
+    if let Some(file) = file {
+        let _coordinate: i32 = file.into_raw_fd();
+    }
+}
+
 #[cfg(unix)]
 impl Drop for ForkChildCloseFile {
     fn drop(&mut self) {
@@ -5315,7 +5358,9 @@ impl Drop for ForkChildCloseFile {
             if child.is_null() {
                 // No reviewed child transition: never enter the copied mutex
                 // or close a numeric coordinate whose custody was discarded.
-                if let Some(file) = self.file.take() { std::mem::forget(file); }
+                // The descriptor's owner is the original process; this copy
+                // gives up its claim to the number without closing it.
+                relinquish_foreign_descriptor_coordinate(self.file.take());
                 return;
             }
             let barrier = unsafe { &*child };
@@ -5323,7 +5368,7 @@ impl Drop for ForkChildCloseFile {
             if state.owned_registration_generations.get(&self.fd) != Some(&self.generation) {
                 // Snapshot disposal already consumed this inherited FD. Its
                 // number may now name a different child-local descriptor.
-                if let Some(file) = self.file.take() { std::mem::forget(file); }
+                relinquish_foreign_descriptor_coordinate(self.file.take());
                 return;
             }
         }

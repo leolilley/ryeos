@@ -532,17 +532,45 @@ impl SelectedRootAdmissionFence {
     }
 }
 
+/// The owners of a selected composition barrier dropped while its root still
+/// reported unresolved custody.
+struct AbandonedSelectedComposition {
+    _root: Arc<SelectedRoot>,
+    _registered_generation: Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>,
+}
+
+/// Process-lifetime retention of selected composition barriers dropped with
+/// unresolved owners. Drop cannot run a bounded native or financial
+/// reconciliation, so the exact root and its registered Store generation stay
+/// reachable here until the process exits. Nothing is ever removed.
+static ABANDONED_SELECTED_COMPOSITIONS: std::sync::Mutex<Vec<AbandonedSelectedComposition>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Count of selected composition barriers this process retains because they
+/// were dropped with unresolved owners. Any nonzero count means a selected
+/// root and its Store generation stay held until the process exits.
+pub fn abandoned_selected_compositions() -> usize {
+    ABANDONED_SELECTED_COMPOSITIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+}
+
 impl Drop for SelectedInvocationCompositionBarrier {
     fn drop(&mut self) {
         if self.close() == SelectedRootClose::Unresolved {
-            // Drop cannot run a bounded native/financial reconciliation. Keep
-            // the exact root and Store alive even if a caller misses the normal
-            // daemon unresolved hold. Arc clone increments only; no new owner,
-            // mutex re-entry, ledger write or synthetic positive receipt.
-            let _ = Arc::into_raw(Arc::clone(&self.root));
-            if let Some(registration) = self.registered_generation.take() {
-                std::mem::forget(registration);
-            }
+            // Keep the exact root and Store alive even if a caller misses the
+            // normal daemon unresolved hold. Both move whole into the
+            // process-lifetime registry; no root mutex re-entry, ledger write
+            // or synthetic positive receipt.
+            let abandoned = AbandonedSelectedComposition {
+                _root: Arc::clone(&self.root),
+                _registered_generation: self.registered_generation.take(),
+            };
+            ABANDONED_SELECTED_COMPOSITIONS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(abandoned);
         }
     }
 }
@@ -976,9 +1004,12 @@ mod selected_close_controls {
         assert!(barrier.has_unresolved_owners());
         assert_eq!(barrier.close(), SelectedRootClose::Unresolved);
         let observer = Arc::downgrade(&root);
+        let abandoned_before = abandoned_selected_compositions();
         drop(root);
         drop(barrier);
-        // Defensive Drop retains the SAME root; it does not invent closure.
+        // Defensive Drop retains the SAME root in the counted registry; it
+        // does not invent closure.
         assert!(observer.upgrade().is_some());
+        assert!(abandoned_selected_compositions() > abandoned_before);
     }
 }

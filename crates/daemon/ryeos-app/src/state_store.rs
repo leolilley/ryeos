@@ -124,7 +124,7 @@ mod live_close;
 pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure, StateStoreCensus};
 mod live_native;
 pub use live_native::{
-    LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure,
+    LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure, abandoned_state_store_openings,
     LiveAccountingNativeAdmission,
     LiveSchedulerNativeAdmission, LiveSchedulerNativeAdmissionFailure,
     LiveSchedulerNativeAdmissionOutsideSources,

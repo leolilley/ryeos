@@ -33,10 +33,17 @@ pub fn original_native_region_layout() -> Result<OriginalNativeRegionLayout, Fix
         .map_err(|_| FixedHostRefusal::Layout)?;
     Ok(OriginalNativeRegionLayout { layout: layout.pad_to_align(), payload_offset })
 }
-struct Gate { header: NonNull<RegionHeader>, process: u32 }
+// `armed` is cleared only by `keep_locked`, which leaves the gate word locked
+// for the life of the mapping; the gate owns nothing else.
+struct Gate { header: NonNull<RegionHeader>, process: u32, armed: bool }
+impl Gate {
+    /// Leave the gate word locked for good: the region is sealed and its
+    /// mapping may be released, so no destructor may touch it afterwards.
+    fn keep_locked(mut self) { self.armed = false; }
+}
 impl Drop for Gate {
     fn drop(&mut self) {
-        if self.process != std::process::id() { return; }
+        if !self.armed || self.process != std::process::id() { return; }
         // No foreign callback, allocation, destructor or fallible arithmetic
         // runs in this gate. Only complete primitive metadata transitions.
         unsafe { self.header.as_ref() }.gate.store(UNLOCKED, Ordering::Release);
@@ -47,7 +54,7 @@ fn gate(header: NonNull<RegionHeader>, process: u32, generation: u64) -> Result<
     let h = unsafe { header.as_ref() };
     if h.process != process || h.generation != generation { return Err(FixedHostRefusal::Provenance); }
     h.gate.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed).map_err(|_| FixedHostRefusal::Busy)?;
-    Ok(Gate { header, process })
+    Ok(Gate { header, process, armed: true })
 }
 fn increment(value: usize) -> Result<usize, FixedHostRefusal> {
     value.checked_add(1).filter(|n| *n <= COUNT_MAX).ok_or(FixedHostRefusal::Overflow)
@@ -148,7 +155,7 @@ impl OriginalNativeRegionOwner {
             h.phase.store(SEALED, Ordering::Release);
             // Permanently disarm before any concrete disposal/unmap. No guard
             // destructor can dereference the mapping once outside release starts.
-            std::mem::forget(guard);
+            guard.keep_locked();
             Ok(OriginalNativeRegionReleaseExclusion { payload: retained.payload, process: retained.process,
                 generation: retained.generation, disposition: 0, base: retained.header.as_ptr() as usize, bytes: retained.bytes })
         })();

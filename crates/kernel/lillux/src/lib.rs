@@ -52,7 +52,7 @@ pub use exec::{
 };
 pub use exec::{
     ForkSensitiveDescriptorLeaseRefused, current_thread_retains_fork_sensitive_descriptors,
-    retain_fork_sensitive_descriptors_until, try_retain_fork_sensitive_descriptors,
+    fork_exclusions_held_until_exit, retain_fork_sensitive_descriptors_until, try_retain_fork_sensitive_descriptors,
 };
 pub use sandbox::{
     HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,

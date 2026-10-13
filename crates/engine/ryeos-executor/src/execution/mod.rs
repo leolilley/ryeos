@@ -40,7 +40,7 @@ pub mod runtime_dispatch;
 mod selected_invocation_root;
 pub use selected_invocation_root::{
     SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, abandoned_selected_compositions,
 };
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;

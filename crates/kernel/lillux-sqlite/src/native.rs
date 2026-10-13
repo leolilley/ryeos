@@ -759,7 +759,7 @@ impl OriginalProjectionLease {
                                     self.fork_invariant_refused = true;
                                     // Invariant-only fail-closed: prevent every protected fork
                                     // from observing a stale consumed numeric registration.
-                                    std::mem::forget(fork_guard);
+                                    fork_guard.hold_until_process_exit();
                                     anyhow::bail!("lease consumed-FD fork deregistration invariant refused");
                                 }
                             }
@@ -1986,7 +1986,7 @@ impl OriginalNativeFactory {
                         owner.fork_invariant_refused = true;
                         // Never release fork exclusion around an unregistered real FD.
                         // This invariant-only refusal remains held until restart/recovery.
-                        std::mem::forget(fork_guard);
+                        fork_guard.hold_until_process_exit();
                         anyhow::bail!("lease acquired-FD fork enrollment invariant refused");
                     }
                 }
@@ -1994,7 +1994,7 @@ impl OriginalNativeFactory {
                 if let Err(reservation) = reservation.cancel(&fork_guard) {
                     *owner.fork_reservation = Some(reservation);
                     owner.fork_invariant_refused = true;
-                    std::mem::forget(fork_guard);
+                    fork_guard.hold_until_process_exit();
                     anyhow::bail!("lease unused fork reservation invariant refused");
                 }
             }
@@ -3588,8 +3588,16 @@ impl Drop for OriginalNativeConnection {
             }
         }
         if let Some(body) = self.body.take() {
-            std::mem::forget(body);
-        } /* no terminal from Drop */
+            if self.factory.require_process().is_ok() {
+                // No terminal from Drop: the unsupervised body stays retained.
+                crate::retain_abandoned_sqlite_owner(
+                    crate::AbandonedSqliteOwnerKind::NativeConnection, Box::new(body));
+            } else {
+                // A forked copy owns no native handle of the original process
+                // and may neither allocate nor enter a copied mutex.
+                std::mem::forget(body);
+            }
+        }
     }
 }
 
@@ -4516,7 +4524,8 @@ impl Drop for OriginalNativeCloseFailure {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            std::mem::forget(owner);
+            crate::retain_abandoned_sqlite_owner(
+                crate::AbandonedSqliteOwnerKind::NativeCloseFailure, Box::new(owner));
         }
         unsafe {
             std::mem::ManuallyDrop::drop(&mut self.owner);
@@ -4842,7 +4851,8 @@ impl Drop for OriginalNativeOpenFailure {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            std::mem::forget(owner);
+            crate::retain_abandoned_sqlite_owner(
+                crate::AbandonedSqliteOwnerKind::NativeOpenFailure, Box::new(owner));
         }
         unsafe {
             std::mem::ManuallyDrop::drop(&mut self.owner);
