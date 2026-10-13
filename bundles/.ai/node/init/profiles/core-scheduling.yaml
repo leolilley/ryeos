@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T07:32:11Z:22364ac63b6733c72a9267e3ab5105bf2db115429e97457ceee1bc45121d2130:8ovG/96Vbzyi+nOS8ml/4vsoxvhFlitBi1E0WhVDj7glsRfGjQpDOK7KbrlR/pjVZqPE2MmoZMXK5v4cSv4zCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T18:22:27Z:0c9bf78ecfc82ed64fe180da8b956a363c369e14faee9a66292efb8d9236ca7f:kZODjjrZtdI7CnYktbuXoiZLxvd7NNXSSes4cV9h0sonRh8FbzcyjKCrrNKzVWgojcPiUJDixOvsUMRO2r3RCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Source-only Core+scheduling profile; signing/admission/native qualification pending.
 schema: 1
 exact_bundles:
@@ -13,7 +13,7 @@ policies:
   # Explicit local capacity issuance; admission/signing and operation proof remain open.
   # The account is root/node-bound and cannot be reminted by policy refresh.
   native_capacity:
-    schema: 5
+    schema: 6
     issuance_nonce: "33c88bbc57daa7c765d0fc460459d25a"
     allowance:
       # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.
@@ -42,6 +42,11 @@ policies:
       work_per_attempt: 65536
       control_storage_bytes: 262144
       maximum_duration_ms: 120000
+    # Each epoch is a fresh allowance under the same issuance; nothing is refunded.
+    renewal:
+      at_orderly_rollover: true
+      operator_reissue: true
+      maximum_epochs: null
 
   accounting:
     schema: 2

@@ -135,6 +135,44 @@ impl NativeRecoveryEnvelope {
     }
 }
 
+/// Which epoch renewals the signed policy pre-authorises. Each epoch is a
+/// fresh allowance and fresh recovery attempts for the same issuance; nothing
+/// in an earlier epoch is ever refunded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRenewalEnvelope {
+    /// A settled orderly rollover opens the next epoch by itself.
+    pub at_orderly_rollover: bool,
+    /// `ryeos node capacity reissue` may open the next epoch on a stopped node.
+    pub operator_reissue: bool,
+    /// Highest epoch number that may ever be opened; `null` is unbounded.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub maximum_epochs: Option<u64>,
+}
+
+/// A present key whose value may be `null`. The key itself stays required:
+/// an absent renewal bound is not a silent "unbounded".
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+impl NativeRenewalEnvelope {
+    pub fn validate(&self) -> std::result::Result<(), NativeCapacityPolicyRefusal> {
+        // The booleans are independent of the bound: `maximum_epochs: 1` with
+        // both paths disabled is a legitimate "one epoch, ever" statement.
+        if let Some(bound) = self.maximum_epochs {
+            if bound == 0 || bound > i64::MAX as u64 {
+                return Err(NativeCapacityPolicyRefusal::Renewal);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Fixed refusals retained by the pre-allocation admission owner. These
 /// validate shape only; a parsed policy is not authentication or funding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +187,7 @@ pub enum NativeCapacityPolicyRefusal {
     Allowance,
     Recovery,
     RolloverMargin,
+    Renewal,
 }
 impl std::fmt::Display for NativeCapacityPolicyRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,6 +203,7 @@ impl std::fmt::Display for NativeCapacityPolicyRefusal {
                 Self::Allowance => "native account allowance cannot fund the incarnation",
                 Self::Recovery => "capacity recovery allowance is invalid or overflows",
                 Self::RolloverMargin => "native rollover drain margin must be positive and shorter than the service window",
+                Self::Renewal => "native capacity renewal bound must be absent or a positive epoch count",
                 Self::Units(_) => unreachable!(),
             }),
         }
@@ -212,11 +252,12 @@ pub struct NodeNativeCapacityPolicy {
     pub allowance: NativeCapacityUnits,
     pub incarnation: NativeIncarnationEnvelope,
     pub recovery: NativeRecoveryEnvelope,
+    pub renewal: NativeRenewalEnvelope,
 }
 
 impl NodeNativeCapacityPolicy {
     pub fn validate(&self) -> std::result::Result<(), NativeCapacityPolicyRefusal> {
-        if self.schema != 5 { return Err(NativeCapacityPolicyRefusal::Schema); }
+        if self.schema != 6 { return Err(NativeCapacityPolicyRefusal::Schema); }
         if self.issuance_nonce.len() != 32 || !self.issuance_nonce.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
             return Err(NativeCapacityPolicyRefusal::IssuanceNonce);
@@ -224,6 +265,7 @@ impl NodeNativeCapacityPolicy {
         self.allowance.validate()?;
         self.incarnation.validate()?;
         self.recovery.validate()?;
+        self.renewal.validate()?;
         if !self.allowance.covers(&self.incarnation.units) {
             return Err(NativeCapacityPolicyRefusal::Allowance);
         }
@@ -264,7 +306,7 @@ mod outside_cleanup_tests {
             allocator_steps: 20_000_000, connection_tickets: 64, cleanup_steps: 300_000,
         };
         NodeNativeCapacityPolicy {
-            schema: 5, issuance_nonce: "a".repeat(32), allowance: units,
+            schema: 6, issuance_nonce: "a".repeat(32), allowance: units,
             incarnation: NativeIncarnationEnvelope {
                 units, maximum_occupancy_ms: 7_200_000, cleanup_occupancy_ms: 120_000,
                 rollover_drain_margin_ms: 90_000,
@@ -273,6 +315,9 @@ mod outside_cleanup_tests {
             recovery: NativeRecoveryEnvelope {
                 maximum_attempts: 32, work_per_attempt: 65_536,
                 control_storage_bytes: 262_144, maximum_duration_ms: 120_000,
+            },
+            renewal: NativeRenewalEnvelope {
+                at_orderly_rollover: true, operator_reissue: true, maximum_epochs: None,
             },
         }
     }
@@ -295,8 +340,33 @@ mod outside_cleanup_tests {
         let mut encoded = serde_json::to_value(&policy).unwrap();
         encoded["incarnation"].as_object_mut().unwrap().remove("outside_cleanup_steps");
         assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(encoded).is_err());
-        policy.schema = 4;
+        policy.schema = 5;
         assert!(policy.validate().is_err());
+        policy.schema = 6;
+        let mut unrenewed = serde_json::to_value(&policy).unwrap();
+        unrenewed.as_object_mut().unwrap().remove("renewal");
+        assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(unrenewed).is_err());
+        policy.renewal.maximum_epochs = Some(0);
+        assert_eq!(policy.validate(), Err(NativeCapacityPolicyRefusal::Renewal));
+    }
+
+    #[test]
+    fn renewal_bound_is_required_nullable_data_independent_of_the_paths() {
+        let mut policy = policy();
+        let mut absent_bound = serde_json::to_value(&policy).unwrap();
+        absent_bound["renewal"].as_object_mut().unwrap().remove("maximum_epochs");
+        assert!(serde_json::from_value::<NodeNativeCapacityPolicy>(absent_bound).is_err());
+        let mut null_bound = serde_json::to_value(&policy).unwrap();
+        null_bound["renewal"]["maximum_epochs"] = serde_json::Value::Null;
+        let parsed = serde_json::from_value::<NodeNativeCapacityPolicy>(null_bound).unwrap();
+        assert_eq!(parsed.renewal.maximum_epochs, None);
+        parsed.validate().unwrap();
+        policy.renewal = NativeRenewalEnvelope {
+            at_orderly_rollover: false, operator_reissue: false, maximum_epochs: Some(1),
+        };
+        policy.validate().unwrap();
+        policy.renewal.maximum_epochs = Some(i64::MAX as u64 + 1);
+        assert_eq!(policy.validate(), Err(NativeCapacityPolicyRefusal::Renewal));
     }
 
     #[test]
