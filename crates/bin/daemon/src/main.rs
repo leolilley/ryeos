@@ -792,9 +792,7 @@ impl DaemonSelectedComposition {
             "accounting outside sources compete with already cached sources");
         let sources = ledger.take_outside_sources(terminal)
             .context("take accounting ledger outside sources")?;
-        let ryeos_app::accounting_db::AccountingNativeOutsideSources {
-            connection, reference, unused_reference,
-        } = sources;
+        let (connection, reference, unused_reference) = sources.into_parts();
         self.accounting_native_connection_parts = connection;
         self.accounting_native_reference_parts = reference;
         self.accounting_native_unused_reference = unused_reference;

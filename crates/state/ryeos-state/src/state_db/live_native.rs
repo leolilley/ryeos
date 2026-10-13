@@ -2917,7 +2917,8 @@ fn advance_startup_close(progress: StartupCloseProgress)
         destination_join: std::sync::OnceLock::new(), progress };
     if released.native_terminals(&factory).is_err() {
         // Only the progress carries owners; the other slots are still empty.
-        return Err(retain(std::mem::ManuallyDrop::new(released.into_parts().progress)));
+        let progress = std::mem::ManuallyDrop::new(released.into_parts().progress);
+        return Err(retain(progress));
     }
     Ok(released)
 }

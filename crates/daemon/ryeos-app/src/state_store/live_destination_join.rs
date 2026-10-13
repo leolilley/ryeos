@@ -41,6 +41,19 @@ pub(super) struct LiveStoreDestinationJoin {
     parent_registry_identity: OnceLock<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
 }
 impl LiveStoreDestinationJoin {
+    /// The registry-free part of parent completion: this process, the
+    /// outside completion no longer pending and no parent body retained. A
+    /// dropped receiver settles on exactly these checks.
+    pub(super) fn require_parent_completed_holders(&self) -> Result<()> {
+        ensure!(self.process == std::process::id(), "foreign original Store receiver");
+        ensure!(!self.parent_outside_pending.load(std::sync::atomic::Ordering::Acquire),
+            "Store parent outside completion remains pending");
+        let original = self.original.try_lock()
+            .map_err(|_| anyhow::anyhow!("actual Store receiver busy or poisoned"))?;
+        ensure!(original.is_none(), "actual Store parent remains in the destination receiver");
+        Ok(())
+    }
+
     pub(super) fn require_original_origin(&self,
         factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal,
     ) -> Result<()> {
@@ -58,24 +71,14 @@ impl LiveStoreDestinationJoin {
         aggregate: &OriginalNativeTerminal,
     ) -> Result<()> {
         self.require_original_origin(factory, aggregate)?;
-        ensure!(!self.parent_outside_pending.load(std::sync::atomic::Ordering::Acquire),
-            "Store parent outside completion remains pending");
-        let original = self.original.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual Store receiver busy or poisoned"))?;
-        ensure!(original.is_none(), "actual Store parent remains in the destination receiver");
-        Ok(())
+        self.require_parent_completed_holders()
     }
 
     pub(super) fn require_parent_completed_in_registry(
         &self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original Store receiver");
-        ensure!(!self.parent_outside_pending.load(std::sync::atomic::Ordering::Acquire),
-            "Store parent outside completion remains pending");
-        let original = self.original.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual Store receiver busy or poisoned"))?;
-        ensure!(original.is_none(), "actual Store parent remains in the destination receiver");
+        self.require_parent_completed_holders()?;
         let completed = self.parent_registry_identity.get()
             .context("Store parent completion lacks its pre-disposal registry identity")?;
         completed.require_same_registry(&registry.identity()?)
@@ -85,12 +88,7 @@ impl LiveStoreDestinationJoin {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original Store receiver");
-        ensure!(!self.parent_outside_pending.load(std::sync::atomic::Ordering::Acquire),
-            "Store parent outside completion remains pending");
-        let original = self.original.try_lock()
-            .map_err(|_| anyhow::anyhow!("actual Store receiver busy or poisoned"))?;
-        ensure!(original.is_none(), "actual Store parent remains in the destination receiver");
+        self.require_parent_completed_holders()?;
         let completed = self.parent_registry_identity.get()
             .context("Store parent completion lacks its pre-disposal registry identity")?;
         registry.require_same_registry(completed)
@@ -262,6 +260,9 @@ impl LiveStoreDestinationJoin {
             canonical.take()
         };
         drop(alias);
+        // An unpublished candidate never had a parent to complete: it ends
+        // settled, holding nothing.
+        self.parent_outside_pending.store(false, std::sync::atomic::Ordering::Release);
     }
 
     fn prepare(original: &Arc<LiveStateOpen>, factory: &Arc<OriginalNativeFactory>,
@@ -307,6 +308,28 @@ impl LiveStoreDestinationJoin {
         }
         *link = Arc::downgrade(&candidate);
         Ok(candidate)
+    }
+}
+
+impl Drop for LiveStoreDestinationJoin {
+    fn drop(&mut self) {
+        // Settled exactly when parent completion would accept this receiver
+        // without a registry: no outside completion pending and no parent
+        // body retained. The slot is taken exactly once, here; otherwise the
+        // parent body stays retained until the process exits.
+        let settled = self.require_parent_completed_holders().is_ok();
+        let original = unsafe { std::mem::ManuallyDrop::take(self.original.get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(original);
+            return;
+        }
+        if settled {
+            drop(original);
+        } else {
+            lillux::custody::abandon("ryeos-app::store-destination-join", original);
+        }
     }
 }
 
@@ -424,6 +447,43 @@ pub(super) fn transfer_store_leaf(
     let outside = unsafe { lillux_sqlite::OriginalDestinationOutsideCustody::issued(sources, continuation) };
     drop(original);
     Ok(outside)
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const KIND: &str = "ryeos-app::store-destination-join";
+
+    fn join(parent_outside_pending: bool) -> LiveStoreDestinationJoin {
+        LiveStoreDestinationJoin {
+            process: std::process::id(),
+            factory: Weak::new(),
+            original: Mutex::new(ManuallyDrop::new(None)),
+            parent_outside_pending: std::sync::atomic::AtomicBool::new(parent_outside_pending),
+            parent_registry_identity: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn dropped_completed_join_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let join = join(false);
+        join.require_parent_completed_holders().unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(join);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_join_with_pending_parent_completion_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let join = join(true);
+        assert!(join.require_parent_completed_holders().is_err());
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(join);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+    }
 }
 
 #[cfg(test)]

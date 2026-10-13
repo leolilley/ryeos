@@ -1215,7 +1215,8 @@ fn advance_operational_startup_close(progress: OperationalStartupCloseProgress)
     }
     let released = ReleasedLiveOperationalStartup { progress };
     if released.native_terminals(&factory).is_err() {
-        return Err(retain(std::mem::ManuallyDrop::new(released.into_progress())));
+        let progress = std::mem::ManuallyDrop::new(released.into_progress());
+        return Err(retain(progress));
     }
     Ok(released)
 }

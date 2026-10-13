@@ -231,6 +231,31 @@ struct OriginalPacketBoundResources {
     _inspection: ManuallyDrop<Option<(lillux_sqlite::SqliteCopyLease,
         std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>>,
 }
+impl OriginalPacketBoundResources {
+    /// No root, inspection or registration remains: the retired source
+    /// evidence left nothing behind.
+    fn holders_retired(&self) -> bool {
+        self._root.is_none() && self._inspection.is_none() && self.registration.is_none()
+    }
+}
+impl Drop for OriginalPacketBoundResources {
+    fn drop(&mut self) {
+        // Settled exactly when no root, inspection or registration remains.
+        // Each slot is taken exactly once, here; otherwise the bound root and
+        // inspection lease stay retained together until the process exits.
+        let settled = self.holders_retired();
+        let taken = unsafe {(
+            ManuallyDrop::take(&mut self._root),
+            ManuallyDrop::take(&mut self._inspection),
+        )};
+        if settled {
+            drop(taken);
+        } else {
+            let registration = self.registration.take();
+            lillux::custody::abandon("ryeos-app::packet-bound-resources", (taken, registration));
+        }
+    }
+}
 pub(super) struct OriginalPacketPartsProgress {
     process: u32,
     source_kind: OriginalPacketSourceKind,
@@ -1147,16 +1172,36 @@ impl UnopenedSchedulerDatabaseProgress {
         Ok(())
     }
 
+    /// End an exhausted source. Its Drop settles on the exhaustion check the
+    /// caller already passed, so every slot is released normally.
     pub(super) fn exhaust(self) {
-        let Self { process: _, handoff_id, root, name, mode: _, domain: _, authority, inspection,
-            registration, root_identity_checked: _, authority_joined: _,
-            registration_consumed: _ } = self;
-        drop(handoff_id);
-        drop(ManuallyDrop::into_inner(root));
-        drop(name);
-        drop(ManuallyDrop::into_inner(authority));
-        drop(ManuallyDrop::into_inner(inspection));
-        drop(registration);
+        drop(self);
+    }
+}
+impl Drop for UnopenedSchedulerDatabaseProgress {
+    fn drop(&mut self) {
+        // Settled exactly when exhaustion would accept the source: authority
+        // joined, registration consumed and no root, authority or inspection
+        // owner left. Each slot is taken exactly once, here; otherwise the
+        // bound root, authority alias and inspection lease stay retained
+        // together until the process exits.
+        let settled = self.require_exhausted().is_ok();
+        let taken = unsafe {(
+            ManuallyDrop::take(&mut self.root),
+            ManuallyDrop::take(&mut self.authority),
+            ManuallyDrop::take(&mut self.inspection),
+        )};
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
+            return;
+        }
+        if settled {
+            drop(taken);
+        } else {
+            let registration = self.registration.take();
+            lillux::custody::abandon("ryeos-app::unopened-scheduler-database", (taken, registration));
+        }
     }
 }
 
@@ -1229,9 +1274,29 @@ impl UnopenedNativeTransientProgress {
         Ok(())
     }
 
+    /// End a joined input. Its Drop settles on the joined check the caller
+    /// already passed, so the authority slot is released normally.
     pub(super) fn exhaust(self) {
-        let Self { process: _, expected_domain: _, domain: _, authority, joined: _ } = self;
-        drop(ManuallyDrop::into_inner(authority));
+        drop(self);
+    }
+}
+impl Drop for UnopenedNativeTransientProgress {
+    fn drop(&mut self) {
+        // Settled exactly when is_joined holds: the authority alias joined
+        // the inventory and left this slot. The slot is taken exactly once,
+        // here; otherwise the alias stays retained until the process exits.
+        let settled = self.is_joined();
+        let authority = unsafe { ManuallyDrop::take(&mut self.authority) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(authority);
+            return;
+        }
+        if settled {
+            drop(authority);
+        } else {
+            lillux::custody::abandon("ryeos-app::unopened-native-transient", authority);
+        }
     }
 }
 
@@ -1247,25 +1312,40 @@ impl OriginalPacketPartsProgress {
         Ok(())
     }
 
+    /// End an exhausted packet. Its Drop settles on the exhaustion check the
+    /// caller already passed, so every slot is released normally.
     fn exhaust(self) {
-        let Self { process: _, source_kind: _, optional_source_census: _, source_parts_consumed: _,
-            scheduler_handoff, native_domain: _, bound, authority, destination, destination_retirement,
-            refusal, destination_retries: _, destination_started: _, requires_destination: _,
-            destination_roots_registered: _, destination_native_references_retired: _,
-            destination_consumed: _, bound_root_receipt_consumed: _, metadata_pin_phase: _,
-            metadata_pin_registry_identity, metadata_pin_inputs, metadata_pin_receipts, raw,
-            parts } = self;
-        drop(scheduler_handoff);
-        drop(ManuallyDrop::into_inner(bound));
-        drop(ManuallyDrop::into_inner(authority));
-        drop(ManuallyDrop::into_inner(destination));
-        drop(ManuallyDrop::into_inner(destination_retirement));
-        drop(refusal);
-        drop(metadata_pin_registry_identity);
-        drop(ManuallyDrop::into_inner(metadata_pin_inputs));
-        drop(ManuallyDrop::into_inner(metadata_pin_receipts));
-        drop(ManuallyDrop::into_inner(raw));
-        drop(ManuallyDrop::into_inner(parts));
+        drop(self);
+    }
+}
+impl Drop for OriginalPacketPartsProgress {
+    fn drop(&mut self) {
+        // Settled exactly when exhaustion would accept the packet: source
+        // parts consumed and no source, destination, root or pin owner left.
+        // Each slot is taken exactly once, here; otherwise every owner stays
+        // retained together until the process exits.
+        let settled = self.require_exhausted().is_ok();
+        let taken = unsafe {(
+            ManuallyDrop::take(&mut self.bound),
+            ManuallyDrop::take(&mut self.authority),
+            ManuallyDrop::take(&mut self.destination),
+            ManuallyDrop::take(&mut self.destination_retirement),
+            ManuallyDrop::take(&mut self.metadata_pin_inputs),
+            ManuallyDrop::take(&mut self.metadata_pin_receipts),
+            ManuallyDrop::take(&mut self.raw),
+            ManuallyDrop::take(&mut self.parts),
+        )};
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
+            return;
+        }
+        if settled {
+            drop(taken);
+        } else {
+            let refusal = self.refusal.take();
+            lillux::custody::abandon("ryeos-app::packet-parts-progress", (taken, refusal));
+        }
     }
 }
 
@@ -1282,9 +1362,9 @@ pub(super) fn require_original_packets_exhausted(
     Ok(())
 }
 
-pub(super) fn exhaust_original_packets(packets: Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>) {
+pub(super) fn exhaust_original_packets(packets: Option<Vec<OriginalPacketPartsProgress>>) {
     if let Some(packets) = packets {
-        for packet in ManuallyDrop::into_inner(packets) {
+        for packet in packets {
             packet.exhaust();
         }
     }
@@ -1300,11 +1380,9 @@ pub(super) fn require_sql_custody_exhausted(
 }
 
 pub(super) fn exhaust_sql_custody(
-    packets: Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
+    packets: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
 ) {
-    if let Some(packets) = packets {
-        drop(ManuallyDrop::into_inner(packets));
-    }
+    drop(packets);
 }
 
 /// Non-owning record of one exhausted Store outside graph: the identity of
@@ -1976,6 +2054,29 @@ pub enum LiveStateStoreOutsideSource {
     Closed(ClosedLiveStateStore),
     FailedStartup(ReleasedLiveStateStoreStartup),
 }
+impl LiveStateStoreOutsideCustody {
+    /// Move the process id and the whole source out exactly once; the
+    /// emptied shell is never dropped.
+    fn into_parts(self) -> (u32, LiveStateStoreOutsideSource) {
+        let mut custody = ManuallyDrop::new(self);
+        (custody.process, unsafe { ManuallyDrop::take(&mut custody._source) })
+    }
+}
+impl Drop for LiveStateStoreOutsideCustody {
+    fn drop(&mut self) {
+        // No drop settles this wrapper: it always holds the whole closed or
+        // failed-start Store graph, which only the typed physical transfers
+        // or the final exhaustion consume. The source is taken exactly once,
+        // here, and stays retained until the process exits.
+        let source = unsafe { ManuallyDrop::take(&mut self._source) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(source);
+            return;
+        }
+        lillux::custody::abandon("ryeos-app::store-outside-custody", source);
+    }
+}
 impl LiveStateStoreOutsideSource {
     fn physical_registry_mut(
         &mut self,
@@ -2149,9 +2250,9 @@ impl LiveStateStoreOutsideCustody {
         // SAFETY: each taken value is held locally, moved into this exact
         // Store progress frame, or restored to the wrapper on refusal.
         if let Some(database) = unsafe { sources.take_database()? } {
-            match database {
-                ryeos_scheduler::db::SchedulerNativeDatabaseSource::Connection(parts) => {
-                    let mut source = Some(parts);
+            match database.into_taken() {
+                ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::Connection(parts) => {
+                    let mut source = Some(ManuallyDrop::new(parts));
                     let result = self.advance_scheduler_packet_parts_with_handoff(
                         &mut source, factory, aggregate, prepay,
                         Some((handoff_id.clone(), ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Database)));
@@ -2165,8 +2266,8 @@ impl LiveStateStoreOutsideCustody {
                     result?;
                     ensure!(!unaccepted, "Scheduler database packet was not accepted by Store progress");
                 }
-                ryeos_scheduler::db::SchedulerNativeDatabaseSource::NeverOpened(inputs) => {
-                    let mut source = Some(inputs);
+                ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::NeverOpened(inputs) => {
+                    let mut source = Some(ManuallyDrop::new(inputs));
                     let result = self.advance_unopened_scheduler_database_with_handoff(
                         &mut source, factory, aggregate, prepay, Some(handoff_id.clone()));
                     let unaccepted = if let Some(inputs) = source.take() {
@@ -2790,8 +2891,8 @@ impl LiveStateStoreOutsideCustody {
         if let Err(error) = self.require_original_process() {
             return Err((self, error));
         }
-        let Self { process, _source } = self;
-        match ManuallyDrop::into_inner(_source) {
+        let (process, source) = self.into_parts();
+        match source {
             LiveStateStoreOutsideSource::Closed(source) => source.into_exhausted(registry)
                 .map_err(|(source, error)| (Self { process,
                     _source: ManuallyDrop::new(LiveStateStoreOutsideSource::Closed(source)) }, error)),
@@ -2841,11 +2942,8 @@ impl LiveStateStoreOutsideCustody {
         if self.require_original_process().is_err() {
             return Err(self);
         }
-        let Self {
-            process: _,
-            _source,
-        } = self;
-        Ok(ManuallyDrop::into_inner(_source))
+        let (_process, source) = self.into_parts();
+        Ok(source)
     }
 
     /// # Safety
@@ -3128,5 +3226,210 @@ mod destination_retry_tests {
         assert_eq!(calls.get(), 0);
         assert!(root.is_none());
         assert!(saved_registration.is_some());
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const BOUND: &str = "ryeos-app::packet-bound-resources";
+    const PACKET: &str = "ryeos-app::packet-parts-progress";
+    const DATABASE: &str = "ryeos-app::unopened-scheduler-database";
+    const TRANSIENT: &str = "ryeos-app::unopened-native-transient";
+    const OUTSIDE: &str = "ryeos-app::store-outside-custody";
+    const CLOSED: &str = "ryeos-app::closed-store";
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    fn pinned_tempdir() -> (tempfile::TempDir, Arc<lillux::PinnedDirectory>) {
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        (dir, pinned)
+    }
+
+    /// Bound resources of never-opened inputs on `root`, with the root
+    /// retained inside when `keep_root` holds. No ticket is issued, so the
+    /// shared host releases its arena whatever becomes of the resources.
+    fn bound_resources(
+        host: &lillux_sqlite::test_host::TestNativeHost,
+        root: Arc<lillux::PinnedDirectory>,
+        keep_root: bool,
+    ) -> OriginalPacketBoundResources {
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                root, std::ffi::OsStr::new("packet.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate,
+                lillux_sqlite::OriginalNativeDomain::NodeScheduler, host.destination(), None,
+            )
+        }
+        .unwrap();
+        let lillux_sqlite::OriginalNativeOutsideBoundParts { root, name, mode, domain, authority, inspection } =
+            inputs.into_original_parts().ok().expect("fresh inputs split in their own process");
+        drop((authority, inspection));
+        OriginalPacketBoundResources {
+            _root: ManuallyDrop::new(keep_root.then_some(root)),
+            registration: None, _name: name, _mode: mode, _domain: domain,
+            _inspection: ManuallyDrop::new(None),
+        }
+    }
+
+    #[test]
+    fn dropped_retired_bound_resources_release_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let (_dir, root) = pinned_tempdir();
+        let bound = bound_resources(&host, Arc::clone(&root), false);
+        assert!(bound.holders_retired());
+        let before = abandoned(BOUND);
+        drop(bound);
+        assert_eq!(abandoned(BOUND), before);
+        assert_eq!(Arc::strong_count(&root), 1, "the root alias was released");
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_bound_resources_with_root_are_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let (_dir, root) = pinned_tempdir();
+        let bound = bound_resources(&host, Arc::clone(&root), true);
+        assert!(!bound.holders_retired());
+        let before = abandoned(BOUND);
+        drop(bound);
+        assert_eq!(abandoned(BOUND), before + 1);
+        assert_eq!(Arc::strong_count(&root), 2, "the root alias stays retained");
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    fn packet(authority: Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>)
+        -> OriginalPacketPartsProgress {
+        OriginalPacketPartsProgress {
+            process: std::process::id(), source_kind: OriginalPacketSourceKind::Runtime,
+            optional_source_census: None, source_parts_consumed: true, scheduler_handoff: None,
+            native_domain: None, bound: ManuallyDrop::new(None),
+            authority: ManuallyDrop::new(authority), destination: ManuallyDrop::new(None),
+            destination_retirement: ManuallyDrop::new(None), refusal: None, destination_retries: 0,
+            destination_started: false, requires_destination: false,
+            destination_roots_registered: false, destination_native_references_retired: false,
+            destination_consumed: false, bound_root_receipt_consumed: true,
+            metadata_pin_phase: PacketMetadataPinPhase::ConsumedAbsent,
+            metadata_pin_registry_identity: None, metadata_pin_inputs: ManuallyDrop::new(None),
+            metadata_pin_receipts: ManuallyDrop::new([None, None]), raw: ManuallyDrop::new(None),
+            parts: ManuallyDrop::new(None),
+        }
+    }
+
+    #[test]
+    fn dropped_exhausted_packet_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let packet = packet(None);
+        packet.require_exhausted().unwrap();
+        let before = abandoned(PACKET);
+        packet.exhaust();
+        assert_eq!(abandoned(PACKET), before);
+    }
+
+    #[test]
+    fn dropped_packet_with_authority_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        // The authority alias holds no ticket, so the host still releases
+        // its arena while the abandoned packet keeps the alias.
+        let packet = packet(Some(host.destination()));
+        assert!(packet.require_exhausted().is_err());
+        let before = abandoned(PACKET);
+        drop(packet);
+        assert_eq!(abandoned(PACKET), before + 1);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    fn unopened_database(root: Option<Arc<lillux::PinnedDirectory>>) -> UnopenedSchedulerDatabaseProgress {
+        UnopenedSchedulerDatabaseProgress {
+            process: std::process::id(), handoff_id: None, root: ManuallyDrop::new(root),
+            name: None, mode: None, domain: None, authority: ManuallyDrop::new(None),
+            inspection: ManuallyDrop::new(None), registration: None, root_identity_checked: true,
+            authority_joined: true, registration_consumed: true,
+        }
+    }
+
+    #[test]
+    fn dropped_exhausted_unopened_database_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let database = unopened_database(None);
+        database.require_exhausted().unwrap();
+        let before = abandoned(DATABASE);
+        database.exhaust();
+        assert_eq!(abandoned(DATABASE), before);
+    }
+
+    #[test]
+    fn dropped_unopened_database_with_root_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let (_dir, root) = pinned_tempdir();
+        let database = unopened_database(Some(Arc::clone(&root)));
+        assert!(database.require_exhausted().is_err());
+        let before = abandoned(DATABASE);
+        drop(database);
+        assert_eq!(abandoned(DATABASE), before + 1);
+        assert_eq!(Arc::strong_count(&root), 2, "the root alias stays retained");
+    }
+
+    fn unopened_transient(authority: Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>)
+        -> UnopenedNativeTransientProgress {
+        UnopenedNativeTransientProgress {
+            process: std::process::id(),
+            expected_domain: lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference,
+            domain: None, joined: authority.is_none(), authority: ManuallyDrop::new(authority),
+        }
+    }
+
+    #[test]
+    fn dropped_joined_transient_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let transient = unopened_transient(None);
+        assert!(transient.is_joined());
+        let before = abandoned(TRANSIENT);
+        transient.exhaust();
+        assert_eq!(abandoned(TRANSIENT), before);
+    }
+
+    #[test]
+    fn dropped_transient_with_authority_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let transient = unopened_transient(Some(host.destination()));
+        assert!(!transient.is_joined());
+        let before = abandoned(TRANSIENT);
+        drop(transient);
+        assert_eq!(abandoned(TRANSIENT), before + 1);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_outside_custody_is_retained_whole() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_outside_custody_is_retained_whole");
+        // The retained graph keeps the Store's namespace exclusion and native
+        // context, which only the process end releases, so the scenario runs
+        // in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "outside +1; closed +0", "{outcome}");
+            return;
+        }
+        let app_root = tempfile::tempdir().unwrap();
+        let (closed, retained) = super::super::test_native::closed_store_for_test(app_root.path());
+        let custody = LiveStateStoreOutsideCustody::closed(closed);
+        let before = (abandoned(OUTSIDE), abandoned(CLOSED));
+        drop(custody);
+        let after = (abandoned(OUTSIDE), abandoned(CLOSED));
+        lillux_sqlite::test_host::end_isolated_process(
+            (app_root, retained),
+            &format!("outside +{}; closed +{}", after.0 - before.0, after.1 - before.1),
+        )
     }
 }

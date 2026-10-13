@@ -33,6 +33,49 @@ pub(super) struct LiveStorePhysicalParent {
     registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>; 3],
     host: std::mem::ManuallyDrop<LiveStorePhysicalHost>,
 }
+/// Every field of a Store physical parent moved out of its owner, unwrapped.
+struct LiveStorePhysicalParentParts {
+    process: u32,
+    directories: [Option<Arc<lillux::PinnedDirectory>>; 2],
+    namespace: Option<lillux::PinnedDirectoryLock>,
+    registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>; 3],
+    host: LiveStorePhysicalHost,
+}
+impl LiveStorePhysicalParent {
+    /// Move every field out exactly once; the emptied shell is never dropped.
+    fn into_parts(self) -> LiveStorePhysicalParentParts {
+        let mut parent = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            LiveStorePhysicalParentParts {
+                process: parent.process,
+                directories: std::ptr::read(&parent.directories),
+                namespace: std::ptr::read(&parent.namespace),
+                registrations: std::ptr::read(&parent.registrations),
+                host: std::mem::ManuallyDrop::take(&mut parent.host),
+            }
+        }
+    }
+}
+impl Drop for LiveStorePhysicalParent {
+    fn drop(&mut self) {
+        // No drop settles a physical parent: it always holds the Store host
+        // with its factory, lease authority and exclusion lease, which only
+        // the finalization-parts transfer consumes. The host is taken exactly
+        // once, here, and every root, namespace and registration stays
+        // retained with it until the process exits.
+        let host = unsafe { std::mem::ManuallyDrop::take(&mut self.host) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(host);
+            return;
+        }
+        let directories = std::mem::replace(&mut self.directories, std::array::from_fn(|_| None));
+        let namespace = self.namespace.take();
+        let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
+        lillux::custody::abandon("ryeos-app::store-physical-parent",
+            (host, directories, namespace, registrations));
+    }
+}
 struct LiveStorePhysicalHost {
     _outside_join: Mutex<std::sync::Weak<super::live_destination_join::LiveStoreDestinationJoin>>,
     exclusion_alias: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
@@ -260,14 +303,15 @@ impl LiveStorePhysicalParent {
             Err(error) => return Err((self, error)),
         };
 
-        let LiveStorePhysicalParent { process, directories: _, namespace: _, registrations, host } = self;
+        let LiveStorePhysicalParentParts { process, directories: _, namespace: _, registrations, host } =
+            self.into_parts();
         let LiveStorePhysicalHost {
             _outside_join: _, exclusion_alias, exclusion_owner, exclusion_registration,
             exclusion_identity, factory: native_factory, _lease_authority: lease_authority,
             _signer: signer, _trust: trust, _runtime_path: runtime_path, _deadline: deadline,
             _process: process_identity, _scheduler_admission_phase: scheduler_admission_phase,
             _accounting_admission_phase: accounting_admission_phase,
-        } = std::mem::ManuallyDrop::into_inner(host);
+        } = host;
         // Keep every actual host authority in the retained finalization frame;
         // later stages consume it only after the native/descriptor joins.
         drop(exclusion_owner);
@@ -976,10 +1020,7 @@ impl Drop for StateOpenCustody {
                 _state: self.state.take(),
                 _original: self.original.take(),
             };
-            ABANDONED_STATE_STORE_OPENINGS
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(abandoned);
+            lillux::custody::abandon(STATE_STORE_OPENING_KIND, abandoned);
         }
     }
 }
@@ -992,21 +1033,16 @@ struct AbandonedStateStoreOpening {
     _original: Option<Arc<LiveStateOpen>>,
 }
 
-/// Process-lifetime retention of Store openings discarded without settlement.
-/// Their native handles may still be live, so the databases and the original
-/// startup owner stay reachable here until the process exits. Nothing is ever
-/// removed from this list.
-static ABANDONED_STATE_STORE_OPENINGS: Mutex<Vec<AbandonedStateStoreOpening>> =
-    Mutex::new(Vec::new());
+/// The kind under which a Store opening discarded without settlement is
+/// retained for the life of the process: its native handles may still be
+/// live, so the databases and the original startup owner stay reachable.
+const STATE_STORE_OPENING_KIND: &str = "ryeos-app::state-store-opening";
 
 /// Count of Store openings this process retains because they were discarded
 /// without settlement. Any nonzero count means their native custody stays
 /// held until the process exits.
 pub fn abandoned_state_store_openings() -> usize {
-    ABANDONED_STATE_STORE_OPENINGS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .len()
+    lillux::custody::abandoned_custody().count(STATE_STORE_OPENING_KIND)
 }
 
 pub struct LiveStateStoreOpenFailure {
@@ -1108,8 +1144,7 @@ impl LiveSchedulerNativeAdmissionFailure {
             return Err((self, anyhow::anyhow!(
                 "foreign Scheduler admission failure cannot transfer its original Store owner")));
         }
-        let Self { error, custody } = self;
-        let mut attempt = std::mem::ManuallyDrop::into_inner(custody);
+        let (error, mut attempt) = self.into_parts();
         attempt.original.close_scheduler_admission();
         let sources = LiveSchedulerNativeAdmissionOutsideSources {
             process: std::process::id(),
@@ -1121,6 +1156,29 @@ impl LiveSchedulerNativeAdmissionFailure {
             joined: false,
         };
         Ok((sources, error))
+    }
+}
+impl LiveSchedulerNativeAdmissionFailure {
+    /// Move the error and the whole attempt out exactly once; the emptied
+    /// shell is never dropped.
+    fn into_parts(self) -> (anyhow::Error, LiveSchedulerAdmissionAttempt) {
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        unsafe { (std::ptr::read(&failure.error), std::mem::ManuallyDrop::take(&mut failure.custody)) }
+    }
+}
+impl Drop for LiveSchedulerNativeAdmissionFailure {
+    fn drop(&mut self) {
+        // No drop settles a refused admission: the attempt always holds the
+        // original Store alias and any prepared inputs, which only the
+        // outside-sources transfer consumes. The attempt is taken exactly
+        // once, here, and stays retained until the process exits.
+        let attempt = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
+        if attempt.original.factory.require_original_process().is_err() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(attempt);
+            return;
+        }
+        lillux::custody::abandon("ryeos-app::scheduler-admission-failure", attempt);
     }
 }
 impl std::fmt::Debug for LiveSchedulerNativeAdmissionFailure {
@@ -1250,17 +1308,35 @@ impl LiveSchedulerNativeAdmissionOutsideSources {
         Ok(())
     }
 
+    /// End exhausted sources. Their Drop settles on the exhaustion check the
+    /// caller already passed, so every slot is released normally.
     pub(super) fn exhaust(self) {
-        let Self { process: _, original, bound_inputs, transient_inputs, unopened_database,
-            unopened_reference, joined: _ } = self;
-        drop(std::mem::ManuallyDrop::into_inner(original));
-        drop(bound_inputs.map(std::mem::ManuallyDrop::into_inner));
-        drop(transient_inputs.map(std::mem::ManuallyDrop::into_inner));
-        if let Some(database) = unopened_database {
-            database.exhaust();
+        drop(self);
+    }
+}
+impl Drop for LiveSchedulerNativeAdmissionOutsideSources {
+    fn drop(&mut self) {
+        // Settled exactly when exhaustion would accept the sources: joined,
+        // no Store alias or unused input left, and every nested unopened
+        // source exhausted. Each slot is taken exactly once, here; otherwise
+        // the alias, inputs and nested sources stay retained together until
+        // the process exits.
+        let settled = self.require_exhausted().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.original),
+            self.bound_inputs.take().map(|inputs| std::mem::ManuallyDrop::into_inner(inputs)),
+            self.transient_inputs.take().map(|inputs| std::mem::ManuallyDrop::into_inner(inputs)),
+        )};
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
+            return;
         }
-        if let Some(reference) = unopened_reference {
-            reference.exhaust();
+        if settled {
+            drop(taken);
+        } else {
+            let nested = (self.unopened_database.take(), self.unopened_reference.take());
+            lillux::custody::abandon("ryeos-app::scheduler-admission-outside-sources", (taken, nested));
         }
     }
 }
@@ -1488,8 +1564,260 @@ impl StoreStartupCloseProgress {
     fn original(&self) -> Result<&Arc<LiveStateOpen>> {
         self.original.as_ref().context("actual failed Store parent facade already transferred")
     }
+
+    /// The process that built this progress, recorded by its auxiliary
+    /// receipt at close_retained.
+    fn process(&self) -> u32 {
+        match &self.failed_auxiliary_sources {
+            FailedStartupAuxiliaryReceipt::NotConstructed { process, retired_registry: _ } => *process,
+        }
+    }
+
+    /// The registry-free part of final exhaustion: every owner slot consumed,
+    /// the destination receiver completed, the auxiliary receipt consumed,
+    /// every packet, source and admission exhausted, and no refusal that
+    /// retains an owner. A dropped progress settles on exactly these checks.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        let p = self;
+        anyhow::ensure!(p.original.is_none() && p.store_parent.is_none()
+            && p.store_parent_parts.is_none() && p.store_parent_finalization.is_none()
+            && p.store_parent_finalization_retired && p.physical_registry.is_none(),
+            "failed Store retains a parent or registry source at exhaustion");
+        anyhow::ensure!(p.runtime.is_none() && p.runtime_failure.is_none()
+            && p.runtime_closed.is_none() && p.runtime_outside.is_none()
+            && p.runtime_open_failure.is_none() && p.runtime_released.is_none()
+            && p.runtime_released_outside.is_none()
+            && p.runtime_schema_source_parts.is_none() && p.runtime_schema_unused_inputs.is_none(),
+            "failed Store retains a Runtime owner at exhaustion");
+        anyhow::ensure!(p.state.is_none() && p.state_failure.is_none() && p.state_closed.is_none()
+            && p.state_open_failure.is_none() && p.state_recovery_failure.is_none()
+            && p.state_released.is_none() && p.state_physical.is_none(),
+            "failed Store retains a State owner at exhaustion");
+        anyhow::ensure!(p.operational_open_failure.is_none()
+            && p.operational_recovery_failure.is_none() && p.operational_released.is_none()
+            && p.operational_physical.is_none()
+            && p.schema_failure.is_none() && p.schema_released.is_none(),
+            "failed Store retains an Operational or schema owner at exhaustion");
+        p.store_destination_join.get()
+            .context("failed Store destination receiver absent at exhaustion")?
+            .require_parent_completed_holders()?;
+        match &p.failed_auxiliary_sources {
+            FailedStartupAuxiliaryReceipt::NotConstructed { process, retired_registry } => {
+                anyhow::ensure!(*process == std::process::id(),
+                    "foreign failed-start Store auxiliary receipt at exhaustion");
+                anyhow::ensure!(retired_registry.is_some(),
+                    "failed-start Store auxiliary receipt was not consumed");
+            }
+        }
+        for packets in p.runtime_packet_parts.iter().chain(p.operational_packet_parts.iter())
+            .chain(std::iter::once(&p.scheduler_packet_parts)) {
+            super::live_outside::require_original_packets_exhausted(packets)?;
+        }
+        for packets in p.operational_sql_custody.iter().chain(p.runtime_sql_custody.iter()) {
+            super::live_outside::require_sql_custody_exhausted(packets)?;
+        }
+        if let Some(database) = p.scheduler_unopened_database.as_ref() {
+            database.require_exhausted()?;
+        }
+        for reference in [&p.scheduler_unopened_schema_reference, &p.runtime_unopened_schema_reference] {
+            if let Some(reference) = reference.as_ref() {
+                reference.require_exhausted()?;
+            }
+        }
+        if let Some(admission) = p.scheduler_admission_sources.as_ref() {
+            admission.require_exhausted()?;
+        }
+        ryeos_state::state_db::require_exhausted_refusals(
+            p.runtime_schema_refusal.iter().chain(p.prior_refusal.iter()))
+    }
+}
+/// Every field of a StoreStartupCloseProgress moved out of its owner, unwrapped.
+struct StoreStartupCloseProgressParts {
+    store_destination_join: std::sync::OnceLock<Arc<super::live_destination_join::LiveStoreDestinationJoin>>,
+    runtime_packet_parts: [Option<Vec<super::live_outside::OriginalPacketPartsProgress>>; 2],
+    operational_packet_parts: [Option<Vec<super::live_outside::OriginalPacketPartsProgress>>; 3],
+    scheduler_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
+    scheduler_unopened_database: Option<super::live_outside::UnopenedSchedulerDatabaseProgress>,
+    scheduler_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
+    runtime_schema_source_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    runtime_schema_unused_inputs: Option<lillux_sqlite::OriginalNativeTransientInputs>,
+    runtime_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
+    runtime_schema_refusal: Option<anyhow::Error>,
+    scheduler_admission_sources: Option<LiveSchedulerNativeAdmissionOutsideSources>,
+    failed_auxiliary_sources: FailedStartupAuxiliaryReceipt,
+    operational_sql_custody: [Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>; 3],
+    runtime_sql_custody: [Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>; 2],
+    physical_registry: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
+    original: Option<Arc<LiveStateOpen>>,
+    store_parent: Option<LiveStateOpen>,
+    store_parent_parts: Option<LiveStorePhysicalParent>,
+    store_parent_finalization: Option<LiveStoreParentFinalizationParts>,
+    store_parent_finalization_retired: bool,
+    runtime: Option<runtime_db::RuntimeDb>,
+    runtime_failure: Option<runtime_db::OriginalRuntimeCloseFailure>,
+    runtime_closed: Option<runtime_db::OriginalRuntimeClosed>,
+    runtime_outside: Option<runtime_db::OriginalLiveRuntimeOutsideCustody>,
+    runtime_open_failure: Option<runtime_db::OriginalRuntimeAcquisitionFailure>,
+    runtime_released: Option<runtime_db::OriginalRuntimeAcquisitionReleased>,
+    runtime_released_outside: Option<runtime_db::OriginalRuntimeAcquisitionOutsideCustody>,
+    state: Option<StateDb>,
+    state_failure: Option<ryeos_state::state_db::LiveStateCloseFailure>,
+    state_closed: Option<ryeos_state::state_db::ClosedLiveState>,
+    state_open_failure: Option<ryeos_state::state_db::LiveStateDatabaseOpenFailure>,
+    state_recovery_failure: Option<ryeos_state::state_db::LiveStateStartupRecoveryFailure>,
+    state_released: Option<ryeos_state::state_db::ReleasedLiveStateStartup>,
+    state_physical: Option<StoreStartupStatePhysical>,
+    operational_open_failure: Option<ryeos_state::operational::LiveOperationalOpenFailure>,
+    operational_recovery_failure: Option<ryeos_state::operational::LiveOperationalStartupRecoveryFailure>,
+    operational_released: Option<ryeos_state::operational::ReleasedLiveOperationalStartup>,
+    operational_physical: Option<ryeos_state::operational::ReleasedLiveOperationalPhysicalCustody>,
+    schema_failure: Option<ryeos_state::sqlite_schema::NativeSchemaSqlReferenceFailure>,
+    schema_released: Option<ryeos_state::sqlite_schema::ReleasedNativeSchemaSqlReference>,
+    prior_refusal: Option<anyhow::Error>,
+}
+impl StoreStartupCloseProgress {
+    /// Move every field out exactly once; the emptied shell is never dropped.
+    fn into_parts(self) -> StoreStartupCloseProgressParts {
+        let mut progress = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            StoreStartupCloseProgressParts {
+                store_destination_join: std::ptr::read(&progress.store_destination_join),
+                runtime_packet_parts: std::ptr::read(&progress.runtime_packet_parts).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+                operational_packet_parts: std::ptr::read(&progress.operational_packet_parts).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+                scheduler_packet_parts: std::ptr::read(&progress.scheduler_packet_parts).map(std::mem::ManuallyDrop::into_inner),
+                scheduler_unopened_database: std::ptr::read(&progress.scheduler_unopened_database),
+                scheduler_unopened_schema_reference: std::ptr::read(&progress.scheduler_unopened_schema_reference),
+                runtime_schema_source_parts: std::ptr::read(&progress.runtime_schema_source_parts).map(std::mem::ManuallyDrop::into_inner),
+                runtime_schema_unused_inputs: std::ptr::read(&progress.runtime_schema_unused_inputs).map(std::mem::ManuallyDrop::into_inner),
+                runtime_unopened_schema_reference: std::ptr::read(&progress.runtime_unopened_schema_reference),
+                runtime_schema_refusal: std::ptr::read(&progress.runtime_schema_refusal),
+                scheduler_admission_sources: std::ptr::read(&progress.scheduler_admission_sources),
+                failed_auxiliary_sources: std::ptr::read(&progress.failed_auxiliary_sources),
+                operational_sql_custody: std::ptr::read(&progress.operational_sql_custody).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+                runtime_sql_custody: std::ptr::read(&progress.runtime_sql_custody).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+                physical_registry: std::ptr::read(&progress.physical_registry),
+                original: std::ptr::read(&progress.original),
+                store_parent: std::mem::ManuallyDrop::take(&mut progress.store_parent),
+                store_parent_parts: std::mem::ManuallyDrop::take(&mut progress.store_parent_parts),
+                store_parent_finalization: std::ptr::read(&progress.store_parent_finalization),
+                store_parent_finalization_retired: std::ptr::read(&progress.store_parent_finalization_retired),
+                runtime: std::ptr::read(&progress.runtime),
+                runtime_failure: std::ptr::read(&progress.runtime_failure),
+                runtime_closed: std::ptr::read(&progress.runtime_closed),
+                runtime_outside: std::ptr::read(&progress.runtime_outside),
+                runtime_open_failure: std::ptr::read(&progress.runtime_open_failure),
+                runtime_released: std::ptr::read(&progress.runtime_released),
+                runtime_released_outside: std::ptr::read(&progress.runtime_released_outside),
+                state: std::ptr::read(&progress.state),
+                state_failure: std::ptr::read(&progress.state_failure),
+                state_closed: std::ptr::read(&progress.state_closed),
+                state_open_failure: std::ptr::read(&progress.state_open_failure),
+                state_recovery_failure: std::ptr::read(&progress.state_recovery_failure),
+                state_released: std::ptr::read(&progress.state_released),
+                state_physical: std::ptr::read(&progress.state_physical),
+                operational_open_failure: std::ptr::read(&progress.operational_open_failure),
+                operational_recovery_failure: std::ptr::read(&progress.operational_recovery_failure),
+                operational_released: std::ptr::read(&progress.operational_released),
+                operational_physical: std::ptr::read(&progress.operational_physical),
+                schema_failure: std::ptr::read(&progress.schema_failure),
+                schema_released: std::ptr::read(&progress.schema_released),
+                prior_refusal: std::ptr::read(&progress.prior_refusal),
+            }
+        }
+    }
+}
+impl Drop for StoreStartupCloseProgress {
+    fn drop(&mut self) {
+        // Settled exactly when final exhaustion would accept this progress
+        // without a registry. Each retained slot is taken exactly once, here;
+        // otherwise every parent, packet, Runtime, State, Operational and
+        // schema owner stays retained together until the process exits.
+        let settled = self.require_exhausted_holders().is_ok();
+        let taken = unsafe {(
+            std::mem::replace(&mut self.runtime_packet_parts, std::array::from_fn(|_| None)).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+            std::mem::replace(&mut self.operational_packet_parts, std::array::from_fn(|_| None)).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+            self.scheduler_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
+            self.runtime_schema_source_parts.take().map(std::mem::ManuallyDrop::into_inner),
+            self.runtime_schema_unused_inputs.take().map(std::mem::ManuallyDrop::into_inner),
+            std::mem::replace(&mut self.operational_sql_custody, std::array::from_fn(|_| None)).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+            std::mem::replace(&mut self.runtime_sql_custody, std::array::from_fn(|_| None)).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
+            std::mem::ManuallyDrop::take(&mut self.store_parent),
+            std::mem::ManuallyDrop::take(&mut self.store_parent_parts),
+        )};
+        if self.process() != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
+            return;
+        }
+        if settled {
+            drop(taken);
+        } else {
+            let rest = (
+                std::mem::take(&mut self.store_destination_join),
+                self.scheduler_unopened_database.take(),
+                self.scheduler_unopened_schema_reference.take(),
+                self.runtime_unopened_schema_reference.take(),
+                self.runtime_schema_refusal.take(),
+                self.scheduler_admission_sources.take(),
+                std::mem::replace(&mut self.failed_auxiliary_sources, FailedStartupAuxiliaryReceipt::not_constructed_at_close_retained()),
+                self.physical_registry.take(),
+                self.original.take(),
+                self.store_parent_finalization.take(),
+                self.store_parent_finalization_retired,
+                self.runtime.take(),
+                self.runtime_failure.take(),
+                self.runtime_closed.take(),
+                self.runtime_outside.take(),
+                self.runtime_open_failure.take(),
+                self.runtime_released.take(),
+                self.runtime_released_outside.take(),
+                self.state.take(),
+                self.state_failure.take(),
+                self.state_closed.take(),
+                self.state_open_failure.take(),
+                self.state_recovery_failure.take(),
+                self.state_released.take(),
+                self.state_physical.take(),
+                self.operational_open_failure.take(),
+                self.operational_recovery_failure.take(),
+                self.operational_released.take(),
+                self.operational_physical.take(),
+                self.schema_failure.take(),
+                self.schema_released.take(),
+                self.prior_refusal.take(),
+            );
+            lillux::custody::abandon("ryeos-app::store-startup-close-progress", (taken, rest));
+        }
+    }
 }
 pub struct ReleasedLiveStateStoreStartup { progress: std::mem::ManuallyDrop<StoreStartupCloseProgress> }
+impl ReleasedLiveStateStoreStartup {
+    /// Move the whole progress out exactly once; the emptied shell is never
+    /// dropped.
+    fn into_progress(self) -> StoreStartupCloseProgress {
+        let mut released = std::mem::ManuallyDrop::new(self);
+        unsafe { std::mem::ManuallyDrop::take(&mut released.progress) }
+    }
+}
+impl Drop for ReleasedLiveStateStoreStartup {
+    fn drop(&mut self) {
+        // Settled exactly when the progress inside would settle. The progress
+        // is taken exactly once, here; otherwise it stays retained whole
+        // until the process exits.
+        let settled = self.progress.require_exhausted_holders().is_ok();
+        let progress = unsafe { std::mem::ManuallyDrop::take(&mut self.progress) };
+        if progress.process() != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(progress);
+            return;
+        }
+        if settled {
+            drop(progress);
+        } else {
+            lillux::custody::abandon("ryeos-app::released-store-startup", progress);
+        }
+    }
+}
 impl ReleasedLiveStateStoreStartup {
     pub(super) fn physical_registry_slot(&mut self)
         -> &mut Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
@@ -1833,56 +2161,17 @@ impl ReleasedLiveStateStoreStartup {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
         let p = &*self.progress;
-        anyhow::ensure!(p.original.is_none() && p.store_parent.is_none()
-            && p.store_parent_parts.is_none() && p.store_parent_finalization.is_none()
-            && p.store_parent_finalization_retired && p.physical_registry.is_none(),
-            "failed Store retains a parent or registry source at exhaustion");
-        anyhow::ensure!(p.runtime.is_none() && p.runtime_failure.is_none()
-            && p.runtime_closed.is_none() && p.runtime_outside.is_none()
-            && p.runtime_open_failure.is_none() && p.runtime_released.is_none()
-            && p.runtime_released_outside.is_none()
-            && p.runtime_schema_source_parts.is_none() && p.runtime_schema_unused_inputs.is_none(),
-            "failed Store retains a Runtime owner at exhaustion");
-        anyhow::ensure!(p.state.is_none() && p.state_failure.is_none() && p.state_closed.is_none()
-            && p.state_open_failure.is_none() && p.state_recovery_failure.is_none()
-            && p.state_released.is_none() && p.state_physical.is_none(),
-            "failed Store retains a State owner at exhaustion");
-        anyhow::ensure!(p.operational_open_failure.is_none()
-            && p.operational_recovery_failure.is_none() && p.operational_released.is_none()
-            && p.operational_physical.is_none()
-            && p.schema_failure.is_none() && p.schema_released.is_none(),
-            "failed Store retains an Operational or schema owner at exhaustion");
+        p.require_exhausted_holders()?;
         p.store_destination_join.get()
             .context("failed Store destination receiver absent at exhaustion")?
             .require_parent_completed_in_retired_registry(registry)?;
         match &p.failed_auxiliary_sources {
-            FailedStartupAuxiliaryReceipt::NotConstructed { process, retired_registry } => {
-                anyhow::ensure!(*process == std::process::id(),
-                    "foreign failed-start Store auxiliary receipt at exhaustion");
+            FailedStartupAuxiliaryReceipt::NotConstructed { process: _, retired_registry } => {
                 registry.require_same_registry(retired_registry.as_ref()
                     .context("failed-start Store auxiliary receipt was not consumed")?)?;
             }
         }
-        for packets in p.runtime_packet_parts.iter().chain(p.operational_packet_parts.iter())
-            .chain(std::iter::once(&p.scheduler_packet_parts)) {
-            super::live_outside::require_original_packets_exhausted(packets)?;
-        }
-        for packets in p.operational_sql_custody.iter().chain(p.runtime_sql_custody.iter()) {
-            super::live_outside::require_sql_custody_exhausted(packets)?;
-        }
-        if let Some(database) = p.scheduler_unopened_database.as_ref() {
-            database.require_exhausted()?;
-        }
-        for reference in [&p.scheduler_unopened_schema_reference, &p.runtime_unopened_schema_reference] {
-            if let Some(reference) = reference.as_ref() {
-                reference.require_exhausted()?;
-            }
-        }
-        if let Some(admission) = p.scheduler_admission_sources.as_ref() {
-            admission.require_exhausted()?;
-        }
-        ryeos_state::state_db::require_exhausted_refusals(
-            p.runtime_schema_refusal.iter().chain(p.prior_refusal.iter()))
+        Ok(())
     }
 
     /// Final consumption of the failed-start Store graph. Every owner slot
@@ -1897,8 +2186,7 @@ impl ReleasedLiveStateStoreStartup {
             Ok(exhausted) => exhausted,
             Err(error) => return Err((self, error)),
         };
-        let Self { progress } = self;
-        let StoreStartupCloseProgress { store_destination_join, runtime_packet_parts,
+        let StoreStartupCloseProgressParts { store_destination_join, runtime_packet_parts,
             operational_packet_parts, scheduler_packet_parts, scheduler_unopened_database,
             scheduler_unopened_schema_reference, runtime_schema_source_parts,
             runtime_schema_unused_inputs, runtime_unopened_schema_reference, runtime_schema_refusal,
@@ -1910,7 +2198,7 @@ impl ReleasedLiveStateStoreStartup {
             state_open_failure, state_recovery_failure, state_released, state_physical,
             operational_open_failure, operational_recovery_failure, operational_released,
             operational_physical, schema_failure, schema_released, prior_refusal }
-            = std::mem::ManuallyDrop::into_inner(progress);
+            = self.into_progress().into_parts();
         drop(store_destination_join);
         for packets in runtime_packet_parts.into_iter().chain(operational_packet_parts)
             .chain(std::iter::once(scheduler_packet_parts)) {
@@ -1924,8 +2212,8 @@ impl ReleasedLiveStateStoreStartup {
                 reference.exhaust();
             }
         }
-        drop(runtime_schema_source_parts.map(std::mem::ManuallyDrop::into_inner));
-        drop(runtime_schema_unused_inputs.map(std::mem::ManuallyDrop::into_inner));
+        drop(runtime_schema_source_parts);
+        drop(runtime_schema_unused_inputs);
         drop(runtime_schema_refusal);
         if let Some(admission) = scheduler_admission_sources {
             admission.exhaust();
@@ -1936,8 +2224,8 @@ impl ReleasedLiveStateStoreStartup {
         }
         drop(physical_registry);
         drop(original);
-        drop(std::mem::ManuallyDrop::into_inner(store_parent));
-        drop(std::mem::ManuallyDrop::into_inner(store_parent_parts));
+        drop(store_parent);
+        drop(store_parent_parts);
         drop(store_parent_finalization);
         drop(runtime);
         drop(runtime_failure);
@@ -2866,7 +3154,7 @@ impl ReleasedLiveStateStoreStartup {
                 progress: std::mem::ManuallyDrop::new(Mutex::new(std::mem::ManuallyDrop::into_inner(progress))),
             } }
         };
-        let Self { mut progress } = self;
+        let mut progress = std::mem::ManuallyDrop::new(self.into_progress());
         let checked = (|| -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
             factory.require_original_process()?;
             progress.original()?.require_close_factory(&factory)?;
@@ -2961,7 +3249,7 @@ impl ReleasedLiveStateStoreStartup {
                 Ok(true) | Err(_) => progress.schema_released = Some(released),
             }
         }
-        let StoreStartupCloseProgress { store_destination_join, runtime_packet_parts, operational_packet_parts,
+        let StoreStartupCloseProgressParts { store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             runtime_schema_source_parts, runtime_schema_unused_inputs, runtime_unopened_schema_reference,
             runtime_schema_refusal, scheduler_admission_sources, failed_auxiliary_sources,
@@ -2972,11 +3260,11 @@ impl ReleasedLiveStateStoreStartup {
             state_open_failure, state_recovery_failure, state_released, state_physical,
             operational_open_failure, operational_recovery_failure, operational_released,
             operational_physical, schema_failure, schema_released, prior_refusal }
-            = std::mem::ManuallyDrop::into_inner(progress);
+            = std::mem::ManuallyDrop::into_inner(progress).into_parts();
         // Every outside slot was checked empty above and every native owner's
         // terminal is in the census; the facades and opening roots end here.
-        drop(std::mem::ManuallyDrop::into_inner(store_parent));
-        drop(std::mem::ManuallyDrop::into_inner(store_parent_parts));
+        drop(store_parent);
+        drop(store_parent_parts);
         drop((store_destination_join, runtime_packet_parts, operational_packet_parts, scheduler_packet_parts,
             scheduler_unopened_database, scheduler_unopened_schema_reference, runtime_schema_source_parts,
             runtime_schema_unused_inputs, runtime_unopened_schema_reference, scheduler_admission_sources,
@@ -2997,6 +3285,31 @@ enum StoreStartupRecoveryCustody {
     Closing { factory: Arc<OriginalNativeFactory>, progress: std::mem::ManuallyDrop<Mutex<StoreStartupCloseProgress>> },
 }
 pub struct LiveStateStoreStartupRecoveryFailure { custody: StoreStartupRecoveryCustody }
+impl LiveStateStoreStartupRecoveryFailure {
+    /// Move the whole custody out exactly once; the emptied shell is never
+    /// dropped.
+    fn into_custody(self) -> StoreStartupRecoveryCustody {
+        let failure = std::mem::ManuallyDrop::new(self);
+        unsafe { std::ptr::read(&failure.custody) }
+    }
+}
+impl Drop for LiveStateStoreStartupRecoveryFailure {
+    fn drop(&mut self) {
+        // No drop settles a refused recovery. An opening failure retains its
+        // own checkout through that checkout's Drop; a closing progress is
+        // taken exactly once, here, and stays retained whole until the
+        // process exits.
+        if let StoreStartupRecoveryCustody::Closing { factory, progress } = &mut self.custody {
+            let progress = unsafe { std::mem::ManuallyDrop::take(progress) };
+            if factory.require_original_process().is_err() {
+                // A copy in another process holds none of these owners.
+                lillux::custody::relinquish_in_foreign_process(progress);
+                return;
+            }
+            lillux::custody::abandon("ryeos-app::store-startup-recovery-failure", progress);
+        }
+    }
+}
 impl std::fmt::Debug for LiveStateStoreStartupRecoveryFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveStateStoreStartupRecoveryFailure").finish_non_exhaustive()
@@ -3044,7 +3357,7 @@ impl LiveStateStoreOpenFailure {
 }
 impl LiveStateStoreStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveStateStoreStartup, Self> {
-        match self.custody {
+        match self.into_custody() {
             StoreStartupRecoveryCustody::Opening(failure) => failure.close_retained(),
             StoreStartupRecoveryCustody::Closing { factory, progress } => {
                 if factory.require_original_process().is_err() {
@@ -3130,7 +3443,10 @@ fn advance_store_startup_close(progress: StoreStartupCloseProgress)
         }
     }
     let released = ReleasedLiveStateStoreStartup { progress };
-    if released.native_terminals(&factory).is_err() { return Err(retain(released.progress)); }
+    if released.native_terminals(&factory).is_err() {
+        let progress = std::mem::ManuallyDrop::new(released.into_progress());
+        return Err(retain(progress));
+    }
     Ok(released)
 }
 
@@ -3176,5 +3492,149 @@ mod outside_quote_tests {
             bytes: u64::try_from(std::mem::size_of::<LiveStoreParentFinalizationParts>()).unwrap(),
             steps: 8,
         });
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const ADMISSION_SOURCES: &str = "ryeos-app::scheduler-admission-outside-sources";
+    const ADMISSION_FAILURE: &str = "ryeos-app::scheduler-admission-failure";
+    const PROGRESS: &str = "ryeos-app::store-startup-close-progress";
+    const RELEASED: &str = "ryeos-app::released-store-startup";
+    const RECOVERY: &str = "ryeos-app::store-startup-recovery-failure";
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    fn admission_sources(joined: bool) -> LiveSchedulerNativeAdmissionOutsideSources {
+        LiveSchedulerNativeAdmissionOutsideSources {
+            process: std::process::id(), original: std::mem::ManuallyDrop::new(None),
+            bound_inputs: None, transient_inputs: None, unopened_database: None,
+            unopened_reference: None, joined,
+        }
+    }
+
+    #[test]
+    fn dropped_exhausted_admission_sources_release_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let sources = admission_sources(true);
+        sources.require_exhausted().unwrap();
+        let before = abandoned(ADMISSION_SOURCES);
+        sources.exhaust();
+        assert_eq!(abandoned(ADMISSION_SOURCES), before);
+    }
+
+    #[test]
+    fn dropped_unjoined_admission_sources_are_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let sources = admission_sources(false);
+        assert!(sources.require_exhausted().is_err());
+        let before = abandoned(ADMISSION_SOURCES);
+        drop(sources);
+        assert_eq!(abandoned(ADMISSION_SOURCES), before + 1);
+    }
+
+    /// A startup close progress in the shape close_retained builds before any
+    /// owner joins it: no receiver, no registry, every slot empty. It is not
+    /// exhausted, since its receiver and auxiliary receipt never completed.
+    fn empty_startup_progress() -> StoreStartupCloseProgress {
+        StoreStartupCloseProgress { store_destination_join: std::sync::OnceLock::new(),
+            runtime_packet_parts: std::array::from_fn(|_| None),
+            operational_packet_parts: std::array::from_fn(|_| None), scheduler_packet_parts: None,
+            scheduler_unopened_database: None, scheduler_unopened_schema_reference: None,
+            runtime_schema_source_parts: None, runtime_schema_unused_inputs: None,
+            runtime_unopened_schema_reference: None, runtime_schema_refusal: None,
+            scheduler_admission_sources: None,
+            failed_auxiliary_sources: FailedStartupAuxiliaryReceipt::not_constructed_at_close_retained(),
+            operational_sql_custody: std::array::from_fn(|_| None),
+            runtime_sql_custody: std::array::from_fn(|_| None), physical_registry: None,
+            original: None, store_parent: std::mem::ManuallyDrop::new(None),
+            store_parent_parts: std::mem::ManuallyDrop::new(None), store_parent_finalization: None,
+            store_parent_finalization_retired: true, runtime: None, runtime_failure: None,
+            runtime_closed: None, runtime_outside: None, runtime_open_failure: None,
+            runtime_released: None, runtime_released_outside: None, state: None,
+            state_failure: None, state_closed: None, state_open_failure: None,
+            state_recovery_failure: None, state_released: None, state_physical: None,
+            operational_open_failure: None, operational_recovery_failure: None,
+            operational_released: None, operational_physical: None, schema_failure: None,
+            schema_released: None, prior_refusal: None }
+    }
+
+    #[test]
+    fn dropped_uncompleted_startup_progress_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let progress = empty_startup_progress();
+        assert!(progress.require_exhausted_holders().is_err());
+        let before = abandoned(PROGRESS);
+        drop(progress);
+        assert_eq!(abandoned(PROGRESS), before + 1);
+    }
+
+    #[test]
+    fn dropped_released_startup_is_retained_whole() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let released = ReleasedLiveStateStoreStartup {
+            progress: std::mem::ManuallyDrop::new(empty_startup_progress()),
+        };
+        let before = (abandoned(RELEASED), abandoned(PROGRESS));
+        drop(released);
+        // Held whole: the progress inside is never dropped on its own.
+        assert_eq!((abandoned(RELEASED), abandoned(PROGRESS)), (before.0 + 1, before.1));
+    }
+
+    #[test]
+    fn dropped_closing_recovery_failure_is_retained_whole() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let failure = LiveStateStoreStartupRecoveryFailure {
+            custody: StoreStartupRecoveryCustody::Closing {
+                factory: Arc::clone(host.factory()),
+                progress: std::mem::ManuallyDrop::new(Mutex::new(empty_startup_progress())),
+            },
+        };
+        let before = (abandoned(RECOVERY), abandoned(PROGRESS));
+        drop(failure);
+        assert_eq!((abandoned(RECOVERY), abandoned(PROGRESS)), (before.0 + 1, before.1));
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_admission_failure_is_retained_whole() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_admission_failure_is_retained_whole");
+        // The retained attempt aliases the live Store's opening owner, which
+        // the Store's close would then refuse, so the scenario runs in its
+        // own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "failure +1", "{outcome}");
+            return;
+        }
+        let app_root = tempfile::tempdir().unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.path().join("node-key.pem"))
+            .expect("test node identity");
+        let signer: Arc<dyn Signer> = Arc::new(super::super::NodeIdentitySigner::from_identity(&identity));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(identity.fingerprint().to_string(), *identity.verifying_key());
+        let store = super::super::test_native::TestStateStore::open(app_root.path(), signer, Arc::new(head_trust))
+            .expect("test StateStore opens");
+        // A claimed attempt refused after issuance keeps the opening owner's
+        // alias; no prepared inputs are needed to retain it.
+        let original = Arc::clone(store.live_native_open.as_ref().expect("live Store opening owner"));
+        let failure = LiveSchedulerNativeAdmissionFailure {
+            error: anyhow::anyhow!("scheduler admission issuance refused"),
+            custody: std::mem::ManuallyDrop::new(LiveSchedulerAdmissionAttempt {
+                original: Arc::clone(&original), claimed: true, inputs: None, reference: None,
+            }),
+        };
+        assert!(failure.claimed());
+        let before = abandoned(ADMISSION_FAILURE);
+        drop(failure);
+        let delta = abandoned(ADMISSION_FAILURE) - before;
+        let host = super::super::test_native::take_shared_host();
+        lillux_sqlite::test_host::end_isolated_process((original, store, app_root, host), &format!("failure +{delta}"))
     }
 }

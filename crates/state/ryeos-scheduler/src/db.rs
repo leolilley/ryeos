@@ -847,6 +847,40 @@ pub enum SchedulerNativeDatabaseSource {
     Connection(ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>),
     NeverOpened(ManuallyDrop<OriginalNativeBoundInputs>),
 }
+/// The payload of one database source moved out of its retaining owner,
+/// for the Store progress that accepts it or hands it back.
+pub enum TakenSchedulerNativeDatabaseSource {
+    Connection(lillux_sqlite::OriginalNativeOutsideConnectionParts),
+    NeverOpened(OriginalNativeBoundInputs),
+}
+impl SchedulerNativeDatabaseSource {
+    /// Move the payload out exactly once; the emptied shell is never dropped.
+    pub fn into_taken(self) -> TakenSchedulerNativeDatabaseSource {
+        let mut source = ManuallyDrop::new(self);
+        match &mut *source {
+            Self::Connection(parts) => {
+                TakenSchedulerNativeDatabaseSource::Connection(unsafe { ManuallyDrop::take(parts) })
+            }
+            Self::NeverOpened(inputs) => {
+                TakenSchedulerNativeDatabaseSource::NeverOpened(unsafe { ManuallyDrop::take(inputs) })
+            }
+        }
+    }
+}
+impl Drop for SchedulerNativeDatabaseSource {
+    fn drop(&mut self) {
+        // No drop settles a database source: outside its handoff wrapper it
+        // always holds the closed connection's parts or the never-opened
+        // inputs, which only the Store progress accepts. The payload is
+        // taken exactly once, here, and stays retained until the process
+        // exits; a copied process relinquishes it through the same call.
+        const KIND: &str = "ryeos-scheduler::native-database-source";
+        match self {
+            Self::Connection(parts) => lillux::custody::abandon(KIND, unsafe { ManuallyDrop::take(parts) }),
+            Self::NeverOpened(inputs) => lillux::custody::abandon(KIND, unsafe { ManuallyDrop::take(inputs) }),
+        }
+    }
+}
 
 #[must_use = "Scheduler sources must remain in custody until Store acceptance is proved"]
 pub struct SchedulerNativeOutsideSources {
@@ -5100,6 +5134,36 @@ mod tests {
         };
         assert!(!sources.is_empty());
         drop(sources);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_database_source_outside_its_wrapper_is_abandoned() {
+        const KIND: &str = "ryeos-scheduler::native-database-source";
+        let dir = tempfile::tempdir().unwrap();
+        let host = ryeos_state::test_support::shared_test_host();
+        let runtime = Arc::new(PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeBoundInputs::issued(
+                runtime,
+                std::ffi::OsStr::new("scheduler.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeScheduler,
+                host.destination(),
+                None,
+            )
+        }
+        .unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        // Taking the payload leaves nothing for the shell to retain.
+        let taken = SchedulerNativeDatabaseSource::NeverOpened(ManuallyDrop::new(inputs)).into_taken();
+        let TakenSchedulerNativeDatabaseSource::NeverOpened(inputs) = taken else {
+            panic!("never-opened inputs come back as never-opened");
+        };
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+        drop(SchedulerNativeDatabaseSource::NeverOpened(ManuallyDrop::new(inputs)));
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
         ryeos_state::test_support::release_shared_test_host(host);
     }
