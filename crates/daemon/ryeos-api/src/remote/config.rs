@@ -287,13 +287,51 @@ pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
 }
 
 fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<RemotesLoadReport> {
-    let mut report = RemotesLoadReport::default();
     if !path.exists() {
-        return Ok(report);
+        return Ok(RemotesLoadReport::default());
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
-    let file: RemotesFile = serde_yaml::from_str(&content)
+    parse_remotes_report(&content, path, scope)
+}
+
+/// Upper bound on a project-layer remotes file read through a retained
+/// project directory.
+const MAX_PROJECT_REMOTES_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// Read the project-layer remotes file beneath the exact open `project`
+/// directory. Every component is traversed from the held descriptor without
+/// following symlinks; the project's pathname is never reopened.
+fn load_project_remotes_report_under_authority(
+    project: &lillux::PinnedDirectory,
+) -> Result<RemotesLoadReport> {
+    let root = project.path().to_path_buf();
+    let path = remotes_config_path(&root);
+    let mut relative = PathBuf::from(ryeos_engine::AI_DIR);
+    for seg in REMOTES_CONFIG_SUBPATH {
+        relative.push(seg);
+    }
+    let Some(file) = project
+        .open_pinned_regular_descendant(&relative, false)
+        .with_context(|| format!("failed to open remotes config: {}", path.display()))?
+    else {
+        return Ok(RemotesLoadReport::default());
+    };
+    let bytes = file
+        .read_bounded(MAX_PROJECT_REMOTES_CONFIG_BYTES)
+        .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("remotes config is not UTF-8: {}", path.display()))?;
+    parse_remotes_report(&content, &path, RemoteConfigScope::Project { root })
+}
+
+fn parse_remotes_report(
+    content: &str,
+    path: &Path,
+    scope: RemoteConfigScope,
+) -> Result<RemotesLoadReport> {
+    let mut report = RemotesLoadReport::default();
+    let file: RemotesFile = serde_yaml::from_str(content)
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
     for (name, raw) in file.remotes {
         let raw_url = raw
@@ -391,11 +429,6 @@ pub fn load_remotes_layered_report(
 ) -> Result<RemotesLoadReport> {
     let mut report =
         load_remotes_at_report(&remotes_config_path(app_root), RemoteConfigScope::Operator)?;
-    let user_bindings: HashMap<String, HashMap<String, RemoteProjectBinding>> = report
-        .remotes
-        .iter()
-        .map(|(name, loaded)| (name.clone(), loaded.config.project_bindings.clone()))
-        .collect();
     if let Some(project) = project_path {
         let canonical_project = canonical_local_project_path(project)?;
         let project_report = load_remotes_at_report(
@@ -404,15 +437,62 @@ pub fn load_remotes_layered_report(
                 root: canonical_project,
             },
         )?;
-        for (name, mut loaded) in project_report.remotes {
-            if let Some(bindings) = user_bindings.get(&name) {
-                loaded.config.project_bindings = bindings.clone();
-            }
-            report.remotes.insert(name, loaded);
-        }
-        report.invalid.extend(project_report.invalid);
+        layer_project_remotes(&mut report, project_report);
     }
     Ok(report)
+}
+
+/// Load operator remotes plus the project layer of a retained project
+/// directory, retaining invalid entries as diagnostics.
+///
+/// The project layer is read only through `project`'s open descriptor, so a
+/// directory substituted at the project's pathname after `project` was opened
+/// cannot redirect the read. The project scope records `project.path()`, the
+/// identity the directory was bound to, for display only.
+pub fn load_remotes_layered_report_under_project_authority(
+    app_root: &Path,
+    project: Option<&lillux::PinnedDirectory>,
+) -> Result<RemotesLoadReport> {
+    let mut report =
+        load_remotes_at_report(&remotes_config_path(app_root), RemoteConfigScope::Operator)?;
+    if let Some(project) = project {
+        let project_report = load_project_remotes_report_under_authority(project)?;
+        layer_project_remotes(&mut report, project_report);
+    }
+    Ok(report)
+}
+
+/// [`load_remotes_layered_report_under_project_authority`] reduced to the
+/// usable remote configs.
+pub fn load_remotes_layered_under_project_authority(
+    app_root: &Path,
+    project: Option<&lillux::PinnedDirectory>,
+) -> Result<HashMap<String, RemoteConfig>> {
+    Ok(
+        load_remotes_layered_report_under_project_authority(app_root, project)?
+            .remotes
+            .into_iter()
+            .map(|(name, loaded)| (name, loaded.config))
+            .collect(),
+    )
+}
+
+/// Merge a project-layer report over the operator layer: project entries win
+/// on name collision but keep the operator-local project bindings, which a
+/// project layer may never declare.
+fn layer_project_remotes(report: &mut RemotesLoadReport, project_report: RemotesLoadReport) {
+    let user_bindings: HashMap<String, HashMap<String, RemoteProjectBinding>> = report
+        .remotes
+        .iter()
+        .map(|(name, loaded)| (name.clone(), loaded.config.project_bindings.clone()))
+        .collect();
+    for (name, mut loaded) in project_report.remotes {
+        if let Some(bindings) = user_bindings.get(&name) {
+            loaded.config.project_bindings = bindings.clone();
+        }
+        report.remotes.insert(name, loaded);
+    }
+    report.invalid.extend(project_report.invalid);
 }
 
 /// Save remotes config to disk.

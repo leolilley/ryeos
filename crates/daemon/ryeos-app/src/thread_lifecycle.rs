@@ -6939,6 +6939,50 @@ pub fn resolve_thread_history_policy(
     )
 }
 
+/// [`resolve_thread_history_policy`] for an already verified live-project
+/// subject whose project is read through `project_content`. Composition walks
+/// project candidates from that authority only; `project_root` is the
+/// coordinate it answers for and is never reopened as a pathname.
+fn resolve_thread_history_policy_under_project_authority(
+    engine: &Engine,
+    verified: &VerifiedItem,
+    project_root: &Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+) -> Result<ResolvedThreadHistoryPolicy> {
+    let resolved_item = &verified.resolved;
+    let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
+    let request_snapshot = engine
+        .effective_request_snapshot_under_project_authority(
+            project_root,
+            project_content,
+            &resolved_item.subject_resolution_authority,
+        )
+        .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
+    let (resolution, _probed_absences) =
+        ryeos_engine::resolution::run_effective_item_pipeline_with_probes_under_project_authority(
+            &resolved_item.canonical_ref,
+            &engine.kinds,
+            &request_snapshot.parser_dispatcher,
+            &roots,
+            &request_snapshot.trust_store,
+            &engine.composers,
+            project_root,
+            project_content,
+        )
+        .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
+    Ok(
+        ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
+            verified,
+            &resolution,
+            &engine.kinds,
+            node_history_policy,
+        )
+        .map_err(|error| anyhow!("history-policy resolution failed: {error}"))?
+        .history,
+    )
+}
+
 /// Build the immutable root contract from one engine-attested subject. The
 /// composition pass is bound to the verified root digest by
 /// `resolve_launch_policy_from_resolution`; an in-place edit between verify
@@ -7471,24 +7515,41 @@ fn admit_verified_root_execution_inner(
     Ok(admission)
 }
 
+/// The admission facts of a non-execution root apart from its project:
+/// subject identity, acting principal and its scopes, sites, and protocol
+/// profile are independent and stay explicit at this boundary.
+#[derive(Debug, Clone)]
+pub struct NonExecutionRootRequest<'a> {
+    pub item_ref: &'a str,
+    pub requested_by: &'a str,
+    pub caller_scopes: Vec<String>,
+    pub current_site_id: &'a str,
+    pub origin_site_id: &'a str,
+    pub thread_profile: String,
+}
+
 /// Resolve and capture policy for a non-execution root whose authoritative
 /// subject is still a verified item (for example a UI seat presenting a
 /// surface). This uses the same kind/composition/trust pipeline as execution;
 /// callers never synthesize Durable policy or branch on the subject kind.
-// Subject identity, project authority, acting principal, site, and profile are
-// independent admission facts and remain explicit at this boundary.
-#[allow(clippy::too_many_arguments)]
+///
+/// The project is walked by its canonicalized pathname. A caller that holds
+/// the project as an open directory uses
+/// [`admit_non_execution_root_under_project_authority`] instead.
 pub fn admit_non_execution_root(
     engine: &Arc<Engine>,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
-    item_ref: &str,
     project_path: &Path,
-    requested_by: &str,
-    caller_scopes: Vec<String>,
-    current_site_id: &str,
-    origin_site_id: &str,
-    thread_profile: String,
+    request: NonExecutionRootRequest<'_>,
 ) -> Result<NonExecutionRootAdmission> {
+    let NonExecutionRootRequest {
+        item_ref,
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+        thread_profile,
+    } = request;
     validate_principal_identifier("non-execution root acting principal", requested_by)?;
     let canonical_ref = CanonicalRef::parse(item_ref)
         .map_err(|error| anyhow!("invalid root policy item ref `{item_ref}`: {error}"))?;
@@ -7498,12 +7559,109 @@ pub fn admit_non_execution_root(
             project_path.display()
         )
     })?;
+    let (project_authority, plan_context) = live_non_execution_root_context(
+        canonical_project_path,
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+    )?;
+    let resolved = engine
+        .resolve(&plan_context, &canonical_ref)
+        .map_err(|error| anyhow!("root policy item resolution failed: {error}"))?;
+    let verified_subject = engine
+        .verify(&plan_context, resolved.clone())
+        .map_err(|error| anyhow!("root policy item verification failed: {error}"))?;
+    let resolved_history_policy =
+        resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
+    seal_live_non_execution_root(
+        engine,
+        verified_subject,
+        plan_context,
+        project_authority,
+        thread_profile,
+        resolved_history_policy,
+    )
+}
+
+/// [`admit_non_execution_root`] for a project held as an exact open
+/// directory. Discovery, source bytes, project trust, the parser overlay and
+/// history-policy composition are all read through `project`'s descriptor;
+/// the project's pathname is never reopened, so a directory substituted at
+/// that pathname after `project` was opened cannot redirect admission.
+/// `project.path()`, the identity the directory was bound to, is the
+/// resolution coordinate and the recorded project root.
+pub fn admit_non_execution_root_under_project_authority(
+    engine: &Arc<Engine>,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+    project: &lillux::PinnedDirectory,
+    request: NonExecutionRootRequest<'_>,
+) -> Result<NonExecutionRootAdmission> {
+    let NonExecutionRootRequest {
+        item_ref,
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+        thread_profile,
+    } = request;
+    validate_principal_identifier("non-execution root acting principal", requested_by)?;
+    let canonical_ref = CanonicalRef::parse(item_ref)
+        .map_err(|error| anyhow!("invalid root policy item ref `{item_ref}`: {error}"))?;
+    let project_root = project.path();
+    if !project_root.is_absolute() {
+        bail!(
+            "non-execution root project authority is not bound to an absolute path: {}",
+            project_root.display()
+        );
+    }
+    let (project_authority, plan_context) = live_non_execution_root_context(
+        project_root.to_path_buf(),
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+    )?;
+    let verified_subject = engine
+        .resolve_verified_under_project_authority(
+            &plan_context,
+            &canonical_ref,
+            project_root,
+            project,
+        )
+        .map_err(|error| anyhow!("root policy item resolution failed: {error}"))?;
+    let resolved_history_policy = resolve_thread_history_policy_under_project_authority(
+        engine,
+        &verified_subject,
+        project_root,
+        project,
+        node_history_policy,
+    )?;
+    seal_live_non_execution_root(
+        engine,
+        verified_subject,
+        plan_context,
+        project_authority,
+        thread_profile,
+        resolved_history_policy,
+    )
+}
+
+/// The read-only live project authority and planning context of a
+/// non-execution root rooted at the absolute `project_root`.
+fn live_non_execution_root_context(
+    project_root: PathBuf,
+    requested_by: &str,
+    caller_scopes: Vec<String>,
+    current_site_id: &str,
+    origin_site_id: &str,
+) -> Result<(ryeos_state::objects::ExecutionProjectAuthority, PlanContext)> {
     let mut capability_ceiling = caller_scopes.clone();
     capability_ceiling.sort();
     capability_ceiling.dedup();
     let project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
-        canonical_project_path.clone(),
-        format!("local:{}", canonical_project_path.display()),
+        project_root.clone(),
+        format!("local:{}", project_root.display()),
         ryeos_state::objects::LiveProjectAccess::ReadOnly,
         ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
         ryeos_state::objects::EnvironmentAuthority::None,
@@ -7514,9 +7672,7 @@ pub fn admit_non_execution_root(
             fingerprint: requested_by.to_string(),
             scopes: caller_scopes,
         }),
-        project_context: ProjectContext::LocalPath {
-            path: canonical_project_path,
-        },
+        project_context: ProjectContext::LocalPath { path: project_root },
         subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: current_site_id.to_string(),
         origin_site_id: origin_site_id.to_string(),
@@ -7524,14 +7680,17 @@ pub fn admit_non_execution_root(
         scheduled_fire: None,
         validate_only: false,
     };
-    let resolved = engine
-        .resolve(&plan_context, &canonical_ref)
-        .map_err(|error| anyhow!("root policy item resolution failed: {error}"))?;
-    let verified_subject = engine
-        .verify(&plan_context, resolved.clone())
-        .map_err(|error| anyhow!("root policy item verification failed: {error}"))?;
-    let resolved_history_policy =
-        resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
+    Ok((project_authority, plan_context))
+}
+
+fn seal_live_non_execution_root(
+    engine: &Arc<Engine>,
+    verified_subject: VerifiedItem,
+    plan_context: PlanContext,
+    project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    thread_profile: String,
+    resolved_history_policy: ResolvedThreadHistoryPolicy,
+) -> Result<NonExecutionRootAdmission> {
     let admission = NonExecutionRootAdmission {
         request_engine: Arc::clone(engine),
         verified_subject,

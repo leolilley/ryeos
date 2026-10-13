@@ -31,6 +31,13 @@ impl RetainedProjectAccess {
         self.authority.try_clone()
     }
 
+    /// The retained project directory itself. Reads through it traverse from
+    /// the held descriptor; its `path()` is the identity it was bound to and
+    /// is never to be reopened as a pathname.
+    pub fn directory(&self) -> &lillux::PinnedDirectory {
+        self.authority.as_ref()
+    }
+
     /// The retained directory as project-content authority: every project
     /// read through it traverses from the held descriptor.
     pub fn content_authority(
